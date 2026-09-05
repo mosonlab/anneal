@@ -2133,6 +2133,9 @@ test("runner auto-deploy stage one prints a stage-two command carrying the role"
   await withLinux(() => {
     const root = mkdtempSync(join(tmpdir(), "agentos-auto-runner-next-"));
     const unitDirectory = join(root, "etc/systemd/system");
+    const systemctlPath = join(root, "systemctl");
+    writeFileSync(systemctlPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    chmodSync(systemctlPath, 0o755);
     const environment = {
       AGENTOS_SERVICE_PLATFORM: "linux",
       AGENTOS_DEPLOY_ROLE: "runner",
@@ -2150,6 +2153,7 @@ test("runner auto-deploy stage one prints a stage-two command carrying the role"
       userLookup: accountLookup,
       unitDirectory,
       sudoersPath: join(root, "etc/sudoers.d/anneal-service-control"),
+      systemctlPath,
       environment,
       effectiveUid: 501,
       execute: () => "",
