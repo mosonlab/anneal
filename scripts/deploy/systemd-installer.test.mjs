@@ -449,9 +449,10 @@ test("default Darwin render, manifest entries, and plan stdout match 9a52c6ad by
       "f7ca733a830d8951a82af060882d0344a169b07c9a157697119f8cf8544415e9",
     );
     const root = process.cwd();
+    const home = join(root, "fixture-home");
     const plan = installLaunchdServices({
       repositoryRoot: root,
-      userHome: join(root, "fixture-home"),
+      userHome: home,
       nodeBinary: "/usr/bin/node",
       gitBinary: "/usr/bin/git",
       path: "/usr/bin:/bin",
@@ -534,7 +535,11 @@ process.exit(result.status ?? 1);
     const entrypoint = spawnSync(process.execPath, ["scripts/deploy/install-launchd-services.mjs"], {
       cwd: root,
       encoding: "utf8",
-      env: { ...process.env, AGENTOS_SERVICE_PLATFORM: "darwin" },
+      env: {
+        ...process.env,
+        AGENTOS_SERVICE_PLATFORM: "darwin",
+        HOME: home,
+      },
     });
     assert.equal(entrypoint.status, 0, entrypoint.stderr);
     assert.equal(normalize(entrypoint.stdout), baseline.servicePlanStdout);
