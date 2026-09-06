@@ -1,5 +1,6 @@
+import { tmpdir } from "node:os";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -114,20 +115,91 @@ const suiteFiles = (dir, matches, found = []) => {
   return found;
 };
 
-// A path spelled `join(here, "..", "..", "docs", "runbooks", "gate-worker.md")`
-// is the same reference as one spelled in a single literal, so the segment
-// separators are collapsed back into slashes before the literals are read out.
-// Resolved against the file that names it, never against the repository root:
-// `"AGENTS.md"` in a fixture that classifies diff entries names a diff entry,
-// while `"../../docs/runbooks/gate-worker.md"` names this repository's copy of
-// the file, and only the second is a document that fixture reads.
-const referencedDocuments = (file) => {
-  const source = readFileSync(file, "utf8").replace(/(["'])\s*,\s*\1/gu, "/");
-  return [...source.matchAll(/["'`]([^"'`\n]*\.md)["'`]/gu)]
-    .map((match) => resolve(dirname(file), match[1]))
-    .filter((path) => !relative(repoRoot, path).startsWith(".."))
-    .map((path) => relative(repoRoot, path));
+// Follow file-reader arguments and their local bindings. Tokenizing keeps
+// fixture strings (which may themselves contain example code) opaque, and
+// only joins path segments inside join/resolve calls, never inside arrays.
+const referencedDocuments = (file, source = readFileSync(file, "utf8")) => {
+  const tokens = [...source.matchAll(/\/\/[^\n]*|\/\*[\s\S]*?\*\/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|[\w$]+|[^\s]/gu)]
+    .map(([token]) => token).filter((token) => !token.startsWith("//") && !token.startsWith("/*"));
+  const closing = new Map([["(", ")"], ["[", "]"], ["{", "}"]]);
+  const endOf = (start) => {
+    const stack = [];
+    for (let i = start; i < tokens.length; i++) {
+      const token = tokens[i];
+      if (!stack.length && [",", ";", ")", "]", "}"].includes(token)) return i;
+      if (closing.has(token)) stack.push(closing.get(token));
+      else if (token === stack.at(-1)) stack.pop();
+    }
+    return tokens.length;
+  };
+  const scopes = [];
+  const scopeStack = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] === "}") scopeStack.pop();
+    scopes[i] = [...scopeStack];
+    if (tokens[i] === "{") scopeStack.push(i);
+  }
+  const bindings = new Map();
+  for (let i = 0; i < tokens.length; i++) {
+    if (["const", "let", "var"].includes(tokens[i]) && ["=", "of"].includes(tokens[i + 2])) {
+      const name = tokens[i + 1];
+      const values = bindings.get(name) ?? [];
+      const value = tokens.slice(i + 3, endOf(i + 3));
+      if (value.some((token, index) => token === "function" || (token === "=" && value[index + 1] === ">"))) continue;
+      values.push({ value, start: i + 3, scope: scopes[i], declaration: i });
+      bindings.set(name, values);
+    }
+  }
+  const paths = new Set();
+  const follow = (expression, start, seen = new Set()) => {
+    // Consecutive literal segments are joined only within path construction.
+    const text = expression.join(" ").replace(/\b(?:join|resolve)\s*\(([^()]*)\)/gu,
+      (_, args) => args.replace(/(["'])\s*,\s*\1/gu, "/"));
+    for (const match of text.matchAll(/["'`]([^"'`\n]*\.md)["'`]/gu)) {
+      for (const base of [dirname(file), repoRoot]) {
+        const path = relative(repoRoot, resolve(base, match[1]));
+        if (!path.startsWith("..")) paths.add(path);
+      }
+    }
+    for (let offset = 0; offset < expression.length; offset++) {
+      const candidates = bindings.get(expression[offset]) ?? [];
+      const scope = scopes[start + offset];
+      const binding = candidates.filter((candidate) => candidate.declaration < start + offset
+        && candidate.scope.every((part, index) => scope[index] === part))
+        .sort((a, b) => b.scope.length - a.scope.length || b.declaration - a.declaration)[0];
+      if (!binding || seen.has(binding)) continue;
+      seen.add(binding);
+      follow(binding.value, binding.start, seen);
+    }
+  };
+  for (let i = 0; i < tokens.length; i++) {
+    if (["readFileSync", "readFile", "createReadStream"].includes(tokens[i]) && tokens[i + 1] === "(") {
+      follow(tokens.slice(i + 2, endOf(i + 2)), i + 2);
+    }
+  }
+  return [...paths];
 };
+
+test("document guard follows root-anchored reads and path variables", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "document-guard-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const file = join(root, "guard-fixture.test.mjs");
+  for (const source of [
+    'readFileSync(join(repoRoot, "SECURITY.md"), "utf8");',
+    'const doc = resolve(repoRoot, "SECURITY.md"); readFile(doc);',
+    'const docs = ["AGENTS.md", "SECURITY.md"]; for (const doc of docs) { createReadStream(doc); }',
+  ]) {
+    writeFileSync(file, source);
+    assert.ok(referencedDocuments(file).includes("SECURITY.md"), source);
+  }
+  assert.deepEqual(referencedDocuments(file, 'classifyDiff({ nameStatus: changes("M", "SECURITY.md") });'), []);
+  assert.deepEqual(referencedDocuments(file,
+    '{ const path = "SECURITY.md"; } { const path = "package.json"; readFileSync(path); }'), []);
+  for (const name of ["gate-worker", "gate-dispatch"]) {
+    assert.ok(referencedDocuments(join(here, "gate-worker", `${name}.test.mjs`))
+      .includes("docs/runbooks/gate-worker.md"));
+  }
+});
 
 test("no allowlisted document is read by a suite the docs-only profile skips", () => {
   const offences = [];

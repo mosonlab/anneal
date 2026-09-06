@@ -45,8 +45,8 @@ cleanup() {
     'no-verdict '*)
       outcome="${outcome#no-verdict }"
       printf '\n'
-      gate_verdict_not_run "${outcome#* }${cleanup_error:+; ${cleanup_error}}"
       printf 'Nothing judged %s. Re-run the gate; this is not a FAIL.\n' "${GATED_HEAD:-this commit}"
+      gate_verdict_not_run "${outcome#* }${cleanup_error:+; ${cleanup_error}}"
       exit "${outcome%% *}"
       ;;
     'fail '*)
@@ -76,18 +76,17 @@ cleanup() {
   # reported that judgement naming the step it is about.
   if [ -n "${cleanup_error}" ]; then
     printf '\n'
-    gate_verdict_not_authoritative "cleanup: ${cleanup_error}"
     printf 'Every step passed, but this run could not finish tearing itself down and must not authorise a merge.\n'
+    gate_verdict_not_authoritative "cleanup: ${cleanup_error}"
     exit "${GATE_EXIT_NOT_AUTHORITATIVE}"
   fi
   if [ "${KEEP_POSTGRES}" -eq 1 ]; then
     printf '\n'
-    gate_verdict_not_authoritative '--keep-postgres'
     printf 'Every step passed, but this run left a container behind and must not authorise a merge.\n'
+    gate_verdict_not_authoritative '--keep-postgres'
     exit "${GATE_EXIT_NOT_AUTHORITATIVE}"
   fi
   printf '\n'
-  gate_verdict_pass "${GATED_HEAD}"
   # What this PASS does NOT cover, stated here rather than left to be inferred
   # from a skipped test buried in the suite output. Both need live credentials
   # and neither can run inside a hermetic gate, so a green gate is silent about
@@ -96,6 +95,7 @@ cleanup() {
   printf '  (npm run schema-gate -w @anneal/merge-executor, needs GITHUB_SCHEMA_GATE_TOKEN; it fails without one),\n'
   printf '  and the Step 9/10 [real] direction harnesses, which need a scratch repository and a\n'
   printf '  non-production deployment. Run those separately before a release.\n'
+  gate_verdict_pass "${GATED_HEAD}"
   exit 0
 }
 trap cleanup EXIT

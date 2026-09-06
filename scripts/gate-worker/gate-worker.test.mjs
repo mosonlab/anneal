@@ -36,6 +36,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -723,14 +724,8 @@ const mergeGateHostFixture = (t) => {
   return { repo, oid, reached, hold, env, argv };
 };
 
-// The verdict as run-gate.sh reads it back: the last line of either documented
-// shape, which is what `gate_verdict_read` greps for. Lines after it are the
-// gate telling an operator what to do next, not the verdict.
-const lastVerdictLine = (output) =>
-  stripAnsi(output)
-    .split("\n")
-    .filter((line) => line.startsWith("MERGE GATE: ") || line.startsWith("GATE NOT RUN: "))
-    .at(-1) ?? "";
+// Assert the actual final non-empty stdout line, including any advisories.
+const lastVerdictLine = (output) => stripAnsi(output).trim().split("\n").at(-1) ?? "";
 
 test("an unreachable docker daemon is GATE NOT RUN, not a FAIL about the commit", (t) => {
   // The defect this closes. The daemon being down says nothing about the
@@ -753,23 +748,50 @@ test("an unreachable docker daemon is GATE NOT RUN, not a FAIL about the commit"
 
 test("a host with no docker binary at all is GATE NOT RUN as well", (t) => {
   const fixture = mergeGateHostFixture(t);
-  // The host's own PATH with every directory that carries a docker removed,
-  // rather than a PATH built here: the gate still needs the node and git this
-  // machine runs on, and a fixture that kept a real docker on the path would
-  // start a real daemon check.
-  const withoutDocker = (process.env.PATH ?? "")
-    .split(":")
-    .filter((directory) => directory !== "" && !existsSync(join(directory, "docker")))
-    .join(":");
+  const withoutDocker = join(fixture.repo, "..", "no-docker-bin");
+  mkdirSync(withoutDocker);
+  for (const name of ["bash", "git", "node", "cat", "rm", "mkdir", "ln", "mv", "date", "grep", "sed", "tr", "dirname", "mktemp", "sleep", "head", "wc", "sort", "cut", "uname", "getconf"]) {
+    const located = spawnSync("bash", ["-c", 'command -v "$1"', "fixture", name], { encoding: "utf8" });
+    assert.equal(located.status, 0, `locate ${name}`);
+    symlinkSync(located.stdout.trim(), join(withoutDocker, name));
+  }
   const result = spawnSync("bash", fixture.argv, {
     cwd: fixture.repo,
     encoding: "utf8",
     timeout: 120_000,
     env: fixture.env({ PATH: withoutDocker }),
   });
+  assert.ifError(result.error);
   const output = `${result.stdout}${result.stderr}`;
   assert.equal(result.status, 76, output);
   assert.match(lastVerdictLine(result.stdout), /^GATE NOT RUN: docker is required and this host has none/);
+});
+
+test("an unwritable worktree lock root yields no verdict", (t) => {
+  const fixture = mergeGateHostFixture(t);
+  chmodSync(fixture.repo, 0o555);
+  let result;
+  try {
+    result = spawnSync("bash", fixture.argv, {
+      cwd: fixture.repo, encoding: "utf8", env: fixture.env(), timeout: 120_000,
+    });
+  } finally {
+    chmodSync(fixture.repo, 0o755);
+  }
+  assert.ifError(result.error);
+  assert.equal(result.status, 76, `${result.stdout}${result.stderr}`);
+  assert.match(lastVerdictLine(result.stdout), /^GATE NOT RUN:.*lock/);
+});
+
+test("an unusable old-format worktree lock yields no verdict and names both paths", (t) => {
+  const fixture = mergeGateHostFixture(t);
+  mkdirSync(join(fixture.repo, ".merge-gate.lock"));
+  const result = spawnSync("bash", fixture.argv, {
+    cwd: fixture.repo, encoding: "utf8", env: fixture.env(), timeout: 120_000,
+  });
+  assert.ifError(result.error);
+  assert.equal(result.status, 76, `${result.stdout}${result.stderr}`);
+  assert.match(lastVerdictLine(result.stdout), /^GATE NOT RUN:.*\.merge-gate\.slot.*\.merge-gate\.lock/);
 });
 
 test("two gates racing for one worktree leave exactly one holder", async (t) => {

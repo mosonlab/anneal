@@ -294,7 +294,7 @@ acquire_lock() {
     *)
       # Not busy: the lock itself cannot be operated, and the reason is already
       # on stderr. Waiting changes nothing, so this run stops the same way.
-      die "the merge gate lock ${LOCK_FILE} could not be taken; clear it once no gate is running in ${REPO_ROOT}"
+      die_no_verdict "the merge gate lock ${LOCK_FILE} or ${LOCK_ROOT}/${LOCK_SLOT}.lock could not be taken; clear it once no gate is running in ${REPO_ROOT}"
       ;;
   esac
 }
