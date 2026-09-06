@@ -72,6 +72,7 @@ import { verifyServiceInventory } from "./launchd-service-wrapper.mjs";
 import { createServiceControl, describesStableWrapper } from "./service-control.mjs";
 import { resolveServicePlatform } from "./service-platform.mjs";
 import {
+  controlPlaneApiBaseUrl,
   readRunnerControlPlaneRevision,
   readRunnerTargetRevision,
   requireRunnerDeployPreflight,
@@ -326,12 +327,20 @@ const targetRevision = async () => {
   return revision;
 };
 
-const loadEnvironment = async () => {
+const loadEnvironment = async (deployRole = resolveDeployRoleOrFail()) => {
   const envPath = environmentFilePath();
   if (!existsSync(envPath) || !statSync(envPath).isFile()) fail("environment-unreadable", ".env-missing-or-not-a-file");
   if ((statSync(envPath).mode & 0o777) !== 0o600) fail("environment-unreadable", ".env-mode-must-be-0600");
   const { config } = await import("dotenv").catch(() => fail("environment-unreadable", "dotenv-module-unavailable"));
   const loaded = config({ path: envPath, override: false, quiet: true });
+  if (deployRole === "runner") {
+    if (!loaded.parsed?.OPERATOR_TOKEN?.trim()) fail("environment-unreadable", "OPERATOR_TOKEN-missing");
+    if (!loaded.parsed?.RUNNER_TOKEN?.trim()) fail("environment-unreadable", "RUNNER_TOKEN-missing");
+    controlPlaneApiBaseUrl(process.env);
+    if (loaded.error || !process.env.DATABASE_URL) fail("environment-unreadable", "DATABASE_URL-missing");
+    if (!process.env.FEISHU_DEFAULT_CHAT_ID) fail("environment-unreadable", "FEISHU_DEFAULT_CHAT_ID-missing");
+    return;
+  }
   if (loaded.error || !process.env.DATABASE_URL) fail("environment-unreadable", "DATABASE_URL-missing");
   if (!process.env.FEISHU_DEFAULT_CHAT_ID) fail("environment-unreadable", "FEISHU_DEFAULT_CHAT_ID-missing");
   if (!loaded.parsed?.GITHUB_READ_TOKEN?.trim()) fail("environment-unreadable", "GITHUB_READ_TOKEN-missing");
