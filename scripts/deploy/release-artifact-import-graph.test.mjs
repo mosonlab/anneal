@@ -58,7 +58,10 @@ const escapingImport = ({ entryPath, root }) => {
       return { importer, specifier: "", detail: `unparsable-${detail}` };
     }
     for (const specifier of staticImportSpecifiers(sourceFile)) {
-      if (specifier.startsWith("node:") || isBuiltin(specifier)) continue;
+      // `isBuiltin` already accepts both the bare and the `node:` spelling, so it
+      // decides alone: trusting the `node:` prefix would skip `node:not-a-builtin`,
+      // an edge that resolves nowhere, instead of reporting it.
+      if (isBuiltin(specifier)) continue;
       if (!specifier.startsWith(".")) {
         return { importer, specifier, detail: "not-a-relative-module" };
       }
@@ -239,6 +242,22 @@ test("a module the parser cannot read is a violation rather than an empty graph"
     const violation = escapingImport({ entryPath: join(root, "release-artifact.mjs"), root });
     assert.equal(violation?.importer, join(root, "release-artifact.mjs"));
     assert.match(violation?.detail ?? "", /^unparsable-/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a node: specifier that is not a builtin is a violation rather than a skipped edge", () => {
+  const root = fixture({
+    "release-artifact.mjs": 'import { helper } from "./helper.mjs";\nexport const verify = helper;\n',
+    "helper.mjs": 'import "node:not-a-builtin";\nexport const helper = null;\n',
+  });
+  try {
+    const violation = escapingImport({ entryPath: join(root, "release-artifact.mjs"), root });
+    assert.deepEqual(
+      { importer: violation?.importer, specifier: violation?.specifier, detail: violation?.detail },
+      { importer: join(root, "helper.mjs"), specifier: "node:not-a-builtin", detail: "not-a-relative-module" },
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
