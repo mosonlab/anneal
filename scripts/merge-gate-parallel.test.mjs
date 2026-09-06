@@ -471,8 +471,8 @@ GATED_HEAD=abc123
 `;
 
 // Runs a group, waits until the member that is meant to block has reported its
-// pid, then signals the harness the way an operator kills a hung gate.
-const interruptGroup = async (members) => {
+// pid and any requested parent-side observation, then signals the harness.
+const interruptGroup = async (members, observed = "") => {
   const root = mkdtempSync(join(tmpdir(), "merge-gate-interrupted-group."));
   try {
     const memberPidFile = join(root, "member.pid");
@@ -490,13 +490,15 @@ const interruptGroup = async (members) => {
     while (Date.now() < deadline) {
       try {
         memberPid = readFileSync(memberPidFile, "utf8").trim();
-        if (memberPid !== "") break;
+        if (memberPid !== "" && stdout.includes(observed)) break;
       } catch {
         // Not written yet.
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     assert.notEqual(memberPid, "", "the blocking member never reported its pid");
+
+    assert.ok(stdout.includes(observed), "the parent never reported the required observation");
 
     harness.kill("SIGTERM");
     const status = await new Promise((resolve) => harness.on("exit", (code, signal) => resolve(code ?? signal)));
@@ -522,9 +524,16 @@ test("VERDICT a failure seen before the signal survives it", async () => {
   // is reaped rather than in the group's closing accounting: that accounting
   // never runs when a later member is still blocked. Without it the gate would
   // answer "no verdict" about a commit one of its steps had already failed.
+  // A sibling starting does not prove the parent reaped the failure. Wrap the
+  // real recorder to announce that observation before allowing SIGTERM. Delay
+  // the bad member so the old sibling-start handshake reliably signals too soon.
   const run = await interruptGroup(
     (pidFile) =>
-      `parallel_steps "the suites" "bad" sh -c 'exit 1' :: "stuck" sh -c 'printf %s "$$" > "$0"; exec sleep 30' ${pidFile}`,
+      `recorder=$(declare -f record_real_failure)\n` +
+      `eval "\${recorder/record_real_failure/original_record_real_failure}"\n` +
+      `record_real_failure() { original_record_real_failure "$@"; printf 'FAILURE_RECORDED\\n'; }\n` +
+      `parallel_steps "the suites" "bad" sh -c 'sleep 0.2; exit 1' :: "stuck" sh -c 'printf %s "$$" > "$0"; exec sleep 30' ${pidFile}`,
+    "FAILURE_RECORDED\n",
   );
   assert.equal(run.status, 1);
   assert.match(run.stdout, /MERGE GATE: FAIL \(bad\)/);
