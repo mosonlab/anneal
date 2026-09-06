@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 
 import {
+  ACTIVE_RUN_STATUSES,
   CleanupStatus, FailureClass, openRun, resolveRunBranches, runOwnedHead, RunStatus, SessionExecutionStatus,
   type Prisma, type PrismaClient,
 } from "@anneal/db";
@@ -31,16 +32,15 @@ export const terminalRunStatuses = [
 ] as const;
 
 /**
- * Statuses whose workspace is still in use and must never be offered. Kept
- * named because each one is a fix: QUEUED is a run answered but not re-claimed,
- * and WAITING_INBOX is the suspended run whose workspace an earlier sweep
- * deleted out from under a resume. The predicate below tests the terminal side
- * so an unlisted status keeps its directory; the reclaim tests assert every
- * status here individually.
+ * Statuses whose workspace is still in use and must never be offered. This is
+ * the control plane's live-run definition, not a second one: QUEUED is a run
+ * answered but not re-claimed, and WAITING_INBOX is the suspended run whose
+ * workspace an earlier sweep deleted out from under a resume — exactly the runs
+ * `ACTIVE_RUN_STATUSES` exists to protect. The predicate below tests the
+ * terminal side so an unlisted status keeps its directory; the reclaim tests
+ * assert every status here individually.
  */
-export const workspaceKeepStatuses = [
-  RunStatus.QUEUED, RunStatus.CLAIMED, RunStatus.PROVISIONING, RunStatus.RUNNING, RunStatus.WAITING_INBOX,
-] as const;
+export const workspaceKeepStatuses: readonly RunStatus[] = ACTIVE_RUN_STATUSES;
 
 /** How many still-open intents one exchange may ask a runner to settle. */
 const settlementPageSize = 500;
