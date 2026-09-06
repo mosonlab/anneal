@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/mosonlab/agentos/docs/demos/templates-release-evidence.schema.json",
+  "$id": "https://github.com/mosonlab/anneal/docs/demos/templates-release-evidence.schema.json",
   "title": "Anneal templates release demo verification",
   "type": "object",
   "additionalProperties": false,
@@ -13,11 +13,12 @@
       "type": "array",
       "prefixItems": [
         { "const": 1 }, { "const": 2 }, { "const": 3 }, { "const": 4 }, { "const": 5 },
-        { "const": 6 }, { "const": 7 }, { "const": 8 }, { "const": 9 }, { "const": 10 }
+        { "const": 6 }, { "const": 7 }, { "const": 8 }, { "const": 9 }, { "const": 10 },
+        { "const": 11 }, { "const": 12 }
       ],
       "items": false,
-      "minItems": 10,
-      "maxItems": 10
+      "minItems": 12,
+      "maxItems": 12
     },
     "evidenceDigest": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
   }

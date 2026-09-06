@@ -28,7 +28,7 @@ For each bounded theme:
 - Net deletion or consolidation expected
 - Highest risk classification in the theme
 - Recommended chain: `direct` | `compound` | `separate high-risk investigation`
-- Implementation route: `Luna Max eligible` | `Sol High required`, with the routing reason named by `docs/governance/task-routing-v1.md`
+- Implementation route: `default route` | `hazard: <which>`, with the routing reason named by `docs/governance/task-routing-v1.md`
 - Why the candidates belong in one independently verifiable change
 
 Keep public-interface candidates and defense or persisted-data candidates visually separate from ordinary internal themes.
@@ -54,7 +54,7 @@ Use a stable ID such as `SIM-RUNNER-001`.
 - Net effect: implementation and support surface removed minus glue or replacement added
 - Acceptance criteria: observable end state for the later implementation task
 - Validation: focused checks plus the repository-required review and exact-head gate path
-- Implementation routing impact: facts that make the owning theme Luna-eligible or require Sol High
+- Implementation routing impact: facts that support the `default route` or require `hazard: <which>` under `docs/governance/task-routing-v1.md`
 - Confidence: `high` | `medium` | `low`, with the remaining uncertainty
 
 Do not assign `confirmed-internal-delete` when production or dynamic consumption remains ambiguous. Use `rejected` when a production caller survives; use `intentional-keep` when the current architecture deliberately owns the cost.
