@@ -199,6 +199,24 @@ test("fresh classification narrows reader facts and snapshot outcomes", () => {
   assert.deepEqual(freshDecision(), { kind: "queue", candidate, currentBaseSha: CURRENT });
 });
 
+test("a comparison that returned no usable facts is transport, never the candidate's budget", () => {
+  // The read reached GitHub and came back with nothing to compare: the
+  // candidate was never classified, so its counted budget must not pay for it.
+  assert.deepEqual(freshDecision({ authorizedAdvance: null }), {
+    kind: "retry",
+    retryClass: "transport",
+    reason: "authorized-base ancestry facts are incomplete",
+  });
+  assert.deepEqual(freshDecision({
+    candidate: { ...candidate, observedBaseSha: "d".repeat(40) },
+    observedAdvance: null,
+  }), {
+    kind: "retry",
+    retryClass: "transport",
+    reason: "executor-observed-base ancestry facts are incomplete",
+  });
+});
+
 const POLICY: RetryBudgetPolicy = {
   maxValidationAttempts: 30,
   validationMinElapsedMs: 30 * 60_000,
@@ -241,16 +259,29 @@ test("only validation failures spend the counted budget", () => {
   assert.equal(transport.kind === "retry" ? transport.retryClass : "waiting", "transport");
 });
 
-test("each retry class holds the next tick on a doubling backoff capped at a minute", () => {
-  const holds = [1, 2, 3, 4, 5, 6, 7, 40].map((attempt) => {
-    const decision = budget("waiting", {
-      attempts: { waiting: attempt - 1, transport: 0, validation: 0 },
-      firstFailedAt: { waiting: at(-60_000), transport: null, validation: null },
+test("waiting and transport hold the next tick on a doubling backoff capped at a minute", () => {
+  for (const retryClass of ["waiting", "transport"] as const) {
+    const holds = [1, 2, 3, 4, 5, 6, 7, 40].map((attempt) => {
+      const decision = budget(retryClass, {
+        attempts: { waiting: attempt - 1, transport: attempt - 1, validation: 0 },
+        firstFailedAt: { waiting: at(-60_000), transport: at(-60_000), validation: null },
+      });
+      assert.equal(decision.kind, "retry");
+      return decision.kind === "retry" && decision.nextEligibleAt
+        ? decision.nextEligibleAt.getTime() - T0.getTime()
+        : -1;
     });
-    assert.equal(decision.kind, "retry");
-    return decision.kind === "retry" ? decision.nextEligibleAt.getTime() - T0.getTime() : -1;
+    assert.deepEqual(holds, [2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000, 60_000], retryClass);
+  }
+});
+
+test("validation takes no backoff: it is bounded by its count and elapsed time alone", () => {
+  const decision = budget("validation", {
+    attempts: { waiting: 0, transport: 0, validation: 7 },
+    firstFailedAt: { waiting: null, transport: null, validation: at(-60_000) },
   });
-  assert.deepEqual(holds, [2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000, 60_000]);
+  assert.equal(decision.kind, "retry");
+  assert.equal(decision.kind === "retry" ? decision.nextEligibleAt : undefined, null);
 });
 
 test("waiting and transport end only by outlasting their own ceilings", () => {
@@ -298,6 +329,10 @@ test("validation exhausts on the count and the elapsed time together, never on e
   assert.equal(exhausted.kind, "ineligible");
   assert.equal(exhausted.retryClass, "validation");
   assert.match(exhausted.reason, /^validation-budget exhausted: 30 classification failures over 31m/u);
+  // The settle carries the failure that caused it, so the caller can account
+  // the terminal attempt rather than leaving the counter one short of the text.
+  assert.equal(exhausted.classAttempt, 30);
+  assert.equal(exhausted.firstFailedAt.getTime(), at(-31 * 60_000).getTime());
 });
 
 test("a class that has never failed measures its elapsed time from this tick", () => {

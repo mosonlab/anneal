@@ -32,7 +32,7 @@ import {
   awaitAuthorization,
   blockDownstream,
   exhaust,
-  RECOVERY_CLASS_SETTLE_STATE,
+  recoveryClassSettleState,
 } from "./merge-tail-state.js";
 
 /**
@@ -440,7 +440,7 @@ export async function stopMergeTail(
   }
 
   const state = input.retryClass
-    ? RECOVERY_CLASS_SETTLE_STATE[input.retryClass]
+    ? recoveryClassSettleState(input.retryClass)
     : input.phase === "recovery-validation" ? "ineligible" : "exhausted";
   await exhaust(tx, {
     aggregateId: input.aggregateId,

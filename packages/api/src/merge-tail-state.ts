@@ -1,6 +1,7 @@
 import {
   closeIntegratorQuestions,
   enqueueTaskRun,
+  MERGE_RECOVERY_CLASS_SETTLE,
   MERGE_RECOVERY_RETRY_CLASS_ENUM,
   MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
@@ -9,6 +10,7 @@ import {
   transitionMergeRecovery,
   writeMarker,
   type MergeRecoveryAttempt,
+  type MergeRecoveryClassSettleState,
   type MergeRecoveryTransitionData,
   type RecoveryContext,
 } from "@anneal/db";
@@ -20,6 +22,7 @@ import {
 } from "./base-drift-recovery-decision.js";
 
 type RetryBudgetRetry = Extract<RetryBudgetDecision, { kind: "retry" }>;
+type RetryBudgetCeiling = Extract<RetryBudgetDecision, { kind: "ineligible" }>;
 
 type DbTx = Prisma.TransactionClient;
 
@@ -400,17 +403,16 @@ export const reopenAfterHeadAdoption = async (
   return true;
 };
 
-/** The state name a settle records, and the family its stop notice dedupes on. */
-export const RECOVERY_CLASS_SETTLE_STATE = {
-  waiting: "waiting-ceiling",
-  transport: "transport-ceiling",
-  validation: "validation-budget",
-} as const satisfies Record<RetryClass, string>;
+/**
+ * The state name a settle records, and the family its stop notice dedupes on.
+ * A class ceiling takes its name from the same entry that owns its durable
+ * refusal code, so the two cannot drift apart.
+ */
+export const recoveryClassSettleState = (retryClass: RetryClass): MergeRecoveryClassSettleState => (
+  MERGE_RECOVERY_CLASS_SETTLE[MERGE_RECOVERY_RETRY_CLASS_ENUM[retryClass]].state
+);
 
-export type RecoverySettleState =
-  | "ineligible"
-  | "exhausted"
-  | (typeof RECOVERY_CLASS_SETTLE_STATE)[RetryClass];
+export type RecoverySettleState = "ineligible" | "exhausted" | MergeRecoveryClassSettleState;
 
 /**
  * A recovery's terminal settle. `revalidations` generations the stop notice
@@ -520,7 +522,8 @@ export const recordRecoveryRetry = async (
     actorType: "control-plane",
     body: `Automatic pre-merge base-drift classification deferred as ${decision.retryClass}`
       + ` (attempt ${budget}, ${formatElapsed(decision.elapsedMs)} in class,`
-      + ` next eligible ${decision.nextEligibleAt.toISOString()}): ${decision.reason}`,
+      + ` ${decision.nextEligibleAt ? `next eligible ${decision.nextEligibleAt.toISOString()}` : "eligible now"})`
+      + `: ${decision.reason}`,
     metadata: {
       state: "classification-retry",
       integratorTaskId: input.integratorTaskId,
@@ -530,7 +533,7 @@ export const recordRecoveryRetry = async (
       classChanged,
       classAttempt: decision.classAttempt,
       classElapsedMs: decision.elapsedMs,
-      nextEligibleAt: decision.nextEligibleAt.toISOString(),
+      nextEligibleAt: decision.nextEligibleAt?.toISOString() ?? null,
       waitingAttempts: updated.waitingAttempts,
       transportAttempts: updated.transportAttempts,
       validationAttempts: updated.validationAttempts,
@@ -540,6 +543,38 @@ export const recordRecoveryRetry = async (
   });
   return updated;
 };
+
+/**
+ * The failure that crossed a class ceiling, persisted before the settle that
+ * it caused. Without this the terminal failure would be the one classification
+ * never written down, and the refusal text ("30 classification failures") would
+ * outrun the counter the attempt actually carries. The backoff is cleared: a
+ * settled attempt has no next tick to hold.
+ */
+export const recordRecoveryClassCeiling = async (
+  tx: DbTx,
+  input: { attempt: MergeRecoveryAttempt; decision: RetryBudgetCeiling },
+): Promise<MergeRecoveryAttempt> => {
+  const { decision } = input;
+  const fields = RETRY_COUNTER_FIELDS[decision.retryClass];
+  return tx.mergeRecoveryAttempt.update({
+    where: { id: input.attempt.id },
+    data: {
+      [fields.attempts]: decision.classAttempt,
+      [fields.firstAt]: decision.firstFailedAt,
+      nextEligibleAt: null,
+      lastRetryClass: MERGE_RECOVERY_RETRY_CLASS_ENUM[decision.retryClass],
+    },
+  });
+};
+
+/** The counters a settle states, so its activity and the attempt agree. */
+export const recoveryClassCounters = (attempt: MergeRecoveryAttempt): Record<string, unknown> => ({
+  waitingAttempts: attempt.waitingAttempts,
+  transportAttempts: attempt.transportAttempts,
+  validationAttempts: attempt.validationAttempts,
+  nextEligibleAt: attempt.nextEligibleAt?.toISOString() ?? null,
+});
 
 export const retireLegacyRefusal = async (
   tx: DbTx,

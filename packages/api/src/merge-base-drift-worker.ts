@@ -51,7 +51,9 @@ import { stopMergeTail } from "./merge-tail-actions.js";
 import {
   ensureRecoveryValidation,
   enterRepair,
+  recordRecoveryClassCeiling,
   recordRecoveryRetry,
+  recoveryClassCounters,
   recoveryIsReopenableLegacyRefusal,
   retireLegacyRefusal,
 } from "./merge-tail-state.js";
@@ -248,16 +250,25 @@ export const readCandidateFacts = async (
 };
 
 /**
+ * What a settle needs to reach the operator: the resume generation this
+ * attempt has already spent, and whether a class ceiling makes `re-validate`
+ * offerable. Every settle carries the generation, not only the ceilings — a
+ * recovery an operator resumed can settle again, and the answered first card
+ * would otherwise deduplicate the second settle into a task with no open
+ * question and no way out.
+ */
+type RecoverySettleCard = { revalidations: number; ceiling: boolean };
+
+/**
  * The operator card a settled recovery leaves behind. An ordinary refusal
  * offers abandoning only; a retry class that crossed its own ceiling also
- * offers `re-validate`, and its card is generationed by the revalidations
- * already spent so a repeated ceiling opens a new one.
+ * offers `re-validate`.
  */
 const openRecoveryQuestion = async (
   tx: Prisma.TransactionClient,
   integratorTaskId: string,
   stopId: string,
-  ceiling?: Pick<RetryClassCeiling, "retryClass" | "revalidations">,
+  card: RecoverySettleCard,
 ): Promise<void> => {
   const [task, stop] = await Promise.all([
     tx.task.findUnique({ where: { id: integratorTaskId }, select: { assigneeAgentId: true } }),
@@ -276,13 +287,14 @@ const openRecoveryQuestion = async (
     evidence: stop.evidence,
     agentId: task.assigneeAgentId,
     sessionId: session?.id ?? null,
-    ...(ceiling ? { choices: BASE_DRIFT_CLASS_CEILING_CHOICES, generation: ceiling.revalidations } : {}),
+    generation: card.revalidations,
+    ...(card.ceiling ? { choices: BASE_DRIFT_CLASS_CEILING_CHOICES } : {}),
   });
 };
 
-/** A settle a retry class owns: the class, its resume generation, and the
- *  instant the classification that ended it was taken at. */
-type RetryClassCeiling = { retryClass: RetryClass; revalidations: number; at: Date };
+/** A settle a retry class owns: the class, and the instant the classification
+ *  that ended it was taken at. */
+type RetryClassCeiling = { retryClass: RetryClass; at: Date };
 
 const settleIneligibleLocked = async (
   tx: Prisma.TransactionClient,
@@ -301,7 +313,8 @@ const settleIneligibleLocked = async (
     reason,
     at: ceiling?.at ?? new Date(),
     attempt: attempt.attempt,
-    ...(ceiling ? { retryClass: ceiling.retryClass, revalidations: ceiling.revalidations } : {}),
+    revalidations: attempt.revalidations,
+    ...(ceiling ? { retryClass: ceiling.retryClass } : {}),
     recoveryData: {
       ...(ceiling
         ? { refusalCode: MERGE_RECOVERY_CLASS_REFUSAL_CODE[MERGE_RECOVERY_RETRY_CLASS_ENUM[ceiling.retryClass]] }
@@ -313,9 +326,16 @@ const settleIneligibleLocked = async (
       ...(identity?.authorizedBaseSha ? { authorizedBaseSha: identity.authorizedBaseSha } : {}),
       ...(identity?.observedBaseSha ? { observedBaseSha: identity.observedBaseSha } : {}),
     },
-    markerMetadata: { ...identity, ...(ceiling ? { retryClass: ceiling.retryClass } : {}) },
+    markerMetadata: {
+      ...identity,
+      ...recoveryClassCounters(attempt),
+      ...(ceiling ? { retryClass: ceiling.retryClass } : {}),
+    },
   });
-  await openRecoveryQuestion(tx, integratorTaskId, stopId, ceiling);
+  await openRecoveryQuestion(tx, integratorTaskId, stopId, {
+    revalidations: attempt.revalidations,
+    ceiling: ceiling !== undefined,
+  });
 };
 
 const settleIneligible = async (
@@ -339,7 +359,10 @@ const settleIneligible = async (
       reason,
       at: new Date(),
     });
-    await openRecoveryQuestion(tx, integratorTaskId, stopId);
+    await openRecoveryQuestion(tx, integratorTaskId, stopId, {
+      revalidations: existing.revalidations,
+      ceiling: false,
+    });
     return true;
   }
   await settleIneligibleLocked(tx, integratorTaskId, stopId, reason, identity);
@@ -383,13 +406,13 @@ export const recordRecoveryClassificationRetry = async (
   });
   switch (decision.kind) {
     case "ineligible":
+      // The failure that crossed the ceiling is accounted before the settle it
+      // caused, so the refusal text and the stored counters state the same
+      // number of failures.
+      await recordRecoveryClassCeiling(tx, { attempt, decision });
       await settleIneligibleLocked(
-        tx,
-        integratorTaskId,
-        stopId,
-        decision.reason,
-        undefined,
-        { retryClass: decision.retryClass, revalidations: attempt.revalidations, at: now },
+        tx, integratorTaskId, stopId, decision.reason, undefined,
+        { retryClass: decision.retryClass, at: now },
       );
       return "ineligible";
     case "retry":
@@ -498,9 +521,13 @@ const queueRecovery = async (
           observedBaseSha: expected.observedBaseSha,
           currentBaseSha,
         },
-        markerMetadata: common,
+        revalidations: aggregate.revalidations,
+        markerMetadata: { ...common, ...recoveryClassCounters(aggregate) },
       });
-      await openRecoveryQuestion(tx, expected.integratorTaskId, expected.stopId);
+      await openRecoveryQuestion(tx, expected.integratorTaskId, expected.stopId, {
+        revalidations: aggregate.revalidations,
+        ceiling: false,
+      });
       return { kind: "exhausted" };
     case "queue":
       break;

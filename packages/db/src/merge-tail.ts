@@ -60,8 +60,10 @@ export const BASE_DRIFT_TRANSPORT_CEILING_MS = 30 * 60_000;
 export const BASE_DRIFT_RETRY_BACKOFF_START_MS = 2_000;
 export const BASE_DRIFT_RETRY_BACKOFF_CAP_MS = 60_000;
 
+export type MergeRecoveryRetryClassName = "waiting" | "transport" | "validation";
+
 export const MERGE_RECOVERY_RETRY_CLASS_ENUM: Record<
-  "waiting" | "transport" | "validation",
+  MergeRecoveryRetryClassName,
   MergeRecoveryRetryClass
 > = {
   waiting: MergeRecoveryRetryClass.WAITING,
@@ -69,15 +71,50 @@ export const MERGE_RECOVERY_RETRY_CLASS_ENUM: Record<
   validation: MergeRecoveryRetryClass.VALIDATION,
 };
 
+/**
+ * What one class settles as: the durable refusal it records, and the state
+ * name that settle is written under in the recovery activity and its stop
+ * notice key. Both live here, in one entry per class, so a rename cannot leave
+ * the refusal on the attempt disagreeing with the state an operator reads.
+ * `state` is the refusal code's `@map` value in `schema.prisma`.
+ */
+export const MERGE_RECOVERY_CLASS_SETTLE = {
+  [MergeRecoveryRetryClass.WAITING]:
+    { refusalCode: MergeRecoveryRefusalCode.WAITING_CEILING, state: "waiting-ceiling" },
+  [MergeRecoveryRetryClass.TRANSPORT]:
+    { refusalCode: MergeRecoveryRefusalCode.TRANSPORT_CEILING, state: "transport-ceiling" },
+  [MergeRecoveryRetryClass.VALIDATION]:
+    { refusalCode: MergeRecoveryRefusalCode.VALIDATION_BUDGET, state: "validation-budget" },
+} as const satisfies Record<
+  MergeRecoveryRetryClass,
+  { refusalCode: MergeRecoveryRefusalCode; state: string }
+>;
+
+/** The three state names a class ceiling can settle under. */
+export type MergeRecoveryClassSettleState =
+  (typeof MERGE_RECOVERY_CLASS_SETTLE)[MergeRecoveryRetryClass]["state"];
+
 /** The refusal each class settles under when it crosses its own ceiling. */
 export const MERGE_RECOVERY_CLASS_REFUSAL_CODE: Record<
   MergeRecoveryRetryClass,
   MergeRecoveryRefusalCode
 > = {
-  [MergeRecoveryRetryClass.WAITING]: MergeRecoveryRefusalCode.WAITING_CEILING,
-  [MergeRecoveryRetryClass.TRANSPORT]: MergeRecoveryRefusalCode.TRANSPORT_CEILING,
-  [MergeRecoveryRetryClass.VALIDATION]: MergeRecoveryRefusalCode.VALIDATION_BUDGET,
+  [MergeRecoveryRetryClass.WAITING]: MERGE_RECOVERY_CLASS_SETTLE.WAITING.refusalCode,
+  [MergeRecoveryRetryClass.TRANSPORT]: MERGE_RECOVERY_CLASS_SETTLE.TRANSPORT.refusalCode,
+  [MergeRecoveryRetryClass.VALIDATION]: MERGE_RECOVERY_CLASS_SETTLE.VALIDATION.refusalCode,
 };
+
+/**
+ * The lowercase class name every recovery activity spells. The Prisma client
+ * carries the uppercase member name, which is not what operators or the
+ * board's markers read, so anything writing a class into text or metadata
+ * passes through here first.
+ */
+export const MERGE_RECOVERY_RETRY_CLASS_NAME = Object.fromEntries(
+  (Object.entries(MERGE_RECOVERY_RETRY_CLASS_ENUM) as Array<
+    [MergeRecoveryRetryClassName, MergeRecoveryRetryClass]
+  >).map(([name, member]) => [member, name]),
+) as Record<MergeRecoveryRetryClass, MergeRecoveryRetryClassName>;
 
 const CLASS_OF_REFUSAL = new Map<MergeRecoveryRefusalCode, MergeRecoveryRetryClass>(
   (Object.entries(MERGE_RECOVERY_CLASS_REFUSAL_CODE) as Array<
@@ -395,6 +432,7 @@ const DEFENSE_EXACT = new Set([
   "packages/db/src/merge-integrator.ts",
   "packages/db/src/gate-attestation.ts",
   "packages/db/src/merge-integrator-db.ts",
+  "packages/db/src/merge-recovery-revalidate.ts",
   "packages/db/src/merge-tail.ts",
   "packages/db/src/merge-tail-markers.ts",
   "packages/db/src/canonical-output-schema.ts",

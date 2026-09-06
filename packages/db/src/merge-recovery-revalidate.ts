@@ -7,6 +7,7 @@ import {
 } from "@prisma/client";
 
 import {
+  MERGE_RECOVERY_RETRY_CLASS_NAME,
   mergeRecoveryCeilingClass,
   mergeRecoveryClassReset,
   transitionMergeRecovery,
@@ -59,6 +60,9 @@ export const revalidateAfterClassCeiling = async (
     );
   }
   const { attempt, retryClass } = ceiling;
+  // Every recovery activity spells the class in lowercase; the Prisma member
+  // name never reaches operator text or marker metadata.
+  const className = MERGE_RECOVERY_RETRY_CLASS_NAME[retryClass];
   const revalidations = attempt.revalidations + 1;
   await transitionMergeRecovery(tx, attempt.id, MergeRecoveryStatus.VALIDATING, {
     ...mergeRecoveryClassReset(retryClass),
@@ -72,18 +76,18 @@ export const revalidateAfterClassCeiling = async (
     where: { id: input.integratorTaskId },
     data: {
       status: TaskStatus.REVIEW,
-      failureReason: `Automatic base-drift recovery re-validating after its ${retryClass} ceiling was reset`,
+      failureReason: `Automatic base-drift recovery re-validating after its ${className} ceiling was reset`,
     },
   });
   await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", {
     actorType: "operator",
-    body: `Automatic pre-merge base-drift recovery re-validated: ${retryClass} counters reset by operator`,
+    body: `Automatic pre-merge base-drift recovery re-validated: ${className} counters reset by operator`,
     metadata: {
       state: "class-revalidated",
       integratorTaskId: input.integratorTaskId,
       sourceStopId: input.sourceStopId,
       aggregateId: attempt.id,
-      retryClass,
+      retryClass: className,
       revalidations,
     },
   });

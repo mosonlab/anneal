@@ -133,11 +133,13 @@ export type FreshRecoveryFacts =
 /**
  * Why one classification tick did not conclude. The three classes are
  * accounted separately because they are evidence about different things:
- * `waiting` says the chain is busy, `transport` says the repository could not
- * be read, and only `validation` says something about this candidate.
+ * `waiting` says the chain is busy, `transport` says the repository did not
+ * deliver usable facts, and only `validation` says something about this
+ * candidate.
  *
- * A retry with no better class is `validation` on purpose: an unrecognised
- * reason must spend a bounded budget rather than loop until its ceiling.
+ * A read that returned no usable comparison is `transport`, not `validation`:
+ * the candidate never got classified, so its counted budget must not pay for
+ * the upstream's silence.
  */
 export const retryClasses = ["waiting", "transport", "validation"] as const;
 export type RetryClass = (typeof retryClasses)[number];
@@ -162,10 +164,19 @@ export type RetryBudgetDecision =
     retryClass: RetryClass;
     classAttempt: number;
     firstFailedAt: Date;
-    nextEligibleAt: Date;
+    /** The hold `waiting` and `transport` take before the next tick. Null for
+     *  `validation`, which is bounded by its count and elapsed time alone. */
+    nextEligibleAt: Date | null;
     elapsedMs: number;
   }
-  | { kind: "ineligible"; reason: string; retryClass: RetryClass; classAttempt: number; elapsedMs: number };
+  | {
+    kind: "ineligible";
+    reason: string;
+    retryClass: RetryClass;
+    classAttempt: number;
+    firstFailedAt: Date;
+    elapsedMs: number;
+  };
 
 const refusalReason = (code: CandidateRefusalCode, detail?: string): string => {
   switch (code) {
@@ -331,9 +342,10 @@ export function classifyFresh(facts: FreshRecoveryFacts): FreshDecision {
     return { kind: "ineligible", reason: "server-side ancestry comparison is unavailable" };
   }
   if (!facts.authorizedAdvance) {
-    // The read succeeded and the comparison still did not decide: that is this
-    // candidate failing to classify, so it spends the validation budget.
-    return { kind: "retry", retryClass: "validation", reason: "authorized-base ancestry facts are incomplete" };
+    // The repository read returned no usable comparison, so nothing was
+    // decided about this candidate. That is the upstream failing to answer,
+    // and it is held under the transport ceiling rather than counted.
+    return { kind: "retry", retryClass: "transport", reason: "authorized-base ancestry facts are incomplete" };
   }
   if (facts.authorizedAdvance.status !== "ahead" || facts.authorizedAdvance.behindBy !== 0) {
     return {
@@ -345,7 +357,7 @@ export function classifyFresh(facts: FreshRecoveryFacts): FreshDecision {
     if (!facts.observedAdvance) {
       return {
         kind: "retry",
-        retryClass: "validation",
+        retryClass: "transport",
         reason: "executor-observed-base ancestry facts are incomplete",
       };
     }
@@ -426,9 +438,11 @@ export const formatElapsed = (milliseconds: number): string => {
 };
 
 /**
- * The doubling hold between two classification ticks of the same class: one
- * worker tick after the first failure, then twice as long each time, capped.
- * The cap is what keeps a chain that stays active for hours off the reader.
+ * The doubling hold between two classification ticks of `waiting` or
+ * `transport`: one worker tick after the first failure, then twice as long
+ * each time, capped. The cap is what keeps a chain that stays active for hours
+ * off the reader. `validation` takes no hold — it is bounded by its count and
+ * its elapsed time, and delaying it would only slow a recovery down.
  */
 export const retryBackoffMs = (
   classAttempt: number,
@@ -452,7 +466,7 @@ export const classifyRetryBudget = (facts: RetryBudgetFacts): RetryBudgetDecisio
   const firstFailedAt = facts.firstFailedAt[retryClass] ?? facts.now;
   const elapsedMs = Math.max(0, facts.now.getTime() - firstFailedAt.getTime());
   const refuse = (reason: string): RetryBudgetDecision => ({
-    kind: "ineligible", reason, retryClass, classAttempt, elapsedMs,
+    kind: "ineligible", reason, retryClass, classAttempt, firstFailedAt, elapsedMs,
   });
   const elapsed = formatElapsed(elapsedMs);
 
@@ -490,7 +504,12 @@ export const classifyRetryBudget = (facts: RetryBudgetFacts): RetryBudgetDecisio
     classAttempt,
     firstFailedAt,
     elapsedMs,
-    nextEligibleAt: new Date(facts.now.getTime() + retryBackoffMs(classAttempt, policy)),
+    // Only the two classes that are not evidence about the candidate are held
+    // off the reader; a validation failure stays eligible at the next tick and
+    // is bounded by its count and elapsed time instead.
+    nextEligibleAt: retryClass === "validation"
+      ? null
+      : new Date(facts.now.getTime() + retryBackoffMs(classAttempt, policy)),
   };
 };
 

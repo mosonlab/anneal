@@ -1762,14 +1762,23 @@ count:
   and thirty minutes since the first of them, so a burst inside one incident
   cannot exhaust it.
 
-Every class holds the next tick on a per-attempt backoff that doubles from the
-worker's two-second tick to a sixty-second cap, stored on the attempt as
-`nextEligibleAt`. Each deferral writes a `baseDriftRecovery` activity in state
+`waiting` and `transport` hold the next tick on a per-attempt backoff that
+doubles from the worker's two-second tick to a sixty-second cap, stored on the
+attempt as `nextEligibleAt`; `validation` takes no hold and stays eligible at
+the next tick. Each deferral writes a `baseDriftRecovery` activity in state
 `classification-retry` naming the class, its counter, the elapsed time in that
-class, and the next eligible time; a class change is recorded there as well.
+class, and the next eligible time (`null` for `validation`); a class change is
+recorded there as well.
+
+A read that reached the repository and returned no usable ancestry comparison
+is `transport`, not `validation`: the candidate was never classified, so its
+counted budget does not pay for the upstream's silence.
 
 Crossing a ceiling settles the attempt as `FAILED` with a `refusalCode` naming
-the class, and the `failureReason` states the class and the elapsed time:
+the class, and the `failureReason` states the class and the elapsed time. The
+settle records the failure that crossed the ceiling before it settles, so the
+attempt's counters and the refusal text state the same number of failures, and
+the settle activity carries all three counters:
 
 - `waiting-ceiling` — `waiting-ceiling reached: the chain stayed active for <elapsed> (limit 6h00m); last classification: <reason>`
 - `transport-ceiling` — `transport-ceiling reached: repository reads failed for <elapsed> (limit 30m); last read failure: <reason>`
@@ -1778,7 +1787,12 @@ the class, and the `failureReason` states the class and the elapsed time:
 A class-ceiling settle opens a stop question offering `re-validate` alongside
 `abandon`, and writes a stop notice keyed
 `merge-base-drift-recovery:<state>:<stopId>` (with an `:r<n>` suffix after the
-n-th `re-validate`). Answer it through
+n-th `re-validate`). Every base-drift recovery settle — a class ceiling, an
+ordinary ineligibility, or the automatic recovery limit — carries that same
+`:r<n>` generation on its stop question key `merge-stop:<stopId>:r<n>`, so a
+recovery that settles again after a `re-validate` always opens a fresh,
+answerable card instead of deduplicating against the answered one. Answer it
+through
 `POST /inbox/messages/:messageId/decision` with `decision: "re-validate"`. That
 answer resets the counters of the settled class and no other, clears the
 backoff and the refusal, returns the attempt to `VALIDATING`, and records a
