@@ -10,8 +10,10 @@ The job advances the release named by `current` to an exact target commit from
 `com.agentos.inbox`, the configured runner labels (10 by default), and
 `com.agentos.web` (13 labels at the default count). Linux uses the same
 generated inventory. The release may contain the resident merge-executor
-runtime, but that service is outside this activation set. An Anneal Run
-workspace is never deployed.
+runtime, but that service is outside this activation set; on Linux its
+root-owned runtime follows the release through
+`agentos-merge-executor-follower.timer`. An Anneal Run workspace is never
+deployed.
 
 ## Runner-only host
 
