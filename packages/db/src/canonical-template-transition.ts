@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { AssigneeType } from "@prisma/client";
 
 import { DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME } from "./agent-contract.js";
-import { stepRole, type StepRole } from "./step-role.js";
 import { retiredStepShapeDifferences, type LegacyStepRecord } from "./template-step-fields.js";
 import type { PersistedTemplateStepStructure } from "./template-sources.js";
 
@@ -59,13 +58,6 @@ export type LegacyTemplateGeneration = Readonly<{
   marker: string;
   shape: readonly LegacyStepRecord[];
   /**
-   * Structural successor ordinals for a generation whose replacement graph
-   * has a different shape. Prompt-only transitions derive current ordinals
-   * from their own shape; structural transitions state the replacement
-   * explicitly so routing never reuses retired positions.
-   */
-  successorStepOrdinals?: CanonicalStepOrdinals;
-  /**
    * Whether this entry is retired from structural matching because a binding
    * was its only difference from its successor.
    *
@@ -74,8 +66,8 @@ export type LegacyTemplateGeneration = Readonly<{
    * graph that replaced it, and would match every deployed row forever: the
    * installer matches retired generations before it checks the current graph,
    * so every sync would plan a rollover and refuse under any active Run. The
-   * entry stays because the generation was published and its ordinals still
-   * address rows renamed under its marker; only matching skips it.
+   * entry stays to identify rows renamed under its published marker; only
+   * structural matching skips it.
    */
   retiredByBinding?: boolean;
   /**
@@ -188,18 +180,8 @@ const legacyTemplateGenerations = {
       // Structural rollover: the bound direct graph adds a read-only
       // revalidation node ahead of the historical seven-step graph. Existing
       // task and step rows stay under the renamed legacy template; only new
-      // bound chains use the successor ordinals below.
+      // bound chains use the successor graph.
       marker: "pre-revalidate-step",
-      successorStepOrdinals: {
-        revalidation: 1,
-        implementation: 2,
-        "sol-findings": 3,
-        "blind-findings": 4,
-        "fixed-implementation": 5,
-        regression: 6,
-        readiness: 7,
-        integrator: 8,
-      },
       shape: [
         { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null },
@@ -263,7 +245,6 @@ const legacyTemplateGenerations = {
       // published-generation record and excluded from matching.
       marker: "pre-astra-low-review-fix",
       retiredByBinding: true,
-      successorStepOrdinals: { revalidation: 1, implementation: 2, "sol-findings": 3, "blind-findings": 4, "fixed-implementation": 5, regression: 6, readiness: 7, integrator: 8 },
       shape: [
         { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -277,7 +258,6 @@ const legacyTemplateGenerations = {
     },
     {
       marker: "model-neutral-review-step-names",
-      successorStepOrdinals: { revalidation: 1, implementation: 2, "sol-findings": 3, "blind-findings": 4, "fixed-implementation": 5, regression: 6, readiness: 7, integrator: 8 },
       shape: [
         { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -481,7 +461,6 @@ const legacyTemplateGenerations = {
       // published-generation record and excluded from matching.
       marker: "pre-astra-low-review-fix",
       retiredByBinding: true,
-      successorStepOrdinals: { spec: 1, plan: 2, "plan-review": 3, "revised-plan": 4, implementation: 5, "sol-findings": 6, "blind-findings": 7, "fixed-implementation": 8, documentation: 9, regression: 10, readiness: 11, integrator: 12 },
       shape: [
         { name: "Write a spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -499,7 +478,6 @@ const legacyTemplateGenerations = {
     },
     {
       marker: "model-neutral-review-step-names",
-      successorStepOrdinals: { spec: 1, plan: 2, "plan-review": 3, "revised-plan": 4, implementation: 5, "sol-findings": 6, "blind-findings": 7, "fixed-implementation": 8, documentation: 9, regression: 10, readiness: 11, integrator: 12 },
       shape: [
         { name: "Write a spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -573,7 +551,6 @@ const legacyTemplateGenerations = {
       // published-generation record and excluded from matching.
       marker: "pre-astra-low-review-fix",
       retiredByBinding: true,
-      successorStepOrdinals: { implementation: 1, "sol-findings": 2, "blind-findings": 3, "fixed-implementation": 4 },
       shape: [
         { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null, provisionDependencies: false },
@@ -583,7 +560,6 @@ const legacyTemplateGenerations = {
     },
     {
       marker: "model-neutral-review-step-names",
-      successorStepOrdinals: { implementation: 1, "sol-findings": 2, "blind-findings": 3, "fixed-implementation": 4 },
       shape: [
         { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Code review (Sol)", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null, provisionDependencies: false },
@@ -650,25 +626,6 @@ export type CanonicalTemplateIdentity = Readonly<{
   generation: string | null;
 }>;
 
-export type CanonicalStepOrdinals = Readonly<Partial<Record<StepRole, number>>>;
-
-/**
- * Current graphs are deliberately kept apart from retired generations. A
- * canonical template may be introduced with no history at all, so deriving
- * its ordinals from `LEGACY_TEMPLATE_GENERATIONS` would incorrectly make it
- * unaddressable by repair routing.
- */
-export const CURRENT_CANONICAL_STEP_ORDINALS: Readonly<
-  Partial<Record<CanonicalTemplateRegistryName, CanonicalStepOrdinals>>
-> = {
-  [PR_TEMPLATE_NAME]: {
-    implementation: 1,
-    "sol-findings": 2,
-    "blind-findings": 3,
-    "fixed-implementation": 4,
-  },
-};
-
 const registeredGenerations = (canonicalName: string): readonly LegacyTemplateGeneration[] | null =>
   Object.hasOwn(LEGACY_TEMPLATE_GENERATIONS, canonicalName)
     ? LEGACY_TEMPLATE_GENERATIONS[canonicalName as CanonicalTemplateRegistryName]
@@ -721,38 +678,6 @@ export const canonicalTemplateIdentity = (templateName: string): CanonicalTempla
     }
   }
   return null;
-};
-
-/**
- * Derive Step role ordinals from one registered graph. Prompt-only current
- * graphs derive their ordinals from the latest entry's shape. A structural
- * transition carries explicit successor ordinals so the current graph can
- * advance without silently reusing retired positions.
- */
-export const canonicalStepOrdinals = (
-  canonicalName: CanonicalTemplateRegistryName,
-  generation: string | null,
-): CanonicalStepOrdinals | null => {
-  const generations = LEGACY_TEMPLATE_GENERATIONS[canonicalName];
-  const registered = generation === null
-    ? generations.at(-1)
-    : generations.find((candidate) => candidate.marker === generation);
-  if (!registered) {
-    return generation === null ? CURRENT_CANONICAL_STEP_ORDINALS[canonicalName] ?? null : null;
-  }
-  if (generation === null && registered.successorStepOrdinals !== undefined) return registered.successorStepOrdinals;
-  if (generation === null && registered.promptDigest === undefined) {
-    throw new Error(`Current ${canonicalName} Step ordinals are not derivable from its latest structural transition`);
-  }
-
-  const ordinals: Partial<Record<StepRole, number>> = {};
-  for (const [index, step] of registered.shape.entries()) {
-    const role = stepRole({ outputKind: step.outputKind });
-    if (role === null) throw new Error(`Registered ${canonicalName} generation ${registered.marker} has unknown outputKind ${step.outputKind}`);
-    if (ordinals[role] !== undefined) throw new Error(`Registered ${canonicalName} generation ${registered.marker} repeats Step role ${role}`);
-    ordinals[role] = index + 1;
-  }
-  return ordinals;
 };
 
 /**
