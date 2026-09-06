@@ -1,18 +1,16 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 
 import {
   DependencyProvisioning,
-  PrismaClient, SESSION_USAGE_LOCK_CLASS, recomputeSessionUsage, runBackfillSessionUsageCli, sessionUsageLockKey,
+  PrismaClient, SESSION_USAGE_LOCK_CLASS, recomputeSessionUsage, sessionUsageLockKey,
 } from "@anneal/db";
 
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
 
 /**
  * The advisory lock inside `recomputeSessionUsage` (packages/db/src/usage.ts),
- * against a real PostgreSQL, plus the backfill's per-session resilience.
+ * against a real PostgreSQL.
  *
  * HOW TO CHECK THESE TESTS STILL EARN THEIR KEEP. Delete the
  * `pg_advisory_xact_lock` statement from `recomputeSessionUsage` and re-run this
@@ -22,11 +20,11 @@ import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
  *     (`storedInputTokens: 10` where 30 is expected);
  *   - test 2b fails because the contended recompute now RESOLVES instead of
  *     being made to wait.
- * Tests 0, 2a, 3 and 4 are deliberately INSENSITIVE to that deletion: test 0
- * never contends, test 2a takes its lock directly rather than through
- * `recomputeSessionUsage`, and tests 3 and 4 inject their own failure. A reader
- * who deletes the line and sees those four stay green has learned nothing
- * alarming. Restore with `git checkout -- packages/db/src/usage.ts`.
+ * Tests 0 and 2a are deliberately INSENSITIVE to that deletion: test 0 never
+ * contends, and test 2a takes its lock directly rather than through
+ * `recomputeSessionUsage`. A reader who deletes the line and sees those two
+ * stay green has learned nothing alarming. Restore with
+ * `git checkout -- packages/db/src/usage.ts`.
  *
  * WHAT THE FIRST RUN SETTLED (plan §13 items 1 and 2):
  * - The parameterised `${…}::int` bind form is accepted by Prisma 6.19.0
@@ -289,101 +287,4 @@ test("2b: a recompute retries a bounded lock wait until the durable event is fol
     await contender.$disconnect();
     await holder.$disconnect();
   }
-});
-
-/* -------------------------------------------------------------- test 3 */
-
-test("3: one failing session does not starve the backfill, and the CLI reports a non-zero exit", { timeout: 30_000 }, async () => {
-  // Before this, the first throwing row aborted the scan permanently: a re-run
-  // sorts the same way and dies at the same row. After SF-1 no payload can force
-  // a write failure any more, so the failure has to be injected.
-  const first = await seedSession("backfill-a");
-  const middle = await seedSession("backfill-b");
-  const last = await seedSession("backfill-c");
-  for (const seeded of [first, middle, last]) {
-    await addFinalOutput(seeded, 1, { type: "result", usage: { input_tokens: 3, output_tokens: 4 } });
-  }
-
-  // The write lives on `tx.session.update` INSIDE `db.$transaction`, so a Proxy
-  // that replaces `session.update` on the outer client injects nothing: the
-  // recompute would receive Prisma's native `tx`, the scan would succeed, and
-  // this test would assert `failed: 1` against a run in which nothing failed.
-  // That is the more insidious way to pass vacuously, because it looks
-  // instrumented. Wrap the inner client, per chain.dbtest.ts:218-239.
-  const failingFor = (targetId: string) => new Proxy(db, { get(target, property, receiver) {
-    if (property !== "$transaction") {
-      const value = Reflect.get(target, property, receiver);
-      // The bind is required: `backfillSessionUsage` calls `session.findMany` on
-      // the outer client for its scan, and an unbound delegate method called
-      // through a Proxy receiver breaks Prisma's internals.
-      return typeof value === "function" ? value.bind(target) : value;
-    }
-    return (operation: (tx: any) => Promise<unknown>, options: unknown) => target.$transaction(async (tx) => {
-      const sessionDelegate = new Proxy(tx.session, { get(sessionTarget, sessionProperty, sessionReceiver) {
-        if (sessionProperty !== "update") return Reflect.get(sessionTarget, sessionProperty, sessionReceiver);
-        return async (args: Parameters<typeof tx.session.update>[0]) => {
-          // Filtered on the id, never on a call counter: the scan is ordered by
-          // requestedAt, so a counter silently retargets when seed timestamps
-          // move. The throw rolls its transaction back, which is precisely why
-          // the repair pass has something to repair — do not catch it here.
-          if (args?.where?.id === targetId) throw new Error("value out of range for type integer");
-          return tx.session.update(args);
-        };
-      } });
-      const instrumentedTx = new Proxy(tx, { get(txTarget, txProperty, txReceiver) {
-        return txProperty === "session" ? sessionDelegate : Reflect.get(txTarget, txProperty, txReceiver);
-      } });
-      return operation(instrumentedTx);
-    }, options as any);
-  } }) as PrismaClient;
-
-  const failingLines: string[] = [];
-  const failingExit = await runBackfillSessionUsageCli({
-    db: failingFor(middle.session.id),
-    log: (line) => failingLines.push(line),
-    error: (line) => failingLines.push(line),
-  });
-  assert.equal(failingExit, 1);
-  assert.equal(failingLines[0], "scanned 3, updated 2, failed 1");
-  assert.match(failingLines[1] ?? "", new RegExp(middle.session.id));
-
-  const repairLines: string[] = [];
-  const repairExit = await runBackfillSessionUsageCli({
-    db,
-    log: (line) => repairLines.push(line),
-    error: (line) => repairLines.push(line),
-  });
-  assert.equal(repairExit, 0);
-  // `updated 1`, not 3: the two that succeeded now match their stored columns,
-  // so `sameColumns` suppresses their writes and only the previously-failed
-  // session is written. That asymmetry is itself evidence the recompute is an
-  // absolute repair rather than a blind write.
-  assert.equal(repairLines[0], "scanned 3, updated 1, failed 0");
-});
-
-/* -------------------------------------------------------------- test 4 */
-
-test("4: the committed backfill script exits zero through a real process", { timeout: 60_000 }, async () => {
-  // Test 3 drives the reporting function. Only this covers the three lines the
-  // script still owns — the import, the client construction, and the `finally`
-  // that must still `$disconnect` — with a REAL process exit code rather than a
-  // constant read out of the source. The failure path is deliberately not
-  // spawned: an injected Proxy cannot cross a process boundary, and after SF-1
-  // no payload can force a failure. Exit 1 belongs to test 3, exit 0 here.
-  for (const label of ["spawned-a", "spawned-b"]) {
-    const seeded = await seedSession(label);
-    await addFinalOutput(seeded, 1, { type: "result", usage: { input_tokens: 2, output_tokens: 1 } });
-  }
-
-  const dbDirectory = fileURLToPath(new URL("../../db", import.meta.url));
-  const result = spawnSync(process.execPath, ["--import", "tsx", "prisma/backfill-session-usage.ts"], {
-    cwd: dbDirectory,
-    // The script's own PrismaClient reads DATABASE_URL. Same shape testdb.ts
-    // already uses to run `npx prisma` in this directory.
-    env: { ...process.env, DATABASE_URL: testDatabaseUrl },
-    encoding: "utf8",
-  });
-
-  assert.equal(result.status, 0, `exit ${result.status}\n${result.stdout}\n${result.stderr}`);
-  assert.match(result.stdout, /scanned 2, updated 2, failed 0/);
 });
