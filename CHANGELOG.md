@@ -16,8 +16,10 @@ written.
   which sequence range were lost. Lifecycle, error and terminal events are never
   dropped; if the queue is still full once nothing droppable is left, such an
   event keeps its place, type and sequence number but loses its payload to a
-  `truncated` marker, and a queue of nothing but those markers holds past the
-  bound rather than losing the account of the Run.
+  `truncated` marker; once every event not in flight is such a marker, the two
+  oldest adjacent markers merge into one `EVENTS_COALESCED` event carrying their
+  summed counts and the sequence range they span, so the queue holds its bounds
+  under any traffic mix while every event it saw is still accounted for.
   A single event payload above 256 KiB is truncated to a `truncated` marker
   carrying its original size.
   `POST /runner/runs/:runId/events` enforces the same per-event cap and a

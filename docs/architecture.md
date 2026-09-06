@@ -89,12 +89,14 @@ Local runner -----> ephemeral git workspace
   are not exempt from the bound either, because a provider can produce them
   without limit too: once nothing droppable is left, such an event keeps its
   sequence number, type and time and loses only its payload to a `truncated`
-  marker. A queue of nothing but those markers holds past the bound rather than
-  losing the account of the Run, at about a hundred bytes each instead of the
-  256 KiB a payload may carry. Every drop or truncation is itself recorded as an
-  event. The batch in flight is
-  exempt from dropping and is released by identity, so a provider streaming
-  during an append cannot cost an event the request never carried. A 413 the API
+  marker, at about a hundred bytes each instead of the 256 KiB a payload may
+  carry, and once every entry not in flight is such a marker the two oldest
+  adjacent markers merge into one carrying their summed counts and the sequence
+  range they span. So both bounds hold under any traffic mix while what a
+  protected event gives up is its detail, never its account. Every drop,
+  truncation and merge is itself recorded as an event. The batch in flight is
+  exempt from dropping and merging and is released by identity, so a provider
+  streaming during an append cannot cost an event the request never carried. A 413 the API
   raises names the one offending event, so the runner loses that event rather
   than wedging an ordered queue that only advances on success; a 413 that names
   none makes the runner halve its batch budget and retry rather than resend a

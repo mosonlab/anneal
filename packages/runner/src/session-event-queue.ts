@@ -27,12 +27,14 @@ import type { SessionEventPayload } from "./api.js";
  * because a provider can produce protected events without limit too — one
  * `ADAPTER_ERROR` per unparsable line, a `TOOL_STARTED` per call. Once nothing
  * droppable is left, a protected event loses its payload to a `truncated`
- * marker, keeping its sequence number, type, source and time. A queue of
- * nothing but such markers holds past the bound rather than losing the account
- * of the Run: each costs about a hundred bytes instead of the 256 KiB an
- * untruncated payload may carry, so what memory that queue can reach is
- * reduced by three orders of magnitude while every event the Run recorded still
- * reaches the control plane.
+ * marker, keeping its sequence number, type, source and time. That caps what
+ * one protected event costs but not how many of them there are, so once every
+ * unclaimed entry is a marker the two oldest adjacent markers merge into one
+ * carrying their summed counts and their spanning sequence range, repeating
+ * until both bounds hold. What a protected event gives up is its detail, never
+ * its account: the queue an unreachable API leaves behind is O(1) in the number
+ * of protected events it saw, and every one of them is still counted, in
+ * aggregate, in a marker the control plane receives.
  *
  * A batch is *claimed* from the moment it is formed until its request settles.
  * A claimed entry is never dropped and never accumulated into: the queue is
@@ -68,6 +70,19 @@ export const EVENTS_DROPPED_EVENT_TYPE = "EVENTS_DROPPED";
 
 /** Synthetic record of the one event an API refusal named. */
 export const EVENT_REJECTED_EVENT_TYPE = "EVENT_REJECTED";
+
+/**
+ * Synthetic record standing in for a run of adjacent protected events whose
+ * payloads were already given up and whose markers the bound then merged.
+ *
+ * It carries what survives merging: how many queue entries it accounts for, the
+ * inclusive sequence range they spanned, and the drop totals of any
+ * `EVENTS_DROPPED` record it absorbed — those count events that are no longer
+ * in the queue at all, so letting them merge away would lose them from the
+ * account entirely. Everything else an absorbed marker held is one more unit of
+ * `coalescedEvents`.
+ */
+export const EVENTS_COALESCED_EVENT_TYPE = "EVENTS_COALESCED";
 
 /** The `null` standing in for the payload while the envelope alone is measured. */
 const NULL_JSON_BYTES = 4;
@@ -229,11 +244,89 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
     entry.bytes = reduced;
   };
 
+  /** What one entry accounts for, so merging two of them can sum it. */
+  const accountOf = (entry: Entry): {
+    events: number;
+    firstSeq: number;
+    lastSeq: number;
+    droppedEvents: number;
+    droppedBytes: number;
+  } => {
+    const payload = entry.event.payload as Record<string, unknown>;
+    const number = (value: unknown): number => (typeof value === "number" ? value : 0);
+    if (entry.event.type === EVENTS_COALESCED_EVENT_TYPE) {
+      return {
+        events: number(payload.coalescedEvents),
+        firstSeq: number(payload.firstSeq),
+        lastSeq: number(payload.lastSeq),
+        droppedEvents: number(payload.droppedEvents),
+        droppedBytes: number(payload.droppedBytes),
+      };
+    }
+    return {
+      events: 1,
+      firstSeq: entry.event.seq,
+      lastSeq: entry.event.seq,
+      // A drop record counts as one queue entry like any other, and carries the
+      // events it says were dropped, which are in no other entry.
+      droppedEvents: entry.event.type === EVENTS_DROPPED_EVENT_TYPE ? number(payload.droppedEvents) : 0,
+      droppedBytes: entry.event.type === EVENTS_DROPPED_EVENT_TYPE ? number(payload.droppedBytes) : 0,
+    };
+  };
+
+  /**
+   * Merge the two oldest adjacent unclaimed markers into one; false when no
+   * such pair exists.
+   *
+   * Adjacency is in the queue, not merely among candidates: a claimed entry
+   * between two markers holds a sequence number the request in flight will
+   * deliver, and a merged range spanning it would count that event twice. The
+   * merged entry keeps the older marker's sequence number and time, so it keeps
+   * its place in the order and the ranges of the surviving markers stay
+   * contiguous with no gap between them.
+   */
+  const coalesceOldestPair = (): boolean => {
+    for (let index = 0; index + 1 < entries.length; index += 1) {
+      const left = entries[index] as Entry;
+      const right = entries[index + 1] as Entry;
+      if (left.claimed || right.claimed || !left.degraded || !right.degraded) continue;
+      const older = accountOf(left);
+      const newer = accountOf(right);
+      const payload = {
+        reason: "queue-bound",
+        coalescedEvents: older.events + newer.events,
+        firstSeq: older.firstSeq,
+        lastSeq: newer.lastSeq,
+        droppedEvents: older.droppedEvents + newer.droppedEvents,
+        droppedBytes: older.droppedBytes + newer.droppedBytes,
+        queueMaxBytes: maxBytes,
+        queueMaxEvents: maxEvents,
+      };
+      const merged = entryFor({
+        seq: left.event.seq,
+        ...(left.event.at !== undefined ? { at: left.event.at } : {}),
+        source: "RUNNER",
+        type: EVENTS_COALESCED_EVENT_TYPE,
+        payload,
+      }, false, jsonByteLength(payload), true);
+      forget(left);
+      forget(right);
+      entries.splice(index, 2, merged);
+      bytes += merged.bytes;
+      return true;
+    }
+    return false;
+  };
+
   /**
    * The next thing to give up, cheapest first: a droppable liveness event, then
-   * the payload of the oldest protected event. A protected event itself is
-   * never given up. A claimed entry belongs to a request in flight and is not
-   * available either.
+   * the payload of the oldest protected event, then the separate identity of
+   * the two oldest adjacent markers. A protected event's account is never given
+   * up. A claimed entry belongs to a request in flight and is not available
+   * either: a queue whose entries are all claimed is the one state this returns
+   * from still over a bound, and it lasts only until that request settles. The
+   * drop record appended below is the other, deliberate, few hundred bytes of
+   * overshoot.
    */
   const enforceBound = (): void => {
     let droppedEvents = 0;
@@ -244,12 +337,15 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
       const index = entries.findIndex((entry) => entry.droppable && !entry.claimed);
       if (index === -1) {
         // Nothing droppable is left. The oldest protected event that still has
-        // a payload gives it up for its marker; once none does, the queue holds
-        // what remains rather than losing the account of the Run.
+        // a payload gives it up for its marker; once none does, markers merge,
+        // which costs one entry each time and so cannot run forever.
         const degradable = entries.find((entry) => !entry.claimed && !entry.degraded);
-        if (!degradable) break;
-        degrade(degradable);
-        continue;
+        if (degradable) {
+          degrade(degradable);
+          continue;
+        }
+        if (coalesceOldestPair()) continue;
+        break;
       }
       const [removed] = entries.splice(index, 1) as [Entry];
       forget(removed);

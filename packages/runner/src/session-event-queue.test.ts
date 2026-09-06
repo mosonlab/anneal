@@ -8,8 +8,10 @@ import {
 } from "@anneal/db/session-event-limits";
 
 import type { AdapterEvent } from "./adapters.js";
+import type { SessionEventPayload } from "./api.js";
 import {
   createSessionEventQueue,
+  EVENTS_COALESCED_EVENT_TYPE,
   EVENTS_DROPPED_EVENT_TYPE,
   EVENT_REJECTED_EVENT_TYPE,
 } from "./session-event-queue.js";
@@ -77,27 +79,105 @@ test("sustained tool output holds the bound while lifecycle and error events sur
   );
 });
 
-test("protected traffic alone is never shed, however far past the bound it runs", () => {
+/**
+ * What the surviving markers claim to account for: one span per held event,
+ * widened to the merged range where markers were coalesced.
+ */
+const spans = (held: readonly SessionEventPayload[]): { events: number; firstSeq: number; lastSeq: number }[] =>
+  held.map((event) => {
+    if (event.type !== EVENTS_COALESCED_EVENT_TYPE) {
+      return { events: 1, firstSeq: event.seq, lastSeq: event.seq };
+    }
+    const payload = event.payload as { coalescedEvents: number; firstSeq: number; lastSeq: number };
+    return { events: payload.coalescedEvents, firstSeq: payload.firstSeq, lastSeq: payload.lastSeq };
+  });
+
+test("protected traffic far past the count bound is held inside it, still accounting for every event", () => {
   const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 500, maxEvents: 3, batchMaxEvents: 1_000 });
   for (let index = 0; index < 1_000; index += 1) {
     queue.push({ source: "CLAUDE", type: "ADAPTER_ERROR", payload: { error: "invalid-json", line: "x".repeat(200) } });
   }
 
-  assert.equal(queue.length, 1_000, "an error event is never given up, whatever the bound says");
+  assert.ok(queue.length <= 3, `the count bound holds against protected traffic too, held ${queue.length}`);
+  assert.ok(queue.bytes <= 500, `so does the byte bound, held ${queue.bytes}`);
   const held = queue.batch();
   assert.equal(
     held.filter((event) => event.type === EVENTS_DROPPED_EVENT_TYPE).length,
     0,
-    "nothing was dropped, so there is nothing to record",
+    "an error event is still never dropped, so there is nothing to record as lost",
   );
-  assert.deepEqual(held.map((event) => event.seq), Array.from({ length: 1_000 }, (_, index) => index),
-    "every error the provider raised reaches the control plane, in order");
-  const detail = held.filter((event) => (event.payload as { truncated?: boolean }).truncated !== true);
-  assert.ok(detail.length <= 2, `pressure takes the payloads first, kept ${detail.length} intact`);
-  assert.ok(
-    queue.bytes / queue.length < 200,
-    `a marker-only queue costs a fraction of an untruncated one, held ${queue.bytes} over ${queue.length}`,
+  const account = spans(held);
+  assert.equal(
+    account.reduce((total, span) => total + span.events, 0),
+    1_000,
+    "every error the provider raised is accounted for by the markers that survive",
   );
+  assert.equal(account[0]!.firstSeq, 0, "the account starts at the first event");
+  assert.equal(account.at(-1)!.lastSeq, 999, "and ends at the last");
+  for (let index = 1; index < account.length; index += 1) {
+    assert.equal(
+      account[index]!.firstSeq,
+      account[index - 1]!.lastSeq + 1,
+      "the surviving markers cover a contiguous range with no gap between them",
+    );
+  }
+  assert.deepEqual(
+    held.map((event) => event.seq),
+    [...held].sort((left, right) => left.seq - right.seq).map((event) => event.seq),
+    "and they reach the control plane in order",
+  );
+});
+
+test("coalescing keeps the drop account of a record it absorbs", () => {
+  const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 900, maxEvents: 2, batchMaxEvents: 1_000 });
+  // Chunks first, so a drop record exists; then protected traffic that leaves
+  // nothing droppable and forces the record itself to be merged away. Nothing
+  // is claimed in between, or the record would be exempt for the wrong reason.
+  for (let index = 0; index < 20; index += 1) queue.push(chunk("d".repeat(300)));
+  for (let index = 0; index < 50; index += 1) {
+    queue.push({ source: "CLAUDE", type: "ADAPTER_ERROR", payload: { error: "e".repeat(200) } });
+  }
+
+  assert.ok(queue.length <= 2, `the count bound holds, held ${queue.length}`);
+  const held = queue.batch();
+  assert.equal(
+    held.filter((event) => event.type === EVENTS_DROPPED_EVENT_TYPE).length,
+    0,
+    "the drop record was merged like any other marker",
+  );
+  const merged = held.filter((event) => event.type === EVENTS_COALESCED_EVENT_TYPE)
+    .map((event) => event.payload as { droppedEvents: number; droppedBytes: number });
+  assert.equal(
+    merged.reduce((total, payload) => total + payload.droppedEvents, 0),
+    20,
+    "the events it said were dropped are in no other entry, so merging carries them forward",
+  );
+  assert.ok(merged.every((payload) => payload.droppedBytes > 0), "with the bytes they cost");
+});
+
+test("tool output is given up before any lifecycle or error event", () => {
+  const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 3_000, batchMaxEvents: 1_000 });
+  queue.push(lifecycle("PROCESS_STARTED"));
+  for (let index = 0; index < 10; index += 1) {
+    queue.push({ source: "PI", type: "TOOL_COMPLETED", payload: { out: "o".repeat(400) } });
+    queue.push({ source: "PI", type: "TOOL_PROGRESS", payload: { out: "p".repeat(400) } });
+  }
+  queue.push(lifecycle("TOOL_STARTED"));
+  queue.push(lifecycle("ADAPTER_ERROR"));
+  for (let index = 0; index < 40; index += 1) {
+    queue.push({ source: "PI", type: "TOOL_COMPLETED", payload: { out: "q".repeat(400) } });
+  }
+
+  const held = queue.batch();
+  assert.deepEqual(
+    held.filter((event) => event.source !== "RUNNER").map((event) => event.type)
+      .filter((type) => type !== "TOOL_COMPLETED" && type !== "TOOL_PROGRESS"),
+    ["PROCESS_STARTED", "TOOL_STARTED", "ADAPTER_ERROR"],
+    "the chunk types carrying tool output go first; the lifecycle and error events stay",
+  );
+  const record = held.find((event) => event.type === EVENTS_DROPPED_EVENT_TYPE);
+  assert.ok(record, "and the loss is recorded");
+  assert.ok((record.payload as { droppedEvents: number }).droppedEvents > 0);
 });
 
 test("a protected event under pressure loses its payload before it loses its place", () => {
