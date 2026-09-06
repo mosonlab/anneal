@@ -644,7 +644,7 @@ model Task {
   goalDecisionRunId        String?
   goalDecisionAt           DateTime?
   goalPredecessorTaskId    String?                @unique
-  dispatchAfterTaskId      String?                @unique
+  dispatchAfterTaskId      String?
   createdAt                DateTime               @default(now())
   /// Stable completion clock for age-based retention. A database trigger sets
   /// it on every transition into DONE and clears it on every transition out.
@@ -669,7 +669,7 @@ model Task {
   goalPredecessorTask      Task?                  @relation("TaskGoalPredecessor", fields: [goalPredecessorTaskId], references: [id], onDelete: Restrict)
   goalSuccessorTask        Task?                  @relation("TaskGoalPredecessor")
   dispatchAfter            Task?                  @relation("TaskDispatchBinding", fields: [dispatchAfterTaskId, projectId], references: [id, projectId], onDelete: Restrict)
-  dispatchedChainFirstTask Task?                  @relation("TaskDispatchBinding")
+  dispatchedChainFirstTasks Task[]                @relation("TaskDispatchBinding")
   /// Step 2.7 identity backstops. The single-column relations stay as the
   /// delete restrictions the spec names; these composite ones are what stop a
   /// predecessor, Run, or event from crossing a Goal, generation, or iteration.
@@ -689,7 +689,7 @@ model Task {
   @@unique([goalId, goalDecisionKey])
   @@unique([id, goalId, goalGeneration])
   @@unique([id, goalId, goalGeneration, goalIteration])
-  @@unique([dispatchAfterTaskId, projectId])
+  @@index([dispatchAfterTaskId, projectId])
   @@index([projectId, status])
   @@index([assigneeAgentId])
   @@index([templateId])
