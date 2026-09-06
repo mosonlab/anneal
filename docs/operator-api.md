@@ -120,26 +120,6 @@ curl -X PUT "$BASE_URL/files/content?path=notes/today.md" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" --data-binary @notes/today.md
 ```
 
-### POST `/files/mkdir`
-
-- Required JSON field: `path`.
-
-```sh
-curl -X POST "$BASE_URL/files/mkdir" \
-  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"path":"notes"}'
-```
-
-### POST `/files/move`
-
-- Required JSON fields: `from`, `to`.
-
-```sh
-curl -X POST "$BASE_URL/files/move" \
-  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"from":"draft.md","to":"archive/draft.md"}'
-```
-
 ### DELETE `/files`
 
 - Required parameters: none.
