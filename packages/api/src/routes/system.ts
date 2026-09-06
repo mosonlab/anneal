@@ -7,7 +7,6 @@ import type {
   VersionInfo,
 } from "@anneal/db/console-contract";
 import { getMimeType } from "hono/utils/mime";
-import { z } from "zod";
 
 import { projectRunnerBackend } from "../runner-backend-health.js";
 import { versionPayload } from "../version.js";
