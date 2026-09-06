@@ -9,6 +9,9 @@ written.
 
 ## Unreleased
 
+- Removed `POST /inbox/messages/:messageId/supersede`; `POST
+  /inbox/messages/:messageId/close` is the only Inbox closure transition.
+
 ## v0.8.0 — Developer Preview 8
 
 The eighth preview is about who does the work, and where it runs. Staffing
