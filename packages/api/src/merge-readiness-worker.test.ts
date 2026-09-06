@@ -57,3 +57,67 @@ test("the readiness worker never overlaps ticks in one process", async () => {
   await waitUntil(() => active === 0);
   assert.equal(maximumActive, 1);
 });
+
+for (const withRecovery of [false, true]) {
+  test(`a fourth readiness requeue parks regression by name (recovery=${withRecovery})`, async () => {
+    const { requeueRegressionSettlement } = await import("./merge-readiness-worker.js");
+    const { TaskStatus } = await import("@anneal/db");
+    const updates: Array<{ where: { id: string }; data: Record<string, unknown> }> = [];
+    const activities: Array<Record<string, unknown>> = [];
+    const recoveryUpdates: Array<{ data: Record<string, unknown> }> = [];
+    const recovery = {
+      aggregateId: "recovery-1", attempt: 1, sourceStopId: "stop-1", sourceRunId: "source-1",
+      authorizationActivityId: "authorization-1", readinessTaskId: "readiness-1", regressionTaskId: "regression-1",
+      integratorTaskId: "integrator-1", repository: "org/repo", prNumber: 1, targetBranch: "main",
+      authorizedHeadSha: "head", authorizedBaseSha: "old-base", observedBaseSha: "new-base",
+      currentBaseSha: "new-base", recoveryRunId: "run-4",
+    };
+    const aggregate = { ...recovery, id: recovery.aggregateId, boundSourceRunId: recovery.sourceRunId,
+      status: "AWAITING_AUTHORIZATION" };
+
+    const agent = { id: "agent-1", name: "regression", archivedAt: null };
+    const tx = {
+      $queryRaw: async () => [{ id: agent.id }],
+      agent: { findUnique: async () => agent },
+      task: {
+        findUnique: async () => ({
+          id: "regression-1", name: "Regression", assigneeType: "AGENT", assigneeAgent: agent,
+          archivedAt: null, repo: { id: "repo-1", defaultBranch: "main" },
+          runs: [{ id: "run-4", runNumber: 4, maxRunsPerTask: 4, budgetGrants: 3, leaseLossRefunds: 3 }],
+        }),
+        update: async (args: typeof updates[number]) => { updates.push(args); return {}; },
+      },
+      taskActivity: {
+        findMany: async () => [],
+        create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return data; },
+      },
+      run: { create: async () => { assert.fail("cap exhaustion must not create a Run"); } },
+      mergeRecoveryAttempt: {
+        findUnique: async () => aggregate,
+        findUniqueOrThrow: async () => aggregate,
+        update: async (args: typeof recoveryUpdates[number]) => { recoveryUpdates.push(args); return aggregate; },
+      },
+    } as unknown as import("@anneal/db").Prisma.TransactionClient;
+    const claim = {
+      settle: async (client: typeof tx, input: { apply: (client: typeof tx) => Promise<{ value: unknown }> }) => ({
+        settled: true, claim: "released", value: (await input.apply(client)).value,
+      }),
+    } as unknown as import("./readiness-claim.js").ReadinessClaimHandle;
+    const result = await requeueRegressionSettlement({
+      readinessTaskId: "readiness-1", regressionTaskId: "regression-1",
+      staleBaseSha: "old-base", currentBaseSha: "new-base", reason: "base drift",
+      now: new Date(), recovery: withRecovery ? recovery : null,
+    }).body(tx, claim);
+    assert.equal(result.value.applied, true);
+    for (const id of ["regression-1", "readiness-1"]) {
+      const last = updates.filter((update) => update.where.id === id).at(-1)?.data;
+      assert.equal(last?.status, TaskStatus.REVIEW);
+      assert.match(String(last?.failureReason), /Lease-loss refunds exhausted/);
+      assert.doesNotMatch(String(last?.failureReason), /readiness evaluation failed/);
+    }
+    if (withRecovery) assert.equal(recoveryUpdates.at(-1)?.data.status, "BLOCKED_DOWNSTREAM");
+    assert.equal(activities.length, 1);
+    assert.deepEqual(activities[0]?.metadata, { refusal: "lease-loss-refunds-exhausted" });
+  });
+
+}

@@ -10,7 +10,6 @@ import {
   activateChainSuccessor,
   activateRecoveryIntegratorSuccessor,
   authorizationMetadata,
-  enqueueTaskRun,
   isGatedMergeReadinessTask,
   isMergeReadinessStep,
   latestRecordedStop,
@@ -32,6 +31,7 @@ import {
   adoptRecoveryHead,
   awaitAuthorization,
   enterRepair,
+  requeueMergeTailRun,
   RECOVERY_HEAD_ADOPTION_CONFLICT_MESSAGE,
   reopenAfterHeadAdoption,
 } from "./merge-tail-state.js";
@@ -290,7 +290,7 @@ const stopReadinessSettlement = (
 
 export type ReadinessTickResult = { claimed: number; authorized: number; requeued: number; stopped: number };
 
-const requeueRegressionSettlement = (
+export const requeueRegressionSettlement = (
   input: {
     readinessTaskId: string;
     regressionTaskId: string;
@@ -326,9 +326,18 @@ const requeueRegressionSettlement = (
         where: { id: input.regressionTaskId },
         data: { status: TaskStatus.TODO, failureReason: null },
       });
-      await enqueueTaskRun(tx, input.regressionTaskId, input.now, { budgetGrant: 1 });
+      const attempt = await requeueMergeTailRun(tx, input.regressionTaskId, input.now);
+      if (attempt.outcome !== "opened") {
+        if (attempt.outcome === "refused" && attempt.refusal.disposition !== "held") {
+          await tx.task.update({ where: { id: input.readinessTaskId }, data: {
+            status: TaskStatus.REVIEW, failureReason: attempt.refusal.message,
+          } });
+        }
+        return { ownership: "released", leaseOutcome: { kind: "stop", taskId: input.regressionTaskId } };
+      }
       // The counter shares this transaction with the grant it counts, so a
-      // rolled-back settlement leaves neither behind.
+      // rolled-back settlement leaves neither behind, and a refused requeue
+      // returns above without granting or counting anything.
       await recordReadinessRequeue(tx, {
         readinessTaskId: input.readinessTaskId,
         regressionTaskId: input.regressionTaskId,

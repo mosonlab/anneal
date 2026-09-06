@@ -198,7 +198,7 @@ test("lease-loss retry refuses an archived Agent and parks the Task visibly", as
     leaseExpiresAt: new Date(now.getTime() - 10 * 60_000), projectId: "project-1",
     taskId: "task-1", goalId: null, agentId: "agent-1", repoId: "repo-1", runNumber: 1,
     runner: "CLAUDE", model: "model", targetBranch: "main", branch: "feature/x", promptHash: "hash",
-    maxDurationMin: 120, stallTimeoutMin: 10, maxRunsPerTask: 3, budgetGrants: 0,
+    maxDurationMin: 120, stallTimeoutMin: 10, maxRunsPerTask: 3, budgetGrants: 0, leaseLossRefunds: 0,
   };
   const database = {
     run: {
@@ -218,7 +218,7 @@ test("lease-loss retry refuses an archived Agent and parks the Task visibly", as
       },
       agent: { findUnique: async () => ({ id: "agent-1", name: "Archived", archivedAt: now }) },
       run: {
-        findFirst: async () => ({ cancelRequestId: null, cancelReason: null, cancelRequestedAt: null }),
+        findFirst: async () => ({ id: "lost-1", cancelRequestId: null, cancelReason: null, cancelRequestedAt: null }),
         updateMany: async ({ data }: { data: Record<string, unknown> }) => { lostUpdate = data; return { count: 1 }; },
         create: async ({ data }: { data: Record<string, unknown> }) => { queued = data; return { id: "retry-2", ...data }; },
       },
@@ -255,4 +255,126 @@ test("lease-loss retry refuses an archived Agent and parks the Task visibly", as
   assert.match(String(taskUpdates.at(-1)?.failureReason), /retry refused.*Archived/i);
   assert.match(String(activities.at(-1)?.body), /automatic retry refused.*Archived/i);
   assert.match(String(inbox.at(-1)?.body), /Automatic retry refused.*Archived/i);
+});
+
+/* --------------------------------------------- bounded lease-loss refunds */
+
+// One mock for the whole bound: a Run whose lease has expired, a task whose
+// refund count is the only thing that varies between the cases below.
+const lostRunDatabase = (options: { leaseLossRefunds: number; maxSessionsPerTask?: number; runNumber?: number }) => {
+  const now = new Date("2026-09-06T06:00:00.000Z");
+  const created: Record<string, unknown>[] = [];
+  const lostUpdates: Record<string, unknown>[] = [];
+  const activities: Record<string, unknown>[] = [];
+  const taskUpdates: Record<string, unknown>[] = [];
+  const inbox: Record<string, unknown>[] = [];
+  const candidate = {
+    id: "lost-1", heartbeatAt: new Date(now.getTime() - 20 * 60_000),
+    leaseExpiresAt: new Date(now.getTime() - 10 * 60_000), projectId: "project-1",
+    taskId: "task-1", goalId: null, agentId: "agent-1", repoId: null, runNumber: options.runNumber ?? 2,
+    runner: "CLAUDE", model: "model", targetBranch: "main", branch: "feature/x", promptHash: "hash",
+    cancelRequestedAt: null, cancelRequestId: null, cancelReason: null,
+    maxDurationMin: 120, stallTimeoutMin: 10,
+    maxRunsPerTask: (options.maxSessionsPerTask ?? 5) + options.leaseLossRefunds,
+    budgetGrants: options.leaseLossRefunds,
+    leaseLossRefunds: options.leaseLossRefunds,
+  };
+  const live = { id: "agent-1", name: "Senior Dev", archivedAt: null };
+  const database = {
+    run: {
+      findMany: async ({ where }: { where: { status: unknown } }) => (
+        typeof where.status === "object" && where.status !== null && "in" in where.status ? [candidate] : []
+      ),
+    },
+    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation({
+      $queryRaw: async (query: TemplateStringsArray | Prisma.Sql) => {
+        const sql = "sql" in query ? query.sql : query.join("");
+        if (sql.includes('FROM "TaskActivity" AS deferred')) return [];
+        return sql.includes("TaskActivity") ? [] : [{ id: "task-1", archivedAt: null }];
+      },
+      agent: { findUnique: async () => live },
+      run: {
+        findFirst: async () => ({ id: "lost-1", cancelRequestId: null, cancelReason: null, cancelRequestedAt: null, headSha: null }),
+        updateMany: async ({ data }: { data: Record<string, unknown> }) => {
+          lostUpdates.push(data);
+          return { count: 1 };
+        },
+        create: async ({ data }: { data: Record<string, unknown> }) => {
+          created.push(data);
+          return { id: "retry-3", ...data };
+        },
+      },
+      session: { updateMany: async () => ({ count: 1 }) },
+      task: {
+        update: async ({ data }: { data: Record<string, unknown> }) => { taskUpdates.push(data); return {}; },
+        findUnique: async () => ({
+          id: "task-1", projectId: "project-1", name: "Lost task", description: "retry",
+          assigneeType: "AGENT", assigneeAgentId: "agent-1", assigneeAgent: live,
+          repoId: null, repo: null, templateId: null, templateStepId: null, templateStep: null,
+          chainId: null, chainIndex: null, chainLayer: null, targetBranch: "main", opensPullRequest: true,
+          maxDurationMin: 120, stallTimeoutMin: 10,
+          maxSessionsPerTask: options.maxSessionsPerTask ?? 5,
+          archivedAt: null,
+          runs: [candidate],
+        }),
+        findUniqueOrThrow: async () => ({ id: "task-1", archivedAt: null }),
+      },
+      taskActivity: {
+        findMany: async () => [],
+        create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
+      },
+      mergeLeaseEvent: { findMany: async () => [] },
+      inboxMessage: { create: async ({ data }: { data: Record<string, unknown> }) => { inbox.push(data); return {}; } },
+    }),
+    taskActivity: { createMany: async () => ({ count: 0 }) },
+  } as unknown as PrismaClient;
+  return { database, now, created, lostUpdates, activities, taskUpdates, inbox };
+};
+
+test("a lease-loss replacement is spaced by the refunds already granted and records the next one", async () => {
+  // The completion path's schedule, read off the refund count: 30s, 60s, 120s.
+  for (const [refunds, delayMs] of [[0, 30_000], [1, 60_000], [2, 120_000]] as const) {
+    const { database, now, created, lostUpdates } = lostRunDatabase({ leaseLossRefunds: refunds });
+    assert.equal(await reconcileDatabaseRuns(database, now), 1);
+    assert.equal(created.length, 1, `refund ${refunds}`);
+    assert.equal(
+      (created[0]?.readyAt as Date).getTime() - now.getTime(),
+      delayMs,
+      `refund ${refunds} backs off`,
+    );
+    assert.equal(created[0]?.leaseLossRefunds, refunds + 1, `refund ${refunds} counts once`);
+    // The refund is still a refund: the lost Run records the grant it bought.
+    assert.equal(lostUpdates.at(-1)?.budgetGrants, refunds + 1, `refund ${refunds} grants`);
+  }
+});
+
+test("the fourth lease loss is refused by name, parks the Task, and grants nothing", async () => {
+  const { database, now, created, lostUpdates, activities, taskUpdates, inbox } = lostRunDatabase({
+    leaseLossRefunds: 3,
+  });
+
+  assert.equal(await reconcileDatabaseRuns(database, now), 1);
+
+  assert.deepEqual(created, [], "no replacement is queued");
+  assert.equal(taskUpdates.at(-1)?.status, TaskStatus.REVIEW);
+  assert.match(String(taskUpdates.at(-1)?.failureReason), /Lease-loss refunds exhausted after 3/);
+  assert.deepEqual(activities.at(-1)?.metadata, { refusal: "lease-loss-refunds-exhausted" });
+  assert.match(String(activities.at(-1)?.body), /Run 2 lost; automatic retry refused/);
+  assert.match(String(inbox.at(-1)?.body), /Lease-loss refunds exhausted/);
+  // A refund nobody may use is not recorded: the operator's own retry must not
+  // inherit the attempt this reconciliation just refused.
+  assert.equal(lostUpdates.at(-1)?.budgetGrants, 3);
+  assert.equal(lostUpdates.at(-1)?.maxRunsPerTask, 8);
+});
+
+test("refund exhaustion wins when the fourth lost run also reaches the ordinary ceiling", async () => {
+  const { database, now, created, activities, taskUpdates } = lostRunDatabase({
+    leaseLossRefunds: 3, maxSessionsPerTask: 1, runNumber: 4,
+  });
+  await reconcileDatabaseRuns(database, now);
+  assert.equal(created.length, 0);
+  assert.equal(taskUpdates.at(-1)?.status, TaskStatus.REVIEW);
+  assert.match(String(taskUpdates.at(-1)?.failureReason), /Lease-loss refunds exhausted/);
+  assert.equal(activities.filter((activity) =>
+    (activity.metadata as { refusal?: string } | undefined)?.refusal === "lease-loss-refunds-exhausted").length, 1);
 });
