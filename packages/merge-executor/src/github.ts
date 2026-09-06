@@ -19,7 +19,7 @@
  * so importing it does not widen §D-P1's custody surface.
  */
 
-import { callWithTimeout, classifyHttpStatus, NO_RESPONSE, type Http, type HttpAttempt, type HttpTrace } from "@anneal/github-client";
+import { callWithTimeout, classifyHttpStatus, isLostResponse, NO_RESPONSE, type Http, type HttpAttempt, type HttpTrace, type ResponseClass } from "@anneal/github-client";
 
 /** Every mutating request this package can construct. Enumerated so the
  *  no-bypass test can assert the complete list and a new write cannot be added
@@ -86,9 +86,54 @@ export type MergeResponse =
   | { status: "not-found"; reason: string }
   | { status: "unprocessable"; reason: string }
   | { status: "ref-update-refused"; reason: string }
+  /**
+   * The ref update's response never arrived, or arrived unreadable. The update
+   * is a compare-and-swap that may or may not have been applied on the far
+   * side, so the commit we built travels with the outcome: reading the target
+   * ref back and comparing it to `mergeCommitSha` is the only thing that
+   * settles which happened. A lost response recorded as a refusal is how an
+   * already-landed merge gets re-classified as base drift on the next read.
+   */
+  | { status: "ref-update-uncertain"; reason: string; mergeCommitSha: string }
   | { status: "unknown"; reason: string };
 
 export type DisarmResult = { ok: true } | { ok: false; reason: string };
+
+/**
+ * A failed GraphQL call, carrying the one distinction a *mutation*'s caller
+ * cannot do without: `lost` means no answer arrived or the answer could not be
+ * read, so the mutation may still have been applied and only a read-back
+ * settles it. A deterministic GitHub refusal is an answer,
+ * and asking again gets the same one.
+ */
+type GraphQlFailure = { error: string; lost: boolean };
+
+/**
+ * A REST call that produced no usable object, with the class
+ * `classifyHttpStatus` computed for it. The class is carried rather than
+ * recomputed by the caller because a 2xx whose body is unreadable is `lost`
+ * even though its status says `applied`.
+ */
+type RestFailure = { ok: false; responseClass: ResponseClass; status: number; reason: string };
+
+/**
+ * A REST failure, as a merge outcome.
+ *
+ * A deterministic GitHub rejection keeps its class: nothing about repeating a
+ * 403, a 404 or a 422 changes the answer, so degrading it to `unknown` would
+ * buy a read-back and a resend for a request the platform has already refused.
+ * Only a genuinely lost response — no answer, a 5xx, a body we cannot read —
+ * leaves the write's fate open.
+ */
+const restStop = (stage: string, failure: RestFailure, method: "GET" | "POST"): MergeResponse => {
+  const reason = `${stage}: ${failure.reason}`;
+  if (failure.responseClass !== "refused") return { status: "unknown", reason };
+  if (failure.status === 401 || failure.status === 403) return { status: "forbidden", reason };
+  // Refused object reads cannot supply the requested object; they have no
+  // mutation payload to label unprocessable. Preserve the HTTP reason.
+  if (failure.status === 404 || method === "GET") return { status: "not-found", reason };
+  return { status: "unprocessable", reason };
+};
 
 export const READ_QUERY = `query($owner:String!,$name:String!,$number:Int!,$base:String!) {
   repository(owner:$owner,name:$name) {
@@ -186,28 +231,34 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
     ...(request.body === undefined ? {} : { body: request.body }),
   }, options.timeoutMs, options.trace);
 
-  const graphql = async (query: string, variables: Json): Promise<{ data: Json } | { error: string }> => {
+  const graphql = async (query: string, variables: Json): Promise<{ data: Json } | GraphQlFailure> => {
     const response = await call({
       url: options.graphqlUrl,
       method: "POST",
       accept: "application/json",
       body: JSON.stringify({ query, variables }),
     });
-    if (classifyHttpStatus(response.status) !== "applied") {
-      return { error: response.status === NO_RESPONSE ? `network: ${response.body}` : `HTTP ${response.status}` };
+    const responseClass = classifyHttpStatus(response.status);
+    if (responseClass !== "applied") {
+      return {
+        error: response.status === NO_RESPONSE ? `network: ${response.body}` : `HTTP ${response.status}`,
+        lost: responseClass === "lost",
+      };
     }
+    // A 2xx whose body cannot be read says nothing about what the platform did
+    // with the request, so it is lost, not refused.
     let parsed: unknown;
     try {
       parsed = JSON.parse(response.body);
     } catch {
-      return { error: "response body is not valid JSON" };
+      return { error: "response body is not valid JSON", lost: true };
     }
     const record = asRecord(parsed);
-    if (!record) return { error: "response body is not an object" };
+    if (!record) return { error: "response body is not an object", lost: true };
     const errors = classifyGraphQlErrors(record.errors);
-    if (errors) return { error: errors };
+    if (errors) return { error: errors, lost: isLostResponse(errors) };
     const data = asRecord(record.data);
-    if (!data) return { error: "response carried no data" };
+    if (!data) return { error: "response carried no data", lost: true };
     return { data };
   };
 
@@ -417,19 +468,27 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
 
   const restJson = async (
     request: { url: string; method: "GET" | "POST"; body?: unknown },
-  ): Promise<{ ok: true; value: Json } | { ok: false; response: HttpAttempt }> => {
+  ): Promise<{ ok: true; value: Json } | RestFailure> => {
     const response = await call({
       url: request.url,
       method: request.method,
       accept: "application/vnd.github+json",
       ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
     });
-    if (classifyHttpStatus(response.status) !== "applied") return { ok: false, response };
+    const responseClass = classifyHttpStatus(response.status);
+    const reason = response.status === NO_RESPONSE
+      ? `network: ${response.body}`
+      : `HTTP ${response.status} ${response.body}`;
+    if (responseClass !== "applied") return { ok: false, responseClass, status: response.status, reason };
+    // A 2xx we cannot read is not an answer either way, so it keeps the lost
+    // class however deterministic the status looked.
     try {
       const value = asRecord(JSON.parse(response.body));
-      return value ? { ok: true, value } : { ok: false, response: { ...response, body: "response body is not an object" } };
+      return value
+        ? { ok: true, value }
+        : { ok: false, responseClass: "lost", status: response.status, reason: "response body is not an object" };
     } catch {
-      return { ok: false, response: { ...response, body: "response body is not valid JSON" } };
+      return { ok: false, responseClass: "lost", status: response.status, reason: "response body is not valid JSON" };
     }
   };
 
@@ -447,11 +506,11 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
   ): Promise<MergeResponse> => {
     const repo = `${options.restUrl}/repos/${reference.owner}/${reference.name}`;
     const commit = await restJson({ url: `${repo}/git/commits/${expectedHeadSha}`, method: "GET" });
-    if (!commit.ok) return { status: "unknown", reason: `head commit read failed: HTTP ${commit.response.status} ${commit.response.body}` };
+    if (!commit.ok) return restStop("head commit read failed", commit, "GET");
     const headTree = asString(asRecord(commit.value.tree)?.sha);
     if (!headTree) return { status: "unknown", reason: "head commit has no tree sha" };
     const recursive = await restJson({ url: `${repo}/git/trees/${headTree}?recursive=1`, method: "GET" });
-    if (!recursive.ok) return { status: "unknown", reason: `head tree read failed: HTTP ${recursive.response.status} ${recursive.response.body}` };
+    if (!recursive.ok) return restStop("head tree read failed", recursive, "GET");
     if (!Array.isArray(recursive.value.tree) || recursive.value.truncated !== false) {
       return { status: "unknown", reason: "head tree response is malformed or truncated; .chain absence is unproven" };
     }
@@ -463,7 +522,7 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
         method: "POST",
         body: { base_tree: headTree, tree: [{ path: ".chain", mode: "040000", type: "tree", sha: null }] },
       });
-      if (!tree.ok) return { status: "unknown", reason: `sanitized tree creation failed: HTTP ${tree.response.status} ${tree.response.body}` };
+      if (!tree.ok) return restStop("sanitized tree creation failed", tree, "POST");
       const sanitized = asString(tree.value.sha);
       if (!sanitized) return { status: "unknown", reason: "sanitized tree response has no sha" };
       mergeTree = sanitized;
@@ -477,7 +536,7 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
         parents: [expectedBase.sha, expectedHeadSha],
       },
     });
-    if (!created.ok) return { status: "unknown", reason: `merge commit creation failed: HTTP ${created.response.status} ${created.response.body}` };
+    if (!created.ok) return restStop("merge commit creation failed", created, "POST");
     const mergeSha = asString(created.value.sha);
     if (!mergeSha) return { status: "unknown", reason: "merge commit response has no sha" };
     const updated = await graphql(UPDATE_REFS_MUTATION, {
@@ -489,9 +548,18 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
         force: false,
       }],
     });
-    if ("error" in updated) return { status: "ref-update-refused", reason: updated.error };
+    // The ref update IS the merge, so the difference between "GitHub said no"
+    // and "GitHub never answered" is the difference between a stop and a merge
+    // that is already on the branch. Only the former is a refusal; the latter
+    // travels with the commit we built so the caller can settle it by reading
+    // the ref back.
+    if ("error" in updated) {
+      return updated.lost
+        ? { status: "ref-update-uncertain", reason: updated.error, mergeCommitSha: mergeSha }
+        : { status: "ref-update-refused", reason: updated.error };
+    }
     if (!asRecord(updated.data.updateRefs)) {
-      return { status: "unknown", reason: "updateRefs response did not prove the atomic ref update" };
+      return { status: "ref-update-uncertain", reason: "updateRefs response did not prove the atomic ref update", mergeCommitSha: mergeSha };
     }
     return { status: "merged", sha: mergeSha };
   };

@@ -96,13 +96,30 @@ following evidence; a process merely staying alive proves none of these writes.
 | --- | --- | --- |
 | `createSanitizedTree` — `POST /git/trees` | Contents write; Workflows write too when the retained tree changes workflow files | The first controlled Anneal chain PR contains `.chain/` on its head. After the App-bot merge, inspect the landed tree and record that `.chain/` is absent. |
 | `createMergeCommit` — `POST /git/commits` | Contents write; Workflows write for a workflow-changing result | The mechanical `merge-result` names the new commit SHA; GitHub shows a two-parent merge commit whose parents are the authorized base and exact reviewed head. |
-| `updateBaseRef` — GraphQL `updateRefs` | Contents write; Workflows write for a workflow-changing result | The selected base ref equals the recorded merge commit and the old base was its first parent. A concurrent base change must instead record `ref-update-refused`. |
+| `updateBaseRef` — GraphQL `updateRefs` | Contents write; Workflows write for a workflow-changing result | The selected base ref equals the recorded merge commit and the old base was its first parent. A concurrent base change must instead record `ref-update-refused`; a lost response records `ref-update-uncertain` and is settled by the read-back below. |
 | `disablePullRequestAutoMerge` — GraphQL mutation | Pull requests write | In a controlled, merge-blocked test PR with auto-merge armed, exercise a stop/disarm path; record the run activity and verify GitHub reports auto-merge disabled. |
 | `dequeuePullRequest` — GraphQL mutation | Merge queues write | On a repository that uses a merge queue, put a controlled, merge-blocked test PR in the queue and exercise a stop/disarm path; record the activity and verify the queue entry is gone. Repositories without a queue do not fabricate this evidence. |
 
 After an App permission change, GitHub may require an organization owner to
 approve the changed installation. Treat the installation as unavailable until
 the selected-repository page shows the intended permission set again.
+
+### How a ref-update outcome is recorded
+
+`updateRefs` is the merge: the compare-and-swap that moves the base ref is what
+lands it. Its three outcomes are recorded separately, because a response that
+never arrived is not the platform saying no.
+
+| Ref-update outcome | What the executor observed | How the run resolves |
+| --- | --- | --- |
+| merged | GitHub acknowledged the atomic update | The mechanical `merge-result` names the merge commit, after the landed parents are verified. |
+| `ref-update-refused` | GitHub answered and refused — a deterministic 4xx, or a deterministic GraphQL `errors` entry such as a `beforeOid` mismatch | No further ref update. If read-back does not confirm a merge and finds synchronous-execution state re-armed, the executor disarms it and stops `deferred-merge-machinery`. The read-back names the stop: ordinarily `base-drift` when the base moved under the run, otherwise `api-error` carrying the platform's own reason. |
+| `ref-update-uncertain` | No response, a timeout (including a lost-class GraphQL error), a reset connection, a 5xx, or a body that could not be read. The update may already be on the branch | No further ref update. If read-back does not confirm a merge and finds synchronous-execution state re-armed, the executor disarms it and stops `deferred-merge-machinery`. The executor reads the target ref back and compares it to the merge commit it built: equal is a merge, and the result is recorded as one even while GitHub still shows the PR open; different is the refused row's handling, named from the ref that is actually there. If the read-back itself cannot be completed, the run stops `api-error` with the merge's fate unresolved, and only an operator may settle it. |
+
+A run that stops `api-error` after an uncertain ref update has sent exactly one
+ref update. Before re-authorizing, read the base ref: if it is a two-parent
+merge commit whose parents are the authorized base and head, the merge landed
+and the stop is a reporting failure, not a merge failure.
 
 ## Run the capture wizard
 

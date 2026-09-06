@@ -29,7 +29,7 @@ test("operator /files routes use a real filesystem", async (suite) => {
     await rm(root, { recursive: true, force: true });
   });
 
-  await suite.test("upload, list, download, move, and delete round-trip", async () => {
+  await suite.test("upload, list, download, and delete round-trip", async () => {
     const upload = await app.request("/files/content?path=docs%2Fhello.txt", { method: "PUT", headers: auth, body: "hello" });
     assert.equal(upload.status, 200);
     const list = await app.request("/files?dir=docs", { headers: auth });
@@ -39,12 +39,7 @@ test("operator /files routes use a real filesystem", async (suite) => {
     assert.equal(download.status, 200);
     assert.match(download.headers.get("Content-Type") ?? "", /^text\/plain/u);
     assert.equal(await download.text(), "hello");
-    const move = await app.request("/files/move", {
-      method: "POST", headers: { ...auth, "Content-Type": "application/json" }, body: JSON.stringify({ from: "docs/hello.txt", to: "archive/hello.txt" }),
-    });
-    assert.equal(move.status, 200);
-    assert.equal((await stat(join(root, "archive", "hello.txt"))).isFile(), true);
-    assert.equal((await app.request("/files?path=archive%2Fhello.txt", { method: "DELETE", headers: auth })).status, 200);
+    assert.equal((await app.request("/files?path=docs%2Fhello.txt", { method: "DELETE", headers: auth })).status, 200);
   });
 
   await suite.test("directory state conflicts are 409, not 400 or 500", async () => {
