@@ -164,6 +164,7 @@ test("named canonical roles use their model catalog runner and retired role name
     "senior-dev-astra-medium",
     "senior-dev-sol-high",
     "senior-dev-opus-medium",
+    "senior-dev-opus-high",
     "senior-dev-astra-low",
     "spec-revalidator-luna-xhigh",
     "plan-executor-astra-medium",
@@ -188,6 +189,29 @@ test("the frontend roles differ only in their name and model frontmatter lines",
   ]);
 
   assert.equal(frontmatterValue(high, "name"), "frontend-dev-opus-high");
+  assert.equal(frontmatterValue(high, "model"), "claude-opus-5:high");
+  assert.equal(frontmatterValue(medium, "model"), "claude-opus-5:medium");
+
+  const withoutNameAndModelLines = (source: string): string[] => source
+    .split("\n")
+    .filter((line) => !/^(name|model):/u.test(line));
+  assert.deepEqual(withoutNameAndModelLines(high), withoutNameAndModelLines(medium));
+  assert.equal(bodyOf(high), bodyOf(medium));
+});
+
+/**
+ * The two senior-dev Opus roles are one prompt at two efforts: the only
+ * permitted difference is the `name` and `model` frontmatter lines, so a prompt
+ * edit that lands on one file and not the other stops here rather than in
+ * production.
+ */
+test("the senior-dev Opus roles differ only in their name and model frontmatter lines", async () => {
+  const [medium, high] = await Promise.all([
+    roleSource("senior-dev-opus-medium"),
+    roleSource("senior-dev-opus-high"),
+  ]);
+
+  assert.equal(frontmatterValue(high, "name"), "senior-dev-opus-high");
   assert.equal(frontmatterValue(high, "model"), "claude-opus-5:high");
   assert.equal(frontmatterValue(medium, "model"), "claude-opus-5:medium");
 

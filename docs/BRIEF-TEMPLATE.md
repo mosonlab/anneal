@@ -90,11 +90,16 @@ Implementation has six routes:
   It is the same senior-developer prompt on Claude Opus 5 medium; it is
   never a default, and the chain keeps its code review and blind code review
   steps unchanged.
+- **senior-dev-opus-high**, with the reason on the same line, when the operator
+  chooses Claude capacity and names the higher effort. It is the same
+  senior-developer prompt as senior-dev-opus-medium on Claude Opus 5 high; it is
+  never a default.
 - **frontend-dev-opus-medium** for frontend implementation work (UI components, pages,
   client-side behavior).
-- **frontend-dev-opus-high** for that same frontend work when the operator names
-  it because the frontend work is harder. It is the same frontend-developer
-  prompt on Claude Opus 5 high; it is never a default.
+- **frontend-dev-opus-high**, the operator-chosen high variant of the frontend
+  route, for that same frontend work when the operator names it because the
+  frontend work is harder. It is the same frontend-developer prompt on Claude
+  Opus 5 high; it is never a default.
 
 Tier answers how hard the diff is; chain shape answers how settled the spec
 is — a brief that cannot reach mechanical Acceptance is compound-shaped

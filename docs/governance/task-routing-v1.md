@@ -82,9 +82,10 @@ for persisted data, a
 defense-list path (merge gate, gate worker, migrations, or merge
 automation), or uncertain classification. Use `senior-dev-sol-high` for that same
 work only when named explicitly because the Astra model is unavailable;
-it is never a default. Use `senior-dev-opus-medium` when the operator names it to
-spend Claude capacity on the implementation instead of Codex capacity; it is
-never a default either. Use `frontend-dev-opus-medium` for work primarily
+it is never a default. Use `senior-dev-opus-medium`, or `senior-dev-opus-high` for that same work at the
+higher effort, when the operator names it to
+spend Claude capacity on the implementation instead of Codex capacity; neither is
+ever a default. Use `frontend-dev-opus-medium` for work primarily
 consisting of a new or redesigned web page or UI surface, and
 `frontend-dev-opus-high` for that same work when the operator names it because
 the frontend work is harder; it is never a default. The defense-list rule
