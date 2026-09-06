@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -162,5 +163,14 @@ for (const [field, value] of [['schemaVersion', 2], ['commit', old], ['releaseNa
   const f = fixture(t); const path = join(f.candidate, 'release-manifest.json');
   const manifest = JSON.parse(readFileSync(path)); manifest[field] = value; writeFileSync(path, JSON.stringify(manifest));
   assert.throws(f.run, /release-manifest-invalid/);
+  assert.equal(f.pointer(), `releases/${old}`);
+});
+
+
+test('installed CLI reports a named nonzero failure for unavailable configuration', t => {
+  const f = fixture(t);
+  const result = spawnSync(process.execPath, [new URL('./merge-executor-follower.mjs', import.meta.url).pathname, '--config', join(f.root, 'missing.json')], { encoding: 'utf8' });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, process.getuid() === 0 ? /config-unreadable/ : /root-required/);
   assert.equal(f.pointer(), `releases/${old}`);
 });
