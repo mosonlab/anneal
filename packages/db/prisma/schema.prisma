@@ -170,6 +170,7 @@ enum MergeRecoveryRefusalCode {
 enum MergeLeaseEventState {
   HANDOFF_PENDING  @map("handoff-pending")
   RELEASE_DEFERRED @map("release-deferred")
+  CONTENDED        @map("contended")
   RELEASED         @map("released")
   INVALID          @map("invalid")
 }

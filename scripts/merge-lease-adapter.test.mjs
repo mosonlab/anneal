@@ -8,10 +8,22 @@ import {
   buildMergeLeaseArgv,
   classifyMergeLeaseExecution,
   isMergeLeaseReleaseAnomaly,
+  mergeLeaseHoldSeconds,
+  parseMergeLeaseHolder,
   parseMergeLeaseRelease,
+  readMergeLeaseHolder,
   releaseMergeLease,
   resolveMergeLeaseScriptPath,
 } from "./merge-lease-adapter.mjs";
+
+const holderLine = (lease) => `MERGE LEASE HOLDER: ${JSON.stringify(lease)}`;
+const heldLease = {
+  holder: "runner@executor",
+  task: "chain-9",
+  acquiredAt: "2026-08-29T12:00:00.000Z",
+  reason: "chain merge tail chain-9",
+  sha: "a".repeat(40),
+};
 
 const releasedLine = "MERGE LEASE: released refs/merge-lease/holder lease-sha 2026-08-29T12:00:00.000Z";
 
@@ -173,4 +185,76 @@ test("path resolution and argv honor the release root and caller policy", async 
     [scriptPath, "release", "--task", "chain-42"],
     { cwd: "/checkout", environment: { AGENTOS_RELEASE_ROOT: releaseRoot }, processTimeoutMs: 90_000 },
   ]);
+});
+
+test("a contended acquisition carries the holder the script named", () => {
+  const contended = classifyMergeLeaseExecution({
+    operation: "acquire",
+    code: 75,
+    stderr: `merge-lease: timed out waiting for refs/merge-lease/holder after 0 minute(s)\n${holderLine(heldLease)}\n`,
+  });
+  assert.equal(contended.outcome, "contended");
+  assert.deepEqual(contended.holder, heldLease);
+});
+
+test("a contention the script could not name is still a contention", () => {
+  const contended = classifyMergeLeaseExecution({
+    operation: "acquire",
+    code: 75,
+    stderr: "merge-lease: timed out waiting for refs/merge-lease/holder after 0 minute(s)\n",
+  });
+  assert.equal(contended.outcome, "contended");
+  assert.equal(contended.holder, undefined);
+});
+
+test("holder lines are read only when they say something a reader can trust", () => {
+  assert.deepEqual(parseMergeLeaseHolder(holderLine(heldLease)), heldLease);
+  assert.deepEqual(
+    parseMergeLeaseHolder(holderLine({ holder: "solo@host", acquiredAt: heldLease.acquiredAt })),
+    { holder: "solo@host", task: null, reason: null, acquiredAt: heldLease.acquiredAt, sha: null },
+  );
+  assert.equal(parseMergeLeaseHolder("MERGE LEASE HOLDER: none"), null);
+  assert.equal(parseMergeLeaseHolder("merge-lease: no lease held"), null);
+  assert.equal(parseMergeLeaseHolder("MERGE LEASE HOLDER: {not json"), null);
+  assert.equal(parseMergeLeaseHolder(holderLine({ acquiredAt: heldLease.acquiredAt })), null);
+  assert.equal(parseMergeLeaseHolder(holderLine({ holder: "solo@host", acquiredAt: "never" })), null);
+  // Two holders in one output is an output no reader can attribute.
+  assert.equal(parseMergeLeaseHolder(`${holderLine(heldLease)}\n${holderLine(heldLease)}`), null);
+});
+
+test("a status read reports the holder, no lease, or an unreachable origin", async () => {
+  assert.deepEqual(
+    classifyMergeLeaseExecution({ operation: "status", code: 0, stderr: holderLine(heldLease) }),
+    { outcome: "held", holder: heldLease, detail: holderLine(heldLease) },
+  );
+  assert.equal(classifyMergeLeaseExecution({
+    operation: "status",
+    code: 0,
+    stdout: "merge-lease: no lease held\n",
+    stderr: "MERGE LEASE HOLDER: none\n",
+  }).outcome, "none");
+  assert.deepEqual(
+    classifyMergeLeaseExecution({ operation: "status", code: 1, stderr: "could not read refs/merge-lease/holder" }),
+    { outcome: "unreachable", detail: "could not read refs/merge-lease/holder" },
+  );
+
+  const calls = [];
+  const status = await readMergeLeaseHolder({
+    repoRoot: "/checkout",
+    environment: {},
+    processTimeoutMs: 30_000,
+    runner: async (...args) => {
+      calls.push(args);
+      return { code: 0, stderr: holderLine(heldLease) };
+    },
+  });
+  assert.equal(status.outcome, "held");
+  assert.deepEqual(calls[0][1], [path.resolve("/checkout/scripts/merge-lease.sh"), "status"]);
+});
+
+test("a hold is whole seconds and never negative", () => {
+  assert.equal(mergeLeaseHoldSeconds("2026-08-29T12:00:00.000Z", new Date("2026-08-29T12:02:07.400Z")), 127);
+  assert.equal(mergeLeaseHoldSeconds("2026-08-29T12:00:00.000Z", "2026-08-29T11:59:00.000Z"), 0);
+  assert.equal(mergeLeaseHoldSeconds("never", new Date("2026-08-29T12:00:00.000Z")), null);
+  assert.equal(mergeLeaseHoldSeconds("2026-08-29T12:00:00.000Z", new Date(Number.NaN)), null);
 });
