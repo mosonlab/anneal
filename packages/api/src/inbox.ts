@@ -2,7 +2,6 @@ import {
   InboxDeliveryStatus,
   InboxKind,
   InboxSender,
-  InboxStatus,
   Prisma,
   RunStatus,
   SessionExecutionStatus,
