@@ -5,12 +5,21 @@ import { dirname, join, relative, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { classifyDiff, FAST_DOCUMENTS } from "./merge-gate-profile.mjs";
+import { classifyDiff, FAST_DOCUMENTS, FROZEN_RECORD_DIRECTORIES } from "./merge-gate-profile.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..");
+const frozenCheckerPath = join(here, "check-frozen-docs.sh");
 
 const changes = (...entries) => Buffer.from(`${entries.flat().join("\0")}\0`);
+
+test("the frozen directory allowlists stay equal", () => {
+  const source = readFileSync(frozenCheckerPath, "utf8");
+  const match = source.match(/^FROZEN_RECORD_DIRECTORIES=\(([^)]*)\)$/mu);
+  assert.ok(match, "check-frozen-docs.sh must declare FROZEN_RECORD_DIRECTORIES");
+  const checkerDirectories = match[1].trim().split(/\s+/u).map((directory) => `${directory}/`);
+  assert.deepEqual(checkerDirectories, FROZEN_RECORD_DIRECTORIES);
+});
 
 test("modified allowlisted prose selects docs-only", () => {
   assert.equal(classifyDiff({ nameStatus: changes("M", "AGENTS.md") }), "docs-only");
