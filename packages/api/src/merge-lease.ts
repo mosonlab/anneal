@@ -13,9 +13,12 @@ import {
 import {
   acquireMergeLease as invokeMergeLeaseAcquisition,
   isMergeLeaseReleaseAnomaly,
+  readMergeLeaseHolder as invokeMergeLeaseStatus,
   releaseMergeLease as invokeMergeLeaseRelease,
   type LeaseRunner,
   type MergeLeaseAcquisition as LeaseScriptAcquisition,
+  type MergeLeaseHolder,
+  type MergeLeaseStatus,
 } from "../../../scripts/merge-lease-adapter.mjs";
 import {
   recordMergeLeaseHold,
@@ -31,6 +34,14 @@ import {
  * release never got far enough to say anything.
  */
 export type MergeLeaseReleaser = (chainId: string) => Promise<MergeLeaseRelease>;
+
+/** Who holds the lease on origin right now. Reads only; `status` writes nothing. */
+export type MergeLeaseHolderReader = () => Promise<MergeLeaseStatus>;
+
+export const readMergeLeaseHolderAdapter: MergeLeaseHolderReader = async () => await invokeMergeLeaseStatus({
+  environment: process.env,
+  processTimeoutMs: 30_000,
+});
 
 export const releaseMergeLeaseAdapter = async (
   chainId: string,
@@ -449,6 +460,13 @@ export const commitWithLeaseOutcomes = async <T>(
  */
 export type MergeLeaseAcquisition = LeaseScriptAcquisition;
 
+/**
+ * A lease this chain could not take, and whoever was holding it. The holder is
+ * absent when `merge-lease.sh` could not read the blob on origin: contention is
+ * still contention, and the caller says so rather than naming nobody.
+ */
+export type MergeLeaseContention = { outcome: "contended"; holder?: MergeLeaseHolder };
+
 export type MergeLeaseAcquirer = (chainId: string) => Promise<MergeLeaseAcquisition>;
 
 /**
@@ -493,7 +511,7 @@ export type WithMergeLease = <T>(
   db: PrismaClient,
   dependencies?: MergeLeaseDependencies,
 ) => Promise<
-  | { outcome: "contended" }
+  | MergeLeaseContention
   | { outcome: "unreachable"; detail: string; releaseDeferred?: true }
   | { outcome: "ran"; value: T }
 >;
@@ -515,7 +533,7 @@ export const withMergeLease = async <T>(
     release: releaseMergeLeaseAdapter,
   },
 ): Promise<
-  | { outcome: "contended" }
+  | MergeLeaseContention
   | { outcome: "unreachable"; detail: string; releaseDeferred?: true }
   | { outcome: "ran"; value: T }
 > => {
@@ -525,7 +543,9 @@ export const withMergeLease = async <T>(
   }
 
   const acquisition = await dependencies.acquire(target.chainId);
-  if (acquisition.outcome === "contended") return { outcome: "contended" };
+  if (acquisition.outcome === "contended") {
+    return { outcome: "contended", ...(acquisition.holder ? { holder: acquisition.holder } : {}) };
+  }
   if (acquisition.outcome === "unreachable") {
     return { outcome: "unreachable", detail: acquisition.detail };
   }

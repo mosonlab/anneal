@@ -125,6 +125,7 @@ const expectedRoutes = [
   "PUT /tasks/:taskId/output",
   "POST /tasks/:taskId/merge-target",
   "POST /tasks/:taskId/activity",
+  "GET /merge-lease",
   "GET /inbox/messages/summary",
   "GET /inbox/messages",
   "GET /inbox/messages/:messageId",
