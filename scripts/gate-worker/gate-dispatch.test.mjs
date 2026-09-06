@@ -1076,11 +1076,122 @@ test("one busy desktop slot uses the second desktop slot before fallback", (t) =
 
 test("two busy desktop slots spill onto the fallback without using the Mac", (t) => {
   const repo = fixtureRepo(t, {});
-  const result = runDispatch(repo, busyCache(t, ["remote-1", "remote-1-2"]), [repo.head]);
+  const result = runDispatch(repo, busyCache(t, ["remote-1", "remote-1-2"]), [repo.head], {
+    GATE_DISPATCH_FALLBACK_AFTER_MINUTES: "0",
+  });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /MERGE GATE: PASS/);
   assert.match(result.stderr, /running on fallback/);
   assert.doesNotMatch(result.stderr, /local slot/);
+});
+
+// Only the clock and sleep are replaced; slot locking and dispatch remain real.
+const dispatchClock = (t) => {
+  const shim = scratch(t);
+  const clock = join(shim, "clock");
+  writeFileSync(clock, "1000");
+  const realDate = execFileSync("which", ["date"], { encoding: "utf8" }).trim();
+  writeFileSync(join(shim, "date"), `#!/usr/bin/env bash
+if [ "$1" = "+%s" ]; then cat "$TEST_CLOCK"; else exec "$TEST_REAL_DATE" "$@"; fi
+`);
+  writeFileSync(join(shim, "sleep"), `#!/usr/bin/env bash
+printf '%s' "$(( $(cat "$TEST_CLOCK") + 60 ))" > "$TEST_CLOCK"
+`);
+  chmodSync(join(shim, "date"), 0o755);
+  chmodSync(join(shim, "sleep"), 0o755);
+  return {
+    clock,
+    env: { PATH: `${shim}:${process.env.PATH}`, TEST_CLOCK: clock, TEST_REAL_DATE: realDate },
+  };
+};
+
+test("fallback is held during the default grace period", (t) => {
+  const repo = fixtureRepo(t, {});
+  const { env, clock } = dispatchClock(t);
+  const result = runDispatch(repo, busyCache(t, ["remote-1", "remote-1-2"]),
+    [repo.head, "--timeout-minutes", "1"], env);
+  assert.equal(result.status, 75, result.stderr);
+  assert.doesNotMatch(result.stderr, /running on fallback/u);
+  assert.match(result.stderr, /fallback after 6 min; waited 0/u);
+  assert.equal(readFileSync(clock, "utf8"), "1060");
+});
+
+test("fallback is tried at the default grace boundary after polling primary", (t) => {
+  const repo = fixtureRepo(t, {});
+  const { env, clock } = dispatchClock(t);
+  const result = runDispatch(repo, busyCache(t, ["remote-1", "remote-1-2"]),
+    [repo.head, "--timeout-minutes", "10"], env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /trying fallback.*fallback after 6 min; waited 6/u);
+  assert.match(result.stderr, /running on fallback/u);
+  assert.equal(readFileSync(clock, "utf8"), "1360");
+});
+
+test("a primary slot freed during grace handles the gate before fallback", (t) => {
+  const repo = fixtureRepo(t, {});
+  const cache = busyCache(t, ["remote-1", "remote-1-2"]);
+  const { env, clock } = dispatchClock(t);
+  writeFileSync(join(dirname(clock), "sleep"), `#!/usr/bin/env bash
+printf '1060' > "$TEST_CLOCK"
+rm "$TEST_PRIMARY_SLOT"
+`);
+  const result = runDispatch(repo, cache, [repo.head], {
+    ...env,
+    TEST_PRIMARY_SLOT: join(cache, "gate-dispatch", "remote-1-2.slot"),
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /running on primary/u);
+  assert.doesNotMatch(result.stderr, /running on fallback/u);
+  assert.equal(readFileSync(clock, "utf8"), "1060");
+});
+
+test("a configured grace period controls the fallback boundary", (t) => {
+  const repo = fixtureRepo(t, {});
+  const { env, clock } = dispatchClock(t);
+  const result = runDispatch(repo, busyCache(t, ["remote-1", "remote-1-2"]),
+    [repo.head, "--timeout-minutes", "10"], { ...env, GATE_DISPATCH_FALLBACK_AFTER_MINUTES: "02" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /trying fallback.*fallback after 2 min; waited 2/u);
+  assert.equal(readFileSync(clock, "utf8"), "1120");
+});
+
+test("zero grace tries fallback immediately", (t) => {
+  const repo = fixtureRepo(t, {});
+  const { env, clock } = dispatchClock(t);
+  const result = runDispatch(repo, busyCache(t, ["remote-1", "remote-1-2"]), [repo.head],
+    { ...env, GATE_DISPATCH_FALLBACK_AFTER_MINUTES: "0" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /running on fallback/u);
+  assert.equal(readFileSync(clock, "utf8"), "1000");
+});
+
+test("single-server mode remains unaffected by fallback grace", (t) => {
+  const repo = fixtureRepo(t, {});
+  const { env, clock } = dispatchClock(t);
+  const result = runDispatch(repo, busyCache(t, ["remote-1"]),
+    [repo.head, "--server", "single-worker", "--timeout-minutes", "1"], env);
+  assert.equal(result.status, 75, result.stderr);
+  assert.doesNotMatch(result.stderr, /fallback/u);
+  assert.equal(readFileSync(clock, "utf8"), "1060");
+});
+
+test("a broken primary slot bypasses the busy-primary grace period", (t) => {
+  const repo = fixtureRepo(t, {});
+  const cache = busyCache(t, ["remote-1"]);
+  mkdirSync(join(cache, "gate-dispatch", "remote-1-2.lock"));
+  const result = runDispatch(repo, cache, [repo.head]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /running on fallback/u);
+});
+
+test("invalid fallback grace fails before any slot is tried", (t) => {
+  const repo = fixtureRepo(t, {});
+  for (const value of ["", "-1", "1.5", "no"]) {
+    const result = dispatch(t, repo, [repo.head], { GATE_DISPATCH_FALLBACK_AFTER_MINUTES: value });
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, /GATE_DISPATCH_FALLBACK_AFTER_MINUTES needs a number/u);
+    assert.doesNotMatch(result.stderr, /running on/u);
+  }
 });
 
 test("busy plus broken waits out the timeout and then reports 76, not 75", (t) => {
@@ -1093,7 +1204,9 @@ test("busy plus broken waits out the timeout and then reports 76, not 75", (t) =
   const cache = busyCache(t, ["remote-1", "remote-1-2"]);
   const slots = join(cache, "gate-dispatch");
   mkdirSync(join(slots, "remote-2.lock"));
-  const result = runDispatch(repo, cache, [repo.head, "--timeout-minutes", "0"]);
+  const result = runDispatch(repo, cache, [repo.head, "--timeout-minutes", "0"], {
+    GATE_DISPATCH_FALLBACK_AFTER_MINUTES: "0",
+  });
   assert.equal(result.status, 76, result.stderr);
   assert.match(result.stdout, /^GATE NOT RUN: /m);
   assert.doesNotMatch(result.stdout, /GATE DISPATCH: NO SLOT/);

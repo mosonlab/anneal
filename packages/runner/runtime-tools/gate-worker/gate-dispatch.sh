@@ -86,6 +86,7 @@ ALLOW_LOCAL="${AGENTOS_GATE_ALLOW_LOCAL:-0}"
 LOCAL_SLOT_COUNT="${AGENTOS_GATE_LOCAL_SLOTS-1}"
 POLL_SECONDS="${GATE_DISPATCH_POLL_SECONDS:-30}"
 TIMEOUT_MINUTES="${GATE_DISPATCH_TIMEOUT_MINUTES:-60}"
+FALLBACK_AFTER_MINUTES="${GATE_DISPATCH_FALLBACK_AFTER_MINUTES-6}"
 if [ -n "${AGENTOS_RUNNER_HOME:-}" ]; then
   SLOT_ROOT="${AGENTOS_RUNNER_HOME}/.cache/gate-dispatch"
   SLOT_ROOT_SOURCE="AGENTOS_RUNNER_HOME"
@@ -180,6 +181,9 @@ else
 fi
 
 case "$TIMEOUT_MINUTES" in ''|*[!0-9]*) die "--timeout-minutes needs a number, got: $TIMEOUT_MINUTES" ;; esac
+case "$FALLBACK_AFTER_MINUTES" in ''|*[!0-9]*) die "GATE_DISPATCH_FALLBACK_AFTER_MINUTES needs a number, got: $FALLBACK_AFTER_MINUTES" ;; esac
+# Treat leading zeros as decimal, as the setting is an integer, not shell code.
+FALLBACK_AFTER_MINUTES=$((10#$FALLBACK_AFTER_MINUTES))
 case "$POLL_SECONDS" in ''|*[!0-9]*|0) die "GATE_DISPATCH_POLL_SECONDS needs a positive number, got: $POLL_SECONDS" ;; esac
 case "$LOCAL_SLOT_COUNT" in
   ''|*[!0-9]*) die "AGENTOS_GATE_LOCAL_SLOTS needs a positive number, got: $LOCAL_SLOT_COUNT" ;;
@@ -380,7 +384,8 @@ no_verdict() {
   exit "$GATE_EXIT_NO_VERDICT"
 }
 
-DEADLINE=$(( $(date +%s) + TIMEOUT_MINUTES * 60 ))
+WAIT_STARTED="$(date +%s)"
+DEADLINE=$(( WAIT_STARTED + TIMEOUT_MINUTES * 60 ))
 FIRST=1
 # Survives the rounds: once a slot's lock has been seen broken, a later 75 would
 # be a lie even if that round happened to find only busy slots.
@@ -399,6 +404,8 @@ while :; do
   # slots that could have been taken and were not; round_broken the ones whose
   # lock could not be operated. Waiting is only justified while round_busy > 0:
   # a busy slot frees when its gate ends, a broken one does not free at all.
+  primary_busy=0
+  fallback_wait=""
   round_busy=0
   round_broken=""
 
@@ -446,7 +453,7 @@ while :; do
           UNAVAILABLE_EVER="${UNAVAILABLE_EVER} primary"
           break
           ;;
-        1) round_busy=$(( round_busy + 1 )) ;;
+        1) round_busy=$(( round_busy + 1 )); primary_busy=$(( primary_busy + 1 )) ;;
         *) round_broken="${round_broken} ${primary_slot}" ;;
       esac
     done
@@ -454,23 +461,33 @@ while :; do
 
   outcome=0
   if [ -n "$FALLBACK_SERVER" ] && [ "$FALLBACK_DISABLED" -eq 0 ]; then
-    try_slot remote-2 || outcome=$?
-    case "$outcome" in
-      0)
-        run_remote fallback "$FALLBACK_SERVER"
-        if gate_verdict_is_judgement "$REMOTE_STATUS"; then
-          [ -n "$REMOTE_OUTPUT" ] && printf '%s\n' "$REMOTE_OUTPUT"
-          exit "$REMOTE_STATUS"
-        fi
-        printf 'gate-dispatch: fallback produced no verdict (exit %s)\n' "$REMOTE_STATUS" >&2
-        [ -n "$REMOTE_OUTPUT" ] && printf 'gate-dispatch: fallback said: %s\n' "$REMOTE_OUTPUT" >&2
-        release_slot
-        FALLBACK_DISABLED=1
-        UNAVAILABLE_EVER="${UNAVAILABLE_EVER} remote-2"
-        ;;
-      1) round_busy=$(( round_busy + 1 )) ;;
-      *) round_broken="${round_broken} remote-2" ;;
-    esac
+    waited_seconds=$(( $(date +%s) - WAIT_STARTED ))
+    if [ "$primary_busy" -eq "${#PRIMARY_SLOTS[@]}" ] \
+      && [ "$waited_seconds" -lt "$(( FALLBACK_AFTER_MINUTES * 60 ))" ]; then
+      fallback_wait="; fallback after ${FALLBACK_AFTER_MINUTES} min; waited $(( waited_seconds / 60 )) min"
+    else
+      if [ "$primary_busy" -eq "${#PRIMARY_SLOTS[@]}" ]; then
+        printf 'gate-dispatch: trying fallback capacity (fallback after %s min; waited %s min)\n' \
+          "$FALLBACK_AFTER_MINUTES" "$(( waited_seconds / 60 ))" >&2
+      fi
+      try_slot remote-2 || outcome=$?
+      case "$outcome" in
+        0)
+          run_remote fallback "$FALLBACK_SERVER"
+          if gate_verdict_is_judgement "$REMOTE_STATUS"; then
+            [ -n "$REMOTE_OUTPUT" ] && printf '%s\n' "$REMOTE_OUTPUT"
+            exit "$REMOTE_STATUS"
+          fi
+          printf 'gate-dispatch: fallback produced no verdict (exit %s)\n' "$REMOTE_STATUS" >&2
+          [ -n "$REMOTE_OUTPUT" ] && printf 'gate-dispatch: fallback said: %s\n' "$REMOTE_OUTPUT" >&2
+          release_slot
+          FALLBACK_DISABLED=1
+          UNAVAILABLE_EVER="${UNAVAILABLE_EVER} remote-2"
+          ;;
+        1) round_busy=$(( round_busy + 1 )) ;;
+        *) round_broken="${round_broken} remote-2" ;;
+      esac
+    fi
   fi
 
   # Union, not concatenation: a slot that is broken stays broken every round, and
@@ -506,6 +523,7 @@ while :; do
     printf 'GATE DISPATCH: NO SLOT\n'
     exit "$EXIT_NO_SLOT"
   fi
+  log_wait="$FIRST"
   if [ "$FIRST" -eq 1 ]; then
     FIRST=0
     if [ "$ALLOW_LOCAL" -eq 1 ] && ! local_eligible; then
@@ -515,9 +533,11 @@ while :; do
       printf 'gate-dispatch: the locks of%s are unusable; waiting on the %s slot(s) that are merely busy\n' \
         "$round_broken" "$round_busy" >&2
     fi
-    printf 'gate-dispatch: %s slot(s) busy, polling every %ss until %s\n' \
+  fi
+  if [ -n "$fallback_wait" ] || [ "$log_wait" -eq 1 ]; then
+    printf 'gate-dispatch: %s slot(s) busy, polling every %ss until %s%s\n' \
       "$round_busy" "$POLL_SECONDS" \
-      "$(date -r "$DEADLINE" '+%H:%M:%S' 2>/dev/null || date -d "@${DEADLINE}" '+%H:%M:%S')" >&2
+      "$(date -r "$DEADLINE" '+%H:%M:%S' 2>/dev/null || date -d "@${DEADLINE}" '+%H:%M:%S')" "$fallback_wait" >&2
   fi
   sleep "$POLL_SECONDS"
 done
