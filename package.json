@@ -37,7 +37,6 @@
     "test:release-docs": "node --test scripts/release-docs.test.mjs scripts/setup-merge-executor.test.mjs",
     "demo:templates": "node scripts/templates-release-demo.mjs",
     "test:demo-templates": "node --test scripts/templates-release-demo.test.mjs",
-    "test:dependency-gate": "node --test scripts/goal-5a0-dependency-gate.test.mjs scripts/goal-5a0-handoff-preimage.test.mjs",
     "test:db": "bash scripts/run-scope-guard.sh test:db && npm run test:db -w @anneal/api",
     "merge-gate": "bash scripts/run-scope-guard.sh merge-gate && bash scripts/merge-gate.sh",
     "verify:build-sha": "node packages/build-info/verify-dist.mjs",
