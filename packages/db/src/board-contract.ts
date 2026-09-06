@@ -542,6 +542,12 @@ export type BoardCard<DateTime = string> = {
    *  `taskStartability`, which is the only thing that reads a task's configured
    *  budget together with the grants its runs carry. */
   budgetRemaining: boolean;
+  /** How many attempts this task has had refunded because the platform lost a
+   *  Run — lease loss, an invalidated claim, a merge-tail requeue — as opposed
+   *  to attempts its agent spent. Bounded by `LEASE_LOSS_REFUND_CAP`; at the
+   *  bound the platform stops requeueing and parks the task for an operator,
+   *  so this is the number that says whether that is about to happen. */
+  leaseLossRefunds: number;
   /** Carried once by one visible member of each Chain; null otherwise. */
   chainAggregate: ChainAggregate<DateTime> | null;
 };

@@ -1,8 +1,10 @@
 import {
+  attemptRunBirth,
   closeIntegratorQuestions,
   enqueueTaskRun,
   MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
+  openRun,
   Prisma,
   TaskStatus,
   transitionMergeRecovery,
@@ -186,6 +188,28 @@ const stopNotice = async (
   }, update: {} });
 };
 
+/** A platform requeue must persist a named park if Run birth is refused. */
+export const requeueMergeTailRun = async (tx: DbTx, taskId: string, now: Date) => {
+  const attempt = await attemptRunBirth(tx, (client) => openRun(client, taskId, {
+    kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1,
+  }));
+  if (attempt.outcome === "refused") {
+    const { refusal } = attempt;
+    if (refusal.disposition !== "held") {
+      await tx.task.update({
+        where: { id: taskId },
+        data: { status: TaskStatus.REVIEW, failureReason: refusal.message },
+      });
+    }
+    await tx.taskActivity.create({ data: {
+      taskId, actorType: "control-plane",
+      body: `Merge-tail target was not queued: ${refusal.message}`,
+      metadata: { refusal: refusal.code },
+    } });
+  }
+  return attempt;
+};
+
 export const enterRepair = async (
   tx: DbTx,
   input: {
@@ -194,7 +218,7 @@ export const enterRepair = async (
     now: Date;
     readinessRequeue?: { staleBaseSha: string; reason: string };
   },
-): Promise<{ recoveryRunId: string }> => {
+): Promise<{ recoveryRunId: string } | null> => {
   const context = await requireRecoveryRepairIdentity(tx, input.aggregateId);
   const aggregate = await tx.mergeRecoveryAttempt.findUniqueOrThrow({
     where: { id: input.aggregateId },
@@ -228,12 +252,21 @@ export const enterRepair = async (
       },
     });
   }
-  const run = await enqueueTaskRun(
-    tx,
-    context.regressionTaskId,
-    input.now,
-    requeue ? { budgetGrant: 1 } : {},
-  );
+  const attempt = requeue ? await requeueMergeTailRun(tx, context.regressionTaskId, input.now) : null;
+  if (attempt && attempt.outcome !== "opened") {
+    if (attempt.outcome === "refused" && attempt.refusal.disposition !== "held") {
+      await transitionMergeRecovery(tx, input.aggregateId, MergeRecoveryStatus.BLOCKED_DOWNSTREAM, {
+        failureReason: attempt.refusal.message, endedAt: input.now,
+      });
+      for (const taskId of [context.readinessTaskId, context.integratorTaskId]) {
+        await tx.task.update({ where: { id: taskId }, data: {
+          status: TaskStatus.REVIEW, failureReason: attempt.refusal.message,
+        } });
+      }
+    }
+    return null;
+  }
+  const run = attempt?.run ?? await enqueueTaskRun(tx, context.regressionTaskId, input.now);
   await transitionMergeRecovery(tx, input.aggregateId, MergeRecoveryStatus.REPAIRING, {
     recoveryRunId: run.id,
     currentBaseSha: input.currentBaseSha,

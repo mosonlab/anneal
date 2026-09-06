@@ -1,0 +1,19 @@
+Runs: a task's refunded attempts are bounded and re-queued with backoff, independently of the ceiling they raise
+
+Goal: a Run lost to lease expiry or reconciliation is re-queued at most a bounded number of times per task with a growing delay, and the bound cannot be raised by the refund it is bounding.
+
+Background: when reconciliation declares a Run LOST (`packages/api/src/reconcile.ts:113-115` candidate, `:175-180` orphan filter using `stallTimeoutMin`), it re-queues a replacement with a budget grant: `reconcile.ts:263-270` and `packages/db/src/run-open.ts:1014-1030` set `maxRunsPerTask = source + 1` and `budgetGrants = source + 1`, so the check `runNumber < budgetCeiling` at `reconcile.ts:334-341` is always true in a pure lease-loss sequence. The `run-budget-exhausted` refusal at `run-open.ts:1030` applies only to `intent.kind === "retry"`; lease-loss, late-salvage claim invalidation (`workspace-reclaim.ts:465-510`) and merge-tail requeue do not pass through it. The replacement is queued with `readyAt: now` (no backoff), unlike the completion path's exponential backoff (`execution.ts:16-19`). `EXTERNAL_FAILURE_REFUND_CAP = 3` (`run-open.ts`) bounds a different refund class (provider-transport / regression target-fetch) and is the shape to reuse. `run-completion.ts:761-767` already states the principle ("a run authorized once could buy itself unbounded further attempts by failing externally"). Note: a fresh claim writes `heartbeatAt` (`run-claim.ts:924-934`), so LOST is a stall of `stallTimeoutMin` (default 10 min), not 60 s.
+
+Changes:
+1. Introduce a per-task bound on lease-loss / reconciliation refunds, counted independently of `maxRunsPerTask` (for example a `leaseLossRefunds` counter carried on Run like `budgetGrants`, or derived from the task's Runs marked LOST), with a constant default (propose 3, matching `EXTERNAL_FAILURE_REFUND_CAP`). When the bound is reached, reconciliation does not re-queue; the task moves to REVIEW with a `TaskActivity` stating the reason (`lease-loss-refunds-exhausted`) and the operator can raise the budget and retry through the existing PATCH + retry path.
+2. Queue lease-loss replacements with a backoff derived from the refund count (reuse the completion path's exponential schedule), instead of `readyAt: now`.
+3. Route every non-`retry` replacement intent that raises the ceiling (lease-loss, claim-invalidated/late-salvage, merge-tail requeue) through one budget decision point in `run-open.ts` so the bound in item 1 cannot be bypassed by intent kind. Do not change the semantics of the `retry` refusal.
+4. Surface the counter on the board payload next to `budgetGrants` (`board.ts:532-548`) so the operator can see refunds accumulate.
+
+Out of scope: `Task.spendCap` (separate card), the `EXTERNAL_FAILURE_REFUND_CAP` class, stall/heartbeat timing, fencing (`run-fence.ts`), salvage-resume semantics, the `maxRunsPerTask`-as-sum representation, chain activation.
+
+Constraints: an existing task at or over the new bound is not retroactively moved; the bound applies to future reconciliations. The refusal must be loud (activity + REVIEW), never a silent drop. `RUNNER_WORKSPACE_ROOT` rules for tests apply; dbtests run only on the merge gate.
+
+Acceptance: `npm run test -w @anneal/api` and `-w @anneal/db` are green; new dbtests cover: three consecutive LOST runs re-queue with increasing `readyAt`, the fourth does not re-queue and the task is REVIEW with the named activity; a `retry` after the operator raises `maxSessionsPerTask` succeeds; a late-salvage claim invalidation counts against the same bound; the board payload exposes the counter. `docs/operator-api.md` documents the new field and the REVIEW reason.
+
+Route: implementation=senior-dev-opus-high - budget arithmetic across reconcile, run-open and salvage is a concurrency/ledger hazard whose wrong outcome (unbounded requeue or wrongful refusal) is only visible in production
