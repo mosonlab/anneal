@@ -823,12 +823,16 @@ export const legacyHumanSixStepTemplateName = (templateId: string): string =>
  * only new chains bind the replacement graph. Active Runs and unfinished work
  * that has no chain identity remain blockers.
  */
+export const templateRolloverBlockers = <T extends { chainId: string | null; activeRunCount: number }>(
+  tasks: readonly T[],
+): T[] => tasks.filter((task) => task.activeRunCount > 0 || task.chainId === null);
+
 export const templateRolloverBlockerCount = (
   tasks: readonly {
     chainId: string | null;
     activeRunCount: number;
   }[],
-): number => tasks.filter((task) => task.activeRunCount > 0 || task.chainId === null).length;
+): number => templateRolloverBlockers(tasks).length;
 
 /** The adjudication-era rename, kept for the rows and fixtures already carrying it. */
 export const legacyAdjudicationTemplateName = (templateName: string, templateId: string): string =>
