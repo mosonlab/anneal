@@ -236,7 +236,8 @@ own. The board holds either the card or its chain, never both.
   its `Route:` line. Chain ordering passes `afterTaskId` (the predecessor
   chain's final task) to the instantiate endpoint; the bound chain dispatches
   when the predecessor completes. `afterTaskId` cannot combine with
-  `autoStart`, and each predecessor task accepts one successor.
+  `autoStart`. One predecessor task accepts several bound successor chains,
+  so a wave that fans out from one delivered chain need not be serialised.
 - Before every instantiation, classify the new chain against every in-flight
   or co-dispatched chain and select exactly one dependency outcome. Parallel is
   the default. Bind with `afterTaskId` only for a true dependency; serialize by
@@ -245,10 +246,11 @@ own. The board holds either the card or its chain, never both.
      must be deployed before this chain can be verified. Bind with
      `afterTaskId` and record `Depends on: <chain> — <what is consumed or why deploy-first>` in the instantiate description or card activity log. A
      mention of the other chain, a shared document, or an adjacent feature on
-     the same surface is independent. Binding is one-way: the bound chain's
-     first step refuses manual start until the predecessor is `DONE`, and only
-     deleting the bound chain releases it (see the instantiate route in
-     `docs/operator-api.md`).
+     the same surface is independent. Binding is one-way and one hop deep:
+     the bound chain's first step refuses manual start until the predecessor
+     is `DONE`, and only deleting that bound chain releases its own binding —
+     the predecessor's other successors stay bound (see the instantiate route
+     in `docs/operator-api.md`).
   2. Heavy overlap: no dependency, but both chains rewrite the same code area.
      Weigh expected refresh-conflict repair cost against serial wall-clock
      loss; either choice is valid, and a serial choice records its reason.
