@@ -88,18 +88,18 @@ const FROZEN = ["docs/reviews", "docs/merge-notes", "docs/briefs", "docs/plans/a
 // What git actually reports for the branch, so a test's name and the git graph
 // it claims to build cannot drift apart.
 const frozenDiff = (root) =>
-  git(root, "diff", "--find-renames=100%", "-l0", "--name-status", "master", "HEAD", "--", ...FROZEN);
+  git(root, "diff", "--find-renames=100%", "-l0", "--name-status", "main", "HEAD", "--", ...FROZEN);
 
-// A repository whose master already carries merged records in the frozen
+// A repository whose main already carries merged records in the frozen
 // directories, plus a live plan and a DECISIONS.md to point supersession at.
-// `merged` puts further files on master before the branch is cut, which is the
+// `merged` puts further files on main before the branch is cut, which is the
 // only way to test what happens to a record that is genuinely history: a file
 // created on the branch is an addition no matter what the branch then does to
 // it, and a test that forgets this proves nothing about the merged case.
 const repository = (t, merged = {}) => {
   const root = mkdtempSync(join(tmpdir(), "agentos-frozen-docs-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  git(root, "init", "-q", "-b", "master");
+  git(root, "init", "-q", "-b", "main");
   write(root, "docs/reviews/2026-01-01-merged-review.md", "# a merged review\n");
   write(root, "docs/merge-notes/2026-01-01-merged-note.md", "# a merged note\n");
   write(root, "docs/briefs/2026-01-01-merged-brief.md", "# a merged brief\n");
@@ -179,7 +179,7 @@ test("deleting a merged record is refused", (t) => {
 // --- rule 1, the one allowed rename ----------------------------------------
 
 test("a byte-identical rename of a merged record to a dated name passes", (t) => {
-  // The misnamed record is on master before the branch exists, so this is the
+  // The misnamed record is on main before the branch exists, so this is the
   // real correction case: git reports R100, not an addition.
   const root = repository(t, { "docs/plans/archive/undated-plan.md": "# an undated plan\n" });
   git(root, "mv", "docs/plans/archive/undated-plan.md", "docs/plans/archive/2026-02-02-undated-plan.md");
@@ -358,17 +358,17 @@ test("prose that merely discusses supersession is not a marker", (t) => {
 
 // --- the baseline -----------------------------------------------------------
 
-test("a stale origin/master no longer disguises a modification as an addition", (t) => {
+test("a stale origin/main no longer disguises a modification as an addition", (t) => {
   const root = repository(t);
-  const stale = git(root, "rev-parse", "master");
-  git(root, "update-ref", "refs/remotes/origin/master", stale);
+  const stale = git(root, "rev-parse", "main");
+  git(root, "update-ref", "refs/remotes/origin/main", stale);
 
-  // master moves on, adding a record; origin/master stays where it was.
-  git(root, "checkout", "-q", "master");
+  // main moves on, adding a record; origin/main stays where it was.
+  git(root, "checkout", "-q", "main");
   write(root, "docs/reviews/2026-03-03-later-review.md", "# later\n");
-  commit(root, "a record master has but origin/master has not");
+  commit(root, "a record main has but origin/main has not");
   git(root, "checkout", "-q", "topic");
-  git(root, "merge", "-q", "master");
+  git(root, "merge", "-q", "main");
 
   // The branch modifies that record. Against the stale ref it looks new.
   write(root, "docs/reviews/2026-03-03-later-review.md", "# later, edited\n");
@@ -379,35 +379,35 @@ test("a stale origin/master no longer disguises a modification as an addition", 
   assert.match(result.stderr, /frozen record modified: docs\/reviews\/2026-03-03-later-review\.md/u);
 });
 
-test("agreeing refs, and a stale local master, both simply work", (t) => {
+test("agreeing refs, and a stale local main, both simply work", (t) => {
   const root = repository(t);
-  git(root, "update-ref", "refs/remotes/origin/master", git(root, "rev-parse", "master"));
+  git(root, "update-ref", "refs/remotes/origin/main", git(root, "rev-parse", "main"));
   write(root, "docs/reviews/2026-02-02-new-review.md", "# review\n");
   commit(root, "a dated record");
   let result = check(root);
   assert.equal(result.status, 0, result.stderr);
 
-  // origin/master ahead of a local master left behind: the descendant wins.
-  git(root, "update-ref", "refs/remotes/origin/master", git(root, "rev-parse", "topic"));
+  // origin/main ahead of a local main left behind: the descendant wins.
+  git(root, "update-ref", "refs/remotes/origin/main", git(root, "rev-parse", "topic"));
   result = check(root);
   assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /ahead of master/u);
+  assert.match(result.stdout, /ahead of main/u);
 });
 
-test("diverged master refs are refused rather than guessed at", (t) => {
+test("diverged main refs are refused rather than guessed at", (t) => {
   const root = repository(t);
-  const baseline = git(root, "rev-parse", "master");
+  const baseline = git(root, "rev-parse", "main");
 
   git(root, "checkout", "-q", "-b", "elsewhere", baseline);
   write(root, "docs/plans/other.md", "# somewhere else entirely\n");
-  const diverged = commit(root, "a commit master never saw");
-  git(root, "update-ref", "refs/remotes/origin/master", diverged);
+  const diverged = commit(root, "a commit main never saw");
+  git(root, "update-ref", "refs/remotes/origin/main", diverged);
 
-  git(root, "checkout", "-q", "master");
+  git(root, "checkout", "-q", "main");
   write(root, "docs/plans/live-plan.md", "# advanced\n");
-  commit(root, "master advances on its own");
+  commit(root, "main advances on its own");
   git(root, "checkout", "-q", "topic");
-  git(root, "merge", "-q", "master");
+  git(root, "merge", "-q", "main");
 
   const result = check(root);
   assert.equal(result.status, 1);
@@ -417,10 +417,10 @@ test("diverged master refs are refused rather than guessed at", (t) => {
 
 test("an authoritative --master oid settles a divergence the refs cannot", (t) => {
   const root = repository(t);
-  const baseline = git(root, "rev-parse", "master");
+  const baseline = git(root, "rev-parse", "main");
   git(root, "checkout", "-q", "-b", "elsewhere", baseline);
   write(root, "docs/plans/other.md", "# somewhere else entirely\n");
-  git(root, "update-ref", "refs/remotes/origin/master", commit(root, "a commit master never saw"));
+  git(root, "update-ref", "refs/remotes/origin/main", commit(root, "a commit main never saw"));
   git(root, "checkout", "-q", "topic");
 
   const result = check(root, "--master", baseline);
@@ -433,16 +433,16 @@ test("a single stale ref is why the gate binds the oid: unbound passes, bound re
   // remote-tracking ref survives, and it is behind: nothing inside a repository
   // can tell a stale ref from a fresh one.
   const root = repository(t);
-  const stale = git(root, "rev-parse", "master");
-  git(root, "checkout", "-q", "master");
-  write(root, "docs/reviews/2026-03-03-frozen.md", "# a record master carries\n");
-  const current = commit(root, "master moves on");
+  const stale = git(root, "rev-parse", "main");
+  git(root, "checkout", "-q", "main");
+  write(root, "docs/reviews/2026-03-03-frozen.md", "# a record main carries\n");
+  const current = commit(root, "main moves on");
   git(root, "checkout", "-q", "topic");
-  git(root, "merge", "-q", "master");
-  write(root, "docs/reviews/2026-03-03-frozen.md", "# a record master carries, edited\n");
+  git(root, "merge", "-q", "main");
+  write(root, "docs/reviews/2026-03-03-frozen.md", "# a record main carries, edited\n");
   commit(root, "modify it");
-  git(root, "update-ref", "refs/remotes/origin/master", stale);
-  git(root, "branch", "-q", "-D", "master");
+  git(root, "update-ref", "refs/remotes/origin/main", stale);
+  git(root, "branch", "-q", "-D", "main");
 
   const unbound = check(root);
   assert.equal(unbound.status, 0);
@@ -463,10 +463,10 @@ test("--master refuses anything that is not a full object id in this repository"
   assert.equal(check(root, "--nonsense").status, 1);
 });
 
-test("no master ref at all is refused, not passed trivially", (t) => {
+test("no main ref at all is refused, not passed trivially", (t) => {
   const root = repository(t);
-  git(root, "branch", "-q", "-D", "master");
+  git(root, "branch", "-q", "-D", "main");
   const result = check(root);
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /no master ref to compare against/u);
+  assert.match(result.stderr, /no main ref to compare against/u);
 });

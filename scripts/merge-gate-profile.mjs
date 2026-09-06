@@ -12,7 +12,7 @@ const FAST_DOCUMENTS = new Set([
   "docs/runbooks/gate-worker.md",
 ]);
 
-const FROZEN_RECORD_DIRECTORIES = [
+export const FROZEN_RECORD_DIRECTORIES = [
   "docs/reviews/",
   "docs/merge-notes/",
   "docs/briefs/",
