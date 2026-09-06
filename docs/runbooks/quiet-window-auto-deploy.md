@@ -333,6 +333,16 @@ node scripts/deploy/install-launchd-services.mjs --replace-existing
 node scripts/deploy/install-launchd-services.mjs --replace-existing --apply
 ```
 
+For `AGENTOS_DEPLOY_ROLE=runner`, the plan prints one
+`runner-path-source <label>=<.env|rendered>` line per runner definition. `.env`
+means `shared/.env` defines `RUNNER_PATH` and the definition leaves it out so
+that value reaches the runner; `rendered` means the installer wrote a value
+containing the directories of the provider CLIs it resolved (`CLAUDE_BINARY`
+and `CODEX_BINARY`, otherwise `claude` and `codex` on the installing user's
+PATH). When neither CLI resolves it refuses with
+`STOP runner-provider-cli-unresolved:claude,codex`; install the CLI or set
+`RUNNER_PATH` in `shared/.env` and plan again.
+
 The installer records original definitions and manifests, creates
 `shared/bin/agentos-service-wrapper.mjs`, and writes wrapper-based plists. Its
 apply path may `bootout` retired labels and `kickstart` changed owned labels;

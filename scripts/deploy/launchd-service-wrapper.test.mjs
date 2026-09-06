@@ -767,3 +767,138 @@ test("wrapper migration can bootstrap current from the still-serving checkout be
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+/** The EnvironmentVariables dictionary a rendered LaunchAgent definition
+ * carries. launchd hands exactly these to the wrapper process. */
+const plistEnvironment = (definition) => {
+  const dictionary = /<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)\n {2}<\/dict>/u.exec(definition);
+  assert.notEqual(dictionary, null);
+  return Object.fromEntries([...dictionary[1].matchAll(
+    /<key>([^<]+)<\/key>\s*<string>([^<]*)<\/string>/gu,
+  )].map(([, key, value]) => [key, value]));
+};
+
+const runnerRoleFixture = ({ sharedEnvironment, cliDirectory = null }) => {
+  const fixture = releaseFixture();
+  writeFileSync(join(fixture.root, "shared/.env"), sharedEnvironment);
+  if (cliDirectory) {
+    mkdirSync(join(fixture.root, cliDirectory), { recursive: true });
+    writeFileSync(join(fixture.root, cliDirectory, "claude"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(fixture.root, cliDirectory, "claude"), 0o755);
+  }
+  return fixture;
+};
+
+const RUNNER_ROLE_ENVIRONMENT = Object.freeze({
+  AGENTOS_SERVICE_PLATFORM: "darwin",
+  AGENTOS_DEPLOY_ROLE: "runner",
+  AGENTOS_RUNNER_COUNT: "2",
+});
+
+test("a runner-role definition leaves RUNNER_PATH to shared/.env when it defines one", () => {
+  const fixture = runnerRoleFixture({
+    sharedEnvironment: "DATABASE_URL=postgresql://fixture\nRUNNER_PATH=/operator/npm-global/bin:/usr/bin:/bin\n",
+  });
+  const home = join(fixture.root, "operator-home");
+  try {
+    const plan = installLaunchdServices({
+      repositoryRoot: fixture.root,
+      userHome: home,
+      nodeBinary: process.execPath,
+      gitBinary: process.execPath,
+      environment: RUNNER_ROLE_ENVIRONMENT,
+      cliLookup: () => "",
+    });
+    assert.deepEqual(plan.report.filter(([key]) => key === "runner-path-source"), [
+      ["runner-path-source", "com.agentos.runner=.env"],
+      ["runner-path-source", "com.agentos.runner-2=.env"],
+    ]);
+    for (const label of ["com.agentos.runner", "com.agentos.runner-2"]) {
+      const environment = plistEnvironment(plan.rendered[label]);
+      assert.equal(environment.RUNNER_ID, `runner-${label.endsWith("-2") ? 2 : 1}`);
+      assert.equal(Object.hasOwn(environment, "RUNNER_PATH"), false);
+    }
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a runner-role definition renders a RUNNER_PATH reaching the resolved provider CLI", () => {
+  const fixture = runnerRoleFixture({
+    sharedEnvironment: "DATABASE_URL=postgresql://fixture\n",
+    cliDirectory: "operator-bin",
+  });
+  const home = join(fixture.root, "operator-home");
+  const claudeDirectory = realpathSync(join(fixture.root, "operator-bin"));
+  try {
+    const plan = installLaunchdServices({
+      repositoryRoot: fixture.root,
+      userHome: home,
+      nodeBinary: process.execPath,
+      gitBinary: process.execPath,
+      environment: RUNNER_ROLE_ENVIRONMENT,
+      cliLookup: (name) => name === "claude" ? join(claudeDirectory, "claude") : "",
+    });
+    assert.deepEqual(plan.report.filter(([key]) => key === "runner-path-source"), [
+      ["runner-path-source", "com.agentos.runner=rendered"],
+      ["runner-path-source", "com.agentos.runner-2=rendered"],
+    ]);
+    for (const label of ["com.agentos.runner", "com.agentos.runner-2"]) {
+      const environment = plistEnvironment(plan.rendered[label]);
+      assert.equal(environment.RUNNER_PATH.split(":").includes(claudeDirectory), true);
+      assert.equal(environment.RUNNER_PATH.split(":").includes(dirname(process.execPath)), true);
+    }
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a runner-role install refuses when neither provider CLI resolves", () => {
+  const fixture = runnerRoleFixture({ sharedEnvironment: "DATABASE_URL=postgresql://fixture\n" });
+  const home = join(fixture.root, "operator-home");
+  try {
+    assert.throws(
+      () => installLaunchdServices({
+        repositoryRoot: fixture.root,
+        userHome: home,
+        nodeBinary: process.execPath,
+        gitBinary: process.execPath,
+        environment: RUNNER_ROLE_ENVIRONMENT,
+        cliLookup: () => "",
+      }),
+      /runner-provider-cli-unresolved:claude,codex/u,
+    );
+    assert.equal(existsSync(join(home, "Library/LaunchAgents/com.agentos.runner.plist")), false);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("the wrapper gives a runner the shared/.env RUNNER_PATH a rendered definition omits", () => {
+  const operatorPath = "/operator/npm-global/bin:/usr/local/bin:/usr/bin:/bin";
+  const fixture = runnerRoleFixture({
+    sharedEnvironment: `DATABASE_URL=postgresql://fixture\nRUNNER_PATH=${operatorPath}\n`,
+  });
+  const home = join(fixture.root, "operator-home");
+  try {
+    const plan = installLaunchdServices({
+      repositoryRoot: fixture.root,
+      userHome: home,
+      nodeBinary: process.execPath,
+      gitBinary: process.execPath,
+      environment: RUNNER_ROLE_ENVIRONMENT,
+      cliLookup: () => "",
+    });
+    const launchdEnvironment = plistEnvironment(plan.rendered["com.agentos.runner"]);
+    const invocation = resolveServiceInvocation({
+      repositoryRoot: fixture.root,
+      label: "com.agentos.runner",
+      environment: { ...launchdEnvironment, AGENTOS_RUNNER_COUNT: "2" },
+      nodeBinary: process.execPath,
+    });
+    assert.equal(invocation.env.RUNNER_PATH, operatorPath);
+    assert.equal(invocation.env.RUNNER_ID, "runner-1");
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});

@@ -31,7 +31,7 @@ import { DEFAULT_DEPLOY_ROLE, resolveDeployRole } from "./deploy-role.mjs";
 
 export { DEFAULT_DEPLOY_ROLE, resolveDeployRole };
 
-import { resolveCurrentRelease } from "./launchd-service-wrapper.mjs";
+import { parseSharedEnvironment, resolveCurrentRelease } from "./launchd-service-wrapper.mjs";
 import {
   DEFAULT_RUNNER_COUNT,
   MAX_RUNNER_COUNT,
@@ -112,6 +112,83 @@ const requiredConfiguredBinary = (path, name) => {
 
 export const controlledLaunchdPath = ({ nodeBinary, gitBinary }) =>
   [...new Set([dirname(nodeBinary), dirname(gitBinary), "/usr/local/bin", "/usr/bin", "/bin"])].join(":");
+
+/** The provider CLIs a runner definition must be able to execute. A runner
+ * that cannot reach one of these answers `--version` with exit 127 and fails
+ * every session it claims for that provider. */
+const PROVIDER_CLIS = Object.freeze([
+  Object.freeze({ name: "claude", variable: "CLAUDE_BINARY" }),
+  Object.freeze({ name: "codex", variable: "CODEX_BINARY" }),
+]);
+
+/** Look a bare command name up in the installing user's PATH. */
+const providerCliLookup = (environment = process.env, execute = execFileSync) => (name) => {
+  try {
+    return execute("/usr/bin/which", [name], {
+      encoding: "utf8",
+      env: { PATH: environment.PATH ?? "" },
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return "";
+  }
+};
+
+/** The executable a provider CLI resolves to, or null when nothing on this
+ * host answers for it. A configured absolute path is trusted as written; any
+ * other value is a command name searched in the installing user's PATH. */
+const resolveProviderCli = ({ configured, name, lookup }) => {
+  const candidate = typeof configured === "string" && configured !== "" ? configured : name;
+  const found = candidate.startsWith("/") ? candidate : lookup(candidate);
+  if (typeof found !== "string" || !found.startsWith("/")) return null;
+  let resolved;
+  try {
+    resolved = realpathSync(found);
+    accessSync(resolved, fsConstants.X_OK);
+  } catch {
+    return null;
+  }
+  return resolved;
+};
+
+/**
+ * Decide what a runner definition's `RUNNER_PATH` must be on this host.
+ *
+ * The wrapper applies `shared/.env` without overriding an inherited value, so
+ * a `RUNNER_PATH` written into the plist silently defeats the one an operator
+ * configured. When `.env` defines it, the definition leaves it out and the
+ * `.env` value reaches the runner. Otherwise the installer renders a value it
+ * can prove reaches a configured provider CLI, and refuses when it cannot.
+ */
+export const resolveRunnerPathPlan = ({
+  path,
+  sharedValues = {},
+  environment = {},
+  lookup,
+} = {}) => {
+  const configured = sharedValues.RUNNER_PATH;
+  if (typeof configured === "string" && configured !== "") {
+    return Object.freeze({ source: ".env", runnerPath: null });
+  }
+  const directories = [];
+  const missing = [];
+  for (const { name, variable } of PROVIDER_CLIS) {
+    const binary = resolveProviderCli({
+      configured: sharedValues[variable] ?? environment[variable],
+      name,
+      lookup,
+    });
+    if (binary) directories.push(dirname(binary));
+    else missing.push(name);
+  }
+  if (directories.length === 0) {
+    throw new Error(`runner-provider-cli-unresolved:${missing.join(",")}`);
+  }
+  return Object.freeze({
+    source: "rendered",
+    runnerPath: [...new Set([...path.split(":").filter(Boolean), ...directories])].join(":"),
+  });
+};
 
 export const verifyRenderedToolchain = (values, execute = execFileSync) => {
   const options = {
@@ -340,6 +417,7 @@ export const servicePlistValues = ({
   stdoutPath,
   stderrPath,
   path,
+  runnerPath = path,
   wrapperPath = serviceWrapperPath(repositoryRoot),
 }) => {
   const entry = serviceInventoryEntry(inventory, label);
@@ -358,8 +436,10 @@ export const servicePlistValues = ({
     runnerCount: inventory.runnerCount,
     runnerIdPrefix: inventory.runnerIdPrefix,
     deployRole: inventory.deployRole,
+    // A null runnerPath is the deliberate "let shared/.env decide" shape: the
+    // definition carries the runner id but no inline RUNNER_PATH.
     ...(entry.runnerId
-      ? { runnerId: entry.runnerId, runnerPath: path }
+      ? { runnerId: entry.runnerId, runnerPath: runnerPath ?? null }
       : {}),
     wrapperPath,
   });
@@ -382,7 +462,7 @@ export const renderServiceLaunchdPlist = (template, values) => {
   const runnerEnvironmentValues = {
     ...(values.runnerId ? {
       RUNNER_ID: values.runnerId,
-      RUNNER_PATH: values.runnerPath,
+      ...(values.runnerPath ? { RUNNER_PATH: values.runnerPath } : {}),
     } : {}),
     ...runnerCountEnvironment(values.runnerCount),
   };
@@ -412,7 +492,7 @@ export const serviceEnvironmentValues = (values) => Object.freeze({
   ...(values.runnerId
     ? {
         RUNNER_ID: values.runnerId,
-        RUNNER_PATH: values.runnerPath,
+        ...(values.runnerPath ? { RUNNER_PATH: values.runnerPath } : {}),
       }
     : {}),
 });
@@ -764,7 +844,7 @@ const renderMigratedServicePlist = ({ sourcePath, values }) => {
     if (!Object.hasOwn(environment, "PATH")) controlled.PATH = values.path;
     if (values.runnerId) {
       controlled.RUNNER_ID = values.runnerId;
-      if (typeof environment.RUNNER_PATH !== "string" || environment.RUNNER_PATH === "") {
+      if (values.runnerPath && (typeof environment.RUNNER_PATH !== "string" || environment.RUNNER_PATH === "")) {
         controlled.RUNNER_PATH = values.runnerPath;
       }
     }
@@ -1594,9 +1674,13 @@ const systemdInstallerReport = ({ unitDirectory, units, staging }) => [
   ["staging", staging],
 ];
 
-const launchdInstallerReport = ({ wrapper, entries }) => [
+/** The plan an operator reads before `--apply`. Every runner definition names
+ * where its effective RUNNER_PATH comes from, so a value that would defeat
+ * `shared/.env` is visible before it is written. */
+const launchdInstallerReport = ({ wrapper, entries, runnerPathSources = [] }) => [
   ["service-wrapper", wrapper],
   ["service-definitions", String(entries.length)],
+  ...runnerPathSources.map(({ label, source }) => ["runner-path-source", `${label}=${source}`]),
 ];
 
 /** The one outcome both platforms return. It names the phase performed, the
@@ -2317,6 +2401,7 @@ export const installLaunchdServices = ({
   userLookup,
   effectiveUid,
   environment = process.env,
+  cliLookup = null,
   execute = execFileSync,
 } = {}) => {
   // The one inventory this invocation installs, reverts or plans. Every
@@ -2401,6 +2486,23 @@ export const installLaunchdServices = ({
   const resolvedNode = resolve(nodeBinary);
   const resolvedGit = gitBinary ? resolve(gitBinary) : resolvedNode;
   const controlledPath = path ?? controlledLaunchdPath({ nodeBinary: resolvedNode, gitBinary: resolvedGit });
+  // The runner role is the one this host installs runner definitions for on
+  // purpose; its definitions must not carry a RUNNER_PATH that cannot reach a
+  // provider CLI, and must not carry one at all when shared/.env defines it.
+  const runnerPathPlan = deployRole === "runner"
+    ? resolveRunnerPathPlan({
+        path: controlledPath,
+        sharedValues: existsSync(join(sharedRoot, ".env"))
+          ? parseSharedEnvironment(readFileSync(join(sharedRoot, ".env"), "utf8"))
+          : {},
+        environment,
+        lookup: cliLookup ?? providerCliLookup(environment, execute),
+      })
+    : null;
+  const runnerPathSources = runnerPathPlan
+    ? inventory.entries.filter(({ runnerId }) => runnerId)
+      .map(({ label }) => ({ label, source: runnerPathPlan.source }))
+    : [];
   const logPath = (label, stream) => join(logs, `${safeServiceFileName(label)}.${stream}.log`);
   const previous = existsSync(manifestPath)
     ? validateServiceManifest(
@@ -2420,6 +2522,7 @@ export const installLaunchdServices = ({
       stdoutPath: logPath(label, "stdout"),
       stderrPath: logPath(label, "stderr"),
       path: controlledPath,
+      ...(runnerPathPlan ? { runnerPath: runnerPathPlan.runnerPath } : {}),
       wrapperPath: wrapper,
     });
     const destination = join(launchAgents, plistName);
@@ -2516,7 +2619,7 @@ export const installLaunchdServices = ({
   if (!apply) return serviceInstallerOutcome({
     platform: "darwin",
     applied: false,
-    report: launchdInstallerReport({ wrapper, entries }),
+    report: launchdInstallerReport({ wrapper, entries, runnerPathSources }),
     deployRole,
     wrapper,
     entries: entries.map(({ path: entryPath }) => entryPath),
@@ -2625,7 +2728,7 @@ export const installLaunchdServices = ({
   return serviceInstallerOutcome({
     platform: "darwin",
     applied: true,
-    report: launchdInstallerReport({ wrapper, entries }),
+    report: launchdInstallerReport({ wrapper, entries, runnerPathSources }),
     deployRole,
     wrapper,
     bootstrap,
