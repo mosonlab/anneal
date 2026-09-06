@@ -138,6 +138,15 @@ const trackResource = (resource) => {
   return resource;
 };
 
+/** Prisma's CLI prints an advisory "update available" box on stderr at every
+ * invocation. The deploy pins its own toolchain, so on a control-plane host the
+ * box is nothing but noise in `auto-deploy.error.log`, where it hides real
+ * stderr. Added to the child environment, never substituted for it. */
+export const prismaChildEnvironment = (environment = process.env) => ({
+  ...environment,
+  PRISMA_HIDE_UPDATE_MESSAGE: "1",
+});
+
 const command = (program, args, {
   cwd = REPOSITORY_ROOT,
   env = process.env,
@@ -146,7 +155,8 @@ const command = (program, args, {
   timeoutReason,
   allowAfterInterrupt = false,
   onTermination,
-} = {}) => runDeployCommand(program, args, {
+  run = runDeployCommand,
+} = {}) => run(program, args, {
   cwd,
   env,
   capture,
@@ -692,6 +702,8 @@ const makeWritable = (root) => {
 
 export const createDeployHost = ({
   serviceControl: providedServiceControl,
+  runCommand = runDeployCommand,
+  readMigrationTail = migrationTail,
   verifyRecoveredServices = verifyStableServicePaths,
   environment = process.env,
   deployRole = resolveDeployRoleOrFail(environment),
@@ -700,6 +712,10 @@ export const createDeployHost = ({
   serviceVerificationTimeoutMs = 30_000,
   serviceVerificationWait = sleep,
 } = {}) => {
+  const hostChecked = (reason, program, args, options) => checked(reason, program, args, {
+    ...options,
+    run: runCommand,
+  });
   const runnerConfig = deployRole === "runner" ? requireRunnerDeployPreflight(environment) : null;
   // The one inventory this invocation installs, controls and verifies. The
   // service control is built from it rather than resolving a second one, so a
@@ -770,12 +786,13 @@ export const createDeployHost = ({
       }),
     }),
     prepareReleaseArtifact: async (attempt) => {
-      const built = await checked(
+      const built = await hostChecked(
         "release-artifact-build-failed",
         loadBinaries().node,
         [join(SCRIPT_DIR, "build-release-artifact.mjs"), attempt.targetCommit],
         {
           capture: true,
+          env: prismaChildEnvironment(environment),
           timeoutMs: DEPLOY_STEP_TIMEOUT_MS.releaseArtifactBuild,
           timeoutReason: "release-artifact-build-timeout",
         },
@@ -883,14 +900,14 @@ export const createDeployHost = ({
     },
     guardedMigration: async (attempt) => {
       const operationWorkspace = attempt.requireFact("operationWorkspace");
-      const migrationTailBefore = await migrationTail();
-      await checked("guarded-migration-refused", loadBinaries().node, ["node_modules/tsx/dist/cli.mjs", "packages/db/prisma/preflight-goal-execution.ts"], {
+      const migrationTailBefore = await readMigrationTail();
+      await hostChecked("guarded-migration-refused", loadBinaries().node, ["node_modules/tsx/dist/cli.mjs", "packages/db/prisma/preflight-goal-execution.ts"], {
         cwd: operationWorkspace,
         timeoutMs: DEPLOY_STEP_TIMEOUT_MS.migrationPreflight,
         timeoutReason: "migration-preflight-timeout",
       });
       const barrier = attempt.requireFact("barrier");
-      await checked(
+      await hostChecked(
         "guarded-migration-refused",
         loadBinaries().node,
         [
@@ -902,26 +919,28 @@ export const createDeployHost = ({
         ],
         {
           cwd: operationWorkspace,
+          env: prismaChildEnvironment(environment),
           timeoutMs: DEPLOY_STEP_TIMEOUT_MS.migrationDeploy,
           timeoutReason: MIGRATION_DEPLOY_TIMEOUT_REASON,
           onTermination: () => barrier.retainUntilEscalationCleared(),
         },
       );
-      const migrationTailAfter = await migrationTail();
+      const migrationTailAfter = await readMigrationTail();
       return { migration: { migrationTailBefore, migrationTailAfter } };
     },
-    generatePrismaClient: (attempt) => checked("prisma-client-generation-refused", loadBinaries().node, [
+    generatePrismaClient: (attempt) => hostChecked("prisma-client-generation-refused", loadBinaries().node, [
       "node_modules/prisma/build/index.js",
       "generate",
       "--schema",
       "packages/db/prisma/schema.prisma",
     ], {
       cwd: attempt.requireFact("operationWorkspace"),
+      env: prismaChildEnvironment(environment),
       timeoutMs: DEPLOY_STEP_TIMEOUT_MS.prismaClientGeneration,
       timeoutReason: "prisma-client-generation-timeout",
     }),
     syncCanonicalPrompts: async (attempt) => {
-      const result = await checked("canonical-prompt-sync-refused", loadBinaries().node, [
+      const result = await hostChecked("canonical-prompt-sync-refused", loadBinaries().node, [
         "node_modules/tsx/dist/cli.mjs",
         "packages/db/prisma/sync-canonical-prompts.ts",
       ], {
