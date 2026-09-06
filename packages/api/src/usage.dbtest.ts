@@ -20,11 +20,11 @@ import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
  *     (`storedInputTokens: 10` where 30 is expected);
  *   - test 2b fails because the contended recompute now RESOLVES instead of
  *     being made to wait.
- * Tests 0 and 2a are deliberately INSENSITIVE to that deletion: test 0
- * never contends, test 2a takes its lock directly rather than through
- * `recomputeSessionUsage`. A reader who deletes the line and sees those two stay
- * green has learned nothing alarming. Restore with `git checkout --
- * packages/db/src/usage.ts`.
+ * Tests 0 and 2a are deliberately INSENSITIVE to that deletion: test 0 never
+ * contends, and test 2a takes its lock directly rather than through
+ * `recomputeSessionUsage`. A reader who deletes the line and sees those two
+ * stay green has learned nothing alarming. Restore with
+ * `git checkout -- packages/db/src/usage.ts`.
  *
  * WHAT THE FIRST RUN SETTLED (plan §13 items 1 and 2):
  * - The parameterised `${…}::int` bind form is accepted by Prisma 6.19.0
