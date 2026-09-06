@@ -575,7 +575,7 @@ test("opening a Session marks it opened, and returning to the list clears its do
   const fetchHarness = installFetchFunction(async (input) => {
       const path = String(input);
       const payload = path.includes("/runs/")
-        ? { events: [], nextAfterSeq: null, hasMore: false, total: 0 }
+        ? { events: [], hasMore: false, total: 0 }
         : path.includes("/projects")
           ? [{ id: "p-open", name: "Open project" }]
           : path.includes("/sessions/session-1") ? detail : [detail];
@@ -611,7 +611,7 @@ test("a Session finishing while its detail page is open is marked opened again",
   const fetchHarness = installFetchFunction(async (input) => {
       const path = String(input);
       const payload = path.includes("/runs/")
-        ? { events: [], nextAfterSeq: null, hasMore: false, total: 0 }
+        ? { events: [], hasMore: false, total: 0 }
         : detail;
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
   });
@@ -1075,8 +1075,8 @@ test("the detail page does not call the initial drain `N new`", async () => {
       // Two pages, so the flag has to survive an intermediate render.
       const payload = path.includes("/events")
         ? path.includes("afterSeq=6")
-          ? { events: events.slice(6), nextAfterSeq: 12, hasMore: false, total: 12 }
-          : { events: events.slice(0, 6), nextAfterSeq: 6, hasMore: true, total: 12 }
+          ? { events: events.slice(6), hasMore: false, total: 12 }
+          : { events: events.slice(0, 6), hasMore: true, total: 12 }
         : detail;
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
   });
@@ -1122,8 +1122,8 @@ test("the live stream counts a call added to the tail tool group as one new node
       const path = String(input);
       const payload = path.includes("/runs/")
         ? path.includes("afterSeq=2")
-          ? { events: calls, nextAfterSeq: 4, hasMore: false, total: 4 }
-          : { events: current, nextAfterSeq: current.at(-1)?.seq ?? null, hasMore: false, total: current.length }
+          ? { events: calls, hasMore: false, total: 4 }
+          : { events: current, hasMore: false, total: current.length }
         : detail;
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
   });
@@ -1172,7 +1172,7 @@ test("a live stream at the bottom auto-scrolls after its initial drain", async (
   const fetchHarness = installFetchFunction(async (input) => {
       const path = String(input);
       const payload = path.includes("/runs/")
-        ? { events: current, nextAfterSeq: current.at(-1)?.seq ?? null, hasMore: false, total: current.length }
+        ? { events: current, hasMore: false, total: current.length }
         : detail;
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
   });
@@ -1214,7 +1214,7 @@ test("a live stream counts assistant prose absorbed by the tail text node", asyn
   const fetchHarness = installFetchFunction(async (input) => {
       const path = String(input);
       const payload = path.includes("/runs/")
-        ? { events: current, nextAfterSeq: current.at(-1)?.seq ?? null, hasMore: false, total: current.length }
+        ? { events: current, hasMore: false, total: current.length }
         : detail;
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
   });
@@ -1263,7 +1263,7 @@ test("a capped stream keeps the visible event-cap notice", async () => {
         payload: { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: `event ${seq}` }] } },
       });
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify({
-        events: [row], nextAfterSeq: seq, hasMore: true, total: 100,
+        events: [row], hasMore: true, total: 100,
       }) } as unknown as Response;
   });
 
@@ -1338,7 +1338,7 @@ test("the session detail header names the model the run executed with", async ()
   });
   const fetchHarness = installFetchFunction(async (input) => {
     const payload = String(input).includes("/runs/")
-      ? { events: [], nextAfterSeq: null, hasMore: false, total: 0 }
+      ? { events: [], hasMore: false, total: 0 }
       : detail;
     return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
   });

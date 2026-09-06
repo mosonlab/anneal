@@ -3,6 +3,7 @@ import { type ReactNode, useMemo, useState } from "react";
 import { formatDateTime, formatT, titleCase, usageMoney } from "../lib/format";
 import { useLocalStorage, useMediaQuery, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
+import { fatal } from "../lib/poll-state";
 import { useProjectScope } from "../lib/project";
 import type { Agent, CostsReport } from "../lib/types";
 import { Link } from "../lib/router";
@@ -10,7 +11,7 @@ import { IconRefresh } from "../components/icons";
 import {
   HINT, PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW_WRAP,
   STACK, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
-  AgentChip, Card, EmptyState, ErrorNotice, GapNotice, MetricFigure, Page, Segmented,
+  AgentChip, Card, EmptyState, ErrorNotice, MetricFigure, Page, Segmented,
 } from "../components/ui";
 import { Button } from "../components/ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../components/ui/table";
@@ -576,10 +577,9 @@ export const CostsPage = (): ReactNode => {
       </div>
 
       <div className={STACK}>
-        {costs.missing ? <GapNotice endpoint="GET /projects/:projectId/costs" what={t("costs.gap.what")} /> : null}
-        {costs.error === null || costs.missing
-          ? null
-          : <ErrorNotice message={`${costs.error.status} ${costs.error.message}`} onRetry={costs.reload} />}
+        {fatal(costs.error, report)
+          ? <ErrorNotice message={`${costs.error!.status} ${costs.error!.message}`} onRetry={costs.reload} />
+          : null}
 
         {report === null ? null : (
           <>

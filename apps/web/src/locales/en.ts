@@ -32,7 +32,6 @@ export const en = {
   "agents.field.codexServiceTier": "Codex service tier",
   "agents.field.environment": "Environment",
   "agents.field.environment.hint": "Sandbox and env-var scope for this agent.",
-  "agents.field.environment.hint.missing": "No environment list endpoint — paste an Environment ID (required by POST /projects/:id/agents).",
   "agents.field.environment.label": "Environment ID",
   "agents.field.model": "Model",
   "agents.field.name.hint": "Unique inside the project; used by YAML and the CLI.",
@@ -237,7 +236,6 @@ export const en = {
   "costs.chart.empty": "Nothing was spent in this window.",
   "costs.chart.title": "Daily spend",
   "costs.chart.tooltip": "{agent} · {date} · {amount}",
-  "costs.gap.what": "the cost dashboard",
   "costs.head.subtitle": "Settled run spend in {project}.",
   "costs.head.title": "Costs",
   "costs.hint.complete": "Every settled run in this window reported a cost.",
@@ -481,8 +479,6 @@ export const en = {
   "newTask.template.option": "{name} ({n} steps)",
   "newTask.templates.empty": "No templates in this project yet.",
   "newTask.title": "New Task",
-
-  "notice.gap": "The control plane has no {endpoint} yet, so {what} has no data source. The page renders the real empty response and lights up on its own once the endpoint ships.",
 
   "onboarding.back": "Back",
   "onboarding.confirm.acknowledge": "I understand that the starter agent runs on this machine with my user's authority, without a sandbox, and may push to the repository I named.",
@@ -729,7 +725,6 @@ export const en = {
   "sessions.filter.live": "Live",
   "sessions.filter.loaded": "Filters apply to loaded Sessions only.",
   "sessions.filter.status": "Status",
-  "sessions.gap.what": "the session list",
   "sessions.head.subtitle": "Every agent run in {project}, newest first",
   "sessions.head.title": "Sessions",
   "sessions.hover.result": "Result",

@@ -10,7 +10,7 @@ import { DOT, DOT_TONE, RUNNER_ROW, RUNNER_ROW_COMPACT, RUNNER_STATE } from "./u
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "./ui/hover-card";
 
 type RunnersContextValue = { runners: Poll<RunnersResponse>; health: Poll<Health>; freshnessNow: number };
-const idlePoll = <T,>(): Poll<T> => ({ data: null, error: null, loading: false, missing: false, lastSuccessAt: null, reload: () => undefined });
+const idlePoll = <T,>(): Poll<T> => ({ data: null, error: null, loading: false, lastSuccessAt: null, reload: () => undefined });
 const IDLE_CONTEXT: RunnersContextValue = { runners: idlePoll<RunnersResponse>(), health: idlePoll<Health>(), freshnessNow: 0 };
 const RunnersContext = createContext<RunnersContextValue>(IDLE_CONTEXT);
 
