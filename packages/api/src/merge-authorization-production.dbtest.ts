@@ -60,7 +60,12 @@ const call = async (method: string, path: string, body?: unknown): Promise<{ sta
 };
 
 const filledGate = async (label: string) => {
-  const chain = await seedIntegratorChain(db, { label });
+  // The approval-gate shape has no Regression node, so the gate's signature for
+  // the head the snapshot names has to be seeded here: without it every
+  // authorization below is refused for a head no gate ever signed.
+  const chain = await seedIntegratorChain(db, {
+    label, gateAttestation: { headSha: "a".repeat(40), baseHeadSha: "b".repeat(40) },
+  });
   const card = await db.$transaction(
     (tx) => gateQuestion(tx, chain.gateTask.id, chain.gateRun.id, null),
     { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
