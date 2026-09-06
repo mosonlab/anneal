@@ -2265,11 +2265,17 @@ events. When it is full the queue drops the oldest liveness events —
 bytes, and sequence range lost. Tool output is droppable because a tool result
 carries a file read or a command's stdout and is the largest event a Run
 produces. Lifecycle, terminal and error events — including `TOOL_STARTED`,
-`TOOL_FAILED`, `ADAPTER_ERROR` and `FINAL_OUTPUT` — are never dropped; they are
-a bounded few per Run, so a queue made only of those exceeds the bound rather
-than losing the account of the Run. The batch currently in flight is never
-dropped from and never released by position, so a provider streaming during an
-append cannot cost an event that the request did not carry. Each heartbeat carries the
+`TOOL_FAILED`, `ADAPTER_ERROR` and `FINAL_OUTPUT` — survive while anything else
+can be given up. They are not exempt from the bound, because a provider drives
+some of them too — one `ADAPTER_ERROR` per unparsable line, a `TOOL_STARTED` per
+call. A queue with nothing droppable left reduces the oldest of them to a
+`truncated` marker, keeping its sequence number, type and time, and sheds an
+event outright only once every protected event is already such a marker; the
+shed is counted in the same `EVENTS_DROPPED` record. The only excess the queue
+tolerates is the batch in flight and the drop record itself, both bounded by the
+batch cap: the batch in flight is never dropped from and never released by
+position, so a provider streaming during an append cannot cost an event that the
+request did not carry. Each heartbeat carries the
 current queue size as `eventQueueBytes`; the field is observability only and the
 API neither acts on it nor persists it.
 

@@ -20,10 +20,19 @@ import type { SessionEventPayload } from "./api.js";
  * runners on one host. Bounding it means choosing what to lose. Streaming
  * deltas, raw provider frames, captured stderr, provider status and tool output
  * are liveness detail and are dropped oldest-first; lifecycle, terminal and
- * error events are the record of what the Run did and are never dropped, so a
- * queue made entirely of those may exceed the bound rather than lose the
- * account of the Run. Those are a bounded few per Run, unlike the streaming and
- * tool traffic that actually fills memory.
+ * error events are the record of what the Run did and are kept while anything
+ * else can be given up.
+ *
+ * The bound is nevertheless strict, because a provider can produce protected
+ * events without limit too — one `ADAPTER_ERROR` per unparsable line, a
+ * `TOOL_STARTED` per call — and a bound that those escape is not a bound. Once
+ * nothing droppable is left, a protected event first loses its payload to a
+ * `truncated` marker, keeping its sequence number, type and time; only when
+ * every protected event is already reduced to its marker is the oldest of them
+ * shed, counted in the same record. So the account of the Run degrades
+ * gradually under pressure instead of the process dying with all of it. The
+ * only excess left is the batch in flight and the drop record itself, both
+ * bounded by the batch cap.
  *
  * A batch is *claimed* from the moment it is formed until its request settles.
  * A claimed entry is never dropped and never accumulated into: the queue is
@@ -69,6 +78,12 @@ type Entry = {
   droppable: boolean;
   /** In the batch currently being delivered, and so neither droppable nor mutable. */
   claimed: boolean;
+  /**
+   * Already reduced to its `truncated` marker, or a queue record whose counts
+   * are the whole point of it. Either way there is nothing left to give up
+   * short of the event itself.
+   */
+  degraded: boolean;
 };
 
 export type SessionEventQueueOptions = {
@@ -121,8 +136,12 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
   const measure = (event: SessionEventPayload, payloadBytes: number): number =>
     jsonByteLength({ ...event, payload: null }) - NULL_JSON_BYTES + payloadBytes;
 
-  const entryFor = (event: SessionEventPayload, droppable: boolean, payloadBytes: number): Entry =>
-    ({ event, bytes: measure(event, payloadBytes), droppable, claimed: false });
+  const entryFor = (
+    event: SessionEventPayload,
+    droppable: boolean,
+    payloadBytes: number,
+    degraded = false,
+  ): Entry => ({ event, bytes: measure(event, payloadBytes), droppable, claimed: false, degraded });
 
   const append = (entry: Entry): void => {
     entries.push(entry);
@@ -144,7 +163,9 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
 
   const runnerEntry = (type: string, payload: Record<string, unknown>): Entry => {
     const event = runnerEvent(type, payload);
-    return entryFor(event, false, jsonByteLength(payload));
+    // A queue record is born degraded: its payload is the account of what was
+    // lost, so truncating it would erase the very thing it exists to carry.
+    return entryFor(event, false, jsonByteLength(payload), true);
   };
 
   const recordDrop = (
@@ -162,7 +183,7 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
       const payload = dropRecord.event.payload as { droppedEvents: number; droppedBytes: number; lastDroppedSeq: number };
       payload.droppedEvents += droppedEvents;
       payload.droppedBytes += droppedBytes;
-      payload.lastDroppedSeq = lastSeq;
+      payload.lastDroppedSeq = Math.max(payload.lastDroppedSeq, lastSeq);
       bytes -= dropRecord.bytes;
       dropRecord.bytes = measure(dropRecord.event, jsonByteLength(payload));
       bytes += dropRecord.bytes;
@@ -183,19 +204,62 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
     append(dropRecord);
   };
 
+  /**
+   * Reduce a protected event to its `truncated` marker, in place.
+   *
+   * The event keeps its sequence number, type, source and time, so the shape of
+   * what the Run did survives; what it loses is the detail, exactly as an
+   * oversized payload does at the per-event cap. An already-truncated payload
+   * keeps the original size it recorded rather than reporting the marker's own.
+   */
+  const degrade = (entry: Entry): void => {
+    entry.degraded = true;
+    const current = entry.event.payload as { truncated?: unknown; originalBytes?: unknown };
+    const marker = truncateSessionEventPayload(entry.event.payload, 0);
+    const payload = current?.truncated === true && typeof current.originalBytes === "number"
+      ? { ...marker, originalBytes: current.originalBytes }
+      : marker;
+    const payloadBytes = jsonByteLength(payload);
+    const reduced = measure(entry.event, payloadBytes);
+    // A payload smaller than the marker exists; replacing it would spend bytes
+    // to save them. The entry is still marked degraded so the loop advances.
+    if (reduced >= entry.bytes) return;
+    entry.event.payload = payload;
+    bytes -= entry.bytes - reduced;
+    entry.bytes = reduced;
+  };
+
+  /**
+   * The next thing to give up, cheapest first: a droppable liveness event, then
+   * the payload of the oldest protected event, then the oldest protected event
+   * that has nothing left to give. A claimed entry belongs to a request in
+   * flight and the open drop record is the account itself; neither is available.
+   */
   const enforceBound = (): void => {
     let droppedEvents = 0;
     let droppedBytes = 0;
     let firstSeq = 0;
     let lastSeq = 0;
     while (bytes > maxBytes || entries.length > maxEvents) {
-      const index = entries.findIndex((entry) => entry.droppable && !entry.claimed);
+      const droppableIndex = entries.findIndex((entry) => entry.droppable && !entry.claimed);
+      if (droppableIndex === -1) {
+        const degradable = entries.find((entry) => !entry.claimed && !entry.degraded);
+        if (degradable) {
+          degrade(degradable);
+          continue;
+        }
+      }
+      const index = droppableIndex === -1
+        ? entries.findIndex((entry) => !entry.claimed && entry !== dropRecord)
+        : droppableIndex;
       if (index === -1) break;
       const [removed] = entries.splice(index, 1) as [Entry];
       forget(removed);
       droppedBytes += removed.bytes;
-      if (droppedEvents === 0) firstSeq = removed.event.seq;
-      lastSeq = removed.event.seq;
+      // The range, not the order of removal: liveness events go before
+      // protected ones, so the last event shed is not the newest one lost.
+      if (droppedEvents === 0 || removed.event.seq < firstSeq) firstSeq = removed.event.seq;
+      if (droppedEvents === 0 || removed.event.seq > lastSeq) lastSeq = removed.event.seq;
       droppedEvents += 1;
     }
     if (droppedEvents > 0) recordDrop(droppedEvents, droppedBytes, firstSeq, lastSeq);

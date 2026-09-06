@@ -77,13 +77,48 @@ test("sustained tool output holds the bound while lifecycle and error events sur
   );
 });
 
-test("a queue of only undroppable events exceeds the bound rather than losing the account of the Run", () => {
-  const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 500 });
-  for (let index = 0; index < 10; index += 1) queue.push(lifecycle("FINAL_OUTPUT"));
+test("protected traffic alone still holds the bound, by payload first and by event last", () => {
+  const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 500, maxEvents: 3 });
+  for (let index = 0; index < 1_000; index += 1) {
+    queue.push({ source: "CLAUDE", type: "ADAPTER_ERROR", payload: { error: "invalid-json", line: "x".repeat(200) } });
+    assert.ok(queue.length <= 4, `the count bound must hold under protected traffic, held ${queue.length}`);
+    assert.ok(queue.bytes <= 500 + 400, `the byte bound must hold under protected traffic, held ${queue.bytes}`);
+  }
 
-  assert.equal(queue.length, 10);
-  assert.ok(queue.bytes > 500);
-  assert.equal(queue.batch().filter((event) => event.type === EVENTS_DROPPED_EVENT_TYPE).length, 0);
+  const held = queue.batch();
+  const record = held.find((event) => event.type === EVENTS_DROPPED_EVENT_TYPE);
+  assert.ok(record, "shedding a protected event is recorded like any other loss");
+  const dropped = record.payload as { droppedEvents: number; firstDroppedSeq: number; lastDroppedSeq: number };
+  const survivors = held.filter((event) => event.type === "ADAPTER_ERROR");
+  assert.equal(dropped.droppedEvents + survivors.length, 1_000, "every pushed event is either held or counted as lost");
+  assert.ok(dropped.lastDroppedSeq >= dropped.firstDroppedSeq, "the record names the range it lost");
+  assert.ok(
+    survivors.every((event) => event.seq > dropped.lastDroppedSeq),
+    "what survives is the newest traffic, in order",
+  );
+});
+
+test("a protected event under pressure loses its payload before it loses its place", () => {
+  const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 1_200, maxEvents: 50 });
+  queue.push({ source: "CLAUDE", type: "FINAL_OUTPUT", payload: { text: "f".repeat(2_000) } });
+  queue.push({ source: "CLAUDE", type: "ADAPTER_ERROR", payload: { error: "e".repeat(2_000) } });
+
+  assert.equal(queue.length, 2, "no protected event is shed while one still has a payload to give");
+  assert.ok(queue.bytes <= 1_200, `the bound holds by truncation alone, held ${queue.bytes}`);
+  const held = queue.batch();
+  assert.deepEqual(held.map((event) => event.type), ["FINAL_OUTPUT", "ADAPTER_ERROR"]);
+  const marker = held[0]!.payload as { truncated?: boolean; originalBytes?: number };
+  assert.equal(marker.truncated, true, "the loss of the detail is recorded in the event itself");
+  assert.ok((marker.originalBytes ?? 0) > 2_000, "the marker carries the size it was cut from");
+});
+
+test("an event truncated at the per-event cap keeps its original size when pressure truncates it again", () => {
+  const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 400, maxEvents: 50, payloadMaxBytes: 2_000 });
+  queue.push({ source: "CLAUDE", type: "FINAL_OUTPUT", payload: { text: "f".repeat(100_000) } });
+
+  const marker = queue.batch()[0]!.payload as { truncated?: boolean; originalBytes?: number };
+  assert.equal(marker.truncated, true);
+  assert.ok((marker.originalBytes ?? 0) > 100_000, "the size reported is the provider's, not the first marker's");
 });
 
 test("a batch in flight is neither dropped by the bound nor released by count", () => {

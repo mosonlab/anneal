@@ -10,11 +10,15 @@ written.
 ## Unreleased
 
 - Session events are now bounded end to end. A runner holds at most 32 MiB and
-  20 000 undelivered events per Run: when that fills, the oldest liveness events
-  (streaming deltas, raw provider frames, captured stderr) are dropped and an
-  `EVENTS_DROPPED` event records how many and which sequence range; lifecycle,
-  tool, error and terminal events are never dropped. A single event payload
-  above 256 KiB is truncated to a `truncated` marker carrying its original size.
+  20 000 undelivered events per Run, and that bound is strict. When it fills,
+  the oldest liveness events — streaming deltas, raw provider frames, captured
+  stderr, provider status and tool output — are dropped first; if the queue is
+  still full, a lifecycle, error or terminal event keeps its place, type and
+  sequence number but loses its payload to a `truncated` marker, and only a
+  queue with nothing left to truncate sheds those events too. An
+  `EVENTS_DROPPED` event records how many and which sequence range were lost.
+  A single event payload above 256 KiB is truncated to a `truncated` marker
+  carrying its original size.
   `POST /runner/runs/:runId/events` enforces the same per-event cap and a
   request-body cap, answering 413 with the offending event's index so the runner
   drops that one event and resends the rest. Heartbeats now carry
