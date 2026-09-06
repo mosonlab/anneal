@@ -81,3 +81,36 @@ test("a real predecessor DONE transition clears blockedOn and changes the board 
   const resolvedBody = await resolved.json() as Array<{ id: string; blockedOn: unknown }>;
   assert.deepEqual(resolvedBody.find((card) => card.id === successor.id)?.blockedOn, null);
 });
+
+test("two chains bound to one predecessor both report it as blockedOn", async () => {
+  const project = await seedProject("board-fan-out");
+  const predecessor = await seedTask(project.id, "Shared predecessor", {
+    status: "DOING", chainId: "fan-out-predecessor", chainIndex: 0, chainLayer: 0,
+  });
+  const successors = [];
+  for (const label of ["A", "B"]) {
+    successors.push(await seedTask(project.id, `Successor ${label}`, {
+      status: "TODO", chainId: `fan-out-successor-${label}`, chainIndex: 0, chainLayer: 0,
+      dispatchAfterTaskId: predecessor.id,
+    }));
+  }
+
+  const response = await getBoard(project.id);
+  assert.equal(response.status, 200);
+  const cards = await response.json() as Array<{ id: string; blockedOn: unknown }>;
+  for (const successor of successors) {
+    assert.deepEqual(
+      cards.find((card) => card.id === successor.id)?.blockedOn,
+      { taskId: predecessor.id, taskName: predecessor.name },
+      `successor ${successor.name} must report the shared predecessor`,
+    );
+  }
+
+  // The one predecessor settles both bindings at once.
+  await db.task.update({ where: { id: predecessor.id }, data: { status: "DONE" } });
+  const resolved = await getBoard(project.id);
+  const resolvedCards = await resolved.json() as Array<{ id: string; blockedOn: unknown }>;
+  for (const successor of successors) {
+    assert.equal(resolvedCards.find((card) => card.id === successor.id)?.blockedOn, null);
+  }
+});

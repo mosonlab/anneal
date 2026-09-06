@@ -218,10 +218,12 @@ type BoundSuccessor = Prisma.TaskGetPayload<{
 }>;
 
 /**
- * Resolves the one successor bound to a completed predecessor. The caller
- * already owns the predecessor chain mutex; this function acquires the
- * successor chain mutex second and never the other way around. That order is
- * total because a binding can only point at a chain that pre-dates its own.
+ * Resolves one successor bound to a completed predecessor. The caller already
+ * owns the predecessor chain mutex; this function acquires the successor chain
+ * mutex second and never the other way around. That order is total because a
+ * binding can only point at a chain that pre-dates its own. A predecessor may
+ * have several bound successors; each is dispatched by its own call, so one
+ * successor's outcome never changes another's.
  */
 const dispatchBoundSuccessor = async (
   tx: Tx,
@@ -616,18 +618,25 @@ const activateChainSuccessorInternal = async (
     projectId: task.projectId,
     chainId: task.chainId,
   });
-  const boundSuccessor = current.status === TaskStatus.DONE
-    ? await tx.task.findUnique({
+  // A predecessor accepts several bound successors. Dispatching them in id
+  // order gives every completion the same total order over successor chain
+  // mutexes, so two completions can never take two successor locks crosswise.
+  const boundSuccessors = current.status === TaskStatus.DONE
+    ? await tx.task.findMany({
       where: { dispatchAfterTaskId: current.id },
       select: { id: true },
+      orderBy: { id: "asc" },
     })
-    : null;
+    : [];
+  const dispatchBoundSuccessors = async (predecessorTerminal: boolean): Promise<void> => {
+    for (const successor of boundSuccessors) {
+      await dispatchBoundSuccessor(tx, current, successor.id, now, predecessorTerminal);
+    }
+  };
   if (!currentRows.every((row) => row.status === TaskStatus.DONE)) {
     // The first review completion exits here while its blind sibling is still
     // unfinished; the second completion owns the join.
-    if (boundSuccessor) {
-      await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
-    }
+    await dispatchBoundSuccessors(false);
     return { nextTaskId: null, gated: false };
   }
   // A legacy chain can contain a historical DONE gap (for example an operator
@@ -665,23 +674,19 @@ const activateChainSuccessorInternal = async (
     layer: null,
     index: null,
   }, chainControl)) {
-    if (boundSuccessor && current.archivedAt === null) {
-      await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
-    }
+    if (current.archivedAt === null) await dispatchBoundSuccessors(false);
     return withholdSuccessorActivation(null);
   }
   if (nextLayer === undefined) {
     const predecessorComplete = chainRows.every((row) => row.status === TaskStatus.DONE);
-    if (!boundSuccessor || predecessorComplete) {
+    if (boundSuccessors.length === 0 || predecessorComplete) {
       await tx.taskActivity.create({ data: { taskId: current.id, actorType: "control-plane", body: "Chain complete" } });
     }
     // Archiving a predecessor does not resolve its binding. Production routes
     // cannot complete an archived task, but retaining this check also keeps
     // legacy/directly-seeded rows inert instead of dispatching from archived
     // history when an activation replay is attempted.
-    if (boundSuccessor && current.archivedAt === null) {
-      await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, predecessorComplete);
-    }
+    if (current.archivedAt === null) await dispatchBoundSuccessors(predecessorComplete);
     return { nextTaskId: null, gated: false };
   }
 
@@ -689,9 +694,7 @@ const activateChainSuccessorInternal = async (
   // legacy row or direct fixture nevertheless carries one, park it while the
   // predecessor Chain still has work. Bound dispatch belongs to the
   // successor's Chain, so a hold here must not change that outcome.
-  if (boundSuccessor) {
-    await dispatchBoundSuccessor(tx, current, boundSuccessor.id, now, false);
-  }
+  await dispatchBoundSuccessors(false);
 
   if (heldPredicate({
     projectId: task.projectId,
