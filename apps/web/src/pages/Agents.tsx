@@ -4,6 +4,7 @@ import { api } from "../lib/api";
 import { contentRevision, formatDate, formatDateTime, titleCase } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
+import { fatal } from "../lib/poll-state";
 import { useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
 import type { Agent, CodexServiceTier, Environment, FilesystemGrant, MCPConnection, RepoPermission, RunnerPreference, Skill, Repo } from "../lib/types";
@@ -65,6 +66,9 @@ export const NewAgent = ({ projectId, onClose, onCreated, initial }: {
         onClick={() => void submit()}>{t("agents.new.create")}</Button>
     }>
       {error === null ? null : <ErrorNotice message={error} />}
+      {fatal(environments.error, environments.data)
+        ? <ErrorNotice message={`${environments.error!.status} ${environments.error!.message}`} onRetry={environments.reload} />
+        : null}
       <Card title={t("agents.tab.setup")}>
         <div className={STACK}>
           <div className={FIELD_ROW}>
@@ -90,16 +94,10 @@ export const NewAgent = ({ projectId, onClose, onCreated, initial }: {
             </Select>
           </Field>
           <div><Link to="/settings" className="text-[var(--accent)] hover:underline">{t("agents.model.settingsHint")}</Link></div>
-          <Field label={t("agents.field.environment.label")} hint={t(environments.missing
-            ? "agents.field.environment.hint.missing"
-            : "agents.field.environment.hint")}>
-            {environments.data && environments.data.length > 0
-              ? (
-                <Select value={form.environmentId} onChange={(event) => setForm({ ...form, environmentId: event.target.value })}>
-                  {environments.data.map((environment) => <option key={environment.id} value={environment.id}>{environment.name}</option>)}
-                </Select>
-              )
-              : <Input type="text" value={form.environmentId} onChange={(event) => setForm({ ...form, environmentId: event.target.value })} placeholder="cuid" />}
+          <Field label={t("agents.field.environment.label")} hint={t("agents.field.environment.hint")}>
+            <Select value={form.environmentId} onChange={(event) => setForm({ ...form, environmentId: event.target.value })}>
+              {(environments.data ?? []).map((environment) => <option key={environment.id} value={environment.id}>{environment.name}</option>)}
+            </Select>
           </Field>
           <div className={ROW}>
             <Toggle on={form.inboxAccess} onChange={(next) => setForm({ ...form, inboxAccess: next })} label={t("agents.inbox.label")} />
@@ -239,7 +237,7 @@ export const AgentsPage = (): ReactNode => {
       <AgentsListTabs value={listTab} onChange={setListTab} />
 
       <div className={cn(STACK, "mt-4")}>
-        {error === null ? null : <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} />}
+        {fatal(error, data) ? <ErrorNotice message={`${error!.status} ${error!.message}`} onRetry={reload} /> : null}
         {actionError === null ? null : <ErrorNotice message={actionError} />}
         {duplicateError === null ? null : <ErrorNotice message={duplicateError} />}
         <Card flush>
@@ -604,8 +602,8 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
   const { data: siblings } = usePoll<Agent[]>(projectId === "" ? null : `/projects/${projectId}/agents`, 15_000);
   const { error: duplicateError, duplicate } = useDuplicateAgent(siblings ?? []);
 
-  if (error !== null && agent === null) {
-    return <Page><ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /></Page>;
+  if (fatal(error, agent)) {
+    return <Page><ErrorNotice message={`${error!.status} ${error!.message}`} onRetry={reload} /></Page>;
   }
   if (!agent) return <Page><EmptyState>{t("common.loading")}</EmptyState></Page>;
 

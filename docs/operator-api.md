@@ -2145,17 +2145,6 @@ curl -X POST "$BASE_URL/inbox/messages/$MESSAGE_ID/close" \
   -d '{"requestId":"close-001"}'
 ```
 
-### POST `/inbox/messages/:messageId/supersede`
-
-- Required path parameter: `messageId`.
-- Required JSON field: `requestId`.
-
-```sh
-curl -X POST "$BASE_URL/inbox/messages/$MESSAGE_ID/supersede" \
-  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"requestId":"supersede-001"}'
-```
-
 ## Sessions and runs
 
 The operator can list and inspect sessions, cancel runs, and page through run
