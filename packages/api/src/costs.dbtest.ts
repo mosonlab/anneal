@@ -518,22 +518,10 @@ test("a chain's readiness requeues and their grants are summed onto the chain ro
     costUsd: "1.0000",
     cacheCreationInputTokens: 0,
   } });
-  // Written the way the settlement writes them, so the SQL sum is read from
-  // the same rows and ordinals the control plane produces.
-  for (const [stale, current] of [[BASE_SHA, FIRST_DRIFT_SHA], [FIRST_DRIFT_SHA, SECOND_DRIFT_SHA]]) {
-    await recordReadinessRequeue(db, {
-      readinessTaskId: readiness.id,
-      regressionTaskId: readiness.id,
-      staleBaseSha: stale!,
-      currentBaseSha: current!,
-      budgetGrant: 1,
-      reason: "base moved before authorization",
-    });
-  }
-
   // Rows the counters must not read: the public activity route preserves
   // caller-supplied metadata, so any actor can post this kind, and a row
-  // without an ordinal is not a requeue the board can place either.
+  // without an ordinal is not a requeue the board can place either. Seeded
+  // before the real requeues, a counted one would also displace their ordinals.
   await db.taskActivity.createMany({ data: [
     {
       taskId: readiness.id,
@@ -554,6 +542,21 @@ test("a chain's readiness requeues and their grants are summed onto the chain ro
       metadata: { kind: MERGE_READINESS_REQUEUE_KIND, budgetGrant: 9 },
     },
   ] });
+
+  // Written the way the settlement writes them, so the SQL sum is read from
+  // the same rows and ordinals the control plane produces.
+  const ordinals: number[] = [];
+  for (const [stale, current] of [[BASE_SHA, FIRST_DRIFT_SHA], [FIRST_DRIFT_SHA, SECOND_DRIFT_SHA]]) {
+    ordinals.push((await recordReadinessRequeue(db, {
+      readinessTaskId: readiness.id,
+      regressionTaskId: readiness.id,
+      staleBaseSha: stale!,
+      currentBaseSha: current!,
+      budgetGrant: 1,
+      reason: "base moved before authorization",
+    })).ordinal);
+  }
+  assert.deepEqual(ordinals, [1, 2]);
 
   const report = await readProjectCosts(db, project.id, 7, "UTC", new Date());
 

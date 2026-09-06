@@ -521,9 +521,10 @@ test("consecutive pre-authorization requeues are counted on the readiness card",
   const firstDrift = "d".repeat(40);
   const secondDrift = "e".repeat(40);
   // The public activity route preserves caller-supplied metadata, so an
-  // operator or an agent can post a row carrying this kind. Seeded before the
-  // first settlement, a counted one would both inflate the card and push the
-  // first real ordinal past 1.
+  // operator or an agent can post a row carrying this kind, and a control-plane
+  // row of this kind can lack an ordinal the counters could place. Seeded
+  // before the first settlement, a counted one would both inflate the card and
+  // push the first real ordinal past 1.
   await db.taskActivity.createMany({ data: [
     {
       taskId: seeded.readiness.id,
@@ -536,6 +537,12 @@ test("consecutive pre-authorization requeues are counted on the readiness card",
       actorType: "agent",
       body: "agent note shaped like a requeue",
       metadata: { kind: MERGE_READINESS_REQUEUE_KIND, ordinal: 2, budgetGrant: 9 },
+    },
+    {
+      taskId: seeded.readiness.id,
+      actorType: "control-plane",
+      body: "unnumbered row shaped like a requeue",
+      metadata: { kind: MERGE_READINESS_REQUEUE_KIND, budgetGrant: 9 },
     },
   ] });
   assert.equal(
@@ -569,9 +576,10 @@ test("consecutive pre-authorization requeues are counted on the readiness card",
     },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
   });
-  assert.equal(requeues.length, 2);
+  // The unnumbered seed is still on the Task; it is simply not a requeue.
+  assert.equal(requeues.length, 3);
   assert.deepEqual(
-    requeues.map((row) => readinessRequeueFromMetadata(row.metadata)),
+    requeues.flatMap((row) => readinessRequeueFromMetadata(row.metadata) ?? []),
     [
       { ordinal: 1, staleBaseSha: BASE, currentBaseSha: firstDrift, budgetGrant: 1 },
       { ordinal: 2, staleBaseSha: firstDrift, currentBaseSha: secondDrift, budgetGrant: 1 },

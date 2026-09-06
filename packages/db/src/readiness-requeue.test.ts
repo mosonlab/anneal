@@ -26,8 +26,8 @@ const recordingTx = (rows: Row[] = []) => {
     && (row.metadata as { kind?: unknown } | null)?.kind === MERGE_READINESS_REQUEUE_KIND;
   const tx = {
     taskActivity: {
-      count: async ({ where }: { where: { taskId: string; actorType: string } }) =>
-        rows.filter((row) => matches(row, where)).length,
+      findMany: async ({ where }: { where: { taskId: string; actorType: string } }) =>
+        rows.filter((row) => matches(row, where)).map((row) => ({ metadata: row.metadata })),
       create: async ({ data }: { data: Row }) => {
         rows.push(data);
         return data;
@@ -83,6 +83,22 @@ test("an activity from any other actor does not advance the ordinal", async () =
     { taskId: "readiness", actorType: "agent", metadata: { kind: MERGE_READINESS_REQUEUE_KIND, ordinal: 2, budgetGrant: 7 } },
   ]);
   assert.equal((await requeue(tx, "a".repeat(40), "b".repeat(40))).ordinal, 1);
+});
+
+test("an unnumbered row does not consume an ordinal", async () => {
+  // A control-plane row of this kind without a numeric ordinal is invisible to
+  // the board and to the costs view, so it must not shift the numbering either.
+  const { tx, rows } = recordingTx([{
+    taskId: "readiness",
+    actorType: MERGE_READINESS_REQUEUE_ACTOR_TYPE,
+    metadata: { kind: MERGE_READINESS_REQUEUE_KIND, budgetGrant: 9 },
+  }]);
+  assert.equal((await requeue(tx, "a".repeat(40), "b".repeat(40))).ordinal, 1);
+  assert.equal((await requeue(tx, "b".repeat(40), "c".repeat(40))).ordinal, 2);
+  assert.deepEqual(readinessRequeueTotals(rows as { metadata: Prisma.JsonValue }[]), {
+    readinessRequeues: 2,
+    readinessGrants: 2,
+  });
 });
 
 test("a grant that the counters could not read back is refused", async () => {

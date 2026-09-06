@@ -2057,9 +2057,11 @@ curl "$BASE_URL/tasks/$TASK_ID/recurring-fires?take=10" -H "Authorization: Beare
   counts and the grants cannot disagree. `readinessRequeues` and
   `readinessGrants` on the board card and on a costs chain row are folds over
   these rows: over control-plane rows of this kind that carry a numeric
-  `ordinal`, and over those only. A row of this kind posted by any other actor
-  through `POST /tasks/:taskId/activity` is an ordinary note; it is never
-  counted and never advances the next requeue's `ordinal`.
+  `ordinal`, and over those only. The next requeue's `ordinal` is drawn from
+  exactly that row set, so a row the two views cannot count never shifts the
+  numbering: a row of this kind posted by any other actor through
+  `POST /tasks/:taskId/activity` is an ordinary note, and neither it nor an
+  unnumbered row is counted or consumes an `ordinal`.
 
 ```sh
 curl "$BASE_URL/tasks/$TASK_ID/activity" -H "Authorization: Bearer $OPERATOR_TOKEN"

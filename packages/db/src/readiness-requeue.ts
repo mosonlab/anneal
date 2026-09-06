@@ -23,8 +23,10 @@ export const MERGE_READINESS_REQUEUE_SCHEMA_VERSION = 1;
 export const MERGE_READINESS_REQUEUE_ACTOR_TYPE = "control-plane";
 
 /**
- * The one row set the counters are folded over, so the board and the costs view
- * cannot drift apart on which activity is a requeue.
+ * The rows the counters may read, narrowed to what a query can express. A row
+ * that passes this still has to carry a numeric ordinal to be a requeue, which
+ * only `readinessRequeueFromMetadata` can decide; every reader, and the ordinal
+ * itself, folds this row set through that check.
  */
 export const readinessRequeueActivityWhere = <T>(taskId: T) => ({
   taskId,
@@ -86,7 +88,8 @@ export const readinessRequeueTotals = (
 };
 
 /**
- * Records one pre-authorization requeue on the readiness Task.
+ * Records one pre-authorization requeue on the readiness Task, numbered by the
+ * requeues the counters can already read on this chain.
  *
  * The caller passes its settlement transaction, so the count cannot drift from
  * the grants: a settlement that rolls back takes its counter row with it.
@@ -114,11 +117,14 @@ export const recordReadinessRequeue = async (
   if (!Number.isInteger(input.budgetGrant) || input.budgetGrant < 0) {
     throw new Error(`readiness requeue budgetGrant must be a non-negative integer, got ${String(input.budgetGrant)}`);
   }
-  const prior = await tx.taskActivity.count({
+  // Counted the way the board and the costs view count, so an unnumbered row
+  // cannot consume an ordinal that neither of them can see.
+  const prior = await tx.taskActivity.findMany({
     where: readinessRequeueActivityWhere(input.readinessTaskId),
+    select: { metadata: true },
   });
   const requeue: ReadinessRequeue = {
-    ordinal: prior + 1,
+    ordinal: readinessRequeueTotals(prior).readinessRequeues + 1,
     staleBaseSha: input.staleBaseSha,
     currentBaseSha: input.currentBaseSha,
     budgetGrant: input.budgetGrant,
