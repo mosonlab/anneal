@@ -137,11 +137,22 @@ AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" AGENTOS_GATE_SERVER=pr
   local checkout may be detached or single-branch; its incomplete ref namespace
   is never mirrored and cannot delete worker refs.
 - If the primary is offline, its mirror push fails, its SSH connection drops,
-  or both of its slots are busy, the fallback receives the same frozen candidate
-  and baseline. A real `PASS`, `FAIL`, or `NOT AUTHORITATIVE` result is final;
+  or no usable primary slot can accept the gate because a primary slot is
+  unavailable, the fallback receives the same frozen candidate and baseline
+  immediately. A real `PASS`, `FAIL`, or `NOT AUTHORITATIVE` result is final;
   only absence of a verdict falls through to another machine. SSH connection
-  setup is bounded at 10 seconds, and a dead established connection is detected
-  by keepalives instead of waiting on the operating-system TCP timeout.
+  setup is bounded at 10 seconds, and a dead established connection is
+  detected by keepalives instead of waiting on the operating-system TCP
+  timeout.
+- When every primary slot is healthy but busy, the dispatcher waits for
+  `GATE_DISPATCH_FALLBACK_AFTER_MINUTES` minutes before trying the fallback
+  (default `6`, also used for an empty value; it accepts an integer from `0`
+  through `35791394`, and `0` tries the fallback
+  immediately). It keeps polling the primary during that grace period, so a
+  primary slot that frees up handles the gate before the slower fallback is
+  used. A broken or unavailable primary slot does not count as busy. A timeout
+  shorter than the grace can return `75` without probing fallback; increase
+  the timeout or reduce the grace if fallback must be eligible before timeout.
 - All usable slots busy: the dispatcher blocks and re-polls (default every 30s,
   for 60 minutes — `GATE_DISPATCH_POLL_SECONDS`,
   `GATE_DISPATCH_TIMEOUT_MINUTES`).
@@ -318,17 +329,27 @@ Each worker needs an SSH-reachable Ubuntu account that can `sudo`, plus a
 default destination. Configure `AGENTOS_GATE_SERVER` for one worker, configure
 `AGENTOS_GATE_PRIMARY_SERVER` and optionally
 `AGENTOS_GATE_FALLBACK_SERVER` for a two-host topology, or pass
-`--server <alias>` for one invocation.
+`--server <alias>` for one invocation. In two-host mode, a healthy primary
+whose slots are all busy gets a six-minute fallback grace period by default;
+set `GATE_DISPATCH_FALLBACK_AFTER_MINUTES` to a non-negative integer to change
+it, or to `0` for the immediate fallback behavior. An unavailable primary is
+not counted as busy, so its fallback remains immediate.
 
-Agent sessions receive a single operator-selected worker when their runner
+Agent sessions receive an operator-selected gate topology when their runner
 daemon is configured with `RUNNER_GATE_SERVER=<ssh-alias>`. The runner validates
-that destination and exposes it to the session as `AGENTOS_GATE_SERVER`, which
-puts `gate-dispatch.sh` into its existing single-server mode. To contribute local
-capacity, also set
+that destination. Without a fallback, it exposes it to the session as
+`AGENTOS_GATE_SERVER`, which puts `gate-dispatch.sh` into its existing
+single-server mode with one remote slot. When
+`RUNNER_GATE_FALLBACK_SERVER=<ssh-alias>` is also configured, the fallback must
+be a different destination; the runner exposes the pair as
+`AGENTOS_GATE_PRIMARY_SERVER` and `AGENTOS_GATE_FALLBACK_SERVER` and does not
+set `AGENTOS_GATE_SERVER`. This gives the primary two remote slots
+(`remote-1`, `remote-1-2`) and the fallback one (`remote-2`), tried in that
+order before polling. To contribute local capacity, also set
 `RUNNER_GATE_LOCAL_SLOTS=<positive integer, at most 1024>` on the runner. The
 runner then enables local dispatch and passes the count as
-`AGENTOS_GATE_LOCAL_SLOTS`; local slots are tried before that remote worker.
-Task secrets cannot override either runner-owned choice. If
+`AGENTOS_GATE_LOCAL_SLOTS`; local slots are tried before the configured remote
+topology. Task secrets cannot override any runner-owned gate variable. If
 `RUNNER_GATE_LOCAL_SLOTS` is unset, the session gets no local capacity. An unset
 `RUNNER_GATE_SERVER`
 provides no remote capacity to a canonical regression step, but a configured
