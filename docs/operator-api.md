@@ -1479,7 +1479,13 @@ The `board` view is a compact card projection. It includes `createdAt` for
 stable queue ordering, `assigneeType` so a human-owned task can be
 distinguished from an agent task whose agent assignment is missing, and
 `budgetRemaining`, the same run-budget verdict `GET /tasks/:taskId` and
-`GET /tasks/:taskId/startability` report.
+`GET /tasks/:taskId/startability` report. It also includes
+`leaseLossRefunds`: how many attempts the platform has refunded this task
+because it lost a Run — a lease declared LOST by reconciliation, a claim
+invalidated by a late salvage publication, a merge-tail requeue — as opposed to
+attempts its agent spent. It is bounded at three per task; at the bound the
+platform stops requeueing and parks the task for an operator, so a card showing
+`3` is one loss away from `REVIEW`. See "Lost-Run reconciliation" below.
 For a Chain member, the first emitted member also carries the
 `chainAggregate` projection. Its `activation.state` is one of
 `parked-unactivated`, `waiting-on-predecessor`, `running`, `idle`, `held`, or
@@ -1542,7 +1548,9 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
   reports in its checklist: whether the task's configured budget plus the
   grants its Runs carry still leaves an attempt. `POST /tasks/:taskId/retry`
   refuses with `409 Conflict` and `Run budget exhausted` when it is `false`;
-  raise `maxSessionsPerTask` through `PATCH /tasks/:taskId` to lift it.
+  raise `maxSessionsPerTask` through `PATCH /tasks/:taskId` to lift it. It is a
+  separate verdict from the board's `leaseLossRefunds`: a task can have budget
+  left and still be out of platform refunds.
 - `editableBrief` is the prompt text a caller may rewrite through `PATCH
   /tasks/:taskId` with `description`, already extracted: the brief alone for a
   Chain step that authors one, the whole stored description for an ordinary
@@ -2381,3 +2389,31 @@ refund is preserved. After fixing the cause of the rejected completion, recover
 by calling `POST /tasks/:taskId/retry`; the new Run does not require increasing
 `maxSessionsPerTask`. Mechanical Runs without that rejection record and agent
 Runs continue through the normal lost-Run retry path.
+
+That retry path is bounded and spaced. Each lost lease refunds the attempt it
+cost, and each refund raises the ceiling it is measured against, so the run
+budget alone can never end a pure lease-loss sequence. A task may therefore have
+at most three attempts refunded this way — counted on the Run as
+`leaseLossRefunds`, projected on the board card of the same name, and shared
+with the other platform-caused refunds (late-salvage claim invalidation, and the
+merge-tail requeue). Each replacement is queued with the completion path's
+exponential delay derived from that count (30s, then 60s, then 120s) rather than
+immediately, so a runner host that is down is given time to come back.
+
+At the bound nothing is requeued: the Task moves to `REVIEW` with
+`failureReason` beginning `Lease-loss retry refused: Lease-loss refunds
+exhausted`, an Inbox message, and a TaskActivity carrying
+`metadata.refusal = "lease-loss-refunds-exhausted"`. The refused refund is not
+granted, so the Task's recorded budget is what it was before the loss. Recover
+by raising `maxSessionsPerTask` through `PATCH /tasks/:taskId` and calling
+`POST /tasks/:taskId/retry`; an operator retry is not a platform refund, so it
+neither spends one nor resets the count, and a later lease loss on the retried
+Run is refused the same way. A late-salvage claim invalidation at the bound
+behaves the same: the stale claim is still revoked, because its clone base is
+wrong, but nothing replaces it and the Task is parked with the same reason.
+
+Readiness requeues that exhaust this shared bound also park the Regression and
+readiness Tasks in `REVIEW`, with a TaskActivity on Regression carrying
+`metadata.refusal = "lease-loss-refunds-exhausted"`. A recovery readiness requeue
+also parks its integrator and marks the recovery `BLOCKED_DOWNSTREAM`. The
+refund reason is preserved even when the ordinary run budget is also exhausted.
