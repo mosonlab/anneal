@@ -11,12 +11,12 @@
  *
  * The two channels run in different processes and different transactions; their
  * only shared ground is the database. So the proof line becomes a row, written
- * once at ingestion, and both channels require it.
+ * at ingestion, and both channels require it.
  *
  * `deriveGateAttestation` is pure and is the only place that decides whether an
  * output attests anything. Legacy `regression-verification` (v1) outputs carry
- * no proof line and are frozen, so they derive nothing and `requireGateAttestation`
- * leaves their chains alone.
+ * no proof line and derive nothing. Only registered pre-attestation generations
+ * with the frozen v1 Regression protocol receive the compatibility exemption.
  */
 
 import type { Prisma } from "@prisma/client";
@@ -25,6 +25,7 @@ import {
   REGRESSION_VERIFICATION_OUTPUT_KIND,
   parseRegressionVerdict,
 } from "./merge-tail.js";
+import { stepGeneration, stepRole } from "./step-role.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -58,8 +59,8 @@ export const deriveGateAttestation = (
 
 /**
  * Records the attestation an output carries. Idempotent on `(chainId, headSha)`:
- * a repair loop may re-persist the same passing verdict, and a Regression step
- * re-run at the same head attests the same fact.
+ * a repair loop may re-persist the same passing verdict. A new passing verdict
+ * at the same head refreshes its base and provenance for base-drift renewal.
  *
  * A chainless task cannot be merged by any channel, so it records nothing.
  */
@@ -86,7 +87,12 @@ export const recordGateAttestation = async (
       baseHeadSha: attestation.baseHeadSha,
       proof: attestation.proof,
     },
-    update: {},
+    update: {
+      baseHeadSha: attestation.baseHeadSha,
+      proof: attestation.proof,
+      taskId: input.taskId,
+      runId: input.runId,
+    },
   });
   return attestation;
 };
@@ -94,6 +100,21 @@ export const recordGateAttestation = async (
 export type GateAttestationRequirement =
   | { satisfied: true; attestation: GateAttestation | null }
   | { satisfied: false; reason: string };
+
+/**
+ * The Regression generations that predate the proof line, and are therefore the
+ * only ones a chain may present nothing for. Anything else — a later generation,
+ * or an outputKind this build does not recognise as a Regression Step at all —
+ * has to produce a row, because "no attestation found" must never be the same
+ * answer as "this chain was never asked for one".
+ */
+export const PRE_ATTESTATION_REGRESSION_GENERATIONS: readonly string[] = [
+  "v1",
+  "pre-narrow-regression-lease",
+  "pre-adjudication",
+  "pre-zero-gate",
+  "10", "9", "human-12", "regression-first-13", "human-6",
+];
 
 /**
  * Whether this chain may be authorized to merge `headSha`.
@@ -117,15 +138,21 @@ export const requireGateAttestation = async (
   if (found) return { satisfied: true, attestation: found };
   // The generation probe reads the chain's *step*, not its output: an output is
   // absent both before the Regression run lands and on a frozen v1 chain, and
-  // only the second may skip the requirement.
-  const regressionStep = await tx.task.findFirst({
-    where: {
-      chainId: input.chainId,
-      templateStep: { outputKind: REGRESSION_VERIFICATION_OUTPUT_KIND },
-    },
-    select: { id: true },
+  // only the second may skip the requirement. The exemption is stated as a
+  // registered generation rather than inferred from a failed match on the
+  // current outputKind, so renaming or adding a kind cannot silently exempt a
+  // chain the gate never signed for.
+  const chainSteps = await tx.task.findMany({
+    where: { chainId: input.chainId, templateStep: { isNot: null } },
+    select: { templateStep: { select: { outputKind: true, taskTemplate: { select: { name: true } } } } },
   });
-  if (!regressionStep) return { satisfied: true, attestation: null };
+  const regressionStep = chainSteps
+    .map((task) => task.templateStep)
+    .find((step) => step !== null && stepRole(step) === "regression") ?? null;
+  if (regressionStep?.outputKind === "regression-verification"
+    && PRE_ATTESTATION_REGRESSION_GENERATIONS.includes(stepGeneration(regressionStep))) {
+    return { satisfied: true, attestation: null };
+  }
   return {
     satisfied: false,
     reason: `no merge gate attestation for head ${input.headSha}; the gate never signed this commit`,
