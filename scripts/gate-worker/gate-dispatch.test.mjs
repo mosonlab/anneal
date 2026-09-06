@@ -1018,6 +1018,28 @@ test("an ssh transport failure retries the exact gate on the fallback", (t) => {
   assert.match(result.stderr, /running on fallback/);
 });
 
+test("a worker whose docker daemon is down sends the gate to the fallback", (t) => {
+  // The shape the gate's own preflight now produces, carried the whole way. A
+  // host with no reachable daemon judged nothing, so 76 and the `GATE NOT RUN:`
+  // line are what merge-gate.sh reports; the dispatcher must read that as
+  // capacity that could not run rather than as a verdict, and take the same
+  // commit to the fallback worker. While the preflight exited 1 the dispatcher
+  // stopped here and published `MERGE GATE: FAIL (docker preflight)` — a
+  // judgement about a commit that no gate had run a step against.
+  const repo = fixtureRepo(t, {
+    remoteGate:
+      'if [ "$1" = primary ]; then printf "GATE NOT RUN: the docker daemon on this host is not reachable\\n"; exit 76; fi;'
+      + ' printf "MERGE GATE: PASS fallback-after-docker-preflight\\n"',
+  });
+  writeFileSync(join(repo.root, "dirty.txt"), "dirty\n");
+  const result = dispatch(t, repo, [repo.head]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /^MERGE GATE: PASS fallback-after-docker-preflight$/m);
+  assert.doesNotMatch(result.stdout, /MERGE GATE: FAIL/u);
+  assert.match(result.stderr, /primary produced no verdict \(exit 76\); trying fallback capacity/u);
+  assert.match(result.stderr, /primary said: GATE NOT RUN: the docker daemon on this host is not reachable/u);
+});
+
 test("a primary FAIL is final and never falls back", (t) => {
   const repo = fixtureRepo(t, {
     remoteGate:
