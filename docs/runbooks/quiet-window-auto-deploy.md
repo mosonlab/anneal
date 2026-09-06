@@ -452,10 +452,15 @@ Step 2 of the activation sequence polls for zero blocking Runs every
 waits until the platform is quiet. The wait is measured, and crossing a budget
 tells the operator without changing when the deploy proceeds.
 
-The budget is **45 minutes** by default. Set `QUIET_WINDOW_WAIT_BUDGET_MINUTES`
-in the deployment environment to override it with an integer from 1 through
-1440; an out-of-range or non-integer value fails the deploy with
-`environment-invalid`.
+The budget is **45 minutes** by default. Override it by setting
+`QUIET_WINDOW_WAIT_BUDGET_MINUTES` in **`shared/.env`** on the deploying host,
+which the deploy loads into its environment before any phase runs. The
+installer-generated launchd plist and systemd unit carry a closed environment
+block and do not name this key, and the scheduled job inherits nothing from an
+operator shell, so `shared/.env` is the only location that reaches the deploy.
+The value is an integer from 1 through 1440; an out-of-range or non-integer
+value refuses the deploy with `environment-invalid` before the release
+artifact is built, leaving nothing to roll back.
 
 On crossing the budget the deploy, still waiting:
 
@@ -466,11 +471,17 @@ On crossing the budget the deploy, still waiting:
   runner that owns each Run;
 - sends one operator notification through the same Inbox notifier as an
   escalation, with `reason=quiet-window-wait-exceeded` and
-  `detail=elapsed-<seconds>s-budget-<seconds>s`.
+  `detail=still-waiting-elapsed-<seconds>s-budget-<seconds>s`. The notice is
+  scoped to the deployment attempt, so a later attempt with the same revisions
+  and the same timing raises its own message rather than reusing this one.
 
 No escalation marker is written, so no `--clear-escalation` is needed and the
 next scheduled deploy is not blocked by the alert. A wait that stays blocked
-re-alerts at most once per hour.
+re-alerts at most once per hour; an alert that fails to reach the Inbox does
+not consume that hour and is retried on the next poll. Delivery runs beside
+the polling loop, so a stalled notifier never delays acquiring the window. A
+wait that crosses the budget and then finds its window on the next poll still
+alerts and still records its event.
 
 The control-plane quiet-window query is **database-wide**: it counts every
 `claimed`, `provisioning`, or `running` Run in the platform database,
@@ -484,7 +495,7 @@ Every `HOLD quiet-window` line names both facts:
 ```
 HOLD quiet-window blockers=4 elapsed=2700s statuses=running,claimed
 HOLD quiet-window blockers=0 elapsed=180s deploy-barrier-contended
-HOLD quiet-window-wait-exceeded elapsed-2700s-budget-2700s blockers=4
+HOLD quiet-window-wait-exceeded still-waiting-elapsed-2700s-budget-2700s blockers=4
 ```
 
 #### Reading wait durations from the ledger

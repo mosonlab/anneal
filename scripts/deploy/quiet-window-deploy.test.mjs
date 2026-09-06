@@ -55,6 +55,7 @@ import { resolveServiceInvocation } from "./launchd-service-wrapper.mjs";
 import { buildReleaseArtifact, findReleaseArtifact, verifyReleaseArtifact } from "./release-artifact.mjs";
 import {
   autoDeployNoticeBody,
+  autoDeployNoticeDedupeKey,
   canonicalSyncNoticeRecord,
   canonicalSyncRefusedLines,
   createDeployHost,
@@ -2661,9 +2662,11 @@ test("a quiet-window wait over budget writes one ledger event and one notificati
   assert.deepEqual(notices, [{
     outcome: "failure",
     reason: "quiet-window-wait-exceeded",
-    detail: "elapsed-2700s-budget-2700s",
+    // The notice says in its own text that the deploy is still waiting.
+    detail: "still-waiting-elapsed-2700s-budget-2700s",
     from: revisions.from,
     to: revisions.to,
+    dedupeScope: "quiet-window-wait-ledger:2700",
   }]);
   // Informational only: no escalation marker is written next to the ledger.
   assert.equal(existsSync(join(stateDir, "escalated.json")), false);
@@ -2690,6 +2693,136 @@ test("a completed quiet-window wait is recorded on the attempt's ledger entries"
   assert.equal(snapshot.quiet_window_wait_polls, 6);
   assert.equal(snapshot.quiet_window_wait_peak_blocking_runs, 4);
   assert.equal(snapshot.quiet_window_blocking_runs_by_runner, null);
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+test("an over-budget alert dedupes within its attempt and not across attempts", async () => {
+  const event = {
+    elapsedMs: 2_700_000,
+    elapsedSeconds: 2_700,
+    polls: 45,
+    peakBlockingRuns: 7,
+    blockingRuns: 5,
+    budgetMs: 2_700_000,
+    blockingRunsByRunner: { "mac-runner-1": 5 },
+  };
+  const keys = [];
+  const reporterFor = (transactionId) => {
+    const attempt = openDeploymentAttempt({ deployRoot: "/fixture", targetCommit: revisions.to, transactionId });
+    attempt.establish({ revisions });
+    return createQuietWindowWaitReporter({
+      attempt,
+      revisions,
+      notify: async ({ dedupeScope, ...record }) => {
+        keys.push(autoDeployNoticeDedupeKey(autoDeployNoticeBody(record), dedupeScope));
+      },
+      log: () => undefined,
+    });
+  };
+  const first = reporterFor("attempt-one");
+  await first(event);
+  await first(event);
+  await reporterFor("attempt-two")(event);
+  // The same crossing reported twice is one Inbox record; a later attempt with
+  // identical revisions and identical timing raises its own.
+  assert.equal(keys[0], keys[1]);
+  assert.notEqual(keys[0], keys[2]);
+  // An unscoped notice keys on its text alone, as every deploy outcome does.
+  assert.notEqual(keys[0], autoDeployNoticeDedupeKey("[auto-deploy] failure: a -> b; reason=x"));
+});
+
+test("an undelivered over-budget alert reports itself undelivered", async () => {
+  const attempt = openDeploymentAttempt({
+    deployRoot: "/fixture",
+    targetCommit: revisions.to,
+    transactionId: "quiet-window-wait-undelivered",
+  });
+  attempt.establish({ revisions });
+  const lines = [];
+  const outcome = await createQuietWindowWaitReporter({
+    attempt,
+    revisions,
+    notify: async () => { throw new DeployFailure("inbox-notification-failed", "unreachable"); },
+    log: (line) => lines.push(line),
+  })({ elapsedSeconds: 2_700, polls: 45, peakBlockingRuns: 7, blockingRuns: 5, budgetMs: 2_700_000, blockingRunsByRunner: {} });
+  // The wait reads this and retries on its next poll instead of staying silent
+  // for the rest of the alert interval.
+  assert.deepEqual(outcome, { delivered: false });
+  assert.ok(lines.some((line) => line.endsWith("quiet-window-wait-alert-undelivered")));
+});
+
+test("the quiet-window wait, its alert and its recorded distribution are one path", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "anneal-deploy-quiet-wired-"));
+  const attempt = openDeploymentAttempt({
+    deployRoot: "/fixture",
+    targetCommit: revisions.to,
+    transactionId: "quiet-window-wired",
+  });
+  const ledger = createDeploymentLedger({ stateDir, targetCommit: revisions.to });
+  ledger.start();
+  attempt.establish({ revisions, ledger });
+  const notices = [];
+  const barrier = { release: async () => undefined };
+  let polls = 0;
+  const host = createDeployHost({
+    serviceControl: { platform: "linux", restart: async () => undefined, isRunning: async () => true, describe: async () => "" },
+    environment: controlPlaneEnvironment(),
+    // Every poll is over budget, so only the alert interval can hold the
+    // notification to one.
+    waitBudgetMs: 0,
+    blockingRunsAdapter: async () => (polls < 2
+      ? [{ id: "run-1", status: "running", runnerId: "mac-runner-1" }, { id: "run-2", status: "claimed", runnerId: "vm-control-plane" }]
+      : []),
+    acquireBarrier: async () => barrier,
+    createWatchdog: async () => ({ release: async () => undefined }),
+    pollWait: async () => { polls += 1; await new Promise((accept) => { setImmediate(accept); }); },
+    notify: async (record) => { notices.push(record); },
+  });
+  const facts = await host.waitForQuiet(attempt);
+  attempt.establish(facts);
+  assert.equal(facts.barrier, barrier);
+  assert.equal(facts.quietWindowWait.polls, 3);
+  assert.equal(facts.quietWindowWait.peakBlockingRuns, 2);
+  assert.ok(Number.isSafeInteger(facts.quietWindowWait.waitSeconds) && facts.quietWindowWait.waitSeconds >= 0);
+  const events = readFileSync(ledger.eventsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const exceeded = events.filter((event) => event.phase === "QUIET_WINDOW_WAIT_EXCEEDED");
+  assert.equal(exceeded.length, 1);
+  assert.deepEqual(exceeded[0].quiet_window_blocking_runs_by_runner, { "mac-runner-1": 1, "vm-control-plane": 1 });
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].reason, "quiet-window-wait-exceeded");
+  ledger.record("SUCCEEDED", attempt.ledgerMetadata());
+  const snapshot = JSON.parse(readFileSync(ledger.statePath, "utf8"));
+  assert.equal(snapshot.quiet_window_wait_polls, 3);
+  assert.equal(snapshot.quiet_window_wait_peak_blocking_runs, 2);
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+test("a misconfigured wait budget refuses before the deploy builds anything", () => {
+  assert.throws(
+    () => createDeployHost({
+      serviceControl: { platform: "linux", restart: async () => undefined, isRunning: async () => true, describe: async () => "" },
+      environment: controlPlaneEnvironment({ QUIET_WINDOW_WAIT_BUDGET_MINUTES: "0" }),
+    }),
+    (error) => error instanceof DeployFailure
+      && error.reason === "environment-invalid"
+      && error.detail === "QUIET_WINDOW_WAIT_BUDGET_MINUTES-0",
+  );
+});
+
+test("blocking-run counts survive runner ids that name Object prototype members", () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "anneal-deploy-quiet-runners-"));
+  const ledger = createDeploymentLedger({ stateDir, targetCommit: revisions.to });
+  ledger.start();
+  const counts = Object.fromEntries([["toString", 2], ["constructor", 3], ["__proto__", 1]]);
+  ledger.record("QUIET_WINDOW_WAIT_EXCEEDED", {
+    targetCommit: revisions.to,
+    quietWindowWaitSeconds: 2_700,
+    quietWindowBlockingRunsByRunner: counts,
+  });
+  const events = readFileSync(ledger.eventsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const exceeded = events.filter((event) => event.phase === "QUIET_WINDOW_WAIT_EXCEEDED");
+  assert.equal(exceeded.length, 1);
+  assert.deepEqual(exceeded[0].quiet_window_blocking_runs_by_runner, counts);
   rmSync(stateDir, { recursive: true, force: true });
 });
 

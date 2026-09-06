@@ -59,6 +59,7 @@ import {
   DEPLOY_STEP_TIMEOUT_MS,
   deployBarrierTimeoutMsForRole,
   MIGRATION_DEPLOY_TIMEOUT_REASON,
+  DEFAULT_QUIET_WINDOW_WAIT_BUDGET_MS,
   QUIET_WINDOW_WAIT_EXCEEDED_REASON,
   quietWindowWaitBudgetMs,
   waitForEscalationClear,
@@ -483,11 +484,18 @@ const blockingRuns = async (runnerIds = null) => {
   }
 };
 
-const notify = async ({ outcome, reason, detail = "", from, to }) => {
+export const autoDeployNoticeDedupeKey = (body, dedupeScope = null) =>
+  `auto-deploy:${createHash("sha256").update(dedupeScope === null ? body : `${dedupeScope}\n${body}`).digest("hex")}`;
+
+/** `dedupeScope` names what the notice is about when its text alone does not.
+ * Deploy outcomes dedupe on their text; a per-attempt alert scopes its key to
+ * the attempt, so a later attempt with the same revisions and the same timing
+ * still reaches the operator instead of colliding with the earlier record. */
+const notify = async ({ outcome, reason, detail = "", from, to, dedupeScope = null }) => {
   if (outcome === "success") throwIfInterrupted();
   const db = await database();
   const body = autoDeployNoticeBody({ outcome, reason, detail, from, to });
-  const dedupeKey = `auto-deploy:${createHash("sha256").update(body).digest("hex")}`;
+  const dedupeKey = autoDeployNoticeDedupeKey(body, dedupeScope);
   try {
     const chatId = process.env.FEISHU_DEFAULT_CHAT_ID;
     if (!chatId) fail("environment-unreadable", "FEISHU_DEFAULT_CHAT_ID-missing");
@@ -605,16 +613,19 @@ const acquireDeployBarrier = async () => {
 export const quietWindowHoldLine = (progress, detail) =>
   `HOLD quiet-window blockers=${progress.blockingRuns} elapsed=${progress.elapsedSeconds}s${detail ? ` ${detail}` : ""}`;
 
-const waitForQuiet = (
+const waitForQuiet = ({
   startWatchdog,
-  blockingRunsForHost = () => blockingRuns(),
+  blockingRuns: blockingRunsForHost = () => blockingRuns(),
   onWaitBudgetExceeded = () => undefined,
-) => waitForQuietWithWatchdog({
+  waitBudgetMs = DEFAULT_QUIET_WINDOW_WAIT_BUDGET_MS,
+  acquireBarrier = acquireDeployBarrier,
+  wait = () => sleep(POLL_MS),
+}) => waitForQuietWithWatchdog({
   blockingRuns: blockingRunsForHost,
-  acquireBarrier: acquireDeployBarrier,
+  acquireBarrier,
   startWatchdog,
-  wait: () => sleep(POLL_MS),
-  waitBudgetMs: quietWindowWaitBudgetMs(process.env),
+  wait,
+  waitBudgetMs,
   onWaitBudgetExceeded,
   onBlockingRuns: (runs, progress) => log(quietWindowHoldLine(progress, `statuses=${[...new Set(runs.map((run) => run.status))].join(",")}`)),
   onBarrierContended: (progress) => log(quietWindowHoldLine(progress, "deploy-barrier-contended")),
@@ -631,7 +642,10 @@ export const createQuietWindowWaitReporter = ({
   notify: notifyImpl = notify,
   log: logImpl = log,
 }) => async (event) => {
-  const detail = `elapsed-${event.elapsedSeconds}s-budget-${Math.round(event.budgetMs / 1_000)}s`;
+  // The notice is delivered on the escalation notifier's open path, so it says
+  // in its own text that the deploy is still waiting: nothing is broken and no
+  // escalation marker exists to clear.
+  const detail = `still-waiting-elapsed-${event.elapsedSeconds}s-budget-${Math.round(event.budgetMs / 1_000)}s`;
   logImpl(`HOLD quiet-window-wait-exceeded ${detail} blockers=${event.blockingRuns}`);
   try {
     attempt.fact("ledger")?.record("QUIET_WINDOW_WAIT_EXCEEDED", attempt.ledgerMetadata({
@@ -651,11 +665,15 @@ export const createQuietWindowWaitReporter = ({
       detail,
       from: revisions.from,
       to: revisions.to,
+      dedupeScope: `${attempt.transactionId}:${event.elapsedSeconds}`,
     });
   } catch (error) {
     const failure = failureOf(error);
     logImpl(`STOP ${failure.reason} detail=${failure.detail}; quiet-window-wait-alert-undelivered`);
+    // An undelivered alert must not consume the hour: the wait retries it.
+    return { delivered: false };
   }
+  return { delivered: true };
 };
 
 const acquireLock = async () => {
@@ -878,6 +896,17 @@ export const createDeployHost = ({
   fetchImpl = fetch,
   blockingRunsAdapter = null,
   observationWindowMs = resolveObservationWindowMs(environment),
+  // Resolved before any phase runs, so a misconfigured budget refuses the
+  // deploy before the release artifact is built rather than after.
+  waitBudgetMs = quietWindowWaitBudgetMs(environment),
+  // What the quiet-window wait reaches outside this process: the barrier
+  // advisory lock, the watchdog child, the poll sleep, and the Inbox. A
+  // fixture substitutes them to prove the wait, its alert and its recorded
+  // distribution stay wired together.
+  acquireBarrier = acquireDeployBarrier,
+  createWatchdog = createBarrierWatchdog,
+  pollWait = () => sleep(POLL_MS),
+  notify: notifyImpl = notify,
   // The pre-window allowance to reach the first all-green sample is unchanged;
   // the window is added on top of it rather than taken out of it.
   serviceVerificationTimeoutMs = observationWindowMs + 30_000,
@@ -938,7 +967,7 @@ export const createDeployHost = ({
     }
   };
   let canonicalSyncRefusals = [];
-  const notifyDeployOutcome = async (record) => notify(canonicalSyncNoticeRecord(record, canonicalSyncRefusals));
+  const notifyDeployOutcome = async (record) => notifyImpl(canonicalSyncNoticeRecord(record, canonicalSyncRefusals));
   return createProductionHost({
     selfClearEscalation: async (attempt) => {
       const pending = attempt.fact("retryEscalation");
@@ -1029,32 +1058,39 @@ export const createDeployHost = ({
     waitForQuiet: async (attempt) => {
       const revisions = attempt.requireFact("revisions");
       const barrierTimeoutMs = deployBarrierTimeoutMsForRole(deployRole, serviceLabels.length);
-      const { barrier, watchdog, quietWindowWait } = await waitForQuiet(() => createBarrierWatchdog({
-        timeoutMs: barrierTimeoutMs,
-        escalationPath: ESCALATION_PATH,
-        escalationRecord: {
-          outcome: "failure",
-          reason: BARRIER_TIMEOUT_REASON,
-          detail: `budget-${barrierTimeoutMs}ms`,
-          from: revisions.from,
-          to: revisions.to,
-        },
-        onTimeout: async () => {
-          const failure = new DeployFailure(
-            BARRIER_TIMEOUT_REASON,
-            `budget-${barrierTimeoutMs}ms`,
-          );
-          if (!interruption.interruptWithFailure(failure)) return;
-          log(`STOP ${failure.reason} detail=${failure.detail}`);
-        },
-        onError: (error) => {
-          const failure = error instanceof DeployFailure
-            ? error
-            : new DeployFailure("deploy-barrier-watchdog-alert-failed", error instanceof Error ? error.name : "unknown");
-          log(`STOP ${failure.reason} detail=${failure.detail}`);
-          interruption.interruptWithFailure(failure);
-        },
-      }), scopedBlockingRuns, createQuietWindowWaitReporter({ attempt, revisions }));
+      const { barrier, watchdog, quietWindowWait } = await waitForQuiet({
+        blockingRuns: scopedBlockingRuns,
+        onWaitBudgetExceeded: createQuietWindowWaitReporter({ attempt, revisions, notify: notifyImpl }),
+        waitBudgetMs,
+        acquireBarrier,
+        wait: pollWait,
+        startWatchdog: () => createWatchdog({
+          timeoutMs: barrierTimeoutMs,
+          escalationPath: ESCALATION_PATH,
+          escalationRecord: {
+            outcome: "failure",
+            reason: BARRIER_TIMEOUT_REASON,
+            detail: `budget-${barrierTimeoutMs}ms`,
+            from: revisions.from,
+            to: revisions.to,
+          },
+          onTimeout: async () => {
+            const failure = new DeployFailure(
+              BARRIER_TIMEOUT_REASON,
+              `budget-${barrierTimeoutMs}ms`,
+            );
+            if (!interruption.interruptWithFailure(failure)) return;
+            log(`STOP ${failure.reason} detail=${failure.detail}`);
+          },
+          onError: (error) => {
+            const failure = error instanceof DeployFailure
+              ? error
+              : new DeployFailure("deploy-barrier-watchdog-alert-failed", error instanceof Error ? error.name : "unknown");
+            log(`STOP ${failure.reason} detail=${failure.detail}`);
+            interruption.interruptWithFailure(failure);
+          },
+        }),
+      });
       log(`PASS quiet-window deploy-barrier-held blockers=0 elapsed=${quietWindowWait.waitSeconds}s polls=${quietWindowWait.polls}`);
       return { barrier, quietWindowWait, resources: [barrier, watchdog] };
     },

@@ -95,12 +95,15 @@ export const quietWindowWaitBudgetMs = (environment = process.env) => {
  * quiet-window query is database-wide, so these counts name runner-only hosts
  * as well as the deploying host. */
 export const blockingRunCountsByRunner = (runs) => {
-  const counts = {};
+  // A runner id is an arbitrary string, so the counts accumulate in a Map:
+  // ids that name Object prototype members ("toString", "__proto__") are data
+  // here, not inherited properties that would corrupt the tally.
+  const counts = new Map();
   for (const run of runs ?? []) {
     const runner = typeof run?.runnerId === "string" && run.runnerId !== "" ? run.runnerId : "unassigned";
-    counts[runner] = (counts[runner] ?? 0) + 1;
+    counts.set(runner, (counts.get(runner) ?? 0) + 1);
   }
-  return counts;
+  return Object.fromEntries(counts);
 };
 
 export const BARRIER_TIMEOUT_REASON = "deploy-barrier-timeout";
@@ -154,6 +157,7 @@ export const waitForQuietWithWatchdog = async ({
   let polls = 0;
   let peakBlockingRuns = 0;
   let lastAlertElapsedMs = null;
+  let alertInFlight = false;
   const elapsedMs = () => Math.max(0, now() - startedAt);
   const toSeconds = (milliseconds) => Math.round(milliseconds / 1_000);
   const observe = (runs) => {
@@ -167,16 +171,28 @@ export const waitForQuietWithWatchdog = async ({
       blockingRuns: runs.length,
     };
   };
-  const alertIfOverBudget = async (runs) => {
+  /** The alert is informational, so it is delivered beside the loop rather
+   * than inside it: a notifier that never settles must not stop the polling
+   * that acquires the quiet window. Only a delivered alert consumes the
+   * interval; an undelivered one is retried on the next poll. */
+  const alertIfOverBudget = (runs) => {
     const elapsed = elapsedMs();
     if (elapsed < waitBudgetMs) return;
+    if (alertInFlight) return;
     if (lastAlertElapsedMs !== null && elapsed - lastAlertElapsedMs < alertIntervalMs) return;
-    lastAlertElapsedMs = elapsed;
-    await onWaitBudgetExceeded({
+    alertInFlight = true;
+    const event = {
       ...observe(runs),
       budgetMs: waitBudgetMs,
       blockingRunsByRunner: blockingRunCountsByRunner(runs),
-    });
+    };
+    Promise.resolve()
+      .then(() => onWaitBudgetExceeded(event))
+      .then(
+        (result) => { if (result?.delivered !== false) lastAlertElapsedMs = elapsed; },
+        () => undefined,
+      )
+      .finally(() => { alertInFlight = false; });
   };
   const completedWait = () => Object.freeze({
     waitSeconds: toSeconds(elapsedMs()),
@@ -188,14 +204,14 @@ export const waitForQuietWithWatchdog = async ({
     const before = await blockingRuns();
     if (before.length > 0) {
       onBlockingRuns(before, observe(before));
-      await alertIfOverBudget(before);
+      alertIfOverBudget(before);
       await wait();
       continue;
     }
     const barrier = await acquireBarrier();
     if (barrier === null) {
       onBarrierContended(observe([]));
-      await alertIfOverBudget([]);
+      alertIfOverBudget([]);
       await wait();
       continue;
     }
@@ -204,7 +220,13 @@ export const waitForQuietWithWatchdog = async ({
     try {
       watchdog = await startWatchdog();
       const after = await blockingRuns();
-      if (after.length === 0) return { barrier, watchdog, quietWindowWait: completedWait() };
+      // The window can open after the budget has already passed, so the
+      // crossing is reported here too: a completed over-budget wait is never
+      // silent just because the last poll succeeded.
+      if (after.length === 0) {
+        alertIfOverBudget([]);
+        return { barrier, watchdog, quietWindowWait: completedWait() };
+      }
       raced = after;
       await watchdog.release();
       await barrier.release();
@@ -214,7 +236,7 @@ export const waitForQuietWithWatchdog = async ({
       await barrier.release().catch(() => undefined);
       throw error;
     }
-    await alertIfOverBudget(raced);
+    alertIfOverBudget(raced);
     await wait();
   }
 };
