@@ -2142,6 +2142,65 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/merge-target" \
   -d '{"prNumber":42}'
 ```
 
+## Merge lease
+
+### GET `/merge-lease`
+
+- Required parameters: none.
+
+```sh
+curl "$BASE_URL/merge-lease" -H "Authorization: Bearer $OPERATOR_TOKEN"
+```
+
+Operator-scoped and read-only; runner, merge-executor and session credentials
+are refused with 403 before origin or the ledger is read. It runs
+`scripts/merge-lease.sh status`, which writes nothing to
+origin, and reads the merge Lease ledger. It never acquires, releases or steals:
+breaking a lease is a human decision made at the script with
+`scripts/merge-lease.sh steal --human --reason "..."`, which is also the only
+way to skip the 45-minute machine threshold.
+
+Response fields:
+
+- `checkedAt` — when the API finished reading origin. `ageSeconds` is measured
+  from this same instant, so neither under-reports the time the read took.
+- `holder` — the lease standing on `refs/merge-lease/holder`, or `null` when no
+  lease is held. It carries `holder` (`user@host`), `task`, `reason`,
+  `acquiredAt`, `ageSeconds` (whole seconds from `acquiredAt` to `checkedAt`,
+  `null` when `acquiredAt` is not a time), and `sha` (the lease blob on origin).
+  `task`, `reason` and `sha` may be `null`.
+- `unavailable` — why the holder could not be read, or `null`. `holder` and
+  `unavailable` are never both set; the ledger is still returned when origin
+  could not be reached, because that history is what an operator needs when the
+  remote is the broken part.
+- `events` — the 20 most recent `MergeLeaseEvent` rows, newest first. `state` is
+  one of `HANDOFF_PENDING`, `RELEASE_DEFERRED`, `CONTENDED`, `RELEASED`, or
+  `INVALID`. A `CONTENDED` row is an observation rather than a lifecycle: a
+  chain that could not take the lease for longer than
+  `MERGE_LEASE_CONTENTION_ALERT_MINUTES` (default 30), recorded with the holder
+  that was in the way in `failureDetail`, that holder's `acquiredAt`, and
+  `settledAt` at the moment it was alerted. Each uninterrupted episode of
+  contention is recorded and alerted once; a tick that takes the lease, cannot
+  reach origin, or settles before reaching for the lease ends the episode, and
+  the next contention starts a new window. Contention is never stolen
+  automatically.
+
+```json
+{
+  "checkedAt": "2026-09-06T12:00:00.000Z",
+  "holder": {
+    "holder": "runner@executor",
+    "task": "chain-42",
+    "reason": "chain merge tail chain-42",
+    "acquiredAt": "2026-09-06T11:00:00.000Z",
+    "ageSeconds": 3600,
+    "sha": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+  },
+  "unavailable": null,
+  "events": []
+}
+```
+
 ## Inbox
 
 ### GET `/inbox/messages`
