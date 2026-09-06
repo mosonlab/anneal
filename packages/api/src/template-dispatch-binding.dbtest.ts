@@ -462,7 +462,7 @@ test("a predecessor accepts several bound successor chains and records one bindi
     bound.map((task) => task.chainId).sort(),
     [first.body.chainId, second.body.chainId, third.body.chainId].sort(),
   );
-  assert.deepEqual(bound.map((task) => task.chainIndex), [0, 0, 0]);
+  assert.deepEqual(bound.map((task) => task.chainIndex), [1, 1, 1]);
   // One binding activity per successor, not one per predecessor.
   assert.equal(
     await db.taskActivity.count({ where: { taskId: predecessor.id, body: { contains: "bound to predecessor" } } }),
@@ -541,7 +541,7 @@ test("deleting one bound chain releases only its own binding", async () => {
     chainIds.push(created.body.chainId as string);
   }
   const [releasedChainId, retainedChainId] = chainIds as [string, string];
-  const releasedFirst = await db.task.findFirstOrThrow({ where: { chainId: releasedChainId, chainIndex: 0 } });
+  const releasedFirst = await db.task.findFirstOrThrow({ where: { chainId: releasedChainId, chainIndex: 1 } });
 
   const deleted = await operatorRequest(`/tasks/${releasedFirst.id}/chain`, "DELETE");
   assert.equal(deleted.status, 204, JSON.stringify(deleted.body));
