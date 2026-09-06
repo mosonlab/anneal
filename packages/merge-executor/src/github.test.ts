@@ -244,6 +244,116 @@ test("a repository identifier is split strictly", () => {
   assert.equal(splitRepository("owner"), null);
 });
 
+const repositoryReference = { owner: "owner", name: "name" };
+const trainHead = "c".repeat(40);
+const trainBase = "b".repeat(40);
+
+test("train reads the repository's default branch and its exact ref oid", async () => {
+  const { client, requests } = clientWith([
+    { status: 200, body: JSON.stringify({ default_branch: "main" }) },
+    { status: 200, body: JSON.stringify({ ref: "refs/heads/main", object: { type: "commit", sha: trainBase } }) },
+  ]);
+  assert.deepEqual(await client.readDefaultBranch(repositoryReference), { status: "ok", name: "main", oid: trainBase });
+  assert.deepEqual(requests.map(({ method, url }) => ({ method, url })), [
+    { method: "GET", url: "https://api.github.test/repos/owner/name" },
+    { method: "GET", url: "https://api.github.test/repos/owner/name/git/ref/heads/main" },
+  ]);
+});
+
+test("train ref reads distinguish a missing ref from an API failure", async () => {
+  const missing = clientWith([{ status: 404, body: "missing" }]);
+  assert.deepEqual(await missing.client.readRef(repositoryReference, "refs/anneal/train/" + trainHead), { status: "ok", oid: null });
+
+  const malformed = clientWith([{ status: 200, body: JSON.stringify({ object: { sha: 7 } }) }]);
+  const malformedResult = await malformed.client.readRef(repositoryReference, "refs/anneal/train/" + trainHead);
+  assert.equal(malformedResult.status, "api-error");
+
+  const failed = clientWith([{ status: 500, body: "upstream" }]);
+  const failedResult = await failed.client.readRef(repositoryReference, "refs/anneal/train/" + trainHead);
+  assert.equal(failedResult.status, "api-error");
+});
+
+test("train ancestry compares GitHub's strict compare statuses", async () => {
+  for (const [status, expected] of [["ahead", true], ["identical", true], ["behind", false], ["diverged", false]] as const) {
+    const { client, requests } = clientWith([{ status: 200, body: JSON.stringify({ status }) }]);
+    assert.deepEqual(await client.isAncestor(repositoryReference, trainBase, trainHead), { status: "ok", ancestor: expected });
+    assert.equal(requests[0]!.url, `https://api.github.test/repos/owner/name/compare/${trainBase}...${trainHead}`);
+  }
+  const unknown = clientWith([{ status: 200, body: JSON.stringify({ status: "unknown" }) }]);
+  const result = await unknown.client.isAncestor(repositoryReference, trainBase, trainHead);
+  assert.equal(result.status, "api-error");
+});
+
+test("train commit reads require an exact sha and strictly shaped parent shas", async () => {
+  const predecessor = "a".repeat(40);
+  const { client, requests } = clientWith([{
+    status: 200,
+    body: JSON.stringify({ sha: trainHead, parents: [{ sha: predecessor }, { sha: trainBase }] }),
+  }]);
+  assert.deepEqual(await client.readCommit(repositoryReference, trainHead), {
+    status: "ok",
+    commit: { oid: trainHead, parents: [predecessor, trainBase] },
+  });
+  assert.equal(requests[0]!.url, `https://api.github.test/repos/owner/name/git/commits/${trainHead}`);
+
+  for (const body of [
+    { sha: "d".repeat(40), parents: [] },
+    { sha: trainHead, parents: [{ sha: "short" }] },
+    { sha: trainHead, parents: [{ sha: 7 }] },
+    { sha: trainHead },
+  ]) {
+    const malformed = clientWith([{ status: 200, body: JSON.stringify(body) }]);
+    assert.equal((await malformed.client.readCommit(repositoryReference, trainHead)).status, "api-error");
+  }
+});
+
+test("train publication is a non-forced PATCH and only 409/422 are deterministic rejections", async () => {
+  const { client, requests } = clientWith([{ status: 200, body: JSON.stringify({ ref: "refs/heads/main", object: { sha: trainHead } }) }]);
+  assert.deepEqual(await client.publishTrain(repositoryReference, "main", trainHead), { status: "published" });
+  assert.equal(requests[0]!.method, "PATCH");
+  assert.equal(requests[0]!.url, "https://api.github.test/repos/owner/name/git/refs/heads/main");
+  assert.deepEqual(JSON.parse(requests[0]!.body!), { sha: trainHead, force: false });
+
+  for (const status of [409, 422]) {
+    const rejected = clientWith([{ status, body: "ref refused" }]);
+    const result = await rejected.client.publishTrain(repositoryReference, "main", trainHead);
+    assert.equal(result.status, "rejected");
+    assert.match(result.status === "rejected" ? result.reason : "", new RegExp(`HTTP ${status}`, "u"));
+  }
+  for (const status of [403, 404]) {
+    const rejected = clientWith([{ status, body: "ref refused" }]);
+    assert.equal((await rejected.client.publishTrain(repositoryReference, "main", trainHead)).status, "rejected");
+  }
+
+  const ambiguous = clientWith([{ status: 503, body: "upstream" }]);
+  const result = await ambiguous.client.publishTrain(repositoryReference, "main", trainHead);
+  assert.equal(result.status, "unknown");
+
+  for (const body of [
+    "",
+    JSON.stringify({ ref: "refs/heads/main", object: { sha: "d".repeat(40) } }),
+    JSON.stringify({ ref: "refs/heads/other", object: { sha: trainHead } }),
+  ]) {
+    const malformed = clientWith([{ status: 200, body }]);
+    assert.equal((await malformed.client.publishTrain(repositoryReference, "main", trainHead)).status, "unknown");
+  }
+});
+
+test("train ref deletion uses the GitHub git-refs API and reports failures as disarm failures", async () => {
+  const ref = "refs/anneal/train/" + trainHead;
+  const { client, requests } = clientWith([{ status: 204, body: "" }]);
+  assert.deepEqual(await client.deleteTrainRef(repositoryReference, ref), { ok: true });
+  assert.equal(requests[0]!.method, "DELETE");
+  assert.equal(requests[0]!.url, "https://api.github.test/repos/owner/name/git/refs/anneal/train/" + trainHead);
+
+  const missing = clientWith([{ status: 404, body: "missing" }]);
+  assert.deepEqual(await missing.client.deleteTrainRef(repositoryReference, ref), { ok: true });
+
+  const failed = clientWith([{ status: 500, body: "upstream" }]);
+  const result = await failed.client.deleteTrainRef(repositoryReference, ref);
+  assert.equal(result.ok, false);
+});
+
 /* ------------------------------------------------- fail-closed field parsing */
 
 /**

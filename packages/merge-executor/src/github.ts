@@ -19,7 +19,7 @@
  * so importing it does not widen §D-P1's custody surface.
  */
 
-import { callWithTimeout, classifyHttpStatus, NO_RESPONSE, type Http, type HttpAttempt, type HttpTrace } from "@anneal/github-client";
+import { callWithTimeout, classifyHttpStatus, NO_RESPONSE, type Http, type HttpAttempt, type HttpMethod, type HttpTrace } from "@anneal/github-client";
 
 /** Every mutating request this package can construct. Enumerated so the
  *  no-bypass test can assert the complete list and a new write cannot be added
@@ -28,6 +28,8 @@ export const MUTATING_OPERATIONS = [
   "createSanitizedTree",
   "createMergeCommit",
   "updateBaseRef",
+  "publishTrain",
+  "deleteTrainRef",
   "disablePullRequestAutoMerge",
   "dequeuePullRequest",
 ] as const;
@@ -92,6 +94,32 @@ export type MergeResponse =
 
 export type DisarmResult = { ok: true } | { ok: false; reason: string };
 
+export type RepositoryReference = { owner: string; name: string };
+
+export type TrainGitHub = {
+  readDefaultBranch: (reference: RepositoryReference) => Promise<
+    | { status: "ok"; name: string; oid: string }
+    | { status: "api-error"; reason: string }
+  >;
+  readRef: (reference: RepositoryReference, ref: string) => Promise<
+    | { status: "ok"; oid: string | null }
+    | { status: "api-error"; reason: string }
+  >;
+  isAncestor: (reference: RepositoryReference, ancestor: string, descendant: string) => Promise<
+    | { status: "ok"; ancestor: boolean }
+    | { status: "api-error"; reason: string }
+  >;
+  readCommit: (reference: RepositoryReference, oid: string) => Promise<
+    | { status: "ok"; commit: { oid: string; parents: string[] } }
+    | { status: "api-error"; reason: string }
+  >;
+  publishTrain: (reference: RepositoryReference, baseRef: string, publishHead: string) => Promise<
+    | { status: "published" }
+    | { status: "rejected" | "unknown"; reason: string }
+  >;
+  deleteTrainRef: (reference: RepositoryReference, ref: string) => Promise<DisarmResult>;
+};
+
 export const READ_QUERY = `query($owner:String!,$name:String!,$number:Int!,$base:String!) {
   repository(owner:$owner,name:$name) {
     id
@@ -132,6 +160,10 @@ const asRecord = (value: unknown): Json | null =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as Json : null;
 
 const asString = (value: unknown): string | null => typeof value === "string" ? value : null;
+
+const SHA_PATTERN = /^[0-9a-f]{40}$/u;
+
+const isSha = (value: unknown): value is string => typeof value === "string" && SHA_PATTERN.test(value);
 
 /** Re-exported so this module stays the executor's single platform seam even
  *  though the transport itself is now shared. */
@@ -180,7 +212,7 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
   });
 
   const call = async (
-    request: { url: string; method: "GET" | "POST"; accept: string; body?: string },
+    request: { url: string; method: HttpMethod; accept: string; body?: string },
   ): Promise<HttpAttempt> => callWithTimeout(options.http, {
     url: request.url,
     method: request.method,
@@ -418,7 +450,7 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
   };
 
   const restJson = async (
-    request: { url: string; method: "GET" | "POST"; body?: unknown },
+    request: { url: string; method: HttpMethod; body?: unknown },
   ): Promise<{ ok: true; value: Json } | { ok: false; response: HttpAttempt }> => {
     const response = await call({
       url: request.url,
@@ -433,6 +465,160 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
     } catch {
       return { ok: false, response: { ...response, body: "response body is not valid JSON" } };
     }
+  };
+
+  const repositoryUrl = (reference: RepositoryReference): string =>
+    `${options.restUrl}/repos/${encodeURIComponent(reference.owner)}/${encodeURIComponent(reference.name)}`;
+
+  /** GitHub's git-ref REST endpoints take `heads/main`, not `refs/heads/main`. */
+  const apiRefPath = (ref: string): string => {
+    const withoutPrefix = ref.startsWith("refs/") ? ref.slice("refs/".length) : ref;
+    return withoutPrefix.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+  };
+
+  const responseReason = (response: HttpAttempt): string =>
+    response.status === NO_RESPONSE
+      ? `network: ${response.body}`
+      : `HTTP ${response.status}${response.body ? ` ${response.body}` : ""}`;
+
+  const parseRestRecord = (response: HttpAttempt): { ok: true; value: Json } | { ok: false; reason: string } => {
+    if (classifyHttpStatus(response.status) !== "applied") return { ok: false, reason: responseReason(response) };
+    try {
+      const value = asRecord(JSON.parse(response.body));
+      return value ? { ok: true, value } : { ok: false, reason: "response body is not an object" };
+    } catch {
+      return { ok: false, reason: "response body is not valid JSON" };
+    }
+  };
+
+  const readRef = async (
+    reference: RepositoryReference,
+    ref: string,
+  ): Promise<Awaited<ReturnType<TrainGitHub["readRef"]>>> => {
+    const response = await call({
+      url: `${repositoryUrl(reference)}/git/ref/${apiRefPath(ref)}`,
+      method: "GET",
+      accept: "application/vnd.github+json",
+    });
+    // GitHub uses 404 for a ref that is not present. This is a positive
+    // observation and is distinct from an unreadable repository or malformed
+    // response, both of which remain api errors.
+    if (response.status === 404) return { status: "ok", oid: null };
+    const parsed = parseRestRecord(response);
+    if (!parsed.ok) return { status: "api-error", reason: parsed.reason };
+    const object = asRecord(parsed.value.object);
+    const oid = object?.sha;
+    if (!isSha(oid)) return { status: "api-error", reason: "ref response has no valid object sha" };
+    return { status: "ok", oid };
+  };
+
+  const readDefaultBranch = async (
+    reference: RepositoryReference,
+  ): Promise<Awaited<ReturnType<TrainGitHub["readDefaultBranch"]>>> => {
+    const response = await call({
+      url: repositoryUrl(reference),
+      method: "GET",
+      accept: "application/vnd.github+json",
+    });
+    const parsed = parseRestRecord(response);
+    if (!parsed.ok) return { status: "api-error", reason: `default branch read failed: ${parsed.reason}` };
+    const name = parsed.value.default_branch;
+    if (typeof name !== "string" || name.length === 0) {
+      return { status: "api-error", reason: "repository response has no valid default_branch" };
+    }
+    const branch = await readRef(reference, `refs/heads/${name}`);
+    if (branch.status === "api-error") return branch;
+    if (branch.oid === null) return { status: "api-error", reason: `default branch ref ${name} does not exist` };
+    return { status: "ok", name, oid: branch.oid };
+  };
+
+  const isAncestor = async (
+    reference: RepositoryReference,
+    ancestor: string,
+    descendant: string,
+  ): Promise<Awaited<ReturnType<TrainGitHub["isAncestor"]>>> => {
+    if (!isSha(ancestor) || !isSha(descendant)) {
+      return { status: "api-error", reason: "compare requires two valid 40-hex commit shas" };
+    }
+    const response = await call({
+      url: `${repositoryUrl(reference)}/compare/${ancestor}...${descendant}`,
+      method: "GET",
+      accept: "application/vnd.github+json",
+    });
+    const parsed = parseRestRecord(response);
+    if (!parsed.ok) return { status: "api-error", reason: `ancestry read failed: ${parsed.reason}` };
+    const status = parsed.value.status;
+    if (status === "ahead" || status === "identical") return { status: "ok", ancestor: true };
+    if (status === "behind" || status === "diverged") return { status: "ok", ancestor: false };
+    return { status: "api-error", reason: `compare response has unknown status ${String(status)}` };
+  };
+
+  const readCommit = async (
+    reference: RepositoryReference,
+    oid: string,
+  ): Promise<Awaited<ReturnType<TrainGitHub["readCommit"]>>> => {
+    if (!isSha(oid)) return { status: "api-error", reason: "commit read requires a valid 40-hex commit sha" };
+    const response = await call({
+      url: `${repositoryUrl(reference)}/git/commits/${oid}`,
+      method: "GET",
+      accept: "application/vnd.github+json",
+    });
+    const parsed = parseRestRecord(response);
+    if (!parsed.ok) return { status: "api-error", reason: `commit read failed: ${parsed.reason}` };
+    if (parsed.value.sha !== oid) return { status: "api-error", reason: "commit response sha does not match requested oid" };
+    if (!Array.isArray(parsed.value.parents)) return { status: "api-error", reason: "commit response parents is not an array" };
+    const parents: string[] = [];
+    for (const [index, parent] of parsed.value.parents.entries()) {
+      const parentRecord = asRecord(parent);
+      if (!isSha(parentRecord?.sha)) {
+        return { status: "api-error", reason: `commit response parent ${index} has no valid sha` };
+      }
+      parents.push(parentRecord.sha);
+    }
+    return { status: "ok", commit: { oid, parents } };
+  };
+
+  const publishTrain = async (
+    reference: RepositoryReference,
+    baseRef: string,
+    publishHead: string,
+  ): Promise<Awaited<ReturnType<TrainGitHub["publishTrain"]>>> => {
+    if (!isSha(publishHead)) return { status: "unknown", reason: "train publication requires a valid 40-hex publish head" };
+    const branchRef = baseRef.startsWith("refs/heads/") ? baseRef : `refs/heads/${baseRef}`;
+    const response = await call({
+      url: `${repositoryUrl(reference)}/git/refs/${apiRefPath(branchRef)}`,
+      method: "PATCH",
+      accept: "application/vnd.github+json",
+      body: JSON.stringify({ sha: publishHead, force: false }),
+    });
+    if (response.status === 409 || response.status === 422 || classifyHttpStatus(response.status) === "refused") {
+      return { status: "rejected", reason: responseReason(response) };
+    }
+    if (classifyHttpStatus(response.status) === "applied") {
+      const parsed = parseRestRecord(response);
+      if (!parsed.ok) return { status: "unknown", reason: `publication response could not be confirmed: ${parsed.reason}` };
+      const returnedRef = parsed.value.ref;
+      const returnedSha = asRecord(parsed.value.object)?.sha;
+      if (returnedRef !== branchRef || returnedSha !== publishHead) {
+        return { status: "unknown", reason: "publication response did not confirm the requested ref and sha" };
+      }
+      return { status: "published" };
+    }
+    return { status: "unknown", reason: responseReason(response) };
+  };
+
+  const deleteTrainRef = async (
+    reference: RepositoryReference,
+    ref: string,
+  ): Promise<DisarmResult> => {
+    const response = await call({
+      url: `${repositoryUrl(reference)}/git/refs/${apiRefPath(ref)}`,
+      method: "DELETE",
+      accept: "application/vnd.github+json",
+    });
+    return classifyHttpStatus(response.status) === "applied" || response.status === 404
+      ? { ok: true }
+      : { ok: false, reason: responseReason(response) };
   };
 
   /**
@@ -508,7 +694,19 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
     return "error" in result ? { ok: false, reason: result.error } : { ok: true };
   };
 
-  return { readPullRequest, mergePullRequest, disableAutoMerge, dequeuePullRequest, graphql };
+  return {
+    readPullRequest,
+    mergePullRequest,
+    disableAutoMerge,
+    dequeuePullRequest,
+    readDefaultBranch,
+    readRef,
+    isAncestor,
+    readCommit,
+    publishTrain,
+    deleteTrainRef,
+    graphql,
+  };
 };
 
 export type GitHubClient = ReturnType<typeof makeGitHubClient>;
