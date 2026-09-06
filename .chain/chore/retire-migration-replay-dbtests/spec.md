@@ -26,6 +26,7 @@ Files in scope (verifier-corrected list): the four suites that pin `targetMigrat
 
 ## Acceptance
 
-- `grep -ln "targetMigration" packages/api/src/*.dbtest.ts` returns nothing.
+- `grep -ln "targetMigration" packages/api/src/*.dbtest.ts` returns exactly `packages/api/src/agent-canonical-role-migration.dbtest.ts` and `packages/api/src/staffing-profiles-migration.dbtest.ts`. These staffing-profile suites are outside the enumerated retirement scope; shipment of their `20260905120000_staffing_profiles` migration is not established by this task. Keep their replay visible under its original identifier rather than claiming it was retired.
+- All five enumerated replay suites are absent; the retained preflight fixture has no `applyKernelMigration` replay member. This check is scoped to this retirement, not a claim that all staged-history testing in the repository is gone.
 - `npm run lint`, `npm run typecheck` pass; the chain's Regression step (merge gate database suite) passes.
 - CONTRIBUTING.md carries the retention rule once.

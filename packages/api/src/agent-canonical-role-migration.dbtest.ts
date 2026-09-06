@@ -9,9 +9,8 @@
  * gains its `canonicalRole`, an operator's own Agent does not, and the single
  * `runtimeConfigCustomized` flag becomes the per-field list.
  *
- * Modelled on optional-steps-migration.dbtest.ts: real history is deployed up to
- * this migration, rows are written through raw SQL under the old shape, and only
- * then is the migration applied.
+ * Real history is deployed up to the migration under test, rows are written
+ * through raw SQL under the old shape, and then the migration is applied.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -25,7 +24,7 @@ import { PrismaClient } from "@anneal/db";
 
 import { testDatabaseUrl } from "./testdb.js";
 
-const migrationUnderTest = "20260905120000_staffing_profiles";
+const targetMigration = "20260905120000_staffing_profiles";
 const dbDirectory = fileURLToPath(new URL("../../db", import.meta.url));
 
 const execute = (url: string, sql: string): void => {
@@ -58,7 +57,7 @@ const stageHistory = (label: string): { url: string; schema: string; staging: st
   cpSync(join(dbDirectory, "prisma"), stagedPrisma, { recursive: true });
   const stagedMigrations = join(stagedPrisma, "migrations");
   for (const migration of readdirSync(stagedMigrations, { withFileTypes: true })) {
-    if (migration.isDirectory() && migration.name >= migrationUnderTest) {
+    if (migration.isDirectory() && migration.name >= targetMigration) {
       rmSync(join(stagedMigrations, migration.name), { recursive: true, force: true });
     }
   }
@@ -68,8 +67,8 @@ const stageHistory = (label: string): { url: string; schema: string; staging: st
 
 const applyTarget = (staged: { url: string; stagedPrisma: string }): void => {
   cpSync(
-    join(dbDirectory, "prisma", "migrations", migrationUnderTest),
-    join(staged.stagedPrisma, "migrations", migrationUnderTest),
+    join(dbDirectory, "prisma", "migrations", targetMigration),
+    join(staged.stagedPrisma, "migrations", targetMigration),
     { recursive: true },
   );
   deploy(staged.url, join(staged.stagedPrisma, "schema.prisma"));

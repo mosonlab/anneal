@@ -22,12 +22,8 @@ const kernelMigration = "20260818000000_goal_execution_safety_kernel";
 
 interface PreKernelDatabase {
   url: string;
-  schema: string;
-  quoted: string;
   /** Runs SQL against the staged schema, over the fixture's own connection. */
   execute: (sql: string) => Promise<void>;
-  /** Applies the kernel migration through the real `prisma migrate deploy`. */
-  applyKernelMigration: () => void;
   cleanup: () => Promise<void>;
 }
 
@@ -71,17 +67,7 @@ const stageAtPreviousMigration = async (label: string): Promise<PreKernelDatabas
 
   return {
     url,
-    schema,
-    quoted,
     execute,
-    applyKernelMigration: () => {
-      cpSync(
-        join(dbDirectory, "prisma", "migrations", kernelMigration),
-        join(staging, "prisma", "migrations", kernelMigration),
-        { recursive: true },
-      );
-      deploy();
-    },
     cleanup: async (): Promise<void> => {
       rmSync(staging, { recursive: true, force: true });
       try {
