@@ -1,14 +1,16 @@
 import {
-  latestMarker,
-  readMarkers,
+  readLatestMarker,
   recordLeaseContention,
   writeMarker,
+  type Marker,
+  type Prisma,
   type PrismaClient,
 } from "@anneal/db";
 import type { MergeLeaseHolder } from "../../../scripts/merge-lease-adapter.mjs";
 
 import type { MergeLeaseTarget } from "./merge-lease-hold.js";
-import { hasOpenOperatorAlert, openOperatorAlert } from "./operator-alert.js";
+import { openOperatorAlert } from "./operator-alert.js";
+import type { ReadinessClaimHandle } from "./readiness-claim.js";
 
 /**
  * How long a chain may be shut out of the merge Lease before an operator is
@@ -24,17 +26,24 @@ export const contentionAlertAfterMs = (environment: NodeJS.ProcessEnv = process.
   return (Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_CONTENTION_ALERT_MINUTES) * 60_000;
 };
 
-/** One open alert per chain, whatever episode opened it. */
+/** One alert per episode: the prefix names the chain, the key adds its start. */
 export const contentionAlertDedupePrefix = (chainId: string): string => `merge-lease-contention:${chainId}:`;
 
-/** What one contended acquisition did to the chain's contention episode. */
-export type LeaseContentionOutcome = "opened" | "continuing" | "alerted";
+/**
+ * What one contended acquisition did to the chain's contention episode.
+ * `not-owned` is a worker whose readiness claim has already passed to a
+ * successor: it observed the contention, but it is no longer the Step's owner
+ * and writes nothing.
+ */
+export type LeaseContentionOutcome = "opened" | "continuing" | "alerted" | "not-owned";
 
 export type LeaseContentionInput = {
   target: MergeLeaseTarget;
   readinessTaskId: string;
   holder: MergeLeaseHolder | null;
   now: Date;
+  /** The Handle that owns the readiness Step; every write below is fenced by it. */
+  claim: ReadinessClaimHandle;
 };
 
 /**
@@ -68,6 +77,18 @@ const holderAcquiredAt = (holder: MergeLeaseHolder | null): Date | null => {
   return Number.isFinite(acquiredAtMs) ? new Date(acquiredAtMs) : null;
 };
 
+/**
+ * The episode this chain is in, read by kind so that a burst of unrelated
+ * activity cannot hide it and restart the window it opened.
+ */
+const openEpisode = async (
+  tx: Prisma.TransactionClient,
+  readinessTaskId: string,
+): Promise<Marker | null> => {
+  const marker = await readLatestMarker(tx, readinessTaskId, "leaseContention");
+  return marker && marker.state !== "resolved" ? marker : null;
+};
+
 const episodeStart = (raw: Record<string, unknown>, fallback: Date): Date => {
   const startedAtMs = typeof raw.firstContendedAt === "string" ? Date.parse(raw.firstContendedAt) : Number.NaN;
   return Number.isFinite(startedAtMs) ? new Date(startedAtMs) : fallback;
@@ -89,88 +110,99 @@ export const noteLeaseContention = async (
   db: PrismaClient,
   input: LeaseContentionInput,
   alertAfterMs: number = contentionAlertAfterMs(),
-): Promise<LeaseContentionOutcome> => await db.$transaction(async (tx) => {
-  const markers = await readMarkers(tx, input.readinessTaskId);
-  const open = latestMarker(markers, "leaseContention");
-  const description = describeHolder(input.holder);
+): Promise<LeaseContentionOutcome> => await db.$transaction(async (transaction) => {
+  const settlement = await input.claim.settle<LeaseContentionOutcome>(transaction, {
+    kind: "keep",
+    apply: async (tx) => {
+      const open = await openEpisode(tx, input.readinessTaskId);
+      const description = describeHolder(input.holder);
 
-  if (!open || open.state === "resolved") {
-    await writeMarker(tx, input.readinessTaskId, "leaseContention", {
-      actorType: "control-plane",
-      body: `Merge Lease for chain ${input.target.chainId} is held by ${description}`,
-      metadata: {
-        state: "contended",
-        projectId: input.target.projectId,
-        chainId: input.target.chainId,
-        firstContendedAt: input.now.toISOString(),
-        ...holderMetadata(input.holder),
-      },
-    });
-    return "opened";
-  }
-  if (open.state === "alerted") return "continuing";
+      if (!open) {
+        await writeMarker(tx, input.readinessTaskId, "leaseContention", {
+          actorType: "control-plane",
+          body: `Merge Lease for chain ${input.target.chainId} is held by ${description}`,
+          metadata: {
+            state: "contended",
+            projectId: input.target.projectId,
+            chainId: input.target.chainId,
+            firstContendedAt: input.now.toISOString(),
+            ...holderMetadata(input.holder),
+          },
+        });
+        return "opened";
+      }
+      if (open.state === "alerted") return "continuing";
 
-  const startedAt = episodeStart(open.raw, input.now);
-  if (input.now.getTime() - startedAt.getTime() < alertAfterMs) return "continuing";
+      const startedAt = episodeStart(open.raw, input.now);
+      if (input.now.getTime() - startedAt.getTime() < alertAfterMs) return "continuing";
 
-  const minutes = Math.floor((input.now.getTime() - startedAt.getTime()) / 60_000);
-  const detail = `Chain ${input.target.chainId} has been unable to take the merge Lease for ${minutes} minutes; it is held by ${description}`;
-  await writeMarker(tx, input.readinessTaskId, "leaseContention", {
-    actorType: "control-plane",
-    body: detail,
-    metadata: {
-      state: "alerted",
-      projectId: input.target.projectId,
-      chainId: input.target.chainId,
-      firstContendedAt: startedAt.toISOString(),
-      alertedAt: input.now.toISOString(),
-      ...holderMetadata(input.holder),
+      const minutes = Math.floor((input.now.getTime() - startedAt.getTime()) / 60_000);
+      const detail = `Chain ${input.target.chainId} has been unable to take the merge Lease for ${minutes} minutes; it is held by ${description}`;
+      await writeMarker(tx, input.readinessTaskId, "leaseContention", {
+        actorType: "control-plane",
+        body: detail,
+        metadata: {
+          state: "alerted",
+          projectId: input.target.projectId,
+          chainId: input.target.chainId,
+          firstContendedAt: startedAt.toISOString(),
+          alertedAt: input.now.toISOString(),
+          ...holderMetadata(input.holder),
+        },
+      });
+      await recordLeaseContention(tx, {
+        target: input.target,
+        taskId: input.readinessTaskId,
+        holderAcquiredAt: holderAcquiredAt(input.holder),
+        detail,
+        at: input.now,
+      });
+      // Every episode gets its alert. The episode marker already makes it one
+      // per episode, and the dedupe key carries that episode's start, so a
+      // still-unread alert from an earlier episode cannot silence this one.
+      await openOperatorAlert(tx, {
+        body: `${detail}. Nothing was stolen: inspect with \`scripts/merge-lease.sh status\` and, if the holder is gone, break it with \`scripts/merge-lease.sh steal --human --reason "..."\`.`,
+        dedupeKey: `${contentionAlertDedupePrefix(input.target.chainId)}${startedAt.toISOString()}`,
+      });
+      return "alerted";
     },
   });
-  await recordLeaseContention(tx, {
-    target: input.target,
-    taskId: input.readinessTaskId,
-    holder: input.holder === null ? null : {
-      holder: input.holder.holder,
-      task: input.holder.task,
-      reason: input.holder.reason,
-      acquiredAt: holderAcquiredAt(input.holder),
-    },
-    detail,
-    at: input.now,
-  });
-  const prefix = contentionAlertDedupePrefix(input.target.chainId);
-  if (!await hasOpenOperatorAlert(tx, prefix)) {
-    await openOperatorAlert(tx, {
-      body: `${detail}. Nothing was stolen: inspect with \`scripts/merge-lease.sh status\` and, if the holder is gone, break it with \`scripts/merge-lease.sh steal --human --reason "..."\`.`,
-      dedupeKey: `${prefix}${startedAt.toISOString()}`,
-    });
-  }
-  return "alerted";
+  return settlement.settled ? settlement.value : "not-owned";
 });
 
 /**
- * Close the chain's contention episode because this tick got an answer other
- * than contention. The next contention is then a new episode with its own
- * 30 minutes, rather than continuing one that already ended.
+ * Close the chain's contention episode because the run of contended results
+ * broke: this tick took the Lease, could not reach origin, or settled before it
+ * ever reached for the Lease. The window measures continuous contention, so the
+ * next contention is a new episode with its own 30 minutes.
  */
 export const clearLeaseContention = async (
   db: PrismaClient,
-  input: { target: MergeLeaseTarget; readinessTaskId: string; now: Date },
-): Promise<boolean> => await db.$transaction(async (tx) => {
-  const markers = await readMarkers(tx, input.readinessTaskId);
-  const open = latestMarker(markers, "leaseContention");
-  if (!open || open.state === "resolved") return false;
-  await writeMarker(tx, input.readinessTaskId, "leaseContention", {
-    actorType: "control-plane",
-    body: `Merge Lease contention for chain ${input.target.chainId} ended`,
-    metadata: {
-      state: "resolved",
-      projectId: input.target.projectId,
-      chainId: input.target.chainId,
-      firstContendedAt: episodeStart(open.raw, input.now).toISOString(),
-      resolvedAt: input.now.toISOString(),
+  input: {
+    target: MergeLeaseTarget;
+    readinessTaskId: string;
+    now: Date;
+    claim: ReadinessClaimHandle;
+  },
+): Promise<boolean> => await db.$transaction(async (transaction) => {
+  const settlement = await input.claim.settle<boolean>(transaction, {
+    kind: "keep",
+    apply: async (tx) => {
+      const open = await openEpisode(tx, input.readinessTaskId);
+      if (!open) return false;
+      await writeMarker(tx, input.readinessTaskId, "leaseContention", {
+        actorType: "control-plane",
+        body: `Merge Lease contention for chain ${input.target.chainId} ended`,
+        metadata: {
+          state: "resolved",
+          projectId: input.target.projectId,
+          chainId: input.target.chainId,
+          firstContendedAt: episodeStart(open.raw, input.now).toISOString(),
+          resolvedAt: input.now.toISOString(),
+        },
+      });
+      return true;
     },
   });
-  return true;
+  return settlement.settled ? settlement.value : false;
 });

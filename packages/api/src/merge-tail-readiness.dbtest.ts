@@ -682,6 +682,121 @@ test("a contended lease leaves readiness for a later tick instead of authorizing
   assert.equal((resolved!.metadata as Record<string, unknown>).state, "resolved");
 });
 
+const contentionMarkers = async (taskId: string) => await db.taskActivity.findMany({
+  where: { taskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseContention } },
+  orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+});
+
+const contentionState = async (taskId: string): Promise<Array<string | undefined>> => (
+  (await contentionMarkers(taskId)).map((marker) => (
+    (marker.metadata as Record<string, unknown>).state as string | undefined
+  ))
+);
+
+test("a stale worker records no contention after a newer worker owns the claim", async () => {
+  const seeded = await seedReadiness();
+  let startRead!: () => void;
+  let finishRead!: () => void;
+  const readStarted = new Promise<void>((resolve) => { startRead = resolve; });
+  const readMayFinish = new Promise<void>((resolve) => { finishRead = resolve; });
+  let reads = 0;
+  const delayed: PullRequestReader = {
+    readPullRequest: async () => {
+      reads += 1;
+      if (reads === 1) {
+        startRead();
+        await readMayFinish;
+      }
+      return snapshot({});
+    },
+    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+  };
+  const contended: MergeLeaseAcquirer = async () => ({
+    outcome: "contended",
+    holder: {
+      holder: "runner@executor",
+      task: "chain-elsewhere",
+      reason: "chain merge tail chain-elsewhere",
+      acquiredAt: "2026-09-06T10:00:00.000Z",
+      sha: "b".repeat(40),
+    },
+  });
+  const tick = readinessTick(db, delayed, new Date(), 5, releaseChainLease, leaseRunner(contended));
+  await readStarted;
+  await db.task.update({
+    where: { id: seeded.readiness.id },
+    data: {
+      status: TaskStatus.DOING,
+      readinessClaimToken: NEWER_CLAIM_TOKEN,
+      readinessClaimExpiresAt: NEWER_CLAIM_EXPIRY,
+    },
+  });
+  finishRead();
+  await tick;
+
+  // The contention is real, but this worker is no longer the Step's owner, so
+  // it says nothing a successor's own bookkeeping would then have to unpick.
+  assert.deepEqual(await contentionMarkers(seeded.readiness.id), []);
+  assert.equal(await db.mergeLeaseEvent.count({
+    where: { chainId: seeded.readiness.chainId!, state: MergeLeaseEventState.CONTENDED },
+  }), 0);
+  assert.equal(await db.inboxMessage.count({ where: { dedupeKey: { startsWith: "merge-lease-contention:" } } }), 0);
+});
+
+test("an unreachable origin breaks the run of contended results", async () => {
+  const seeded = await seedReadiness();
+  const contended: MergeLeaseAcquirer = async () => ({ outcome: "contended" });
+  const unreachable: MergeLeaseAcquirer = async () => ({ outcome: "unreachable", detail: "spawn bash ENOENT" });
+  const started = new Date();
+  const later = (ticks: number): Date => new Date(started.getTime() + READINESS_CLAIM_LEASE_MS * 2 * ticks);
+
+  await readinessTick(db, reader(), started, 5, releaseChainLease, leaseRunner(contended));
+  assert.deepEqual(await contentionState(seeded.readiness.id), ["contended"]);
+
+  await readinessTick(db, reader(), later(1), 5, releaseChainLease, leaseRunner(unreachable));
+  // The window counts continuous contention. A tick that could not reach origin
+  // learned nothing about the holder, so it is not another refusal.
+  assert.deepEqual(await contentionState(seeded.readiness.id), ["contended", "resolved"]);
+
+  await readinessTick(db, reader(), later(2), 5, releaseChainLease, leaseRunner(contended));
+  const markers = await contentionMarkers(seeded.readiness.id);
+  assert.deepEqual(markers.map((marker) => (marker.metadata as Record<string, unknown>).state), [
+    "contended",
+    "resolved",
+    "contended",
+  ]);
+  // The new episode's 30 minutes start now, not at the first contention.
+  assert.equal(
+    (markers[2]!.metadata as Record<string, unknown>).firstContendedAt,
+    later(2).toISOString(),
+  );
+});
+
+test("a requeue before the lease ends the contention episode", async () => {
+  const seeded = await seedReadiness();
+  const contended: MergeLeaseAcquirer = async () => ({ outcome: "contended" });
+  const started = new Date();
+
+  await readinessTick(db, reader(), started, 5, releaseChainLease, leaseRunner(contended));
+  assert.deepEqual(await contentionState(seeded.readiness.id), ["contended"]);
+
+  const driftedBase = "d".repeat(40);
+  assert.equal(
+    (await readinessTick(
+      db,
+      reader([], snapshot({ baseSha: driftedBase })),
+      new Date(started.getTime() + READINESS_CLAIM_LEASE_MS * 2),
+      5,
+      releaseChainLease,
+      runWithMergeLease,
+    )).requeued,
+    1,
+  );
+  // This tick settled before it ever reached for the lease, so the run of
+  // contended results is broken and the next one starts its own window.
+  assert.deepEqual(await contentionState(seeded.readiness.id), ["contended", "resolved"]);
+});
+
 test("a stale worker cannot stop readiness after a newer worker owns the claim", async () => {
   const seeded = await seedReadiness();
   let startRead!: () => void;

@@ -97,6 +97,27 @@ export const readMarkers = async (tx: Tx, taskId: string): Promise<Marker[]> => 
  */
 export const readMarkerHistory = async (tx: Tx, taskId: string): Promise<Marker[]> => scan(tx, taskId);
 
+/**
+ * The newest marker of one `kind`, found by asking for that kind rather than by
+ * filtering the recent window. `readMarkers` answers "what has this task been
+ * doing lately", which unrelated activity pushes a still-open episode out of
+ * once it exceeds `MERGE_TAIL_MARKER_SCAN` rows. State that must survive its own
+ * duration -- a contention episode outlives 30 minutes of other writes -- is
+ * read this way instead.
+ */
+export const readLatestMarker = async (
+  tx: Tx,
+  taskId: string,
+  kind: MarkerKind,
+): Promise<Marker | null> => {
+  const row = await tx.taskActivity.findFirst({
+    where: { taskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND[kind] } },
+    select: { metadata: true },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  return row ? markerFromMetadata(row.metadata) : null;
+};
+
 /** The newest marker of `kind`, optionally restricted to one `state`. */
 export const latestMarker = (markers: Marker[], kind: MarkerKind, state?: string): Marker | null => (
   markers.find((marker) => marker.kind === kind && (state === undefined || marker.state === state)) ?? null

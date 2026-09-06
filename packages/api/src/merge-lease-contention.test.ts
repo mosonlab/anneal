@@ -22,7 +22,7 @@ test("the contention alert window is configurable and defaults to thirty minutes
   }
 });
 
-test("one open operator alert per chain, whichever episode opened it", () => {
+test("the alert dedupe key is per chain and per episode", () => {
   assert.equal(contentionAlertDedupePrefix("chain-42"), "merge-lease-contention:chain-42:");
   assert.notEqual(contentionAlertDedupePrefix("chain-42"), contentionAlertDedupePrefix("chain-43"));
 });

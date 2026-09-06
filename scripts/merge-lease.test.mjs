@@ -443,6 +443,20 @@ const runOnTerminal = (fixture, command, holder) => {
 const runLeaseOnTerminal = (fixture, args, holder) =>
   runOnTerminal(fixture, ["bash", join(fixture.root, "scripts", "merge-lease.sh"), ...args], holder);
 
+test("usage prints the whole header comment, not a fixed range of it", (t) => {
+  const fixture = leaseFixture(t);
+  const printed = runLease(fixture, []);
+  assert.notEqual(printed.status, 0, printed.stdout + printed.stderr);
+  assert.match(printed.stdout, /steal --reason "Recover abandoned merge" \[--human\]/u);
+  // The range used to be hard-coded, so growing the header truncated the text
+  // mid-sentence. The last sentence, whole, is what proves it is all there.
+  assert.match(
+    printed.stdout.trimEnd(),
+    /Use --force to fall back\nto the holder check when the acquiring task id is genuinely unknown\.$/u,
+  );
+  assert.doesNotMatch(printed.stdout, /^#/mu);
+});
+
 test("a terminal does not make a caller human: only --human waives the threshold", (t) => {
   const fixture = leaseFixture(t);
   // Prove the terminal before asserting what the script does in front of one.

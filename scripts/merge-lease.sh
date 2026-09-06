@@ -34,7 +34,10 @@ FORCE=0
 HOLDER="${MERGE_LEASE_HOLDER:-}"
 
 usage() {
-  sed -n '2,18p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'
+  # The header block, however long it grows: everything from line 2 up to the
+  # first line that is not a comment. A fixed range silently truncated the text
+  # mid-sentence the last time the header gained a line.
+  sed -n '2,${/^[^#]/q;p;}' "$0" | sed 's/^#\{1,2\} \{0,1\}//'
   exit "${1:-0}"
 }
 

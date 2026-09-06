@@ -154,7 +154,8 @@ prints how much of the window is left.
 
 The measurements R3 asks for now exist on both sides of the lease: chain-tail
 holds were already recorded as `MergeLeaseEvent.heldForSeconds`, `merge-train`
-reports `leaseHeldForSeconds` on its own release through the same adapter, and a
+reports `heldForSeconds` on its own release through the same adapter -- the same
+field name, so the two are comparable without translation -- and a
 chain shut out of the lease for longer than
 `MERGE_LEASE_CONTENTION_ALERT_MINUTES` (default 30) is recorded as a `contended`
 event and alerted once to the operator. Nothing steals automatically, so the

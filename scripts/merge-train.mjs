@@ -272,8 +272,12 @@ const validateLeaseWaitMinutes = (value) => {
   }
 };
 
-const publishMergeTrain = async ({
-  repoRoot, task, candidates, leaseWaitMinutes = DEFAULT_LEASE_WAIT_MINUTES, adapters: overrides = {}, hold,
+/**
+ * Coordinate one fixed FIFO batch: build, gate, then publish the longest
+ * contiguous passing prefix under the merge lease.
+ */
+export const coordinateMergeTrain = async ({
+  repoRoot, task, candidates, leaseWaitMinutes = DEFAULT_LEASE_WAIT_MINUTES, adapters: overrides = {},
 }) => {
   validateLeaseWaitMinutes(leaseWaitMinutes);
   validateCandidates(candidates);
@@ -313,8 +317,11 @@ const publishMergeTrain = async ({
   // (packages/api/src/merge-lease-hold.ts). The train held the same lease and
   // recorded nothing, so the two kinds of hold could not be compared. Both now
   // measure the release the same way, from the acquiredAt in the lease blob the
-  // release confirmed.
+  // release confirmed. The release is in the `finally` below, which runs before
+  // a returned result reaches the caller, so the hold is attached to the result
+  // object the publication path built rather than carried out beside it.
   let leaseHeldForSeconds = null;
+  let publication = null;
   let primaryError = null;
   try {
     buildWorktreeAdded = true;
@@ -365,7 +372,7 @@ const publishMergeTrain = async ({
     safeToRelease = true;
     let liveMain = await adapters.readMain(repoRoot);
     if (liveMain !== baseSha) {
-      return {
+      publication = {
         status: "stale-base",
         baseSha,
         liveMain,
@@ -375,6 +382,7 @@ const publishMergeTrain = async ({
         gateResults,
         published: [],
       };
+      return publication;
     }
 
     let candidateDrift = null;
@@ -400,7 +408,7 @@ const publishMergeTrain = async ({
 
     const warnings = await verifyPublishedCandidates(repoRoot, published, adapters);
     const allPendingPublished = published.length === pending.length;
-    return {
+    publication = {
       status: allPendingPublished ? "published-all" : published.length > 0 ? "published-prefix" : "candidate-drift",
       baseSha,
       liveMain,
@@ -412,6 +420,7 @@ const publishMergeTrain = async ({
       published,
       warnings,
     };
+    return publication;
   } catch (error) {
     primaryError = error;
     throw error;
@@ -464,20 +473,10 @@ const publishMergeTrain = async ({
       if (!primaryError) throw cleanupError;
       process.stderr.write(`merge-train: cleanup also failed: ${cleanupError.message}\n`);
     }
-    hold.seconds = leaseHeldForSeconds;
+    // `heldForSeconds` is the name the chain tail records its hold under
+    // (packages/api/src/merge-lease-hold.ts), so the two are comparable.
+    if (publication && leaseHeldForSeconds !== null) publication.heldForSeconds = leaseHeldForSeconds;
   }
-};
-
-/**
- * The hold duration is only known once the release in the `finally` above has
- * confirmed it, which is after the result object each publication path returns
- * was built. Carrying it out through a box and attaching it here keeps those
- * paths untouched: a run that never held the lease has no hold to report.
- */
-export const coordinateMergeTrain = async (options) => {
-  const hold = { seconds: null };
-  const result = await publishMergeTrain({ ...options, hold });
-  return hold.seconds === null ? result : { ...result, leaseHeldForSeconds: hold.seconds };
 };
 
 const usage = () => {
@@ -491,7 +490,7 @@ publishes only the longest contiguous passing prefix under the merge lease.
   --lease-wait-minutes <n>  Wait up to n whole minutes for the publication lease
                             (default: 10; 0 tries immediately).
 On lease-contended, JSON includes leaseWaitedMs (elapsed acquisition milliseconds).
-When the lease was held and released, JSON includes leaseHeldForSeconds.
+When the lease was held and released, JSON includes heldForSeconds.
 `);
 };
 
@@ -545,7 +544,7 @@ const main = async () => {
   const summary = {
     status: result.status,
     ...(result.status === "lease-contended" ? { leaseWaitedMs: result.leaseWaitedMs } : {}),
-    ...(result.leaseHeldForSeconds === undefined ? {} : { leaseHeldForSeconds: result.leaseHeldForSeconds }),
+    ...(result.heldForSeconds === undefined ? {} : { heldForSeconds: result.heldForSeconds }),
     baseSha: result.baseSha,
     liveMain: result.liveMain ?? result.baseSha,
     alreadyDelivered: result.alreadyDelivered.map((candidate) => candidate.pullRequest),

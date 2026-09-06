@@ -220,12 +220,12 @@ for (const scenario of ["unchanged", "moved", "expired", "unreachable"]) {
           assert.equal(result.leaseWaitedMs, 120_000);
           assert.deepEqual(events, ["acquire-attempted"]);
           // A train that never held the lease has no hold to compare.
-          assert.equal(result.leaseHeldForSeconds, undefined);
+          assert.equal(result.heldForSeconds, undefined);
         } else {
           assert.deepEqual(events, ["acquire-attempted", "acquired", "released"]);
           // The same measurement the chain tail records on its own release, so
           // a train hold and a chain-tail hold are comparable numbers.
-          assert.equal(result.leaseHeldForSeconds, 127);
+          assert.equal(result.heldForSeconds, 127);
         }
       }
     } finally {

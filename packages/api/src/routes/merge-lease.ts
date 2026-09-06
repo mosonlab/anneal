@@ -1,5 +1,7 @@
 import type { MergeLeaseEventState } from "@anneal/db";
 
+import { mergeLeaseHoldSeconds } from "../../../../scripts/merge-lease-adapter.mjs";
+
 import type { RouteApp, RouteDeps } from "./support.js";
 
 /** How many ledger rows the route answers with: one screen of recent history. */
@@ -54,7 +56,6 @@ export const registerMergeLeaseRoutes = (app: RouteApp, deps: RouteDeps): void =
   // nothing to origin, and reads the ledger. Nothing here acquires, releases or
   // steals -- breaking a lease stays a human decision made at the script.
   app.get("/merge-lease", async (context) => {
-    const now = new Date();
     const [status, events] = await Promise.all([
       readLeaseHolder(),
       db.mergeLeaseEvent.findMany({
@@ -62,7 +63,10 @@ export const registerMergeLeaseRoutes = (app: RouteApp, deps: RouteDeps): void =
         take: EVENT_WINDOW,
       }),
     ]);
-    const acquiredAtMs = status.outcome === "held" ? Date.parse(status.holder.acquiredAt) : Number.NaN;
+    // Stamped after the reads, not before them: `checkedAt` is when the route
+    // saw origin, and the holder's age is measured from that same instant, so
+    // neither under-reports by however long the `merge-lease.sh` shell-out took.
+    const now = new Date();
     return context.json({
       checkedAt: now.toISOString(),
       holder: status.outcome === "held"
@@ -71,9 +75,7 @@ export const registerMergeLeaseRoutes = (app: RouteApp, deps: RouteDeps): void =
           task: status.holder.task,
           reason: status.holder.reason,
           acquiredAt: status.holder.acquiredAt,
-          ageSeconds: Number.isFinite(acquiredAtMs)
-            ? Math.max(0, Math.floor((now.getTime() - acquiredAtMs) / 1_000))
-            : null,
+          ageSeconds: mergeLeaseHoldSeconds(status.holder.acquiredAt, now),
           sha: status.holder.sha,
         }
         : null,

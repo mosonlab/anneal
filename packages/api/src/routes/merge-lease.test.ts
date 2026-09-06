@@ -29,6 +29,7 @@ const contendedEvent = {
 
 const ledger = (events: unknown[]): PrismaClient => ({
   mergeLeaseEvent: { findMany: async () => events },
+  run: { findFirst: async () => ({ id: "run-1", leaseGeneration: 1 }) },
 }) as unknown as PrismaClient;
 
 const readLease = async (
@@ -46,13 +47,18 @@ const readLease = async (
 };
 
 test("the lease route names the holder, its age, and the recent ledger", async () => {
+  // Pinned before the request, not recomputed inside the reader: the age is
+  // measured against a clock the route stamps, and a fixture that re-reads
+  // Date.now() later would make the expected number depend on how long the
+  // handler took.
+  const acquiredAt = new Date(Date.now() - 90_000).toISOString();
   const { status, body } = await readLease(async () => ({
     outcome: "held",
     holder: {
       holder: "runner@executor",
       task: "chain-9",
       reason: "chain merge tail chain-9",
-      acquiredAt: new Date(Date.now() - 90_000).toISOString(),
+      acquiredAt,
       sha: "a".repeat(40),
     },
   }));
@@ -60,6 +66,8 @@ test("the lease route names the holder, its age, and the recent ledger", async (
   assert.equal(body.holder?.holder, "runner@executor");
   assert.equal(body.holder?.task, "chain-9");
   assert.ok(body.holder!.ageSeconds! >= 90 && body.holder!.ageSeconds! < 120, String(body.holder?.ageSeconds));
+  // `checkedAt` is stamped after origin was read, so the age never exceeds it.
+  assert.ok(Date.parse(body.checkedAt) >= Date.parse(acquiredAt) + 90_000);
   assert.equal(body.unavailable, null);
   assert.equal(body.events.length, 1);
   assert.equal(body.events[0]?.state, MergeLeaseEventState.CONTENDED);
@@ -91,3 +99,29 @@ test("the lease route is closed to an unauthenticated caller", async () => {
     assert.equal(response.status, 401);
   });
 });
+
+// Operator-scoped means every other authenticated principal is refused, and
+// refused before the route can read origin or the ledger: a mechanical caller
+// must not be able to make the API shell out to `merge-lease.sh` at all.
+for (const [principal, token] of [
+  ["a runner", "runner-unit-token"],
+  ["the merge executor", "merge-executor-unit-token"],
+  ["a session", "agos_session_unit-token"],
+] as const) {
+  test(`the lease route refuses ${principal} without reading origin or the ledger`, async () => {
+    let originReads = 0;
+    let ledgerReads = 0;
+    const db = {
+      mergeLeaseEvent: { findMany: async () => { ledgerReads += 1; return []; } },
+      run: { findFirst: async () => ({ id: "run-1", leaseGeneration: 1 }) },
+    } as unknown as PrismaClient;
+    await withTokens(async () => {
+      const response = await createApp(db, {
+        readMergeLeaseHolder: async () => { originReads += 1; return { outcome: "none" }; },
+      }).request("/merge-lease", { headers: { Authorization: `Bearer ${token}` } });
+      assert.equal(response.status, 403);
+    });
+    assert.equal(originReads, 0);
+    assert.equal(ledgerReads, 0);
+  });
+}
