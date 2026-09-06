@@ -24,6 +24,7 @@ import { splitSqlStatements } from "./sql-statements.js";
 import { resetTestDb, setupTestDb, testDatabaseSchema, testDatabaseUrl } from "./testdb.js";
 
 const taskDispatchBindingMigration = "20260825120000_task_dispatch_binding";
+const taskDispatchFanOutMigration = "20260906010000_task_dispatch_binding_fan_out";
 
 interface TaskDispatchBindingMigrationFixture {
   schema: string;
@@ -35,11 +36,10 @@ interface TaskDispatchBindingMigrationFixture {
 }
 
 /**
- * Stage the real migration history immediately before the dispatch-binding
- * migration. The fixture deliberately creates a task before the migration so
- * the additive-only proof can compare its row content and count after deploy.
+ * Stage the real migration history immediately before the requested migration
+ * so upgrade tests can compare existing rows before and after deploy.
  */
-const stageBeforeTaskDispatchBinding = async (): Promise<TaskDispatchBindingMigrationFixture> => {
+const stageBeforeTaskDispatchBinding = async (migration = taskDispatchBindingMigration): Promise<TaskDispatchBindingMigrationFixture> => {
   const base = new URL(testDatabaseUrl);
   const sourceSchema = base.searchParams.get("schema");
   if (!sourceSchema || sourceSchema === "public") throw new Error("dispatch-binding migration fixture refuses public schema");
@@ -58,7 +58,7 @@ const stageBeforeTaskDispatchBinding = async (): Promise<TaskDispatchBindingMigr
   const staging = mkdtempSync(join(tmpdir(), "task-dispatch-binding-fixture."));
   cpSync(join(dbDirectory, "prisma"), join(staging, "prisma"), { recursive: true });
   for (const entry of readdirSync(join(staging, "prisma", "migrations"), { withFileTypes: true })) {
-    if (entry.isDirectory() && entry.name >= taskDispatchBindingMigration) {
+    if (entry.isDirectory() && entry.name >= migration) {
       rmSync(join(staging, "prisma", "migrations", entry.name), { recursive: true, force: true });
     }
   }
@@ -79,8 +79,8 @@ const stageBeforeTaskDispatchBinding = async (): Promise<TaskDispatchBindingMigr
     execute,
     applyMigration: () => {
       cpSync(
-        join(dbDirectory, "prisma", "migrations", taskDispatchBindingMigration),
-        join(staging, "prisma", "migrations", taskDispatchBindingMigration),
+        join(dbDirectory, "prisma", "migrations", migration),
+        join(staging, "prisma", "migrations", migration),
         { recursive: true },
       );
       deploy();
@@ -543,6 +543,40 @@ test("dispatch binding migration is additive and preserves existing task rows", 
   }
 });
 
+test("dispatch fan-out migration preserves an existing binding and permits a second", {
+  skip: !migrationHarnessEnabled,
+}, async () => {
+  const fixture = await stageBeforeTaskDispatchBinding(taskDispatchFanOutMigration);
+  try {
+    await fixture.execute(`
+      INSERT INTO "Project" ("id", "name", "slug", "updatedAt")
+      VALUES ('fan-out-project', 'fan-out', 'fan-out', NOW());
+      INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "chainLayer", "dispatchAfterTaskId", "updatedAt")
+      VALUES ('fan-out-predecessor', 'fan-out-project', 'predecessor', '', 'fan-out-a', 0, 0, NULL, NOW()),
+             ('fan-out-first', 'fan-out-project', 'first', '', 'fan-out-b', 0, 0, 'fan-out-predecessor', NOW());
+    `);
+    const rows = () => migrationQuery<{ row: unknown }>(fixture, `
+      SELECT to_jsonb(task) AS row FROM "Task" AS task ORDER BY task."id"
+    `);
+    const before = await rows();
+    assert.equal(before.length, 2);
+    const secondBinding = `
+      INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "chainLayer", "dispatchAfterTaskId", "updatedAt")
+      VALUES ('fan-out-second', 'fan-out-project', 'second', '', 'fan-out-c', 0, 0, 'fan-out-predecessor', NOW())
+    `;
+    await assert.rejects(() => fixture.execute(secondBinding), /dispatchAfterTaskId/u);
+    fixture.applyMigration();
+    assert.deepEqual(await rows(), before);
+    await fixture.execute(secondBinding);
+    const bindings = await migrationQuery<{ id: string }>(fixture, `
+      SELECT "id" FROM "Task" WHERE "dispatchAfterTaskId" = 'fan-out-predecessor' ORDER BY "id"
+    `);
+    assert.deepEqual(bindings, [{ id: "fan-out-first" }, { id: "fan-out-second" }]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Goal 5a0, plan Step 2.8 — catalog assertions for the idempotent execution
 // kernel migration, plus the raw negative inserts Step 2's verification names.
@@ -685,11 +719,12 @@ test("dispatch binding migration installs the storage contract and rejects unsaf
   const indexes = await db.$queryRaw<Array<{ indexname: string; indexdef: string }>>`
     SELECT indexname, indexdef FROM pg_indexes
     WHERE schemaname = ${testDatabaseSchema}
-      AND indexname = 'Task_dispatchAfterTaskId_key'
+      AND indexname IN ('Task_dispatchAfterTaskId_key', 'Task_dispatchAfterTaskId_projectId_key', 'Task_dispatchAfterTaskId_projectId_idx')
   `;
   assert.equal(indexes.length, 1);
-  assert.match(indexes[0]!.indexdef, /CREATE UNIQUE INDEX/u);
-  assert.match(indexes[0]!.indexdef, /\("dispatchAfterTaskId"\)/u);
+  assert.equal(indexes[0]!.indexname, "Task_dispatchAfterTaskId_projectId_idx");
+  assert.match(indexes[0]!.indexdef, /CREATE INDEX/u);
+  assert.match(indexes[0]!.indexdef, /\("dispatchAfterTaskId", "projectId"\)/u);
 
   const foreignKeys = await db.$queryRaw<Array<{ conname: string; confdeltype: string; columns: string[] }>>`
     SELECT c.conname, c.confdeltype,
@@ -745,11 +780,12 @@ test("dispatch binding migration installs the storage contract and rejects unsaf
     dispatchAfterTaskId: predecessor.id,
   } });
   assert.equal(firstSuccessor.dispatchAfterTaskId, predecessor.id);
-  await rejects(db, `
+  await db.$executeRawUnsafe(`
     INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "chainLayer", "dispatchAfterTaskId", "updatedAt")
     VALUES ('dispatch-successor-two-${suffix}', '${project.id}', 'successor two', 'successor two', 'dispatch-chain-c-${suffix}', 1, 1,
             '${predecessor.id}', NOW())
-  `, 'Key ("dispatchAfterTaskId")=');
+  `);
+  assert.equal(await db.task.count({ where: { dispatchAfterTaskId: predecessor.id } }), 2);
 
   await rejects(db, `
     INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "chainLayer", "dispatchAfterTaskId", "updatedAt")

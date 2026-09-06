@@ -152,15 +152,9 @@ const request = async (
   const prior = process.env.OPERATOR_TOKEN;
   process.env.OPERATOR_TOKEN = OPERATOR;
   try {
-    const response = await createApp(db).request(
-      `/projects/${projectId}/task-templates/${templateId}/instantiate`,
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
+    return await operatorRequest(
+      `/projects/${projectId}/task-templates/${templateId}/instantiate`, "POST", body,
     );
-    return { status: response.status, body: await response.json() };
   } finally {
     if (prior === undefined) delete process.env.OPERATOR_TOKEN;
     else process.env.OPERATOR_TOKEN = prior;
@@ -178,22 +172,18 @@ const instantiate = async (seed: Fixture, autoStart = false) => {
   return db.task.findMany({ where: { chainId: result.body.chainId }, orderBy: { chainIndex: "asc" } });
 };
 
-const operatorRequest = async (path: string, method: "POST" | "DELETE"): Promise<{ status: number; body: any }> => {
+const operatorRequest = async (path: string, method: "POST" | "DELETE" | "PATCH", body?: unknown): Promise<{ status: number; body: any }> => {
   const response = await createApp(db).request(path, {
     method,
-    headers: { Authorization: `Bearer ${OPERATOR}` },
+    headers: { Authorization: `Bearer ${OPERATOR}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const text = await response.text();
   return { status: response.status, body: text === "" ? null : JSON.parse(text) };
 };
 
-const patchTaskStatus = async (taskId: string, status: TaskStatus): Promise<Response> => createApp(db).request(
-  `/tasks/${taskId}`,
-  {
-    method: "PATCH",
-    headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ status }),
-  },
+const patchTaskStatus = async (taskId: string, status: TaskStatus) => operatorRequest(
+  `/tasks/${taskId}`, "PATCH", { status },
 );
 
 const rowCounts = async () => ({
@@ -344,7 +334,7 @@ test("status PATCH cannot move an unresolved bound first task away from TODO", a
     });
 
     const response = await patchTaskStatus(first.id, status);
-    const responseBody = await response.json() as { error: string };
+    const responseBody = response.body as { error: string };
     assert.equal(response.status, 409, JSON.stringify(responseBody));
     assert.match(responseBody.error, new RegExp(predecessor.name, "u"));
     assert.equal((await db.task.findUniqueOrThrow({ where: { id: first.id } })).status, TaskStatus.TODO);
