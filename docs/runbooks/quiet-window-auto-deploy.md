@@ -62,6 +62,12 @@ fails verification; the job points `current` back to `previous`, restarts the
 local runners, and succeeds in recovery only after they all report the
 previous release's commit.
 
+Every host with local runners in its inventory runs that registration check,
+including the control-plane VM, which reads its own loopback API at
+`http://127.0.0.1:${API_PORT}` (default port 3000) with the `OPERATOR_TOKEN`
+from the deployment's `.env`. A control-plane host with local runners and no
+`OPERATOR_TOKEN` fails preflight; the check is never skipped.
+
 ## Runtime layout
 
 ```text
@@ -407,15 +413,37 @@ units; macOS launchd services are labels.
    restart every configured Linux systemd `<label>.service` unit or macOS
    launchd label.
 10. Require all configured Linux systemd `<label>.service` units or macOS
-    launchd labels running. On the control plane, require `/health` success and
-    `/version` reporting the exact clean target commit. On a runner host,
-    require every local registration online, newer than its pre-restart
-    observation, and on that commit. Record `VERIFIED` and `SUCCEEDED`, then
-    write the success Inbox record.
+    launchd labels running. On the control plane, require both `/health`
+    success with `/version` reporting the exact clean target commit and every
+    local runner registration; the API probe never substitutes for the runner
+    check. On a runner host, require every local registration online, newer
+    than its pre-restart observation, and on that commit. Require the whole
+    criterion to hold continuously for the observation window (see below)
+    before recording `VERIFIED` and `SUCCEEDED`, then write the success Inbox
+    record.
 
 The sequence has no install, compile, source-checkout mutation, or
 multi-directory publication. The activation unit is the verified release
 directory selected by the pointer.
+
+### Post-restart observation window
+
+A deploy is green only when every part of the readiness criterion stays green.
+After the first all-green sample, verification keeps sampling every unit's
+`is-active`, the control-plane API probe, and the local runner registrations,
+once a second, for a minimum observation window of **20 seconds** by default.
+Set `AGENTOS_DEPLOY_OBSERVATION_WINDOW_MS` in the deployment environment to
+override it with an integer from 0 through 300000 (five minutes). Any sample that regresses inside the window fails the deploy with
+`observation-window-regressed-<reason>`, naming the failing unit or the
+unregistered runner id, and escalates through the normal escalation path; the
+deploy never self-heals. The overall verification timeout is the upper bound
+and equals the window plus thirty seconds (50 seconds at the default window).
+Raising the window raises the phase’s maximum duration by the same amount.
+
+The `VERIFIED` ledger entry records what the check actually proved:
+`service_verification.units_checked`, `service_verification.runners_registered`,
+`service_verification.observation_window_ms`, and
+`service_verification.observed_for_ms`.
 
 ### Step deadlines and barrier watchdog
 
@@ -482,8 +510,12 @@ diagnostic action.
 
 If restart or health verification fails after pointer activation, atomically
 point `current` back to `previous`, record the rollback outcome, and restart
-the prior release. Do not roll back database migrations, check out source, or
-fall back to a partial directory.
+the prior release. The rollback proves the same combined criterion: units
+running, wrapper binding and prior API identity intact, and every local runner
+re-registered on the previous commit, held for the same observation window. A
+runner that does not come back fails the rollback with
+`previous-service-verification-failed` naming that runner id. Do not roll back
+database migrations, check out source, or fall back to a partial directory.
 
 After success or a no-op, retention keeps the newest three immutable releases
 while protecting both pointer targets, the newest 14 database dumps, one dump
