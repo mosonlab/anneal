@@ -82,6 +82,10 @@ export const mergedSnapshot = (overrides: Partial<RepositorySnapshot["pullReques
     },
   });
 
+export const refLandedBeforeProjection = (): RepositorySnapshot => mergedSnapshot({
+  state: "OPEN", merged: false, mergedAt: null, mergedByLogin: null, mergeCommit: null,
+});
+
 export type TraceEntry = { call: string; detail?: Record<string, unknown> };
 
 export type FakeOptions = {
