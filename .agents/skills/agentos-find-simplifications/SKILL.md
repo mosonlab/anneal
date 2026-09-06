@@ -85,7 +85,7 @@ Assign exactly one verdict to every investigated lead:
 
 - `confirmed-internal-delete`: internal removal or folding supported by strong consumer and intent evidence.
 - `public-removal-needs-operator`: exported API, CLI, protocol, wire format, configuration contract, or other externally consumable surface. List it separately; target an approved removal to the next minor release while Anneal is pre-1.0.
-- `defense-or-persisted-separate-task`: persisted data, Prisma schema or migrations, merge authorization or automation, ownership, locking, workspace containment, security, secrets, or other defense-list behavior. Report the opportunity, but require a separate Sol high task and explicit operator approval before implementation.
+- `defense-or-persisted-separate-task`: persisted data, Prisma schema or migrations, merge authorization or automation, ownership, locking, workspace containment, security, secrets, or other defense-list behavior. Report the opportunity, but require a separate task and explicit operator approval before implementation; the later brief uses the `default route` unless an owner-defined `hazard: <which>` applies.
 - `intentional-keep`: complexity or duplication justified by a current owner, contract, boundary, or deliberate architecture.
 - `rejected`: the evidence did not prove a net simplification or a production consumer still needs the behavior.
 
@@ -97,7 +97,13 @@ Read [references/candidate-report.md](references/candidate-report.md) before wri
 
 The report must account for every surveyed area, including areas with no accepted candidate, and must distinguish exclusions from completed coverage. Prefer a few high-confidence themes over a long list of guesses.
 
-For each theme, read the current tier-selection and implementation-assignee rules in `docs/governance/task-routing-v1.md` and recommend a chain type plus one implementation route: `Luna Max eligible` or `Sol High required`. State the exact routing reason. Treat this as a post-approval handoff recommendation, not implementation authority. A Luna subagent dispatched outside the required Anneal chain does not inherit the chain's permission to implement.
+For each theme, read the current tier-selection and implementation-assignee
+rules in `docs/governance/task-routing-v1.md` and recommend a chain type plus
+one implementation route: `default route` unless the owner-defined hazard
+applies, in which case write `hazard: <which>`. State the exact routing reason.
+Treat this as a post-approval handoff recommendation, not implementation
+authority. A Luna subagent dispatched outside the required Anneal chain does
+not inherit the chain's permission to implement.
 
 End with only the consequential decisions the operator must make:
 

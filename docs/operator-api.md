@@ -1207,19 +1207,20 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   template. If both supplied keys address missing slots, the specification
   refusal is reported first. No task is created for either refusal. Unknown
   fields inside `gates` are rejected by the strict request schema.
-- A machine-readable `Route: implementation=<agent>` line (optionally followed
-  by ` - <reason>`) in `description` is consumed only by
-  `direct-engineer-workflow`. Any other
-  template returns `400 Bad Request` with code
-  `implementation_route_template_unsupported` instead of silently using its
-  configured assignee; remove the line or use `stepOverrides` to assign that
-  template. On `direct-engineer-workflow`, a route-shaped line that does not
-  match the grammar returns `implementation_route_malformed`. Other templates
-  do not parse malformed Route-looking prose. The Route line conflicts with an
-  explicit `stepOverrides` assignee for the implementation step, never with the
-  selected staffing profile, which it simply outranks for that step.
-- An `afterTaskId` binding is released only by `DELETE /tasks/:taskId/chain`
-  on the bound chain; archiving the bound chain does not release it.
+- Implementation route grammar, escalation, and `stepOverrides` interaction
+  are owned by [Implementation assignee routing](governance/task-routing-v1.md#implementation-assignee-routing).
+  Route-related refusal codes are `implementation_route_malformed`,
+  `implementation_route_template_unsupported`,
+  `implementation_route_conflicts_with_step_override`, and
+  `implementation_route_agent_renamed`; `step_override_agent_not_found` is
+  returned when the routed Agent name cannot be resolved in the project.
+- One predecessor task accepts several bound successor chains: binding a
+  second chain to a predecessor that already has one is accepted, and the
+  predecessor records one `Chain <id> bound to predecessor <name>` activity per
+  binding. The binding stays one-way and one hop deep. An `afterTaskId` binding
+  is released only by `DELETE /tasks/:taskId/chain` on that bound chain, which
+  leaves the predecessor's other successors bound; archiving a bound chain does
+  not release it.
 
 ```sh
 curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/instantiate" \
@@ -1547,6 +1548,54 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
   Chain step that authors one, the whole stored description for an ordinary
   task, and `null` for a readiness or integrator step, whose prompt the
   platform owns, or for a description whose brief fence cannot be parsed.
+- Each returned Run carries `metrics`: read-time diagnostics derived from the
+  Run row, its Session row and that session's tool events. Nothing in it is
+  persisted, and `null` always means *unknown* — never zero, and never safe to
+  render as zero.
+  - `metrics.phases` splits the run's wall clock in milliseconds:
+    `queuedMs` (Run `readyAt` to Session `provisionedAt`), `provisioningMs`
+    (`provisionedAt` to `startedAt`), `executingMs` (`startedAt` to `endedAt`,
+    or to now while the run is still executing), `inboxWaitMs` and `cleanupMs`
+    (`cleanupStartedAt` to `cleanupEndedAt`). Each is `null` when either
+    bounding timestamp is missing. `inboxWaitMs` is `0` only when the session
+    demonstrably never waited on the Inbox; when a wait is known to have
+    happened — the session is `WAITING_INBOX`, or it resumed at least once —
+    the stored data marks that it happened without bounding it, so the value is
+    `null` rather than a guess.
+  - `metrics.tokens` reports the canonical input split, where `input` already
+    includes both cache subsets: `input`, `cachedRead`, `cacheWrite`,
+    `uncachedInput`, `output` and `cacheHitRatio` (`cachedRead / input`, a
+    fraction in `[0, 1]`). `uncachedInput` and `cacheHitRatio` are `null` when
+    a component is missing or the split is internally inconsistent; the raw
+    reported columns still appear. A valid zero-input split yields
+    `uncachedInput = 0` and `cacheHitRatio = null`.
+  - `metrics.tools` reports `calls`, `failed`, `unclassified`, `totalToolMs`
+    and `byName` (the five busiest tool names, most calls
+    first, each with `calls` and `failed`). Calls are paired by `toolCallId`.
+    A completion whose payload states no readable outcome counts in
+    `unclassified` and never as a success. A start with no completion, or a
+    completion with no start, still counts in `calls` with an unknown duration
+    which makes `totalToolMs` a lower bound. Unpaired starts do not count in
+    `unclassified`. Missing IDs never establish a pairing. `totalToolMs` is the
+    union of paired intervals, so parallel calls count wall time only once.
+    One query across all run sessions selects only tool start/completion events,
+    projecting names and outcome markers into `payload` in SQL; tool output
+    bodies are never loaded for metrics. Provider discriminators and outcome
+    marker types must match: Claude `tool_result.is_error`, PI
+    `tool_execution_end.isError`, and Codex `command_execution.exit_code`
+    (numeric, with any non-null item-level `error` taking precedence as failure).
+    A Codex status alone cannot establish an outcome.
+  - `metrics.modelActiveMs` is `executingMs` less tool time and Inbox wait,
+    clamped at `0`, and `null` when `executingMs` is unknown. An unknown
+    subtrahend is subtracted as `0`, which can only overstate the remainder:
+    `metrics.modelActiveIsUpperBound` is `true` in exactly that case.
+  - `metrics.outputTokensPerSecond` is `output / (modelActiveMs / 1000)`. It is
+    an **effective session-average rate** over model-active time — not a
+    provider peak rate — and is `null` when `output` is unknown or
+    `modelActiveMs` is unknown or `0`. When `modelActiveIsUpperBound` is true,
+    the duration is an upper bound (≤) and this rate is a lower bound (≥).
+  - `metrics.termination` carries the Session's own account of how the run
+    ended: `reason`, `exitCode` and `signal`.
 
 ```sh
 curl "$BASE_URL/tasks/$TASK_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1588,7 +1637,9 @@ curl "$BASE_URL/tasks/$TASK_ID/chain" -H "Authorization: Bearer $OPERATOR_TOKEN"
 - Required path parameter: `taskId`, naming either a direct Chain member or a
   detached merge-tail repair task bound to the Chain by its repair marker.
 - Deletes every Task in the project-scoped Chain, including its marker-bound
-  repair tasks, atomically.
+  repair tasks, atomically. When the deleted Chain was bound by `afterTaskId`,
+  this releases that binding only; every other chain bound to the same
+  predecessor stays bound.
 - Refusals: `404 Not Found` when the Task does not exist; `409 Conflict` when
   the Task belongs to no Chain, any Chain member has an active Run, or a member
   has retained Run/Session history. Active Run and retained-history refusals
@@ -1974,7 +2025,9 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/retry" -H "Authorization: Bearer $OPERATO
 
 - Required path parameter: `taskId`.
 - Refusals: `409 Conflict` when the task is the first step of a chain bound by
-  `afterTaskId` and the predecessor task is not `DONE`.
+  `afterTaskId` and the predecessor task is not `DONE`. Each chain bound to a
+  predecessor is admitted on its own: once the predecessor is `DONE` every one
+  of them becomes startable, and starting one does not start or refuse another.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$TASK_ID/start" -H "Authorization: Bearer $OPERATOR_TOKEN"
