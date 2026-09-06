@@ -12,29 +12,22 @@ import { testDatabaseUrl } from "./testdb.js";
 /**
  * A disposable database staged at the migration *before* the Goal 5a0 kernel.
  *
- * Both the migration-upgrade tests and the preflight tests need the same thing:
- * a schema holding pre-kernel rows, because the preflight runs before the kernel
- * migration and the migration's own ordering can only be tested against rows
- * that existed before it. The dedicated test schema is already fully migrated,
- * so neither can use it.
+ * The preflight tests need a schema holding pre-kernel rows because the
+ * preflight runs before the kernel migration. The dedicated test schema is
+ * already fully migrated, so it cannot be used here.
  */
 
 const dbDirectory = fileURLToPath(new URL("../../db", import.meta.url));
-export const kernelMigration = "20260818000000_goal_execution_safety_kernel";
-export const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
+const kernelMigration = "20260818000000_goal_execution_safety_kernel";
 
-export interface PreKernelDatabase {
+interface PreKernelDatabase {
   url: string;
-  schema: string;
-  quoted: string;
   /** Runs SQL against the staged schema, over the fixture's own connection. */
   execute: (sql: string) => Promise<void>;
-  /** Applies the kernel migration through the real `prisma migrate deploy`. */
-  applyKernelMigration: () => void;
   cleanup: () => Promise<void>;
 }
 
-export const stageAtPreviousMigration = async (label: string): Promise<PreKernelDatabase> => {
+const stageAtPreviousMigration = async (label: string): Promise<PreKernelDatabase> => {
   const base = new URL(testDatabaseUrl);
   const schema = `${base.searchParams.get("schema") ?? "public"}_${label}`;
   if (schema.startsWith("public")) throw new Error("the pre-kernel fixture refuses to touch the public schema");
@@ -74,17 +67,7 @@ export const stageAtPreviousMigration = async (label: string): Promise<PreKernel
 
   return {
     url,
-    schema,
-    quoted,
     execute,
-    applyKernelMigration: () => {
-      cpSync(
-        join(dbDirectory, "prisma", "migrations", kernelMigration),
-        join(staging, "prisma", "migrations", kernelMigration),
-        { recursive: true },
-      );
-      deploy();
-    },
     cleanup: async (): Promise<void> => {
       rmSync(staging, { recursive: true, force: true });
       try {
@@ -99,7 +82,7 @@ export const stageAtPreviousMigration = async (label: string): Promise<PreKernel
 };
 
 /** Pre-kernel history: a Task carried no Goal link, only its Runs did. */
-export const preKernelSeed = `
+const preKernelSeed = `
   INSERT INTO "Project" ("id", "name", "slug", "updatedAt")
   VALUES ('p-up', 'upgrade', 'upgrade', NOW());
   INSERT INTO "Environment" ("id", "projectId", "name", "updatedAt")

@@ -9,9 +9,8 @@
  * gains its `canonicalRole`, an operator's own Agent does not, and the single
  * `runtimeConfigCustomized` flag becomes the per-field list.
  *
- * Modelled on optional-steps-migration.dbtest.ts: real history is deployed up to
- * this migration, rows are written through raw SQL under the old shape, and only
- * then is the migration applied.
+ * Real history is deployed up to the migration under test, rows are written
+ * through raw SQL under the old shape, and then the migration is applied.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
