@@ -1,0 +1,19 @@
+Merge tail: repair step identity comes from persisted template steps and attestations bind their base
+
+Goal: the merge tail locates the Documentation step of a repair chain from the task's own persisted template steps rather than a retired graph shape, and a gate attestation satisfies an authorization only when its attested base equals the authorization's base.
+
+Background: two independent small defects on merge-tail data reads. (1) `packages/api/src/run-completion.ts:806-814` resolves the Documentation step ordinal through `canonicalStepOrdinals` in `packages/db/src/canonical-template-transition.ts`, the only runtime consumer of retired template shapes. Seed-era markers (`10`, `9`, `human-12`, `regression-first-13`, `human-6`) are registered for identity (`:683-696`) but have no shape, so `canonicalStepOrdinals` returns null (`:736-742`) and the repair silently skips re-opening Documentation (`run-completion.ts:840-844` falls back to Regression; `merge-tail-actions.ts:573-599` only resets Documentation when an id exists). The same transaction already selects `templateId` (`run-completion.ts:800-805`), and `TaskTemplateStep` rows plus `stepRole(outputKind)` yield the ordinal directly. (2) `requireGateAttestation` (`packages/db/src/gate-attestation.ts:113-117`) looks up by `(chainId, headSha)` and returns `baseHeadSha`, but the caller `merge-authorization.ts:94-100` only checks `satisfied` and never compares the authorization's `baseSha` with the attestation's base; the v1 exemption probe at `gate-attestation.ts:121-128` treats "no v2 step found" as legacy exemption (fail-open on a renamed or added kind). Mechanical channels bind head+base elsewhere (`readiness-decision.ts:135-142`, `merge-readiness-worker.ts:523-528`); the residual surface is the direct/Inbox authorization and evidence renewal (`merge-authorization.ts:112-118`).
+
+Changes:
+1. Replace the `canonicalStepOrdinals` call in `run-completion.ts` with a lookup of the repair task's `TaskTemplateStep` rows by `templateId`, deriving the Documentation and Regression steps via `stepRole(outputKind)`. If the template has no Documentation-role step, record a `TaskActivity` saying so instead of silently skipping.
+2. Delete `canonicalStepOrdinals`, `successorStepOrdinals` and `CURRENT_CANONICAL_STEP_ORDINALS` from `canonical-template-transition.ts` and their tests in `canonical-template-registry.test.ts` and `canonical-template-transition.test.ts`; retired shapes remain for sync/rollover recognition only.
+3. In `merge-authorization.ts`, require `attestation.baseHeadSha === payload.baseSha` in addition to `satisfied`; on mismatch refuse with a named reason (`gate-attestation-base-mismatch`) that reaches the activity log.
+4. Make the v1 exemption in `gate-attestation.ts:121-128` explicit: exempt only when the chain's template generation is one of the registered pre-attestation generations; an unrecognised outputKind is not exempt.
+
+Out of scope: adding a version column to TaskTemplate (E-01), the rollover blocker behaviour (E-05), `stepGeneration`'s retired-marker branch (E-07, separate card), readiness or base-drift workers, the executor.
+
+Constraints: no migration. Behaviour for current canonical generations is unchanged except for the two closed holes; every refusal is loud (activity + refusal reason). dbtests run only on the merge gate.
+
+Acceptance: `npm run test -w @anneal/db` and `-w @anneal/api` green; dbtests cover: a repair on a seed-era template row re-opens Documentation; a template without a Documentation step writes the named activity; an authorization whose base differs from the attested base is refused with `gate-attestation-base-mismatch`; an unrecognised outputKind is not treated as exempt. `git grep canonicalStepOrdinals origin/main` after merge returns nothing.
+
+Route: implementation=senior-dev-opus-medium - operator chose Claude capacity; two narrow data-read changes with mechanical dbtest acceptance
