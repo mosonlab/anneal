@@ -475,9 +475,8 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
       state.response = response;
       if (response.status === "merged") return { status: "applied", value: { via: "response", sha: response.sha } };
       // `unknown` is a lost outcome whose recovery may be a second send: a 5xx,
-      // a timeout or an EOF on the REST calls that build the merge commit, or
-      // an updateRefs response that proved nothing. The compare-and-swap is
-      // what makes that send safe.
+      // a timeout or an EOF on the REST calls that build the merge commit.
+      // The compare-and-swap is what makes that send safe.
       if (response.status === "unknown") return { status: "lost", reason: response.reason };
       // Everything else is read back before anything is decided. That
       // deliberately includes `ref-update-uncertain`, whose response was lost
@@ -515,13 +514,14 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
 
   if (landing.status !== "applied") {
     // Nothing landed, or nothing can be said about whether it landed. Every
-    // branch below is a stop; none of them sends anything further.
+    // branch below is a stop; re-armed merge machinery is still disarmed.
     if (state.guardStop) return state.guardStop;
     const response = state.response;
     const platform = response === null
       ? "no response was recorded"
       : response.status === "unknown" ? response.reason
       : response.status === "ref-update-uncertain" ? `ref-update-uncertain: ${response.reason}`
+      : response.status === "ref-update-refused" ? `ref-update-refused: ${response.reason}`
       : response.status === "not-mergeable" ? "405 not mergeable"
       : response.status;
     if (landing.status === "indeterminate") {

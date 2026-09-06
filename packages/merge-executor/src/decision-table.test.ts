@@ -10,6 +10,7 @@ import {
   cleanSnapshot,
   makeFake,
   mergedSnapshot,
+  refLandedBeforeProjection,
 } from "./fake-pr-surface.js";
 
 const stopped = (outcome: Awaited<ReturnType<typeof execute>>): { condition: string; evidence: string } => {
@@ -96,13 +97,10 @@ test("post-merge verification stops when the base ref cannot be resolved", async
 });
 
 test("a successful atomic ref update is not falsely rejected while GitHub still reports the PR open", async () => {
-  const landedRefBeforePrProjection = mergedSnapshot({
-    state: "OPEN", merged: false, mergedAt: null, mergedByLogin: null, mergeCommit: null,
-  });
   const fake = makeFake({ reads: [
     { status: "ok", snapshot: cleanSnapshot() },
     { status: "ok", snapshot: cleanSnapshot() },
-    { status: "ok", snapshot: landedRefBeforePrProjection },
+    { status: "ok", snapshot: refLandedBeforeProjection() },
   ] });
   assert.deepEqual(await execute(fake.deps), { outcome: "merged", mergeCommitSha: MERGE_COMMIT });
 });
@@ -632,16 +630,13 @@ const REF_UPDATE_LOST = {
 test("a lost ref-update response whose ref reads back as our merge commit is a merge, not base drift", async () => {
   // The ref has moved; the PR projection has not caught up, which is the exact
   // window the old code reclassified inside.
-  const landedRefBeforePrProjection = mergedSnapshot({
-    state: "OPEN", merged: false, mergedAt: null, mergedByLogin: null, mergeCommit: null,
-  });
   const fake = makeFake({
     // The second element is the negative: what a blind resend would have landed.
     merges: [REF_UPDATE_LOST, { status: "merged", sha: "d".repeat(40) }],
     reads: [
       { status: "ok", snapshot: cleanSnapshot() },
       { status: "ok", snapshot: cleanSnapshot() },
-      { status: "ok", snapshot: landedRefBeforePrProjection },
+      { status: "ok", snapshot: refLandedBeforeProjection() },
     ],
   });
 
@@ -685,7 +680,9 @@ test("a lost ref-update response confirmed absent stops without a second write, 
 
 test("a deterministic GitHub rejection keeps its class: no read-back retry, and a named stop", async () => {
   const refused = makeFake({ merge: { status: "ref-update-refused", reason: "UNKNOWN: beforeOid mismatch" } });
-  assert.equal(stopped(await execute(refused.deps)).condition, "api-error");
+  const refusal = stopped(await execute(refused.deps));
+  assert.equal(refusal.condition, "api-error");
+  assert.match(refusal.evidence, /beforeOid mismatch/u);
   assert.equal(refused.trace.filter((entry) => entry.call === "merge").length, 1);
 
   const unprocessable = makeFake({
@@ -695,4 +692,36 @@ test("a deterministic GitHub rejection keeps its class: no read-back retry, and 
   assert.equal(outcome.condition, "payload-mismatch");
   assert.match(outcome.evidence, /HTTP 422/u);
   assert.equal(unprocessable.trace.filter((entry) => entry.call === "merge").length, 1);
+});
+
+test("a GraphQL timeout confirmed against the landed ref merges without resending", async () => {
+  const fake = makeFake({
+    merge: { ...REF_UPDATE_LOST, reason: "TIMEOUT: The request timed out" },
+    reads: [
+      { status: "ok", snapshot: cleanSnapshot() },
+      { status: "ok", snapshot: cleanSnapshot() },
+      { status: "ok", snapshot: refLandedBeforeProjection() },
+    ],
+  });
+  assert.deepEqual(await execute(fake.deps), { outcome: "merged", mergeCommitSha: MERGE_COMMIT });
+  assert.equal(fake.calls().filter((call) => call === "merge").length, 1);
+  assertNoPublication(fake.calls());
+});
+
+test("an uncertain ref update disarms re-armed auto-merge and stops without another merge", async () => {
+  const fake = makeFake({
+    merge: REF_UPDATE_LOST,
+    reads: [
+      { status: "ok", snapshot: cleanSnapshot() },
+      { status: "ok", snapshot: cleanSnapshot() },
+      { status: "ok", snapshot: cleanSnapshot({ pullRequest: {
+        autoMergeRequest: { enabledAt: "2026-08-18T00:05:00.000Z", mergeMethod: "MERGE" },
+      } }) },
+      { status: "ok", snapshot: cleanSnapshot() },
+    ],
+  });
+  assert.equal(stopped(await execute(fake.deps)).condition, "deferred-merge-machinery");
+  assert.equal(fake.calls().filter((call) => call === "merge").length, 1);
+  assert.equal(fake.calls().filter((call) => call === "disableAutoMerge").length, 1);
+  assert.ok(fake.calls().indexOf("disableAutoMerge") > fake.calls().indexOf("merge"));
 });

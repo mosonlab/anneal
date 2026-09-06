@@ -419,7 +419,7 @@ test("a deterministic REST rejection keeps its class instead of degrading to a l
   assert.equal(response.status, "unprocessable");
   assert.match(response.status === "unprocessable" ? response.reason : "", /merge commit creation failed: HTTP 422/u);
 
-  for (const [status, expected] of [[401, "forbidden"], [403, "forbidden"], [404, "not-found"], [400, "unprocessable"]] as const) {
+  for (const [status, expected] of [[401, "forbidden"], [403, "forbidden"], [404, "not-found"], [400, "not-found"], [422, "not-found"]] as const) {
     const { client } = clientWith([{ status, body: "no" }]);
     assert.equal((await merge(client)).status, expected, String(status));
   }
@@ -434,4 +434,26 @@ test("a deterministic REST rejection keeps its class instead of degrading to a l
     const { client } = clientWith([response]);
     assert.equal((await merge(client)).status, "unknown", String(response.status));
   }
+});
+
+test("a GraphQL timeout on updateRefs carries the uncertain merge identity", async () => {
+  const { client, head, mergeCommit } = mergeWithoutSanitizing({
+    status: 200, body: JSON.stringify({ errors: [{ type: "TIMEOUT", message: "The request timed out" }] }),
+  });
+  assert.deepEqual(await client.mergePullRequest(reference, head,
+    { ref: "main", sha: "b".repeat(40), repositoryId: "R_repo" }), {
+    status: "ref-update-uncertain", reason: "TIMEOUT: The request timed out", mergeCommitSha: mergeCommit,
+  });
+});
+
+test("a null updateRefs payload retains the uncertain merge identity", async () => {
+  const { client, head, mergeCommit } = mergeWithoutSanitizing({
+    status: 200, body: JSON.stringify({ data: { updateRefs: null } }),
+  });
+  assert.deepEqual(await client.mergePullRequest(reference, head,
+    { ref: "main", sha: "b".repeat(40), repositoryId: "R_repo" }), {
+    status: "ref-update-uncertain",
+    reason: "updateRefs response did not prove the atomic ref update",
+    mergeCommitSha: mergeCommit,
+  });
 });

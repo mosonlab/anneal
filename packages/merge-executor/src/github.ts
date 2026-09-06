@@ -19,7 +19,7 @@
  * so importing it does not widen §D-P1's custody surface.
  */
 
-import { callWithTimeout, classifyHttpStatus, NO_RESPONSE, type Http, type HttpAttempt, type HttpTrace, type ResponseClass } from "@anneal/github-client";
+import { callWithTimeout, classifyHttpStatus, isLostResponse, NO_RESPONSE, type Http, type HttpAttempt, type HttpTrace, type ResponseClass } from "@anneal/github-client";
 
 /** Every mutating request this package can construct. Enumerated so the
  *  no-bypass test can assert the complete list and a new write cannot be added
@@ -103,7 +103,7 @@ export type DisarmResult = { ok: true } | { ok: false; reason: string };
  * A failed GraphQL call, carrying the one distinction a *mutation*'s caller
  * cannot do without: `lost` means no answer arrived or the answer could not be
  * read, so the mutation may still have been applied and only a read-back
- * settles it. A GitHub refusal — a 4xx, or an `errors` entry — is an answer,
+ * settles it. A deterministic GitHub refusal is an answer,
  * and asking again gets the same one.
  */
 type GraphQlFailure = { error: string; lost: boolean };
@@ -125,11 +125,13 @@ type RestFailure = { ok: false; responseClass: ResponseClass; status: number; re
  * Only a genuinely lost response — no answer, a 5xx, a body we cannot read —
  * leaves the write's fate open.
  */
-const restStop = (stage: string, failure: RestFailure): MergeResponse => {
+const restStop = (stage: string, failure: RestFailure, method: "GET" | "POST"): MergeResponse => {
   const reason = `${stage}: ${failure.reason}`;
   if (failure.responseClass !== "refused") return { status: "unknown", reason };
   if (failure.status === 401 || failure.status === 403) return { status: "forbidden", reason };
-  if (failure.status === 404) return { status: "not-found", reason };
+  // Refused object reads cannot supply the requested object; they have no
+  // mutation payload to label unprocessable. Preserve the HTTP reason.
+  if (failure.status === 404 || method === "GET") return { status: "not-found", reason };
   return { status: "unprocessable", reason };
 };
 
@@ -254,7 +256,7 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
     const record = asRecord(parsed);
     if (!record) return { error: "response body is not an object", lost: true };
     const errors = classifyGraphQlErrors(record.errors);
-    if (errors) return { error: errors, lost: false };
+    if (errors) return { error: errors, lost: isLostResponse(errors) };
     const data = asRecord(record.data);
     if (!data) return { error: "response carried no data", lost: true };
     return { data };
@@ -504,11 +506,11 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
   ): Promise<MergeResponse> => {
     const repo = `${options.restUrl}/repos/${reference.owner}/${reference.name}`;
     const commit = await restJson({ url: `${repo}/git/commits/${expectedHeadSha}`, method: "GET" });
-    if (!commit.ok) return restStop("head commit read failed", commit);
+    if (!commit.ok) return restStop("head commit read failed", commit, "GET");
     const headTree = asString(asRecord(commit.value.tree)?.sha);
     if (!headTree) return { status: "unknown", reason: "head commit has no tree sha" };
     const recursive = await restJson({ url: `${repo}/git/trees/${headTree}?recursive=1`, method: "GET" });
-    if (!recursive.ok) return restStop("head tree read failed", recursive);
+    if (!recursive.ok) return restStop("head tree read failed", recursive, "GET");
     if (!Array.isArray(recursive.value.tree) || recursive.value.truncated !== false) {
       return { status: "unknown", reason: "head tree response is malformed or truncated; .chain absence is unproven" };
     }
@@ -520,7 +522,7 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
         method: "POST",
         body: { base_tree: headTree, tree: [{ path: ".chain", mode: "040000", type: "tree", sha: null }] },
       });
-      if (!tree.ok) return restStop("sanitized tree creation failed", tree);
+      if (!tree.ok) return restStop("sanitized tree creation failed", tree, "POST");
       const sanitized = asString(tree.value.sha);
       if (!sanitized) return { status: "unknown", reason: "sanitized tree response has no sha" };
       mergeTree = sanitized;
@@ -534,7 +536,7 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
         parents: [expectedBase.sha, expectedHeadSha],
       },
     });
-    if (!created.ok) return restStop("merge commit creation failed", created);
+    if (!created.ok) return restStop("merge commit creation failed", created, "POST");
     const mergeSha = asString(created.value.sha);
     if (!mergeSha) return { status: "unknown", reason: "merge commit response has no sha" };
     const updated = await graphql(UPDATE_REFS_MUTATION, {
@@ -557,7 +559,7 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
         : { status: "ref-update-refused", reason: updated.error };
     }
     if (!asRecord(updated.data.updateRefs)) {
-      return { status: "unknown", reason: "updateRefs response did not prove the atomic ref update" };
+      return { status: "ref-update-uncertain", reason: "updateRefs response did not prove the atomic ref update", mergeCommitSha: mergeSha };
     }
     return { status: "merged", sha: mergeSha };
   };
