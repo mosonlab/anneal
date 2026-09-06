@@ -42,6 +42,8 @@ for (const [templateName, generations] of Object.entries(LEGACY_TEMPLATE_GENERAT
       const persistedName = templateRolloverName(templateName, generation.marker, "template-row");
       for (const step of generation.shape) {
         const { outputKind } = step;
+        assert.equal(stepGeneration({ outputKind, taskTemplateName: persistedName }), stepGeneration({ outputKind }));
+        assert.equal(stepGeneration({ outputKind, taskTemplate: { name: persistedName } }), stepGeneration({ outputKind }));
         assert.equal(stepRole({ outputKind, taskTemplateName: persistedName }), EXPECTED_ROLES[outputKind]);
       }
       const implementation = { outputKind: "implementation", taskTemplate: { name: persistedName } };
@@ -123,5 +125,5 @@ test("step-role is a leaf module, so no sibling can close an import cycle throug
   // bindings. The branch is gone and the fix is structural — this module must
   // stay importless, so a future edit cannot reintroduce the cycle silently.
   const source = await readFile(new URL("./step-role.ts", import.meta.url), "utf8");
-  assert.deepEqual(source.match(/^import[\s{]/gmu), null);
+  assert.deepEqual(source.match(/^(?:\s*import\b|\s*export\b[^;]*\bfrom\b)|\bimport\s*\(/gmu), null);
 });
