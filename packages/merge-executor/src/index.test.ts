@@ -206,7 +206,16 @@ await pollClaims({
     child = spawn(
       process.execPath,
       ["--conditions=development", "--import", import.meta.resolve("tsx"), script],
-      { cwd: scratch, env: { PATH: process.env.PATH ?? "" }, stdio: ["ignore", "pipe", "pipe"] },
+      {
+        cwd: scratch,
+        // The stripped environment is about executor *configuration*, not about
+        // denying the child a temporary directory: TMPDIR is where tsx keeps the
+        // transpile cache this test process has already filled for exactly these
+        // modules. Dropping it sends the child to a cold cache under /tmp, which
+        // on the gate worker is both unshared and memory-backed.
+        env: { PATH: process.env.PATH ?? "", ...(process.env.TMPDIR ? { TMPDIR: process.env.TMPDIR } : {}) },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
     );
     let stderr = "";
     child.stderr!.setEncoding("utf8");
@@ -215,8 +224,18 @@ await pollClaims({
     const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
       running.on("exit", (code, signal) => resolve({ code, signal }));
     });
+    // Readiness is not a startup-speed assertion, and the bound below is only a
+    // backstop against a child that neither speaks nor exits: the regression this
+    // test stands in front of exits within a second, and the exit listener below
+    // is what catches it. A 10s bound turned a cold transpile on a loaded gate
+    // worker into a failure that said nothing about the daemon.
+    const readinessBackstopMs = 120_000;
+    const spawnedAt = performance.now();
     await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error(`child readiness timed out: ${stderr}`)), 10_000);
+      const timeout = setTimeout(
+        () => reject(new Error(`child never became ready in ${Math.round(performance.now() - spawnedAt)}ms: ${stderr}`)),
+        readinessBackstopMs,
+      );
       let stdout = "";
       running.stdout!.setEncoding("utf8");
       running.stdout!.on("data", (chunk: string) => {
