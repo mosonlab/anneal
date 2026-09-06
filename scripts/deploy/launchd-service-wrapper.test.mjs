@@ -292,6 +292,57 @@ test("runner identity prefixes stay in lockstep across inventory and invocation"
   );
 });
 
+test("empty-prefix Darwin rendering preserves runner labels and ids", () => {
+  const fixture = releaseFixture();
+  const home = join(fixture.root, "operator-home");
+  const environment = {
+    AGENTOS_SERVICE_PLATFORM: "darwin",
+    AGENTOS_RUNNER_ID_PREFIX: "",
+  };
+  const inventory = resolveServiceInventory(environment);
+  const expectedRunners = Array.from({ length: 10 }, (_unused, offset) => ({
+    label: offset === 0 ? "com.agentos.runner" : `com.agentos.runner-${offset + 1}`,
+    runnerId: `runner-${offset + 1}`,
+  }));
+  try {
+    assert.deepEqual(
+      inventory.entries.filter(({ runnerId }) => runnerId).map(({ label, runnerId }) => ({ label, runnerId })),
+      expectedRunners,
+    );
+    const rendered = renderServicePlists({
+      inventory,
+      nodeBinary: "/usr/bin/node",
+      repositoryRoot: fixture.root,
+      sharedRoot: join(fixture.root, "shared"),
+      stdoutPath: join(home, "stdout.log"),
+      stderrPath: join(home, "stderr.log"),
+      path: "/usr/bin:/bin",
+    });
+    for (const { label, runnerId } of expectedRunners) {
+      assert.match(rendered[label], new RegExp(`<key>RUNNER_ID</key>\\s*<string>${runnerId}</string>`, "u"));
+    }
+
+    installLaunchdServices({
+      repositoryRoot: fixture.root,
+      userHome: home,
+      nodeBinary: process.execPath,
+      gitBinary: process.execPath,
+      environment,
+      apply: true,
+    });
+    assert.equal(
+      readFileSync(serviceWrapperPath(fixture.root), "utf8"),
+      readFileSync(join(REPOSITORY_ROOT, "scripts/deploy/launchd-service-wrapper.mjs"), "utf8"),
+    );
+    for (const { label, runnerId } of expectedRunners) {
+      const plist = readFileSync(join(home, "Library/LaunchAgents", `${label}.plist`), "utf8");
+      assert.match(plist, new RegExp(`<key>RUNNER_ID</key>\\s*<string>${runnerId}</string>`, "u"));
+    }
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("service invocation resolves the configured prefix without overriding an explicit runner id", () => {
   const fixture = releaseFixture();
   try {

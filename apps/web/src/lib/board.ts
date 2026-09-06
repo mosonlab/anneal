@@ -1,3 +1,4 @@
+import { RUN_STATUS_IS_ACTIVE } from "@anneal/db/board-contract";
 import { type ChainControlActionKind, chainControlAction } from "./chain-aggregate";
 import { formatDateTime, formatT } from "./format";
 import { cronProse } from "./schedule";
@@ -259,15 +260,9 @@ export const orderColumn = <T extends BoardTask | BoardEntry>(tasks: readonly T[
 
 /* ------------------------------------------------------------- run liveness */
 
-/** The statuses under which the control plane still owns a Run. The same five
- *  the server fences on (`packages/api/src/run-fence.ts`), suspended Inbox work
- *  included; everything else is terminal. */
-const ACTIVE_RUN_STATUSES = [
-  "QUEUED", "CLAIMED", "PROVISIONING", "RUNNING", "WAITING_INBOX",
-] as const satisfies readonly RunStatus[];
+export { ACTIVE_RUN_STATUSES } from "@anneal/db/board-contract";
 
-const isActiveRunStatus = (status: RunStatus): boolean =>
-  ACTIVE_RUN_STATUSES.includes(status as (typeof ACTIVE_RUN_STATUSES)[number]);
+const isActiveRunStatus = (status: RunStatus): boolean => RUN_STATUS_IS_ACTIVE[status];
 
 /** The run fields the rule reads. Both projections carry them, so a caller
  *  hands over whichever it holds: the board's `BoardLatestRun` or the detail

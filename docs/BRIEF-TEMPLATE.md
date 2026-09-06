@@ -74,7 +74,7 @@ it can.
 
 ## Routing
 
-Implementation has six routes:
+Implementation has seven routes:
 
 - **senior-dev-luna-max** (template default): a brief with mechanical Acceptance
   is work that tier finishes under the chain's review and regression tail.
@@ -88,6 +88,10 @@ Implementation has six routes:
   It is the same senior-developer prompt on Claude Opus 5 medium; it is
   never a default, and the chain keeps its code review and blind code review
   steps unchanged.
+- **senior-dev-opus-high**, with the reason on the same line, when the operator
+  chooses Claude capacity and names the higher effort. It is the same
+  senior-developer prompt as senior-dev-opus-medium on Claude Opus 5 high; it is
+  never a default.
 - **frontend-dev-opus-medium** for the frontend scope defined in
   [Implementation assignee routing](governance/task-routing-v1.md#implementation-assignee-routing).
 - **frontend-dev-opus-high** for that same frontend scope when the operator names

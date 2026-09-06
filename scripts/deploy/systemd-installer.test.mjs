@@ -435,7 +435,7 @@ test("systemd path directives escape whitespace and percent specifiers", () => {
   assert.match(unit, /^ExecStart="\/opt\/Node Runtime 100%%\/node" "\/opt\/Anneal Runtime 100%%\/shared\/bin\/agentos-service-wrapper\.mjs" com\.agentos\.api$/mu);
 });
 
-test("default Darwin render, manifest entries, and plan stdout match 9a52c6ad bytes", () => {
+test("empty-prefix Darwin definitions and plans preserve the baseline identities", () => {
   const serviceRoot = realpathSync(mkdtempSync(join(tmpdir(), "agentos-darwin-service-root-")));
   const previousPlatform = process.env.AGENTOS_SERVICE_PLATFORM;
   const previousCount = process.env.AGENTOS_RUNNER_COUNT;
@@ -445,10 +445,6 @@ test("default Darwin render, manifest entries, and plan stdout match 9a52c6ad by
   delete process.env.AGENTOS_RUNNER_ID_PREFIX;
   try {
     const baseline = JSON.parse(readFileSync(new URL("./fixtures/darwin-9a52c6ad-baseline.json", import.meta.url), "utf8"));
-    assert.equal(
-      digest(readFileSync(new URL("./launchd-service-wrapper.unprefixed.mjs", import.meta.url))),
-      "f7ca733a830d8951a82af060882d0344a169b07c9a157697119f8cf8544415e9",
-    );
     const root = process.cwd();
     const plan = installLaunchdServices({
       repositoryRoot: serviceRoot,
@@ -1370,7 +1366,7 @@ test("Darwin retries pending wrapper upgrades and partial grows", () => {
       apply: true,
     };
     installLaunchdServices({ ...common, environment: { AGENTOS_RUNNER_COUNT: "12" } });
-    const wrapperSource = readFileSync(new URL("./launchd-service-wrapper.unprefixed.mjs", import.meta.url));
+    const wrapperSource = readFileSync(new URL("./launchd-service-wrapper.mjs", import.meta.url));
     const pendingWrapper = JSON.parse(readFileSync(manifestPath, "utf8"));
     const wrapperEntry = pendingWrapper.entries[0];
     const oldWrapper = "previous wrapper artifact\n";
