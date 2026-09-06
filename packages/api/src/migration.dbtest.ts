@@ -809,8 +809,8 @@ test("goal 5a0 migration installs the exact enum labels, columns, checks, FKs, a
   ]);
   assert.ok(taskColumns.every((row) => row.is_nullable === "YES"), "every Task lineage column stays nullable");
 
-  const checks = await db.$queryRaw<Array<{ conname: string }>>`
-    SELECT c.conname FROM pg_constraint c
+  const checks = await db.$queryRaw<Array<{ conname: string; convalidated: boolean }>>`
+    SELECT c.conname, c.convalidated FROM pg_constraint c
     JOIN pg_namespace n ON n.oid = c.connamespace
     WHERE n.nspname = ${testDatabaseSchema} AND c.contype = 'c'
       AND (c.conname LIKE '%goal%' OR c.conname LIKE 'GoalExecutionEvent%')
@@ -827,6 +827,8 @@ test("goal 5a0 migration installs the exact enum labels, columns, checks, FKs, a
     "Task_goal_predecessor_shape_check",
     "Task_goal_runtime_shape_check",
   ]);
+
+  assert.ok(checks.every((row) => row.convalidated), `every Goal-lineage check is validated: ${JSON.stringify(checks)}`);
 
   const foreignKeys = await db.$queryRaw<Array<{ conname: string; confdeltype: string }>>`
     SELECT c.conname, c.confdeltype FROM pg_constraint c
@@ -1006,4 +1008,28 @@ test("goal 5a0 constraints reject every corrupt lineage shape and accept manual 
                                       "taskId", "runId", "type", "dedupeKey")
     VALUES ('ev-ok', '${goalId}', 1, 1, 't-1', 'r-1', 'DISPATCH_CREATED', 'dedupe:ev-ok')`);
   assert.equal(await db.goalExecutionEvent.count(), 1);
+});
+
+test("current template steps have a non-null false optional database default", async () => {
+  const columns = await db.$queryRaw<Array<{ is_nullable: string; column_default: string | null }>>`
+    SELECT is_nullable, column_default FROM information_schema.columns
+    WHERE table_schema = ${testDatabaseSchema} AND table_name = 'TaskTemplateStep' AND column_name = 'optional'
+  `;
+  assert.deepEqual(columns, [{ is_nullable: "NO", column_default: "false" }]);
+});
+
+test("current Run subagent columns replace all retired Agent and Run subprocess columns", async () => {
+  const columns = await db.$queryRaw<Array<{ table_name: string; column_name: string }>>`
+    SELECT table_name, column_name FROM information_schema.columns
+    WHERE table_schema = ${testDatabaseSchema} AND table_name IN ('Agent', 'Run')
+  `;
+  const runNames = new Set(columns.filter((row) => row.table_name === "Run").map((row) => row.column_name));
+  assert.ok(runNames.has("subagentModel"));
+  assert.ok(runNames.has("subagentMaxConcurrent"));
+  const names = new Set(columns.map((row) => row.column_name));
+  for (const removed of [
+    "ordinarySubprocessModel", "ordinarySubprocessCodexServiceTier",
+    "elevatedSubprocessModel", "elevatedSubprocessCodexServiceTier",
+    "subprocessModel", "subprocessCodexServiceTier",
+  ]) assert.equal(names.has(removed), false, removed);
 });
