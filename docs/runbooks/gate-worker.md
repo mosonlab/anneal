@@ -146,10 +146,13 @@ AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" AGENTOS_GATE_SERVER=pr
   timeout.
 - When every primary slot is healthy but busy, the dispatcher waits for
   `GATE_DISPATCH_FALLBACK_AFTER_MINUTES` minutes before trying the fallback
-  (default `6`; it accepts a non-negative integer, and `0` tries the fallback
+  (default `6`, also used for an empty value; it accepts an integer from `0`
+  through `35791394`, and `0` tries the fallback
   immediately). It keeps polling the primary during that grace period, so a
   primary slot that frees up handles the gate before the slower fallback is
-  used. A broken or unavailable primary slot does not count as busy.
+  used. A broken or unavailable primary slot does not count as busy. A timeout
+  shorter than the grace can return `75` without probing fallback; increase
+  the timeout or reduce the grace if fallback must be eligible before timeout.
 - All usable slots busy: the dispatcher blocks and re-polls (default every 30s,
   for 60 minutes — `GATE_DISPATCH_POLL_SECONDS`,
   `GATE_DISPATCH_TIMEOUT_MINUTES`).

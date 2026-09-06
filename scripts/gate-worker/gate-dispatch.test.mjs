@@ -1127,6 +1127,28 @@ test("fallback is tried at the default grace boundary after polling primary", (t
   assert.equal(readFileSync(clock, "utf8"), "1360");
 });
 
+test("busy fallback logs each grace transition only once", (t) => {
+  const repo = fixtureRepo(t, {});
+  const { env, clock } = dispatchClock(t);
+  const result = runDispatch(repo, busyCache(t, ["remote-1", "remote-1-2", "remote-2"]),
+    [repo.head, "--timeout-minutes", "10"], env);
+  assert.equal(result.status, 75, result.stderr);
+  assert.equal((result.stderr.match(/polling every/gu) ?? []).length, 1);
+  assert.equal((result.stderr.match(/trying fallback capacity/gu) ?? []).length, 1);
+  assert.match(result.stderr, /fallback after 6 min; waited 6/u);
+  assert.equal(readFileSync(clock, "utf8"), "1600");
+});
+
+test("empty fallback grace uses the default", (t) => {
+  const repo = fixtureRepo(t, {});
+  const { env, clock } = dispatchClock(t);
+  const result = runDispatch(repo, busyCache(t, ["remote-1", "remote-1-2"]),
+    [repo.head, "--timeout-minutes", "10"], { ...env, GATE_DISPATCH_FALLBACK_AFTER_MINUTES: "" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /fallback after 6 min; waited 6/u);
+  assert.equal(readFileSync(clock, "utf8"), "1360");
+});
+
 test("a primary slot freed during grace handles the gate before fallback", (t) => {
   const repo = fixtureRepo(t, {});
   const cache = busyCache(t, ["remote-1", "remote-1-2"]);
@@ -1186,10 +1208,10 @@ test("a broken primary slot bypasses the busy-primary grace period", (t) => {
 
 test("invalid fallback grace fails before any slot is tried", (t) => {
   const repo = fixtureRepo(t, {});
-  for (const value of ["", "-1", "1.5", "no"]) {
+  for (const value of ["-1", "1.5", "no", "9999999999999999999", "35791395"]) {
     const result = dispatch(t, repo, [repo.head], { GATE_DISPATCH_FALLBACK_AFTER_MINUTES: value });
     assert.equal(result.status, 2, result.stderr);
-    assert.match(result.stderr, /GATE_DISPATCH_FALLBACK_AFTER_MINUTES needs a number/u);
+    assert.match(result.stderr, /GATE_DISPATCH_FALLBACK_AFTER_MINUTES needs/u);
     assert.doesNotMatch(result.stderr, /running on/u);
   }
 });
