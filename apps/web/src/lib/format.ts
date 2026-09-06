@@ -79,6 +79,36 @@ export const duration = (from: string | null | undefined, to: string | null | un
   return formatT("format.minutesSeconds", { m: minutes, s: seconds % 60 });
 };
 
+/** At most one decimal, so `20` stays `20` and `19.94` becomes `19.9`. */
+const trim = (value: number): string => value.toFixed(1).replace(/\.0$/u, "");
+
+const measured = (value: number | null | undefined): value is number =>
+  value !== null && value !== undefined && Number.isFinite(value);
+
+/** A span that arrives already in milliseconds, where `duration` above takes a
+ *  pair of ISO timestamps. `null` means the span was never measured, so it is
+ *  the em dash and never `0s`; a sub-second span keeps its millisecond unit
+ *  rather than rounding to a zero that reads as "no time at all", and a
+ *  measured `0` still renders as `0`. */
+export const durationMs = (value: number | null | undefined): string => {
+  if (!measured(value)) return "—";
+  if (value < 1000) return formatT("format.millis", { n: Math.round(value) });
+  const seconds = Math.round(value / 1000);
+  if (seconds < 60) return formatT("format.seconds", { n: seconds });
+  return formatT("format.minutesSeconds", { m: Math.floor(seconds / 60), s: seconds % 60 });
+};
+
+/** A `0..1` ratio as a percentage, or `null` when the ratio was never measured
+ *  — the caller drops its clause rather than claiming `0%`. A measured `0` is
+ *  still `0%`, because a run really can read nothing from cache. */
+export const percent = (ratio: number | null | undefined): string | null =>
+  measured(ratio) ? `${trim(ratio * 100)}%` : null;
+
+/** An output rate as prose. Whether it is a measurement or a ceiling is the
+ *  caller's to say; this only formats the number. */
+export const tokensPerSecond = (value: number | null | undefined): string =>
+  measured(value) ? formatT("format.tokensPerSecond", { n: trim(value) }) : "—";
+
 export const durationWithInboxWait = (
   from: string | null | undefined,
   to: string | null | undefined,
