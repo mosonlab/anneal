@@ -137,6 +137,15 @@ const trackResource = (resource) => {
   return resource;
 };
 
+/** Prisma's CLI prints an advisory "update available" box on stderr at every
+ * invocation. The deploy pins its own toolchain, so on a control-plane host the
+ * box is nothing but noise in `auto-deploy.error.log`, where it hides real
+ * stderr. Added to the child environment, never substituted for it. */
+export const prismaChildEnvironment = (environment = process.env) => ({
+  ...environment,
+  PRISMA_HIDE_UPDATE_MESSAGE: "1",
+});
+
 const command = (program, args, {
   cwd = REPOSITORY_ROOT,
   env = process.env,
@@ -145,7 +154,8 @@ const command = (program, args, {
   timeoutReason,
   allowAfterInterrupt = false,
   onTermination,
-} = {}) => runDeployCommand(program, args, {
+  run = runDeployCommand,
+} = {}) => run(program, args, {
   cwd,
   env,
   capture,
@@ -683,6 +693,7 @@ const makeWritable = (root) => {
 
 export const createDeployHost = ({
   serviceControl: providedServiceControl,
+  runCommand = runDeployCommand,
   verifyRecoveredServices = verifyStableServicePaths,
   environment = process.env,
   deployRole = resolveDeployRoleOrFail(environment),
@@ -879,6 +890,7 @@ export const createDeployHost = ({
         cwd: operationWorkspace,
         timeoutMs: DEPLOY_STEP_TIMEOUT_MS.migrationPreflight,
         timeoutReason: "migration-preflight-timeout",
+        run: runCommand,
       });
       const barrier = attempt.requireFact("barrier");
       await checked(
@@ -893,9 +905,11 @@ export const createDeployHost = ({
         ],
         {
           cwd: operationWorkspace,
+          env: prismaChildEnvironment(),
           timeoutMs: DEPLOY_STEP_TIMEOUT_MS.migrationDeploy,
           timeoutReason: MIGRATION_DEPLOY_TIMEOUT_REASON,
           onTermination: () => barrier.retainUntilEscalationCleared(),
+          run: runCommand,
         },
       );
       const migrationTailAfter = await migrationTail();
@@ -908,8 +922,10 @@ export const createDeployHost = ({
       "packages/db/prisma/schema.prisma",
     ], {
       cwd: attempt.requireFact("operationWorkspace"),
+      env: prismaChildEnvironment(),
       timeoutMs: DEPLOY_STEP_TIMEOUT_MS.prismaClientGeneration,
       timeoutReason: "prisma-client-generation-timeout",
+      run: runCommand,
     }),
     syncCanonicalPrompts: async (attempt) => {
       const result = await checked("canonical-prompt-sync-refused", loadBinaries().node, [

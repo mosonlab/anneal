@@ -2045,3 +2045,65 @@ test("auto-deploy plist launches through current with an explicit source remote 
   assert.match(rendered, /https:\/\/example\.invalid\/anneal\.git/u);
   assert.doesNotMatch(rendered, /__[A-Z_]+__/u);
 });
+
+/** The deploy resolves its binaries once, from the environment, before any
+ * phase spawns anything; a control-plane role also verifies its backup
+ * configuration. Neither is what these tests are about. */
+const withDeployBinaries = (t) => {
+  const previous = { ...process.env };
+  process.env.DEPLOY_PG_DUMP_MODE = "host";
+  process.env.DEPLOY_PG_DUMP_BINARY = process.execPath;
+  t.after(() => { process.env = previous; });
+};
+
+test("the guarded migration spawns Prisma with its update banner hidden", async (t) => {
+  withDeployBinaries(t);
+  const spawns = [];
+  const host = createDeployHost({
+    serviceControl: { platform: "darwin", restart: async () => {}, isRunning: async () => true, describe: async () => "" },
+    runCommand: async (program, args, options) => {
+      spawns.push({ args, env: options.env });
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  const attempt = openDeploymentAttempt({
+    deployRoot: "/fixture",
+    targetCommit: "d".repeat(40),
+    transactionId: "prisma-banner-migration",
+  });
+  attempt.establish({
+    operationWorkspace: "/fixture/operation",
+    barrier: { retainUntilEscalationCleared: () => undefined },
+  });
+
+  await host.guardedMigration(attempt);
+  const migration = spawns.find(({ args }) => args.includes("migrate") && args.includes("deploy"));
+  assert.ok(migration, "the guarded migration must spawn prisma migrate deploy");
+  assert.equal(migration.env.PRISMA_HIDE_UPDATE_MESSAGE, "1");
+  // Added, never substituted: the child keeps the deploy's own environment.
+  assert.equal(migration.env.PATH, process.env.PATH);
+});
+
+test("client generation spawns Prisma with its update banner hidden", async (t) => {
+  withDeployBinaries(t);
+  const spawns = [];
+  const host = createDeployHost({
+    serviceControl: { platform: "darwin", restart: async () => {}, isRunning: async () => true, describe: async () => "" },
+    runCommand: async (program, args, options) => {
+      spawns.push({ args, env: options.env });
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  const attempt = openDeploymentAttempt({
+    deployRoot: "/fixture",
+    targetCommit: "e".repeat(40),
+    transactionId: "prisma-banner-generate",
+  });
+  attempt.establish({ operationWorkspace: "/fixture/operation" });
+
+  await host.generatePrismaClient(attempt);
+  assert.equal(spawns.length, 1);
+  assert.ok(spawns[0].args.includes("generate"));
+  assert.equal(spawns[0].env.PRISMA_HIDE_UPDATE_MESSAGE, "1");
+  assert.equal(spawns[0].env.PATH, process.env.PATH);
+});
