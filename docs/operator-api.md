@@ -2321,11 +2321,49 @@ Task. A later matching mechanical claim closes all open mismatch alerts.
 ### GET `/sessions`
 
 - Required parameters: none.
-- Optional query: `projectId`, `limit` (1–200, default `50`), and `before` (an
-  ISO date cursor).
+- Optional scope: `projectId`, `limit` (1–200, default `50`), and `before` (an
+  ISO date cursor, exclusive, on `requestedAt`).
+- Optional filters: `status`, `agentId`, `runner`, `taskId`, `chainId`,
+  `since`, `until`, and `q`.
+
+Every named filter narrows the list further: the filters combine with each
+other, with `projectId`, and with the `before` cursor by AND, and `limit` still
+caps the page. `since` and `until` are ISO timestamps read against
+`requestedAt`, inclusive at both ends, and share that column with the cursor.
+`agentId`, `taskId` and `chainId` are exact ids; `chainId` matches the chain of
+the session's Task. `runner` is an exact `RunnerKind`.
+
+`status` is a lifecycle bucket, not a persisted execution status. It accepts
+`live` (`REQUESTED`, `PROVISIONING`, `RUNNING`, `WAITING_INBOX`), `done`
+(`SUCCEEDED`), `failed` (`FAILED`, `TIMED_OUT`, `LOST`), and `cancelled`
+(`CANCELLED`). Every execution status belongs to exactly one bucket.
+
+`q` is a case-insensitive substring search over human-authored text only: the
+Task name, the Run branch, and the session's `failureReason`. A row matching
+any of the three is returned. It never searches ids or event payloads, so an id
+is addressed through `taskId`, `chainId` or `agentId` rather than through `q`. `%`, `_`, and backslash are matched literally.
+
+`since` and `until` require a valid ISO calendar timestamp with time and a
+`Z` or numeric timezone offset; parseable prose and overflowing dates refuse.
+
+A request naming no filter answers exactly what it answered before the filters
+existed. A present-but-unusable filter is refused rather than ignored, so a
+narrowed list never silently widens; a present-but-empty value (`status=`) is
+unusable for the same reason. Each refusal is `400 Bad Request` with a body
+carrying `error` and `code`: `session-filter-status-invalid`,
+`session-filter-agent-id-invalid`, `session-filter-runner-invalid`,
+`session-filter-task-id-invalid`, `session-filter-chain-id-invalid`,
+`session-filter-since-invalid`, `session-filter-until-invalid`, and
+`session-filter-q-invalid`. An unparseable `before` remains tolerated: the
+cursor is dropped, and the request is not refused.
+
+Each returned session carries its Task as `{ id, name, chainId, chainName }`.
+`chainId` is the persisted chain and is what `chainId` filters on; `chainName`
+is display-only and is `null` whenever the returned rows cannot prove a name.
 
 ```sh
-curl "$BASE_URL/sessions?projectId=$PROJECT_ID&limit=50" -H "Authorization: Bearer $OPERATOR_TOKEN"
+curl "$BASE_URL/sessions?projectId=$PROJECT_ID&status=failed&runner=CODEX&since=2026-08-01T00:00:00Z&q=gate&limit=50" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
 
 ### GET `/sessions/:sessionId`

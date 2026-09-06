@@ -36,6 +36,11 @@
       "development": "./src/console-contract.ts",
       "import": "./dist/console-contract.js"
     },
+    "./session-filter-contract": {
+      "types": "./src/session-filter-contract.ts",
+      "development": "./src/session-filter-contract.ts",
+      "import": "./dist/session-filter-contract.js"
+    },
     "./chain-order": {
       "types": "./src/chain-order.ts",
       "development": "./src/chain-order.ts",
