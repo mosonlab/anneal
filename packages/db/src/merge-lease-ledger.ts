@@ -179,6 +179,47 @@ export const recordLeaseDeferral = async (
   return { event, recorded: created.count === 1 };
 };
 
+/**
+ * Record that a chain could not take the lease because somebody else held it.
+ *
+ * Unlike a handoff or a deferred release this is not an open lifecycle: the
+ * chain never held this lease, so there is nothing to settle later. The row is
+ * created settled, at the moment the contention was alerted, and carries when
+ * the holder in the way took the lease -- `holderAcquiredAt`, the only part of
+ * that holder this row has a column for; the rest is in `detail`, which is what
+ * an operator reads. `leaseSha` stays null so it can never collide
+ * with the released event for that holder's own lease blob, which is also what
+ * lets one chain record more than one contention episode.
+ */
+export const recordLeaseContention = async (
+  tx: Tx,
+  input: {
+    target: MergeLeaseLedgerTarget;
+    taskId: string;
+    holderAcquiredAt: Date | null;
+    detail: string;
+    at: Date;
+  },
+): Promise<MergeLeaseEvent> => {
+  const task = await tx.task.findUnique({
+    where: { id: input.taskId },
+    select: { projectId: true, chainId: true },
+  });
+  if (!task || task.projectId !== input.target.projectId || task.chainId !== input.target.chainId) {
+    throw new Error(`Cannot record Merge Lease contention for Task ${input.taskId}: target validation failed`);
+  }
+  return tx.mergeLeaseEvent.create({
+    data: {
+      ...input.target,
+      state: MergeLeaseEventState.CONTENDED,
+      owningTaskId: input.taskId,
+      settledAt: input.at,
+      failureDetail: input.detail,
+      ...(input.holderAcquiredAt ? { acquiredAt: input.holderAcquiredAt } : {}),
+    },
+  });
+};
+
 export function listUnresolvedLeaseEvents(
   tx: Tx,
   input: { kind: "handoff"; staleBefore: Date },

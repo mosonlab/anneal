@@ -23,9 +23,22 @@ declare module "*merge-lease-adapter.mjs" {
     | { outcome: "refused"; heldBy: string; detail?: string }
     | { outcome: "unreachable"; detail: string };
 
+  export type MergeLeaseHolder = {
+    holder: string;
+    task: string | null;
+    reason: string | null;
+    acquiredAt: string;
+    sha: string | null;
+  };
+
   export type MergeLeaseAcquisition =
     | { outcome: "acquired"; detail?: string }
-    | { outcome: "contended"; detail?: string }
+    | { outcome: "contended"; detail?: string; holder?: MergeLeaseHolder }
+    | { outcome: "unreachable"; detail: string };
+
+  export type MergeLeaseStatus =
+    | { outcome: "held"; holder: MergeLeaseHolder; detail?: string }
+    | { outcome: "none"; detail?: string }
     | { outcome: "unreachable"; detail: string };
 
   export function resolveMergeLeaseScriptPath(options?: {
@@ -35,8 +48,13 @@ declare module "*merge-lease-adapter.mjs" {
 
   export function buildMergeLeaseArgv(options:
     | { operation: "release"; scriptPath: string; task: string }
+    | { operation: "status"; scriptPath: string }
     | { operation: "acquire"; scriptPath: string; task: string; reason: string; timeoutMinutes: number }
   ): string[];
+
+  export function parseMergeLeaseHolder(output: string): MergeLeaseHolder | null;
+
+  export function mergeLeaseHoldSeconds(acquiredAt: string, releasedAt: Date | string): number | null;
 
   export function parseMergeLeaseRelease(output: string):
     | { outcome: "released"; ref: string; sha: string; acquiredAt: string }
@@ -46,8 +64,8 @@ declare module "*merge-lease-adapter.mjs" {
     | null;
 
   export function classifyMergeLeaseExecution(input: LeaseProcessResult & {
-    operation: "acquire" | "release";
-  }): MergeLeaseAcquisition | MergeLeaseRelease;
+    operation: "acquire" | "release" | "status";
+  }): MergeLeaseAcquisition | MergeLeaseRelease | MergeLeaseStatus;
 
   export function isMergeLeaseReleaseAnomaly(release: MergeLeaseRelease): boolean;
 
@@ -65,4 +83,6 @@ declare module "*merge-lease-adapter.mjs" {
   }): Promise<MergeLeaseAcquisition>;
 
   export function releaseMergeLease(options: InvocationOptions): Promise<MergeLeaseRelease>;
+
+  export function readMergeLeaseHolder(options?: Omit<InvocationOptions, "task">): Promise<MergeLeaseStatus>;
 }
