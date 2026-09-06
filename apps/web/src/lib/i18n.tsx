@@ -77,11 +77,11 @@ export const useT = (): Translate => {
 /**
  * The same interpolation, with nodes instead of strings.
  *
- * Four strings in the app wrap a technical identifier in `<code>`: the three
- * App banners and `GapNotice`. Their dictionary values stay plain text with a
- * `{placeholder}` where the identifier goes, and the markup lives here, in the
- * caller's tree — a translated value never contains a tag, so a translator can
- * never break the DOM and the identifiers are not translated by accident.
+ * Several strings in the app wrap a technical identifier in `<code>`. Their
+ * dictionary values stay plain text with a `{placeholder}` where the identifier
+ * goes, and the markup lives here, in the caller's tree — a translated value
+ * never contains a tag, so a translator can never break the DOM and the
+ * identifiers are not translated by accident.
  *
  * An unsubstituted placeholder renders as itself, exactly as `interpolate` does,
  * so a missing node is visible rather than silently blank.
