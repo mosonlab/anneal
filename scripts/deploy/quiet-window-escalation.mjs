@@ -12,12 +12,22 @@ const fail = (reason, detail = "") => { throw new DeployFailure(reason, detail);
 
 const OID = /^[0-9a-f]{40}$/u;
 
-/** The commit a marker latched against. `null` means the marker names no
- * usable target, which is never treated as commit-scoped: a failure whose
- * target is unknown could have come from anything on this host. */
-const escalationTargetCommit = (record) => {
+/** The deploy records this sentinel in `to` when the attempt failed before it
+ * could determine a target commit (`persistAndNotifyFailure`). */
+const NO_TARGET_DETERMINED = "unknown";
+
+/** How a marker names the commit it failed on:
+ * - `commit`: a usable target oid.
+ * - `none`: the deploy itself recorded that no target was determined yet.
+ * - `malformed`: `to` is missing or holds anything else, so the marker does
+ *   not describe a state this classifier can reason about.
+ * A `none` or `malformed` target is never treated as commit-scoped: a failure
+ * whose target is unknown could have come from anything on this host. */
+const escalationTarget = (record) => {
   const to = record?.to;
-  return typeof to === "string" && OID.test(to) ? to : null;
+  if (typeof to === "string" && OID.test(to)) return { kind: "commit", commit: to };
+  if (to === NO_TARGET_DETERMINED) return { kind: "none", commit: null };
+  return { kind: "malformed", commit: null };
 };
 
 /** Classify a marker into the three escalation classes.
@@ -35,9 +45,15 @@ export const escalationScope = ({ record, retryableReasons, hostScopedReasons })
   if (!(hostScopedReasons instanceof Set)) throw new TypeError("hostScopedReasons-required");
   const reason = String(record?.reason ?? "unknown-failure");
   if (record?.activationOutcomeProven === false) return "host-scoped";
+  // Target validation precedes the allowlist. A marker whose `to` is missing
+  // or malformed proves nothing about which commits are affected — even when
+  // its reason reads as transient — so it blocks every deploy instead of
+  // spending retry attempts on an unclassifiable failure.
+  const target = escalationTarget(record);
+  if (target.kind === "malformed") return "host-scoped";
   if (retryableReasons?.has(reason)) return "retryable-transient";
   if (hostScopedReasons.has(reason) || (hostScopedReasons.has("service-control-failed") && reason.startsWith("service-control-failed:"))) return "host-scoped";
-  return escalationTargetCommit(record) === null ? "host-scoped" : "commit-scoped";
+  return target.kind === "commit" ? "commit-scoped" : "host-scoped";
 };
 
 /** Inspect and possibly clear an escalation while the caller owns the deploy
@@ -99,7 +115,7 @@ export const checkExistingEscalation = async ({
   }
   const scope = escalationScope({ record: current.record, retryableReasons, hostScopedReasons });
   if (scope === "commit-scoped") {
-    const failedCommit = escalationTargetCommit(current.record);
+    const failedCommit = escalationTarget(current.record).commit;
     log(`STOP escalation-active scope=commit-scoped commit=${failedCommit} path=${escalationPath}`);
     return {
       active: true,

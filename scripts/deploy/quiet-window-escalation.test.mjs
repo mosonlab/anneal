@@ -21,6 +21,9 @@ const hostScopedReasons = new Set(["database-backup-failed"]);
 const retryableEscalation = {
   reason: "remote-main-unreadable",
   detail: "exit-128",
+  // `persistAndNotifyFailure` records this sentinel when the attempt failed
+  // before it could determine a target commit.
+  to: "unknown",
   attempts: 1,
   escalatedAt: "2026-08-30T15:00:00.000Z",
 };
@@ -114,11 +117,12 @@ test("an escalation outside the shipped allowlist stays latched", async (t) => {
   assert.equal(state.retryCalls(), 1);
 });
 
-test("the three escalation classes are decided by reason first and target second", () => {
+test("the three escalation classes are decided by target first and reason second", () => {
   const scope = (record) => escalationScope({ record, retryableReasons, hostScopedReasons });
 
-  // The allowlist owns its class whatever commit the marker names: a new
-  // commit must not shorten the retry policy or extend it past the cap.
+  // With a usable target the allowlist owns its class whatever commit the
+  // marker names: a new commit must not shorten the retry policy or extend it
+  // past the cap.
   assert.equal(scope({ reason: "remote-main-unreadable", to: failedCommit }), "retryable-transient");
   assert.equal(scope({ reason: "database-backup-failed", to: failedCommit }), "host-scoped");
   assert.equal(scope({ reason: "release-artifact-build-failed", to: failedCommit }), "commit-scoped");
@@ -173,6 +177,23 @@ test("a commit-scoped marker without a usable target latches as host-scoped", as
     escalatedAt: "2026-08-30T15:00:00.000Z",
   });
 
+  assert.deepEqual(await checkExistingEscalation(state.options), { active: true });
+  assert.equal(existsSync(state.escalationPath), true);
+});
+
+test("a retryable reason cannot rescue a marker whose target is missing or malformed", async (t) => {
+  const scope = (record) => escalationScope({ record, retryableReasons, hostScopedReasons });
+
+  // Target validation runs before the allowlist: only the deploy's own
+  // "no target determined" sentinel and a real oid describe a state this
+  // classifier can reason about.
+  assert.equal(scope({ reason: "remote-main-unreadable", to: "unknown" }), "retryable-transient");
+  assert.equal(scope({ reason: "remote-main-unreadable", to: failedCommit }), "retryable-transient");
+  assert.equal(scope({ reason: "remote-main-unreadable" }), "host-scoped");
+  assert.equal(scope({ reason: "remote-main-unreadable", to: `${failedCommit}x` }), "host-scoped");
+  assert.equal(scope({ reason: "remote-main-unreadable", to: null }), "host-scoped");
+
+  const state = fixture(t, { ...retryableEscalation, to: `${failedCommit}x` });
   assert.deepEqual(await checkExistingEscalation(state.options), { active: true });
   assert.equal(existsSync(state.escalationPath), true);
 });

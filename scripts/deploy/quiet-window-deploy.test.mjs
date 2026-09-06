@@ -989,6 +989,7 @@ test("repeated retryable failures persist attempts atomically through the cap an
   const state = escalationFixture(t, {
     outcome: "failure",
     reason: "remote-main-unreadable",
+    to: "unknown",
     attempts: ESCALATION_RETRY_CAP - 2,
   });
   for (const expected of [ESCALATION_RETRY_CAP - 1, ESCALATION_RETRY_CAP]) {
@@ -1040,6 +1041,7 @@ test("malformed retry attempts fail closed", async (t) => {
   const state = escalationFixture(t, {
     outcome: "failure",
     reason: "remote-main-unreadable",
+    to: "unknown",
     attempts: "1",
   });
   const checked = await checkExistingEscalation(state.options);
@@ -1075,6 +1077,7 @@ test("self-clear notification failure keeps the escalation marker", async (t) =>
   const state = escalationFixture(t, {
     outcome: "failure",
     reason: "deploy-barrier-unavailable",
+    to: revisions.to,
     attempts: 1,
   });
   const checked = await checkExistingEscalation(state.options);

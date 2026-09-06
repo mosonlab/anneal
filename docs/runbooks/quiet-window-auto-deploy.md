@@ -526,17 +526,22 @@ closed recovery notification before dismissing the original failure.
 
 ### Escalation classes
 
-Every marker falls into exactly one of three classes, decided by its `reason`
-first and its recorded target commit `to` second:
+Every marker falls into exactly one of three classes, decided by its recorded
+target commit `to` first and its `reason` second:
 
-- **retryable-transient** — a reason on the allowlist above. The retry cap and
-  self-clear rules in this section own it end to end; the commit main points at
-  does not change its answer, in either direction.
+- **retryable-transient** — a reason on the allowlist above, on a marker whose
+  `to` is a full commit oid or the literal `unknown` the deploy records when it
+  failed before determining a target. The retry cap and self-clear rules in
+  this section own it end to end; the commit main points at does not change its
+  answer, in either direction. A transient-looking reason on a marker with any
+  other `to` (missing, or a value that is neither) is host-scoped instead: it
+  spends no retry attempt and blocks every deploy.
 - **commit-scoped** — any other reason on a marker whose `to` is a full commit
   oid: the failure was determined by that commit (its artifact build, its
   migration, its verification). It blocks that commit and only that commit.
 - **host-scoped** — a reason naming host state rather than the commit, or any
-  marker whose `to` is missing or not a commit oid. It blocks every deploy.
+  marker whose `to` is missing or is neither a commit oid nor `unknown`,
+  whatever its reason. It blocks every deploy.
   The set is `database-backup-failed`, `database-backup-timeout`,
   `release-directory-assembly-failed`, `deployment-ledger-write-failed`,
   `operation-workspace-preparation-failed`, `release-pointer-activation-failed`,
