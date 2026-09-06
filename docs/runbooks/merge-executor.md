@@ -11,6 +11,23 @@ The executor is fail closed. A missing permission, unreadable field, shared
 principal, unsafe key path, failed disarm, or uncertain merge result stops the
 mechanical run; there is no token, identity, or service fallback.
 
+## Not supported: a target branch with a merge queue
+
+The executor merges synchronously and verifies the result it produced. It
+therefore refuses any pull request whose landing GitHub would perform
+asynchronously, and a **repository-level merge queue enabled on the target
+branch** is such a case: the executor's disarm step can dequeue *this* pull
+request and cancel *this* auto-merge, but it cannot turn off the branch's queue.
+
+The chain stops with `deferred-merge-machinery`, and it stops permanently:
+re-authorizing only produces the same stop, because nothing about the branch
+changed. Do not loop on `re-authorize`.
+
+Resolve it in GitHub, not in Anneal — disable the merge queue on the target
+branch's ruleset, or point the chain at a branch that has none. Supporting
+merge-queue landings would mean the executor no longer observes the merge it
+authorized, which the security model does not allow.
+
 ## Security model
 
 Create a private GitHub App owned by the account or organization where Anneal
