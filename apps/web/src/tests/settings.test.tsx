@@ -18,7 +18,7 @@ import { SecretsPage } from "../pages/Secrets";
 import { SettingsContent, SettingsPage } from "../pages/Settings";
 
 const idle = <T,>(overrides: Partial<Poll<T>> = {}): Poll<T> => ({
-  data: null, error: null, loading: false, missing: false, lastSuccessAt: null, reload: () => undefined, ...overrides,
+  data: null, error: null, loading: false, lastSuccessAt: null, reload: () => undefined, ...overrides,
 });
 
 const renderSettings = (health: Poll<Health> = idle<Health>(), version: Poll<VersionInfo> = idle<VersionInfo>()): string => renderToStaticMarkup(
