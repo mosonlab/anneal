@@ -24,6 +24,8 @@ export const gitCredentialHelperTool = "git-credential-runner.sh";
  */
 export const runtimeToolPaths = Object.freeze([
   gitCredentialHelperTool,
+  "merge-train.sh",
+  "merge-train.mjs",
   "regression-verification.sh",
   "gate-worker/gate-dispatch.sh",
   "gate-worker/lib.sh",

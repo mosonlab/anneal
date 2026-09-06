@@ -11,6 +11,8 @@ import { fileURLToPath } from "node:url";
  */
 export const RUNTIME_TOOL_FILES = Object.freeze([
   Object.freeze({ source: "packages/runner/runtime-tools/git-credential-runner.sh", destination: "git-credential-runner.sh" }),
+  Object.freeze({ source: "packages/runner/runtime-tools/merge-train.sh", destination: "merge-train.sh" }),
+  Object.freeze({ source: "packages/runner/runtime-tools/merge-train.mjs", destination: "merge-train.mjs" }),
   Object.freeze({ source: "packages/runner/runtime-tools/regression-verification.sh", destination: "regression-verification.sh" }),
   Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/gate-dispatch.sh", destination: "gate-worker/gate-dispatch.sh" }),
   Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/lib.sh", destination: "gate-worker/lib.sh" }),
@@ -52,7 +54,7 @@ const directory = (filesystem, path, label) => {
 };
 
 const expectedDirectoryEntries = new Map([
-  ["", ["gate-worker", "git-credential-runner.sh", "regression-verification.sh"]],
+  ["", ["gate-worker", "git-credential-runner.sh", "merge-train.mjs", "merge-train.sh", "regression-verification.sh"]],
   ["gate-worker", ["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"]],
 ]);
 
