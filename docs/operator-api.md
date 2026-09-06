@@ -2041,6 +2041,17 @@ curl "$BASE_URL/tasks/$TASK_ID/recurring-fires?take=10" -H "Authorization: Beare
 ### GET `/tasks/:taskId/activity`
 
 - Required path parameter: `taskId`.
+- Control-plane rows carry a `metadata.kind`. On a merge-readiness Step,
+  `mergeReadiness.requeue` records one pre-authorization requeue: readiness
+  returned the chain's candidate to Regression because the pull request's base
+  moved under the authorized head. Its metadata carries `ordinal` (one-based,
+  oldest first within the chain), `staleBaseSha` and `currentBaseSha` (the base
+  it moved from and to), `budgetGrant` (extra Run attempts the settlement
+  granted, which fund the replacement Regression Run), `regressionTaskId`, and
+  `reason`. The row is written in the settlement's own transaction, so the
+  counts and the grants cannot disagree. `readinessRequeues` and
+  `readinessGrants` on the board card and on a costs chain row are folds over
+  these rows.
 
 ```sh
 curl "$BASE_URL/tasks/$TASK_ID/activity" -H "Authorization: Bearer $OPERATOR_TOKEN"

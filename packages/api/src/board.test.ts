@@ -213,7 +213,7 @@ test("the board projection carries every field the board consumes and nothing el
   // deliberate act with a payload cost, so it has to be added here too.
   assert.deepEqual(Object.keys(boardCard(row(), null, moveContext)).sort(), [
     "approvalGate", "assigneeAgent", "assigneeType", "blockedOn", "budgetRemaining", "chainAggregate", "chainId", "chainIndex", "chainName", "chainProgress", "createdAt", "cron",
-    "displayName", "failureReason", "id", "latestRun", "mergeOutcome", "moveTargets", "name", "repairOf", "runAt", "scheduleKind", "source", "status",
+    "displayName", "failureReason", "id", "latestRun", "mergeOutcome", "moveTargets", "name", "readinessGrants", "readinessRequeues", "repairOf", "runAt", "scheduleKind", "source", "status",
     "strandedSalvageBranches", "taskCost", "templateId", "timezone", "updatedAt",
   ]);
 });
@@ -632,6 +632,8 @@ test("blockedOn is projected from the resolved predecessor without storing its s
     repairOf: null,
     budgetRemaining: true,
     chainAggregate: null,
+    readinessRequeues: 0,
+    readinessGrants: 0,
   });
 });
 

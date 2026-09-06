@@ -168,6 +168,15 @@ test("a requeued readiness Step names its requeues and the attempts they granted
   assert.ok(markup.includes(translate("en", "tasks.pill.readinessRequeue", { n: 2, grants: 3 })), markup);
 });
 
+test("the counters survive a readiness Step that has no Run of its own", () => {
+  // The control plane settles readiness without launching a Run, so the card
+  // that owns these counters is usually the one with no run line at all.
+  const markup = card({ latestRun: null, readinessRequeues: 2, readinessGrants: 2 });
+
+  assert.ok(markup.includes("data-card-readiness-requeues"), markup);
+  assert.ok(markup.includes(translate("en", "tasks.pill.readinessRequeue", { n: 2, grants: 2 })), markup);
+});
+
 test("the overwhelming zero case renders no requeue pill at all", () => {
   const markup = card({ readinessRequeues: 0, readinessGrants: 0 });
 
