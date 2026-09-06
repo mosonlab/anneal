@@ -12,7 +12,7 @@ import {
   matchedLegacyGeneration,
   sourcePromptGenerationDrift,
   templatePromptGenerationDigest,
-  templateRolloverBlockerCount,
+  templateRolloverBlockers,
   type CanonicalTemplateRegistryName,
   type PersistedTransitionStep,
 } from "./canonical-template-transition.js";
@@ -24,19 +24,22 @@ import {
 } from "./template-sources.js";
 
 test("parked and not-yet-started legacy chains may roll over intact", () => {
-  assert.equal(templateRolloverBlockerCount([
+  assert.equal(templateRolloverBlockers([
     { chainId: "parked", activeRunCount: 0 },
     { chainId: "parked", activeRunCount: 0 },
     { chainId: "not-started", activeRunCount: 0 },
-  ]), 0);
+  ]).length, 0);
 });
 
 test("active Runs and unfinished work without a chain identity block rollover", () => {
-  assert.equal(templateRolloverBlockerCount([
-    { chainId: "active", activeRunCount: 1 },
-    { chainId: "quiescent", activeRunCount: 0 },
-    { chainId: null, activeRunCount: 0 },
-  ]), 2);
+  const tasks = [
+    { id: "task-active", chainId: "active", activeRunCount: 1 },
+    { id: "task-quiescent", chainId: "quiescent", activeRunCount: 0 },
+    { id: "task-chainless", chainId: null, activeRunCount: 0 },
+  ];
+  assert.equal(templateRolloverBlockers(tasks).length, 2);
+  // The refusal names the blockers, so the identity has to survive the filter.
+  assert.deepEqual(templateRolloverBlockers(tasks).map((task) => task.id), ["task-active", "task-chainless"]);
 });
 
 const asPersisted = (steps: readonly TemplateStepSource[]): PersistedTransitionStep[] =>

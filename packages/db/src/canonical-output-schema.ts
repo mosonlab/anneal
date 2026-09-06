@@ -189,8 +189,7 @@ export const canonicalOutputSchema = (step: TemplateStepLike): z.ZodType | null 
   const role = stepRole(step);
   if (role === null) return null;
   // Template rollovers preserve an output protocol unless outputKind itself
-  // changes; omit template identity so stepGeneration's -vN parser stays the
-  // only implementation of protocol versioning.
-  const generation = stepGeneration({ outputKind: step.outputKind });
+  // changes, which is why stepGeneration reads the -vN suffix and nothing else.
+  const generation = stepGeneration(step);
   return canonicalOutputSchemas[role]?.[generation] ?? null;
 };

@@ -75,6 +75,20 @@ export const requireRunnerDeployPreflight = (environment = process.env) => {
   });
 };
 
+/** The loopback API origin and operator credential a control-plane host must
+ * use to prove its own local runners re-registered. The control plane always
+ * answers on its own loopback port, so no destination is configurable here. */
+export const requireControlPlaneRegistrationAccess = (environment = process.env) => {
+  const operatorToken = environment?.OPERATOR_TOKEN;
+  if (typeof operatorToken !== "string" || operatorToken.trim() === "") {
+    fail("runner-registration-verification-unavailable", "OPERATOR_TOKEN-missing");
+  }
+  return Object.freeze({
+    apiBaseUrl: controlPlaneApiBaseUrl({ API_PORT: environment?.API_PORT }),
+    operatorToken,
+  });
+};
+
 export const readRunnerControlPlaneRevision = async ({ apiBaseUrl, fetchImpl = fetch }) => {
   const verifiedApiBaseUrl = controlPlaneApiBaseUrl({ RUNNER_API_URL: apiBaseUrl });
   const endpoint = `${verifiedApiBaseUrl}/version`;

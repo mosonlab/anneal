@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   cpSync,
@@ -57,9 +58,15 @@ import {
   canonicalSyncNoticeRecord,
   canonicalSyncRefusedLines,
   createDeployHost,
+  createDeployStartup,
+  DEFAULT_SERVICE_OBSERVATION_WINDOW_MS,
   deployRootFromEnvironment,
+  HOST_SCOPED_ESCALATION_REASONS,
   loadDeployBinaries,
+  loadEnvironment,
+  observeReadiness,
   probeSourceRemoteCommit,
+  resolveObservationWindowMs,
   verifyStableServicePaths,
 } from "./quiet-window-deploy.mjs";
 import {
@@ -71,7 +78,51 @@ import {
 import { runnerRegistrationRefusal } from "./runner-role-verification.mjs";
 
 const SERVICE_LABELS = resolveServiceInventory().labels;
+const LOCAL_RUNNER_IDS = resolveServiceInventory().entries
+  .map(({ runnerId }) => runnerId)
+  .filter((runnerId) => typeof runnerId === "string");
 const revisions = { from: "a".repeat(40), to: "b".repeat(40) };
+
+/** A control-plane host verifies its own loopback API and its own local
+ * runners, so its fixtures answer all three endpoints from one seam. */
+const controlPlaneEnvironment = (overrides = {}) => ({
+  ...process.env,
+  OPERATOR_TOKEN: "operator-token",
+  ...overrides,
+});
+
+const runnerRegistry = ({
+  commit,
+  lastSeenAt,
+  runnerIds = LOCAL_RUNNER_IDS,
+  overrides = {},
+}) => ({
+  ok: true,
+  status: 200,
+  json: async () => ({
+    daemons: runnerIds.map((runnerId) => ({
+      runnerId,
+      online: true,
+      daemonVersion: commit,
+      lastSeenAt,
+      ...(overrides[runnerId] ?? {}),
+    })),
+  }),
+});
+
+const controlPlaneFetch = ({ commit, registry, onRequest = () => undefined }) => async (url, options) => {
+  onRequest({ url, authorization: options?.headers?.authorization });
+  if (url.endsWith("/health")) return { ok: true, status: 200 };
+  if (url.endsWith("/version")) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ packageName: "@anneal/api", commit, dirty: false }),
+    };
+  }
+  if (url.endsWith("/runners")) return registry();
+  throw new Error(`unexpected-request-${url}`);
+};
 const REPOSITORY_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const EXPECTED_RUNTIME_PATHS = RUNTIME_TOOL_FILES
   .map(({ destination }) => `packages/runner/dist/runtime-tools/${destination}`)
@@ -513,6 +564,7 @@ test("an upgrade decides mode, target and escalation state under one lock acquis
     targetCommit: revisions.to,
     lock: state.lock,
     retryEscalation: RETRY_ESCALATION,
+    supersededEscalation: null,
   });
   // The failure this covers: the target read and the deployment each ran their
   // own escalation check, argv parse and lock acquisition. Every one of these
@@ -551,14 +603,122 @@ test("a recovered stale owner releases the lock and refuses the invocation", asy
   assert.deepEqual(state.calls, ["load-environment", "load-binaries", "acquire-lock", "release-lock"]);
 });
 
-test("an active escalation releases the lock and stops before the target read", async () => {
+test("a host-scoped escalation releases the lock and stops before the target read", async () => {
   const state = startupFixture({
     checkEscalation: async () => ({ active: true }),
-    readRemoteMain: async () => assert.fail("an active escalation must not read the target"),
+    readRemoteMain: async () => assert.fail("a host-scoped escalation must not read the target"),
   });
 
   assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
   assert.deepEqual(state.calls, ["load-environment", "load-binaries", "acquire-lock", "release-lock"]);
+});
+
+const SUPERSEDABLE = Object.freeze({
+  failedCommit: revisions.from,
+  reason: "release-artifact-build-failed",
+  escalatedAt: "2026-09-05T02:00:00.000Z",
+});
+
+const commitScopedFixture = (overrides = {}) => {
+  const state = startupFixture(overrides);
+  state.startup.checkEscalation = async () => {
+    state.calls.push("check-escalation");
+    return { active: true, supersedable: SUPERSEDABLE };
+  };
+  return state;
+};
+
+test("a commit-scoped escalation admits a newer main commit and records the supersession", async () => {
+  // The failure this covers: a build failure on one commit latched the whole
+  // job, so the fix commit pushed to main could never deploy itself.
+  const state = commitScopedFixture();
+
+  const invocation = await decideInvocation(state.startup, "upgrade");
+
+  assert.deepEqual(invocation, {
+    mode: "upgrade",
+    targetCommit: revisions.to,
+    lock: state.lock,
+    retryEscalation: null,
+    supersededEscalation: SUPERSEDABLE,
+  });
+  assert.equal(invocation.supersededEscalation, SUPERSEDABLE);
+  assert.deepEqual(state.calls, [
+    "load-environment",
+    "load-binaries",
+    "acquire-lock",
+    "check-escalation",
+    "read-remote-main",
+  ]);
+  assert.deepEqual(state.logs, [
+    `SUPERSEDE escalation reason=release-artifact-build-failed failed-commit=${revisions.from} target=${revisions.to}`,
+  ]);
+});
+
+test("the commit a commit-scoped escalation latched is never retried", async () => {
+  const state = commitScopedFixture({
+    readRemoteMain: async () => { state.calls.push("read-remote-main"); return revisions.from; },
+  });
+
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
+  assert.deepEqual(state.logs, [`STOP escalation-active commit-unchanged commit=${revisions.from}`]);
+  assert.equal(state.calls.includes("release-lock"), true);
+});
+
+test("an unreadable target under a commit-scoped escalation latches without replacing the marker", async () => {
+  const state = commitScopedFixture({
+    readRemoteMain: async () => { throw new DeployFailure("remote-main-unreadable", "exit-128"); },
+  });
+
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
+  assert.deepEqual(state.logs, ["STOP escalation-active target-unreadable reason=remote-main-unreadable"]);
+  assert.equal(state.calls.some((call) => call.startsWith("persist-failure")), false);
+});
+
+test("a superseded escalation reaches the deployment ledger as an additive fact", (t) => {
+  const stateDir = mkdtempSync(join(tmpdir(), "anneal-deploy-supersede-ledger-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const attempt = openDeploymentAttempt({
+    deployRoot: stateDir,
+    targetCommit: revisions.to,
+    transactionId: randomUUID(),
+  });
+  attempt.establish({ revisions, supersededEscalation: SUPERSEDABLE });
+  const ledger = createDeploymentLedger({
+    stateDir,
+    deploymentId: attempt.transactionId,
+    targetCommit: attempt.targetCommit,
+  });
+
+  ledger.start(attempt.ledgerMetadata());
+
+  const event = JSON.parse(readFileSync(ledger.eventsPath, "utf8").trim().split("\n").at(-1));
+  assert.deepEqual(event.superseded_escalation, {
+    failed_commit: revisions.from,
+    reason: "release-artifact-build-failed",
+    escalated_at: "2026-09-05T02:00:00.000Z",
+  });
+  assert.equal(JSON.parse(readFileSync(ledger.statePath, "utf8")).superseded_escalation.failed_commit, revisions.from);
+});
+
+test("the host-scoped reason set covers host state and excludes commit-determined failures", () => {
+  for (const reason of [
+    "database-backup-failed",
+    "release-pointer-activation-failed",
+    "release-pointer-rollback-failed",
+    "stale-deploy-owner-recovered",
+    "unexpected-error",
+  ]) {
+    assert.equal(HOST_SCOPED_ESCALATION_REASONS.has(reason), true, reason);
+  }
+  for (const reason of [
+    "release-artifact-build-failed",
+    "release-artifact-digest-mismatch",
+    "guarded-migration-refused",
+    "service-verification-failed",
+  ]) {
+    assert.equal(HOST_SCOPED_ESCALATION_REASONS.has(reason), false, reason);
+  }
 });
 
 test("an unreadable target persists the failure and releases the lock", async () => {
@@ -832,6 +992,7 @@ const escalationFixture = (t, record) => {
     options: {
       escalationPath,
       retryableReasons: RETRYABLE_ESCALATION_REASONS,
+      hostScopedReasons: HOST_SCOPED_ESCALATION_REASONS,
       retryCap: ESCALATION_RETRY_CAP,
       readRemoteMain: async () => assert.fail("retry admission must not read remote main"),
       retryEscalationNotification: async () => { retryNotifications += 1; },
@@ -876,6 +1037,7 @@ test("repeated retryable failures persist attempts atomically through the cap an
   const state = escalationFixture(t, {
     outcome: "failure",
     reason: "remote-main-unreadable",
+    to: "unknown",
     attempts: ESCALATION_RETRY_CAP - 2,
   });
   for (const expected of [ESCALATION_RETRY_CAP - 1, ESCALATION_RETRY_CAP]) {
@@ -927,6 +1089,7 @@ test("malformed retry attempts fail closed", async (t) => {
   const state = escalationFixture(t, {
     outcome: "failure",
     reason: "remote-main-unreadable",
+    to: "unknown",
     attempts: "1",
   });
   const checked = await checkExistingEscalation(state.options);
@@ -962,6 +1125,7 @@ test("self-clear notification failure keeps the escalation marker", async (t) =>
   const state = escalationFixture(t, {
     outcome: "failure",
     reason: "deploy-barrier-unavailable",
+    to: revisions.to,
     attempts: 1,
   });
   const checked = await checkExistingEscalation(state.options);
@@ -1085,20 +1249,36 @@ test("the deploy host restarts and restores every Linux unit in inventory order"
     describe: async () => "",
   };
   let recoveryVerified = false;
+  let observations = 0;
   const host = createDeployHost({
     serviceControl,
+    environment: controlPlaneEnvironment(),
+    observationWindowMs: 0,
+    fetchImpl: controlPlaneFetch({
+      commit: revisions.to,
+      registry: () => runnerRegistry({
+        commit: revisions.from,
+        lastSeenAt: new Date(1_800_000_000_000 + (observations += 1) * 1_000).toISOString(),
+      }),
+    }),
     verifyRecoveredServices: async (control) => {
       assert.equal(control, serviceControl);
       recoveryVerified = true;
     },
   });
+  const attempt = openDeploymentAttempt({
+    deployRoot: "/fixture",
+    targetCommit: revisions.to,
+    transactionId: "inventory-order",
+  });
+  attempt.establish({ revisions });
 
   await host.restartServices();
   assert.deepEqual(calls.map(({ label }) => label), SERVICE_LABELS);
   assert.deepEqual(calls.map(({ options }) => options.reason), SERVICE_LABELS.map(() => "service-restart-failed"));
 
   calls.length = 0;
-  await host.restorePreviousServices();
+  await host.restorePreviousServices(attempt);
   assert.deepEqual(calls.map(({ label }) => label), SERVICE_LABELS);
   assert.deepEqual(calls.map(({ options }) => options.reason), SERVICE_LABELS.map(() => "previous-service-restore-failed"));
   assert.equal(recoveryVerified, true);
@@ -1126,6 +1306,7 @@ test("runner deploy host restarts only local runners and verifies a newer target
   });
   const host = createDeployHost({
     environment,
+    observationWindowMs: 0,
     serviceControl: {
       platform: "darwin",
       restart: async (label) => { restarts.push(label); },
@@ -1143,9 +1324,13 @@ test("runner deploy host restarts only local runners and verifies a newer target
   attempt.establish(await host.restartServices(attempt));
   const verified = await host.verifyServices(attempt);
   assert.deepEqual(restarts, ["com.agentos.runner", "com.agentos.runner-2"]);
-  assert.deepEqual(verified.serviceVerification, {
+  const { observedForMs, ...verification } = verified.serviceVerification;
+  assert.equal(observedForMs >= 0, true);
+  assert.deepEqual(verification, {
+    unitsChecked: ["com.agentos.runner", "com.agentos.runner-2"],
     runnerIds: ["mac-runner-1", "mac-runner-2"],
     activatedBuildCommit: targetCommit,
+    observationWindowMs: 0,
   });
   assert.deepEqual(requests, [
     { url: "http://127.0.0.1:3000/runners", authorization: "Bearer operator-test-token" },
@@ -1256,6 +1441,193 @@ test("runner rollback proves every previous-build runner registered after its re
   assert.deepEqual(restarts, ["com.agentos.runner", "com.agentos.runner-2"]);
 });
 
+test("control-plane verification fails naming a local runner that never registers", async () => {
+  const environment = controlPlaneEnvironment({ AGENTOS_RUNNER_COUNT: "2", AGENTOS_RUNNER_ID_PREFIX: "vm-" });
+  const runnerIds = ["vm-runner-1", "vm-runner-2"];
+  let observations = 0;
+  const host = createDeployHost({
+    environment,
+    serviceControl: {
+      platform: "linux",
+      restart: async () => {},
+      isRunning: async () => true,
+      describe: async () => "",
+    },
+    fetchImpl: controlPlaneFetch({
+      commit: revisions.to,
+      registry: () => runnerRegistry({
+        commit: revisions.to,
+        lastSeenAt: new Date(1_800_000_000_000 + (observations += 1) * 1_000).toISOString(),
+        // The second unit stays active but never reports to the API.
+        runnerIds: runnerIds.slice(0, 1),
+      }),
+    }),
+    serviceVerificationTimeoutMs: 5,
+    serviceVerificationWait: async () => undefined,
+  });
+  const attempt = openDeploymentAttempt({
+    deployRoot: "/fixture",
+    targetCommit: revisions.to,
+    transactionId: "control-plane-unregistered",
+  });
+  attempt.establish({ revisions });
+  attempt.establish(await host.restartServices(attempt));
+  await assert.rejects(
+    host.verifyServices(attempt),
+    (error) => error.reason === "service-verification-failed"
+      && error.detail === "runner-missing-vm-runner-2",
+  );
+});
+
+test("control-plane verification fails when a unit dies inside the observation window", async () => {
+  const environment = controlPlaneEnvironment({ AGENTOS_RUNNER_COUNT: "2", AGENTOS_RUNNER_ID_PREFIX: "vm-" });
+  let samples = 0;
+  let observations = 0;
+  const host = createDeployHost({
+    environment,
+    observationWindowMs: 5_000,
+    serviceControl: {
+      platform: "linux",
+      restart: async () => {},
+      // Green once, then com.agentos.runner-2 crashes.
+      isRunning: async (label) => {
+        if (label === "com.agentos.api") samples += 1;
+        return !(samples > 1 && label === "com.agentos.runner-2");
+      },
+      describe: async () => "",
+    },
+    fetchImpl: controlPlaneFetch({
+      commit: revisions.to,
+      registry: () => runnerRegistry({
+        commit: revisions.to,
+        lastSeenAt: new Date(1_800_000_000_000 + (observations += 1) * 1_000).toISOString(),
+        runnerIds: ["vm-runner-1", "vm-runner-2"],
+      }),
+    }),
+    serviceVerificationWait: async () => undefined,
+  });
+  const attempt = openDeploymentAttempt({
+    deployRoot: "/fixture",
+    targetCommit: revisions.to,
+    transactionId: "control-plane-window-regression",
+  });
+  attempt.establish({ revisions });
+  attempt.establish(await host.restartServices(attempt));
+  await assert.rejects(
+    host.verifyServices(attempt),
+    (error) => error.reason === "service-verification-failed"
+      && error.detail === "observation-window-regressed-systemd-unavailable-com.agentos.runner-2",
+  );
+  assert.equal(samples > 1, true, "verification must keep sampling after the first green");
+});
+
+test("both roles pass only after the API, every runner and the whole window stay green", async () => {
+  const windowMs = 30;
+  for (const role of ["control-plane", "runner"]) {
+    const runnerIds = role === "runner" ? ["mac-runner-1"] : ["vm-runner-1"];
+    const environment = {
+      ...controlPlaneEnvironment(),
+      AGENTOS_DEPLOY_ROLE: role,
+      AGENTOS_RUNNER_COUNT: "1",
+      AGENTOS_RUNNER_ID_PREFIX: role === "runner" ? "mac-" : "vm-",
+      ...(role === "runner" ? { RUNNER_API_URL: "http://127.0.0.1:3000" } : {}),
+    };
+    let observations = 0;
+    const host = createDeployHost({
+      environment,
+      deployRole: role,
+      observationWindowMs: windowMs,
+      serviceControl: {
+        platform: "linux",
+        restart: async () => {},
+        isRunning: async () => true,
+        describe: async () => "",
+      },
+      fetchImpl: controlPlaneFetch({
+        commit: revisions.to,
+        registry: () => runnerRegistry({
+          commit: revisions.to,
+          lastSeenAt: new Date(1_800_000_000_000 + (observations += 1) * 1_000).toISOString(),
+          runnerIds,
+        }),
+      }),
+      serviceVerificationWait: async () => new Promise((done) => setTimeout(done, 5)),
+    });
+    const attempt = openDeploymentAttempt({
+      deployRoot: "/fixture",
+      targetCommit: revisions.to,
+      transactionId: `steady-${role}`,
+    });
+    attempt.establish({ revisions });
+    attempt.establish(await host.restartServices(attempt));
+    const { serviceVerification } = await host.verifyServices(attempt);
+    assert.deepEqual(serviceVerification.runnerIds, runnerIds);
+    assert.deepEqual(
+      serviceVerification.unitsChecked,
+      resolveServiceInventory(environment, role).labels,
+    );
+    assert.equal(serviceVerification.observationWindowMs, windowMs);
+    assert.equal(serviceVerification.observedForMs >= windowMs, true);
+    assert.equal(serviceVerification.activatedBuildCommit, revisions.to);
+    assert.equal(
+      serviceVerification.activatedBuildStamp?.commit ?? null,
+      role === "runner" ? null : revisions.to,
+    );
+  }
+});
+
+test("control-plane rollback fails when a local runner does not re-register", async () => {
+  const environment = controlPlaneEnvironment({ AGENTOS_RUNNER_COUNT: "2", AGENTOS_RUNNER_ID_PREFIX: "vm-" });
+  const runnerIds = ["vm-runner-1", "vm-runner-2"];
+  let reads = 0;
+  const host = createDeployHost({
+    environment,
+    verifyRecoveredServices: async () => {},
+    serviceControl: {
+      platform: "linux",
+      restart: async () => {},
+      isRunning: async () => true,
+      describe: async () => "",
+    },
+    fetchImpl: controlPlaneFetch({
+      commit: revisions.from,
+      registry: () => {
+        reads += 1;
+        return runnerRegistry({
+          commit: revisions.from,
+          lastSeenAt: reads === 1 ? "2026-09-04T12:00:00.000Z" : "2026-09-04T12:01:00.000Z",
+          runnerIds,
+          // The second runner never comes back after the restore.
+          overrides: reads === 1 ? {} : { "vm-runner-2": { online: false } },
+        });
+      },
+    }),
+    serviceVerificationTimeoutMs: 5,
+    serviceVerificationWait: async () => undefined,
+  });
+  const attempt = openDeploymentAttempt({
+    deployRoot: "/fixture",
+    targetCommit: revisions.to,
+    transactionId: "control-plane-rollback",
+  });
+  attempt.establish({ revisions });
+  await assert.rejects(
+    host.restorePreviousServices(attempt),
+    (error) => error.reason === "previous-service-verification-failed"
+      && error.detail === "runner-offline-vm-runner-2",
+  );
+});
+
+test("the observation window defaults to twenty seconds and is environment-overridable", () => {
+  assert.equal(DEFAULT_SERVICE_OBSERVATION_WINDOW_MS, 20_000);
+  assert.equal(resolveObservationWindowMs({}), 20_000);
+  assert.equal(resolveObservationWindowMs({ AGENTOS_DEPLOY_OBSERVATION_WINDOW_MS: "45000" }), 45_000);
+  assert.throws(
+    () => resolveObservationWindowMs({ AGENTOS_DEPLOY_OBSERVATION_WINDOW_MS: "20s" }),
+    (error) => error.reason === "deploy-observation-window-invalid" && error.detail === "20s",
+  );
+});
+
 test("rollback re-proves liveness, wrapper binding, and prior API identity on both platforms", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "agentos-rollback-proof-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -1279,6 +1651,20 @@ test("rollback re-proves liveness, wrapper binding, and prior API identity on bo
   const fetchImpl = async (url) => url.endsWith("/health")
     ? { ok: true }
     : { ok: true, json: async () => ({ commit: release, dirty: false }) };
+  let observations = 0;
+  const hostFetch = controlPlaneFetch({
+    commit: release,
+    registry: () => runnerRegistry({
+      commit: release,
+      lastSeenAt: new Date(1_800_000_000_000 + (observations += 1) * 1_000).toISOString(),
+    }),
+  });
+  const rollbackAttempt = openDeploymentAttempt({
+    deployRoot: "/fixture",
+    targetCommit: "b".repeat(40),
+    transactionId: "rollback-proof",
+  });
+  rollbackAttempt.establish({ revisions: { from: release, to: "b".repeat(40) } });
   assert.equal(resolveServiceInvocation({
     repositoryRoot: root,
     label: "com.agentos.api",
@@ -1298,6 +1684,9 @@ test("rollback re-proves liveness, wrapper binding, and prior API identity on bo
     };
     const host = createDeployHost({
       serviceControl: control,
+      environment: controlPlaneEnvironment(),
+      observationWindowMs: 0,
+      fetchImpl: hostFetch,
       verifyRecoveredServices: (serviceControl) => {
         assert.equal(existsSync(join(root, "current")), true);
         return verifyStableServicePaths(serviceControl, {
@@ -1307,7 +1696,7 @@ test("rollback re-proves liveness, wrapper binding, and prior API identity on bo
         });
       },
     });
-    await host.restorePreviousServices();
+    await host.restorePreviousServices(rollbackAttempt);
     const expected = [
       ...SERVICE_LABELS.map((label) => ["restart", label]),
       ...SERVICE_LABELS.flatMap((label) => platform === "linux"
@@ -1325,13 +1714,21 @@ test("rollback re-proves liveness, wrapper binding, and prior API identity on bo
     };
     const host = createDeployHost({
       serviceControl: control,
+      environment: controlPlaneEnvironment(),
+      observationWindowMs: 0,
+      fetchImpl: hostFetch,
+      serviceVerificationTimeoutMs: 5,
+      serviceVerificationWait: async () => {},
       verifyRecoveredServices: (serviceControl) => verifyStableServicePaths(serviceControl, {
         repositoryRoot: root,
         environment: { DEPLOY_NODE_BINARY: "/usr/bin/node" },
         fetchImpl,
       }),
     });
-    await assert.rejects(host.restorePreviousServices(), /service-start-failed:com\.agentos\.api/u);
+    await assert.rejects(
+      host.restorePreviousServices(rollbackAttempt),
+      /service-start-failed:com\.agentos\.api/u,
+    );
   }
 });
 
@@ -1346,7 +1743,14 @@ test("a Linux service-control denial aborts restart traversal", async () => {
     isRunning: async () => true,
     describe: async () => "",
   };
-  const host = createDeployHost({ serviceControl });
+  const host = createDeployHost({
+    serviceControl,
+    environment: controlPlaneEnvironment(),
+    fetchImpl: controlPlaneFetch({
+      commit: revisions.to,
+      registry: () => runnerRegistry({ commit: revisions.from, lastSeenAt: "2026-09-04T12:00:00.000Z" }),
+    }),
+  });
 
   await assert.rejects(
     host.restartServices(),
@@ -2169,6 +2573,36 @@ test("deploy history prunes recognized backups and leaves unrelated entries", ()
   rmSync(stateDir, { recursive: true, force: true });
 });
 
+test("the ledger entry records what the post-restart verification proved", () => {
+  const attempt = openDeploymentAttempt({
+    deployRoot: "/fixture",
+    targetCommit: revisions.to,
+    transactionId: "verification-ledger",
+  });
+  attempt.establish({
+    revisions,
+    serviceVerification: {
+      unitsChecked: SERVICE_LABELS,
+      runnerIds: LOCAL_RUNNER_IDS,
+      activatedBuildCommit: revisions.to,
+      observationWindowMs: 20_000,
+      observedForMs: 20_134,
+    },
+  });
+  const stateDir = mkdtempSync(join(tmpdir(), "anneal-deploy-verification-"));
+  const ledger = createDeploymentLedger({ stateDir, targetCommit: revisions.to });
+  ledger.start();
+  ledger.record("VERIFIED", attempt.ledgerMetadata());
+  const snapshot = JSON.parse(readFileSync(ledger.statePath, "utf8"));
+  assert.deepEqual(snapshot.service_verification, {
+    units_checked: SERVICE_LABELS,
+    runners_registered: LOCAL_RUNNER_IDS,
+    observation_window_ms: 20_000,
+    observed_for_ms: 20_134,
+  });
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
 test("deployment ledger accepts the artifact verification seam", () => {
   assert.ok(DEPLOYMENT_LEDGER_STATES.includes("ARTIFACT_PREPARED"));
   assert.ok(DEPLOYMENT_LEDGER_STATES.includes("ARTIFACT_VERIFIED"));
@@ -2290,4 +2724,168 @@ test("canonical prompt sync uses the host command seam", async (t) => {
   await host.syncCanonicalPrompts(attempt);
   assert.equal(spawns.length, 1);
   assert.ok(spawns[0].args.includes("packages/db/prisma/sync-canonical-prompts.ts"));
+});
+
+for (const regression of ["unit", "api"]) {
+  test(`rollback detects ${regression} regression during its observation window`, async () => {
+    let samples = 0;
+    let observations = 0;
+    const host = createDeployHost({
+      environment: controlPlaneEnvironment(),
+      observationWindowMs: 10,
+      serviceVerificationWait: async () => {},
+      serviceControl: { platform: "linux", restart: async () => {} },
+      verifyRecoveredServices: async () => {
+        if (++samples > 1) throw new DeployFailure("service-wrapper-verification-failed",
+          regression === "unit" ? "service-start-failed:com.agentos.runner" : "service-readiness-failed:com.agentos.api");
+      },
+      fetchImpl: controlPlaneFetch({ commit: revisions.from, registry: () => runnerRegistry({
+        commit: revisions.from,
+        lastSeenAt: new Date(1_800_000_000_000 + ++observations * 1_000).toISOString(),
+      }) }),
+    });
+    const attempt = openDeploymentAttempt({ deployRoot: "/fixture", targetCommit: revisions.to, transactionId: "rollback-regression" });
+    attempt.establish({ revisions });
+    await assert.rejects(host.restorePreviousServices(attempt),
+      (error) => error.reason === "previous-service-verification-failed"
+        && error.detail.includes("observation-window-regressed")
+        && error.detail.includes(regression === "unit" ? "com.agentos.runner" : "com.agentos.api"));
+    assert.equal(samples, 2);
+  });
+}
+
+test("observation overrides reject overflow and durations beyond five minutes", () => {
+  for (const value of ["9".repeat(400), "9007199254740992", "300001", "20000000"]) {
+    assert.throws(() => resolveObservationWindowMs({ AGENTOS_DEPLOY_OBSERVATION_WINDOW_MS: value }),
+      (error) => error.reason === "deploy-observation-window-invalid");
+  }
+  assert.equal(resolveObservationWindowMs({ AGENTOS_DEPLOY_OBSERVATION_WINDOW_MS: "300000" }), 300000);
+});
+
+test("a refusal sampled across the deadline preserves the named rollback failure", async () => {
+  let now = 0;
+  await assert.rejects(observeReadiness({
+    sample: async () => { now = 11; return "service-start-failed:com.agentos.api"; },
+    observationWindowMs: 0, timeoutMs: 10, now: () => now,
+    wait: async () => assert.fail("expired sample must not wait"),
+    failureReason: "previous-service-verification-failed",
+  }), (error) => error.reason === "previous-service-verification-failed"
+    && error.detail === "service-start-failed:com.agentos.api");
+});
+
+test("a regression sampled across the deadline preserves the named rollback failure", async () => {
+  let now = 0;
+  await assert.rejects(observeReadiness({
+    sample: async () => {
+      if (now === 0) return null;
+      now = 11;
+      return "service-start-failed:com.agentos.api";
+    },
+    observationWindowMs: 5, timeoutMs: 10, now: () => now,
+    wait: async () => { now = 1; },
+    failureReason: "previous-service-verification-failed",
+  }), (error) => error.reason === "previous-service-verification-failed"
+    && error.detail === "observation-window-regressed-service-start-failed:com.agentos.api");
+});
+
+test("a first green sample near the deadline cannot complete the window after timeout", async () => {
+  let now = 0;
+  let samples = 0;
+  await assert.rejects(observeReadiness({
+    sample: async () => { samples++; now = 9; return null; },
+    observationWindowMs: 2, timeoutMs: 10, now: () => now,
+    wait: async (ms) => { assert.equal(ms, 1); now += ms; },
+    failureReason: "service-verification-failed",
+  }), (error) => error.detail === "observation-window-incomplete-2ms");
+  assert.equal(samples, 1);
+  now = 0;
+  await assert.rejects(observeReadiness({
+    sample: async () => { now = 11; return null; },
+    observationWindowMs: 0, timeoutMs: 10, now: () => now,
+    wait: async () => assert.fail("expired sample must not wait"),
+    failureReason: "service-verification-failed",
+  }), (error) => error.reason === "service-verification-failed");
+});
+
+test("control-plane registration sends the deployment file token over an inherited token", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "deploy-file-token-"));
+  const envPath = join(root, ".env");
+  const saved = { ...process.env };
+  t.after(() => {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+    rmSync(root, { recursive: true, force: true });
+  });
+  Object.assign(process.env, controlPlaneEnvironment(), {
+    OPERATOR_TOKEN: "inherited-token", DATABASE_URL: "fixture", FEISHU_DEFAULT_CHAT_ID: "fixture",
+  });
+  writeFileSync(envPath, "OPERATOR_TOKEN=file-token\nGITHUB_READ_TOKEN=fixture\n", { mode: 0o600 });
+  await loadEnvironment("control-plane", envPath);
+  const host = createDeployHost({
+    deployRole: "control-plane",
+    serviceControl: { restart: async () => {} },
+    fetchImpl: async (url, options) => {
+      assert.ok(url.endsWith("/runners"));
+      assert.equal(options.headers.authorization, "Bearer file-token");
+      return runnerRegistry({ commit: revisions.from });
+    },
+  });
+  await host.restartServices();
+});
+
+for (const reason of ["deployment-ledger-write-failed", "operation-workspace-preparation-failed",
+  "previous-service-restore-failed", "previous-service-restore-timeout",
+  "service-wrapper-verification-failed", "service-control-denied", "service-control-failed:restart:api"]) {
+  test(`host failure ${reason} blocks a moved main`, async (t) => {
+    const marker = escalationFixture(t, { reason, detail: "ENOSPC", to: revisions.from });
+    let targetReads = 0;
+    assert.deepEqual(await checkExistingEscalation(marker.options), { active: true });
+    const startup = startupFixture({
+      checkEscalation: () => checkExistingEscalation(marker.options),
+      readRemoteMain: async () => { targetReads += 1; return revisions.to; },
+    });
+    assert.deepEqual(await decideInvocation(startup.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
+    assert.equal(targetReads, 0);
+  });
+}
+
+test("a superseding build failure re-latches B and refuses the next B invocation", async (t) => {
+  const marker = escalationFixture(t, { reason: "release-artifact-build-failed", to: revisions.from });
+  const startup = startupFixture({ checkEscalation: () => checkExistingEscalation({
+    ...marker.options, hostScopedReasons: HOST_SCOPED_ESCALATION_REASONS,
+  }) });
+  const invocation = await decideInvocation(startup.startup, "upgrade");
+  assert.equal(invocation.targetCommit, revisions.to);
+  const run = fixture({ builderOutput: "invalid receipt" });
+  run.attempt.establish({ supersededEscalation: invocation.supersededEscalation });
+  run.host.escalate = async (record) => {
+    run.state.escalated = record;
+    writeEscalationWithAttempts({ ...marker.options, record });
+  };
+  assert.equal((await executeUpgrade(run.host, run.attempt)).ok, false);
+  assert.equal(run.state.escalated.reason, "release-artifact-build-failed");
+  assert.equal(JSON.parse(readFileSync(marker.escalationPath, "utf8")).to, revisions.to);
+  assert.deepEqual(await decideInvocation(startup.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
+});
+
+test("failed recovery persists unproven activation and blocks newer main", async (t) => {
+  const run = fixture({ failure: "verify-services" });
+  run.host.restorePreviousServices = async () => { throw new DeployFailure("service-control-failed:restart:api"); };
+  await executeUpgrade(run.host, run.attempt);
+  assert.equal(run.state.escalated.activationOutcomeProven, false);
+  assert.equal(run.records.at(-1).state, "MANUAL_RECOVERY");
+  const marker = escalationFixture(t, run.state.escalated);
+  assert.deepEqual(await checkExistingEscalation({ ...marker.options, hostScopedReasons: HOST_SCOPED_ESCALATION_REASONS }), { active: true });
+});
+
+test("production startup wiring keeps backup failure host-scoped", async (t) => {
+  const marker = escalationFixture(t, { reason: "database-backup-failed", to: revisions.from });
+  const production = createDeployStartup({ escalationPath: marker.escalationPath, retryNotification: async () => {} });
+  let targetReads = 0;
+  const state = startupFixture({
+    checkEscalation: production.checkEscalation,
+    readRemoteMain: async () => { targetReads += 1; return revisions.to; },
+  });
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
+  assert.equal(targetReads, 0);
 });
