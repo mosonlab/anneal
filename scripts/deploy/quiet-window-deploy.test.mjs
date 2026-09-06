@@ -76,9 +76,11 @@ const REPOSITORY_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const EXPECTED_RUNTIME_PATHS = RUNTIME_TOOL_FILES
   .map(({ destination }) => `packages/runner/dist/runtime-tools/${destination}`)
   .sort();
+const RUNTIME_TOOL_MANIFEST_PATH = "packages/runner/scripts/build-runtime-tools.mjs";
 const COMPLETE_ARTIFACT_PATHS = Object.freeze([
   "packages/api/dist",
   "packages/runner/dist",
+  RUNTIME_TOOL_MANIFEST_PATH,
   "packages/db/prisma",
   "packages/db/src",
   "scripts/deploy",
@@ -259,6 +261,8 @@ const minimalBuildTree = (root, revision) => {
   for (const { source: sourcePath, destination } of RUNTIME_TOOL_FILES) {
     cpSync(join(REPOSITORY_ROOT, sourcePath), join(runnerDist, "runtime-tools", destination));
   }
+  mkdirSync(join(root, "packages/runner/scripts"), { recursive: true });
+  cpSync(join(REPOSITORY_ROOT, RUNTIME_TOOL_MANIFEST_PATH), join(root, RUNTIME_TOOL_MANIFEST_PATH));
   cpSync(join(REPOSITORY_ROOT, "scripts/deploy"), join(root, "scripts/deploy"), { recursive: true });
 };
 
@@ -1424,6 +1428,7 @@ test("release artifact inventory copies and verifies deploy runtime and workspac
     assert.deepEqual(workspaceDependencyPaths(root), ["apps/web/node_modules", "packages/api/node_modules"]);
     const paths = deployReleaseArtifactPaths(root);
     assert.ok(paths.includes("scripts/deploy"));
+    assert.ok(paths.includes(RUNTIME_TOOL_MANIFEST_PATH));
     assert.ok(paths.includes(adapterPath));
     assert.ok(paths.includes("packages/db/src"));
     for (const path of DEPLOY_REQUIRED_ARTIFACT_PATHS) assert.ok(paths.includes(path), path);
@@ -1798,26 +1803,20 @@ test("a target runtime-tool addition passes its target inventory verifier", () =
   const source = join(deployRoot, "source");
   mkdirSync(source);
   minimalBuildTree(source, revisions.to);
-  const targetDeployScripts = join(source, "scripts/deploy");
-  cpSync(join(REPOSITORY_ROOT, "scripts/deploy"), targetDeployScripts, { recursive: true });
-  const targetVerifierPath = join(targetDeployScripts, "release-artifact.mjs");
-  const targetVerifier = readFileSync(targetVerifierPath, "utf8")
-    .replace(
-      '  "git-credential-runner.sh",\n',
-      '  "git-credential-runner.sh",\n  "new-target-tool.sh",\n',
-    )
-    .replace(
-      '["", new Set(["gate-worker", "git-credential-runner.sh", "regression-verification.sh"])]',
-      '["", new Set(["gate-worker", "git-credential-runner.sh", "new-target-tool.sh", "regression-verification.sh"])]',
-    );
-  writeFileSync(targetVerifierPath, targetVerifier);
-  writeFileSync(join(source, "packages/runner/dist/runtime-tools/new-target-tool.sh"), "target tool\n");
+  const targetManifestPath = join(source, RUNTIME_TOOL_MANIFEST_PATH);
+  const targetManifest = readFileSync(targetManifestPath, "utf8").replace(
+    "export const RUNTIME_TOOL_FILES = Object.freeze([",
+    'export const RUNTIME_TOOL_FILES = Object.freeze([\n  Object.freeze({ source: "target-only.sh", destination: "new-tools/nested/new-target-tool.sh" }),',
+  );
+  writeFileSync(targetManifestPath, targetManifest);
+  mkdirSync(join(source, "packages/runner/dist/runtime-tools/new-tools/nested"), { recursive: true });
+  writeFileSync(join(source, "packages/runner/dist/runtime-tools/new-tools/nested/new-target-tool.sh"), "target tool\n");
   try {
     const assembled = assembleReleaseDirectory({
       stageRoot: source,
       deployRoot,
       revision: revisions.to,
-      artifactPaths: ["packages/api/dist", "packages/runner/dist", "packages/db/prisma", "packages/db/src", "scripts/deploy"],
+      artifactPaths: COMPLETE_ARTIFACT_PATHS,
       optionalArtifactPaths: [],
     });
     const verified = verifyReleaseArtifact({
@@ -1825,7 +1824,7 @@ test("a target runtime-tool addition passes its target inventory verifier", () =
       revision: revisions.to,
       releaseName: assembled.releaseName,
     });
-    assert.ok(verified.runtimeTools.files.includes("packages/runner/dist/runtime-tools/new-target-tool.sh"));
+    assert.ok(verified.runtimeTools.files.includes("packages/runner/dist/runtime-tools/new-tools/nested/new-target-tool.sh"));
   } finally {
     removeTree(deployRoot);
   }
@@ -2014,6 +2013,28 @@ test("artifact verification rejects missing, extra, non-regular, and misplaced r
   });
   assertRuntimeInventoryFailure({
     artifactPaths: completePaths,
+    expectedDetail: "packages/runner/dist/runtime-tools/gate-worker-inventory-mismatch",
+    mutate: (source) => writeFileSync(
+      join(source, "packages/runner/dist/runtime-tools/gate-worker/extra.sh"),
+      "unexpected\n",
+    ),
+  });
+  assertRuntimeInventoryFailure({
+    artifactPaths: completePaths,
+    expectedDetail: "packages/runner/dist/runtime-tools/gate-worker-inventory-mismatch",
+    mutate: (source) => rmSync(join(source, "packages/runner/dist/runtime-tools/gate-worker/lib.sh")),
+  });
+  assertRuntimeInventoryFailure({
+    artifactPaths: completePaths,
+    expectedDetail: "packages/runner/dist/runtime-tools/gate-worker-not-a-directory",
+    mutate: (source) => {
+      const path = join(source, "packages/runner/dist/runtime-tools/gate-worker");
+      rmSync(path, { recursive: true });
+      writeFileSync(path, "not a directory\n");
+    },
+  });
+  assertRuntimeInventoryFailure({
+    artifactPaths: completePaths,
     expectedDetail: "packages/runner/dist/runtime-tools/regression-verification.sh-not-a-regular-file",
     mutate: (source) => {
       const path = join(source, "packages/runner/dist/runtime-tools/regression-verification.sh");
@@ -2069,7 +2090,7 @@ test("artifact verification rejects an incomplete DB maintenance runtime before 
     stageRoot: source,
     deployRoot,
     revision: revisions.to,
-    artifactPaths: ["packages/api/dist", "packages/db/prisma", "scripts/deploy"],
+    artifactPaths: ["packages/api/dist", "packages/db/prisma", "scripts/deploy", RUNTIME_TOOL_MANIFEST_PATH],
     optionalArtifactPaths: [],
   });
   assert.throws(
