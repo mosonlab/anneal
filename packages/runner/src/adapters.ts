@@ -38,7 +38,8 @@ export const RUNNER_DEFINITIONS: Readonly<Record<RunnerKind, AdapterDeclaration>
 });
 
 const COMMON_PROTECTED_SECRET_ENVIRONMENT = [
-  "GIT_CONFIG_GLOBAL", "AGENTOS_GATE_SERVER", "AGENTOS_GATE_ALLOW_LOCAL", "AGENTOS_GATE_LOCAL_SLOTS",
+  "GIT_CONFIG_GLOBAL", "AGENTOS_GATE_SERVER", "AGENTOS_GATE_PRIMARY_SERVER", "AGENTOS_GATE_FALLBACK_SERVER",
+  "AGENTOS_GATE_ALLOW_LOCAL", "AGENTOS_GATE_LOCAL_SLOTS",
   "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
 ] as const;
 
@@ -155,7 +156,7 @@ const gitConfigOverrides = (entries: readonly (readonly [string, string])[]): No
 
 export const buildChildEnvironment = (
   config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix" | "workspaceRoot" | "hostProofSlots">
-    & Partial<Pick<RunnerConfig, "proxyEnvironment" | "gateServer" | "gateLocalSlots">>,
+    & Partial<Pick<RunnerConfig, "proxyEnvironment" | "gateServer" | "gateFallbackServer" | "gateLocalSlots">>,
   claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner" | "agent" | "task">,
   scratch: AgentScratch,
   workspacePath: string,
@@ -165,6 +166,16 @@ export const buildChildEnvironment = (
   const regressionStep = outputKind !== undefined && stepRole({ outputKind }) === "regression";
   if (regressionStep && !claim.task.chainId) {
     throw new Error("regression-verification task is missing its platform chain id");
+  }
+  const environment = workspaceEnvironment(config);
+  // RUNNER_GATE_FALLBACK_SERVER opts sessions into the dispatcher's two-host topology.
+  if (config.gateFallbackServer) {
+    if (!config.gateServer) {
+      throw new Error("RUNNER_GATE_FALLBACK_SERVER requires RUNNER_GATE_SERVER");
+    }
+    delete environment.AGENTOS_GATE_SERVER;
+    environment.AGENTOS_GATE_PRIMARY_SERVER = config.gateServer;
+    environment.AGENTOS_GATE_FALLBACK_SERVER = config.gateFallbackServer;
   }
   const taskSecrets = Object.fromEntries(Object.entries(claim.secrets).filter(([name]) =>
     !PROTECTED_SECRET_ENVIRONMENT.has(name)
@@ -176,7 +187,7 @@ export const buildChildEnvironment = (
     AGENTOS_TOOLS: scratch.toolsDir,
     AGENTOS_HOST_PROOF_SLOT_DIR: hostProofSlotDirectory(config),
     AGENTOS_HOST_PROOF_SLOTS: String(config.hostProofSlots),
-    ...workspaceEnvironment(config),
+    ...environment,
     AGENTOS_API_URL: config.apiUrl,
     AGENTOS_SESSION_TOKEN: claim.sessionToken,
     AGENTOS_RUN_ID: claim.run.id,
