@@ -177,7 +177,7 @@ test("a long step output clamps and offers Show more; a short one does neither",
 const unknownMetrics: RunMetrics = {
   phases: { queuedMs: null, provisioningMs: null, executingMs: null, inboxWaitMs: null, cleanupMs: null },
   tokens: { input: null, cachedRead: null, cacheWrite: null, uncachedInput: null, output: null, cacheHitRatio: null },
-  tools: { calls: 0, failed: 0, unclassified: 0, totalToolMs: 0, unpairedCalls: 0, byName: [] },
+  tools: { calls: 0, failed: 0, unclassified: 0, totalToolMs: 0, byName: [] },
   modelActiveMs: null,
   modelActiveIsUpperBound: false,
   outputTokensPerSecond: null,
@@ -185,9 +185,9 @@ const unknownMetrics: RunMetrics = {
 };
 
 const measuredMetrics: RunMetrics = {
-  phases: { queuedMs: 12_000, provisioningMs: 3_000, executingMs: 600_000, inboxWaitMs: 30_000, cleanupMs: 250 },
+  phases: { queuedMs: 12_000, provisioningMs: 3_000, executingMs: 600_000, inboxWaitMs: null, cleanupMs: 250 },
   tokens: { input: 120_000, cachedRead: 90_000, cacheWrite: 5_000, uncachedInput: 25_000, output: 8_000, cacheHitRatio: 0.75 },
-  tools: { calls: 42, failed: 3, unclassified: 1, totalToolMs: 9_000, unpairedCalls: 2, byName: [{ name: "Bash", calls: 20, failed: 1 }] },
+  tools: { calls: 42, failed: 3, unclassified: 1, totalToolMs: 200_000, byName: [{ name: "Bash", calls: 20, failed: 1 }] },
   modelActiveMs: 400_000,
   modelActiveIsUpperBound: true,
   outputTokensPerSecond: 20,
@@ -210,23 +210,23 @@ test("measured diagnostics render their phases, tokens, tools and termination", 
   const markup = renderToStaticMarkup(<RunDiagnostics metrics={measuredMetrics} />);
   for (const shown of [
     /Queued<\/span><span>12s/u, /Provisioning<\/span><span>3s/u, /Executing<\/span><span>10m 0s/u,
-    /Inbox wait<\/span><span>30s/u, /Cleanup<\/span><span>250ms/u,
+    /Inbox wait<\/span><span>— · Wait duration not measured/u, /Cleanup<\/span><span>250ms/u,
     /Input<\/span><span>120K/u, /Cached read<\/span><span>90K/u, /Cache write<\/span><span>5K/u,
     /Output<\/span><span>8K/u, /Cache hit<\/span><span>75%/u,
     /Calls<\/span><span>42/u, /Failed<\/span><span>3/u, /Unclassified<\/span><span>1/u,
     /Bash<\/span><span>20 calls · 1 failed/u,
     /Reason<\/span><span>completed/u, /Exit code<\/span><span>0<\/span>/u, /Signal<\/span><span>—/u,
   ]) assert.match(markup, shown);
-  // Widths are proportional to the measured phases: 12s of a 645.25s bar.
-  assert.match(markup, /width:1\.8[0-9]*%/u);
+  // Widths are proportional to the measured phases: 12s of a 615.25s bar.
+  assert.match(markup, /width:1\.950426655830963%/u);
 });
 
-test("the output rate is labelled a session average and marked when it is an upper bound", () => {
+test("the output rate is labelled a session average and marked when it is a lower bound", () => {
   const markup = renderToStaticMarkup(<RunDiagnostics metrics={measuredMetrics} />);
   assert.match(markup, /Effective output rate/u);
   assert.match(markup, /A session average over model-active time, not a provider peak rate\./u);
-  // `modelActiveIsUpperBound` makes the rate and the time it divides ceilings.
-  assert.match(markup, /≤ 20 tok\/s \(upper bound\)/u);
+  // An upper-bound denominator gives a lower-bound rate.
+  assert.match(markup, /≥ 20 tok\/s \(lower bound\)/u);
   assert.match(markup, /≤ 6m 40s \(upper bound\)/u);
 
   const measured = { ...measuredMetrics, modelActiveIsUpperBound: false };
@@ -272,9 +272,9 @@ test("the newest run's cache hit reaches the tokens stat pill", () => {
 
 test("termination is stated once, in the diagnostics block rather than twice", () => {
   assert.doesNotMatch(source, /taskDetail\.run\.termination/u);
-  assert.doesNotMatch(source, /run\.terminationReason/u);
+  assert.match(source, /runTerminationReason=\{run\.terminationReason\}/u);
   const row = source.slice(source.indexOf("const RunRow"), source.indexOf("const Activity"));
-  assert.match(row.slice(row.indexOf("{expanded ?")), /<RunDiagnostics metrics=\{run\.metrics\} \/>/u);
+  assert.match(row.slice(row.indexOf("{expanded ?")), /<RunDiagnostics metrics=\{run\.metrics\} runTerminationReason=\{run\.terminationReason\} \/>/u);
 });
 
 /* ------------------------------------------------------------ static guards */
@@ -311,4 +311,22 @@ test("every run's pull request is reachable, not just the newest one's", () => {
   assert.match(expanded, /run\.pullRequestUrl/);
   // Distinct from Push, which is the status word and never a link.
   assert.match(expanded, /k: t\("taskDetail\.run\.push"\)/);
+});
+
+test("measured inbox wait subdivides execution without changing total wall time", () => {
+  const markup = renderToStaticMarkup(<RunDiagnostics metrics={{
+    ...measuredMetrics,
+    phases: { queuedMs: 100, provisioningMs: 0, executingMs: 800, inboxWaitMs: 200, cleanupMs: 100 },
+  }} />);
+  assert.match(markup, /title="Executing" style="width:60%/u);
+  assert.match(markup, /title="Inbox wait" style="width:20%/u);
+  assert.match(markup, /Executing<\/span><span>800ms/u);
+});
+
+test("a cancelled run without a session retains its run termination reason", () => {
+  const markup = renderToStaticMarkup(<RunDiagnostics metrics={unknownMetrics} runTerminationReason="superseded by revised brief" />);
+  assert.match(markup, /Reason<\/span><span>superseded by revised brief/u);
+  const withSession = renderToStaticMarkup(<RunDiagnostics metrics={measuredMetrics} runTerminationReason="run fallback" />);
+  assert.match(withSession, /Reason<\/span><span>completed/u);
+  assert.doesNotMatch(withSession, /run fallback/u);
 });

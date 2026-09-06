@@ -1,7 +1,7 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { compactTokens, durationMs, durationWithInboxWait, formatDateTime, percent, pullRequestLabel, repoWebUrl, sha, timeAgo, titleCase, tokensPerSecond, usageCostLabel } from "../lib/format";
+import { UNKNOWN, measured, compactTokens, durationMs, durationWithInboxWait, formatDateTime, percent, pullRequestLabel, repoWebUrl, sha, timeAgo, titleCase, tokensPerSecond, usageCostLabel } from "../lib/format";
 import { useAction, usePoll, type Poll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { Link } from "../lib/router";
@@ -137,15 +137,6 @@ export const StartabilityChecklist = ({ verdict, hasRuns }: { verdict: TaskStart
 
 /* --------------------------------------------------------- run diagnostics */
 
-/** Every `null` in `RunMetrics` means "not measured", so it renders as the em
- *  dash the rest of the product uses and never as `0`, `0%` or `0s`: a zero
- *  there would read as a measurement that came back empty. A measured `0`
- *  still renders as `0`. */
-const UNKNOWN = "—";
-
-const measured = (value: number | null | undefined): value is number =>
-  typeof value === "number" && Number.isFinite(value);
-
 /* `dictionary` rather than `label`: the i18n sweep reads a `label` property as
  * user copy, and these are dictionary keys. */
 const PHASES: ReadonlyArray<{ field: keyof RunPhaseMetrics; dictionary: string; color: string }> = [
@@ -173,19 +164,26 @@ const DiagnosticsRow = ({ k, children }: { k: string; children: ReactNode }): Re
 /** Widths are proportional to the phases that were measured; an unmeasured one
  *  contributes no segment rather than a zero-width sliver, and its duration
  *  reads as the unknown marker in the legend below. `inboxWaitMs` is a subset
- *  of `executingMs` on the wire, so the bar reads as where the time went and
- *  not as a partition of the wall clock. */
+ *  of `executingMs` on the wire: subtract it from the executing segment,
+ *  preserving the raw executing duration in the legend. */
 const PhaseBar = ({ phases }: { phases: RunPhaseMetrics }): ReactNode => {
   const t = useT();
+  const segmentMs = (field: keyof RunPhaseMetrics): number | null => {
+    const value = phases[field];
+    const wait = measured(phases.inboxWaitMs) && measured(phases.executingMs)
+      ? Math.min(phases.inboxWaitMs, phases.executingMs) : 0;
+    if (field === "inboxWaitMs") return wait;
+    return field === "executingMs" && measured(value) ? value - wait : value;
+  };
   const total = PHASES.reduce((sum, phase) => {
-    const value = phases[phase.field];
+    const value = segmentMs(phase.field);
     return sum + (measured(value) && value > 0 ? value : 0);
   }, 0);
   return (
     <div className="grid gap-[7px]">
       <div className="flex h-[8px] overflow-hidden rounded-md bg-accent" data-run-phase-bar="">
         {total === 0 ? null : PHASES.map((phase) => {
-          const value = phases[phase.field];
+          const value = segmentMs(phase.field);
           if (!measured(value) || value <= 0) return null;
           return (
             <span
@@ -201,7 +199,8 @@ const PhaseBar = ({ phases }: { phases: RunPhaseMetrics }): ReactNode => {
           <span key={phase.field} className="inline-flex items-baseline gap-[5px] whitespace-nowrap">
             <span className="inline-block h-[8px] w-[8px] shrink-0 rounded-full" style={{ background: phase.color }} />
             <span className="text-muted-foreground">{t(phase.dictionary)}</span>
-            <span>{durationMs(phases[phase.field])}</span>
+            <span>{durationMs(phases[phase.field])}{phase.field === "inboxWaitMs" && phases.inboxWaitMs === null
+              ? ` · ${t("taskDetail.diagnostics.phase.inboxUnmeasured")}` : ""}</span>
           </span>
         ))}
       </div>
@@ -210,9 +209,8 @@ const PhaseBar = ({ phases }: { phases: RunPhaseMetrics }): ReactNode => {
 };
 
 /** The per-run diagnostics the Task detail attaches at read time. It carries
- *  the run's termination too, which is why the run's key-value list no longer
- *  states it: one fact, one place. */
-export const RunDiagnostics = ({ metrics }: { metrics: RunMetrics | null | undefined }): ReactNode => {
+ *  session termination with a run-reason fallback for pre-session exits. */
+export const RunDiagnostics = ({ metrics, runTerminationReason }: { metrics: RunMetrics | null | undefined; runTerminationReason?: string | null }): ReactNode => {
   const t = useT();
   const title = <div className="text-[12px] font-bold text-muted-foreground">{t("taskDetail.diagnostics.title")}</div>;
   if (metrics === null || metrics === undefined) {
@@ -224,11 +222,9 @@ export const RunDiagnostics = ({ metrics }: { metrics: RunMetrics | null | undef
     );
   }
   const { phases, tokens, tools, termination } = metrics;
-  /* `modelActiveMs` and every rate derived from it are ceilings whenever an
-   * unknown subtrahend was treated as zero, so they are marked rather than
-   * presented as measurements. */
-  const bounded = (text: string): string => metrics.modelActiveIsUpperBound && text !== UNKNOWN
-    ? t("taskDetail.diagnostics.rate.upperBound", { value: text })
+  // An upper-bound model-active duration gives a lower-bound output rate.
+  const bounded = (text: string, bound: "upperBound" | "lowerBound"): string => metrics.modelActiveIsUpperBound && text !== UNKNOWN
+    ? t(`taskDetail.diagnostics.rate.${bound}`, { value: text })
     : text;
   const rate = metrics.outputTokensPerSecond;
   return (
@@ -262,14 +258,14 @@ export const RunDiagnostics = ({ metrics }: { metrics: RunMetrics | null | undef
           {/* Unkeyed: the row heading already names it, and a second "Rate"
               label beside "Effective output rate" reads as two numbers. */}
           <span className="whitespace-nowrap">
-            {bounded(tokensPerSecond(rate))}
+            {bounded(tokensPerSecond(rate), "lowerBound")}
           </span>
-          <Stat k={t("taskDetail.diagnostics.modelActive")} v={bounded(durationMs(metrics.modelActiveMs))} />
+          <Stat k={t("taskDetail.diagnostics.modelActive")} v={bounded(durationMs(metrics.modelActiveMs), "upperBound")} />
         </DiagnosticsRow>
         <div className={HINT}>{t("taskDetail.diagnostics.rate.note")}</div>
       </div>
       <DiagnosticsRow k={t("taskDetail.diagnostics.termination.title")}>
-        <Stat k={t("taskDetail.diagnostics.termination.reason")} v={termination.reason ?? UNKNOWN} />
+        <Stat k={t("taskDetail.diagnostics.termination.reason")} v={termination.reason ?? runTerminationReason ?? UNKNOWN} />
         <Stat
           k={t("taskDetail.diagnostics.termination.exitCode")}
           v={measured(termination.exitCode) ? String(termination.exitCode) : UNKNOWN}
@@ -338,7 +334,7 @@ export const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remot
                 // Termination moved into the diagnostics block below, which
                 // states it alongside the exit code and signal it belongs with.
               ]} />
-              <RunDiagnostics metrics={run.metrics} />
+              <RunDiagnostics metrics={run.metrics} runTerminationReason={run.terminationReason} />
               {run.failureReason === null ? null : <ErrorNotice message={run.failureReason} />}
             </div>
           </TableCell>

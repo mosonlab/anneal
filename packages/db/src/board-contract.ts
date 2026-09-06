@@ -308,12 +308,9 @@ export type RunToolMetrics = {
   calls: number;
   failed: number;
   unclassified: number;
-  /** Summed duration of the calls that paired a start with a completion, so a
-   *  lower bound whenever `unpairedCalls` is non-zero. */
+  /** Union of paired call intervals: overlapping tools count wall time once.
+   *  A lower bound when any calls have unknown duration. */
   totalToolMs: number;
-  /** Calls the stored events left unpaired — a start with no completion, or a
-   *  completion with no start. They count in `calls` with unknown duration. */
-  unpairedCalls: number;
   /** The five tool names with the most calls, most calls first. */
   byName: RunToolNameMetrics[];
 };
@@ -331,8 +328,8 @@ export type RunMetrics = {
   /** executingMs minus tool time and Inbox wait, clamped at 0. Null when
    *  `executingMs` is unknown. */
   modelActiveMs: number | null;
-  /** True when an unknown subtrahend was treated as 0, so `modelActiveMs` and
-   *  every rate derived from it are upper bounds rather than measurements. */
+  /** True when an unknown subtrahend was treated as 0, so `modelActiveMs` is
+   *  an upper bound and the derived output rate is a lower bound. */
   modelActiveIsUpperBound: boolean;
   /** output / (modelActiveMs / 1000): an effective session-average rate over
    *  model-active time, never a provider peak rate. Null when `output` is

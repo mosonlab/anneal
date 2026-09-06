@@ -341,13 +341,26 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
     // five runs must not cost five queries. MODEL_DELTA and PROVIDER_RAW
     // payloads are the bulk of a session's events and are never loaded here.
     const metricsSessionIds = task.runs.flatMap((run) => run.session === null ? [] : [run.session.id]);
-    const toolEvents = metricsSessionIds.length === 0 ? [] : await db.sessionEvent.findMany({
-      where: { sessionId: { in: metricsSessionIds }, type: { in: [...TOOL_METRIC_EVENT_TYPES] } },
-      select: { id: true, sessionId: true, type: true, at: true, toolCallId: true, payload: true },
-      // Emission order, so a start and its completion inside the same
-      // millisecond still pair in the order the adapter reported them.
-      orderBy: [{ sessionId: "asc" }, { seq: "asc" }],
-    });
+    // Project only names and outcome markers in PostgreSQL: provider tool
+    // output can be megabytes and must never enter the metrics input.
+    const toolEvents = metricsSessionIds.length === 0 ? [] : await db.$queryRaw<
+      Array<RunMetricsToolEvent & { id: string; sessionId: string }>
+    >(Prisma.sql`
+      SELECT "id", "sessionId", "type", "at", "toolCallId",
+        jsonb_build_object(
+          'type', CASE WHEN jsonb_typeof("payload"->'type') = 'string' THEN "payload"->'type' END,
+          'name', CASE WHEN jsonb_typeof("payload"->'name') = 'string' THEN "payload"->'name' END,
+          'toolName', CASE WHEN jsonb_typeof("payload"->'toolName') = 'string' THEN "payload"->'toolName' END,
+          'is_error', CASE WHEN jsonb_typeof("payload"->'is_error') = 'boolean' THEN "payload"->'is_error' END,
+          'isError', CASE WHEN jsonb_typeof("payload"->'isError') = 'boolean' THEN "payload"->'isError' END,
+          'exit_code', CASE WHEN jsonb_typeof("payload"->'exit_code') = 'number' THEN "payload"->'exit_code' END,
+          'error', CASE WHEN "payload"->'error' IS NOT NULL AND "payload"->'error' <> 'null'::jsonb THEN true END
+        ) AS "payload"
+      FROM "SessionEvent"
+      WHERE "sessionId" IN (${Prisma.join(metricsSessionIds)})
+        AND "type"::text IN (${Prisma.join([...TOOL_METRIC_EVENT_TYPES])})
+      ORDER BY "sessionId" ASC, "seq" ASC
+    `);
     const toolEventsBySession = new Map<string, RunMetricsToolEvent[]>();
     for (const event of toolEvents) {
       const events = toolEventsBySession.get(event.sessionId);

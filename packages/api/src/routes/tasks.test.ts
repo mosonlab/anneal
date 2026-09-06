@@ -269,9 +269,9 @@ const retryRequest = async (
   return { response, created, last };
 };
 
-type SessionEventQuery = { where?: Record<string, any>; select?: Record<string, unknown> };
+type SessionEventQuery = { where?: Record<string, any>; select?: Record<string, unknown>; sql?: string; values?: unknown[] };
 
-/** `events.queries` records every `sessionEvent.findMany` the detail route
+/** `events.queries` records every event query the detail route
  *  issues, which is what proves the diagnostics read does not grow per run. */
 const taskDetailDatabase = (
   task: Record<string, unknown>,
@@ -279,6 +279,19 @@ const taskDetailDatabase = (
 ): PrismaClient => ({
   task: { findUnique: async () => task, findMany: async () => [task] },
   run: { groupBy: async () => [] },
+  $queryRaw: async (query: { sql: string; values: unknown[] }) => {
+    events.queries?.push(query);
+    // Model the SQL projection, including a large provider output that must
+    // never be selected into the metrics input.
+    assert.match(query.sql, /jsonb_build_object/u);
+    assert.doesNotMatch(query.sql, /SELECT[\s\S]*?,\s*"payload"\s*(?:,|FROM)/u);
+    const keys = [...query.sql.matchAll(/'([^']+)',/gu)].map((match) => match[1]!);
+    assert.deepEqual(keys, ["type", "name", "toolName", "is_error", "isError", "exit_code", "error"]);
+    return (events.rows ?? []).map((row) => ({
+      ...row,
+      payload: Object.fromEntries(Object.entries(row.payload as Record<string, unknown>).filter(([key]) => keys.includes(key))),
+    }));
+  },
   sessionEvent: {
     findMany: async (args: SessionEventQuery) => {
       events.queries?.push(args);
@@ -1252,7 +1265,7 @@ const toolEventRow = (
 
 const DIAGNOSTICS_TOOL_EVENTS = [
   toolEventRow("session-2", 1, "TOOL_STARTED", "toolu_1", { type: "tool_use", id: "toolu_1", name: "Bash" }),
-  toolEventRow("session-2", 3, "TOOL_COMPLETED", "toolu_1", { type: "tool_result", tool_use_id: "toolu_1", is_error: false }),
+  toolEventRow("session-2", 3, "TOOL_COMPLETED", "toolu_1", { type: "tool_result", tool_use_id: "toolu_1", is_error: false, content: "large-tool-output".repeat(100_000) }),
   toolEventRow("session-1", 1, "TOOL_STARTED", "toolu_9", { type: "tool_use", id: "toolu_9", name: "Edit" }),
   toolEventRow("session-1", 5, "TOOL_COMPLETED", "toolu_9", { type: "tool_result", tool_use_id: "toolu_9", is_error: true }),
 ];
@@ -1284,15 +1297,11 @@ test("task detail attaches read-time diagnostics to every run from one tool-even
 
     // Two runs, one events query: the route's query count must not grow with
     // the number of runs.
-    const toolQueries = queries.filter((query) => (query.where?.type?.in as string[] | undefined)?.includes("TOOL_STARTED"));
+    const toolQueries = queries.filter((query) => query.sql !== undefined);
     assert.equal(toolQueries.length, 1);
-    assert.deepEqual(toolQueries[0]!.where?.type, { in: ["TOOL_STARTED", "TOOL_COMPLETED"] });
-    assert.deepEqual(toolQueries[0]!.where?.sessionId, { in: ["session-2", "session-1"] });
-    // Only the columns the metrics read: no MODEL_DELTA or PROVIDER_RAW payload
-    // ever loads through this query.
-    assert.deepEqual(Object.keys(toolQueries[0]!.select ?? {}).sort(), [
-      "at", "id", "payload", "sessionId", "toolCallId", "type",
-    ]);
+    assert.match(toolQueries[0]!.sql!, /FROM "SessionEvent"/u);
+    assert.deepEqual(toolQueries[0]!.values, ["session-2", "session-1", "TOOL_STARTED", "TOOL_COMPLETED"]);
+    assert.doesNotMatch(JSON.stringify(body), /large-tool-output/u);
 
     assert.equal(body.runs.length, 2);
     for (const run of body.runs) assert.notEqual(run.metrics, undefined);

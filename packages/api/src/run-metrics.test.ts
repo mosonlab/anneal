@@ -69,6 +69,9 @@ test("each phase is null when either bounding timestamp is missing", () => {
   assert.equal(noProvision.phases.queuedMs, null);
   assert.equal(noProvision.phases.provisioningMs, null);
 
+  const noEnd = metricsOf({ session: session({ endedAt: null }) });
+  assert.equal(noEnd.phases.executingMs, null);
+
   const noStart = metricsOf({ session: session({ startedAt: null }) });
   assert.equal(noStart.phases.provisioningMs, null);
   assert.equal(noStart.phases.executingMs, null);
@@ -177,7 +180,6 @@ for (const [runner, toolEvents, names] of runnerFixtures) {
     assert.equal(tools.calls, 2);
     assert.equal(tools.failed, 1);
     assert.equal(tools.unclassified, 0);
-    assert.equal(tools.unpairedCalls, 0);
     assert.equal(tools.totalToolMs, 7_000);
     assert.deepEqual(tools.byName.map((entry) => entry.name), names);
     assert.equal(tools.byName.reduce((sum, entry) => sum + entry.calls, 0), 2);
@@ -200,6 +202,18 @@ for (const [runner, payload] of [
   ["CLAUDE", { type: "tool_result", tool_use_id: "toolu_1" }],
   ["CODEX", { id: "command-1", type: "command_execution" }],
   ["PI", { type: "tool_execution_end", toolCallId: "call_1" }],
+  ["CLAUDE", { type: "other", is_error: false }],
+  ["CLAUDE", { is_error: true }],
+  ["CLAUDE", { type: "tool_result", is_error: "false" }],
+  ["CODEX", { type: "other", exit_code: 0 }],
+  ["CODEX", { error: "wrong record" }],
+  ["CODEX", { type: "command_execution", status: "completed" }],
+  ["CODEX", { type: "command_execution", status: "failed" }],
+  ["CODEX", { type: "command_execution", exit_code: "0" }],
+  ["CODEX", { type: "command_execution", exit_code: Number.NaN }],
+  ["PI", { type: "other", isError: false }],
+  ["PI", { isError: true }],
+  ["PI", { type: "tool_execution_end", isError: "true" }],
 ] as ReadonlyArray<[RunnerKind, unknown]>) {
   test(`${runner}: a completion with no readable outcome counts as unclassified, never as a success`, () => {
     const { tools } = metricsOf({ session: session({ runner }), toolEvents: [
@@ -232,8 +246,7 @@ test("an unpaired start is a call with unknown duration, and an unpaired complet
     completed("toolu_9", 7_000, { type: "tool_result", tool_use_id: "toolu_9", is_error: true }),
   ] });
   assert.equal(tools.calls, 3);
-  // The orphan start and the orphan completion both leave a duration unknown.
-  assert.equal(tools.unpairedCalls, 2);
+  assert.equal(tools.unclassified, 0);
   assert.equal(tools.failed, 1);
   assert.equal(tools.totalToolMs, 4_000);
 });
@@ -315,4 +328,35 @@ test("termination reports the session's own account of how the run ended", () =>
   }) });
   assert.deepEqual(metrics.termination, { reason: "provider exited", exitCode: 137, signal: "SIGKILL" });
   assert.deepEqual(metricsOf({ session: null }).termination, { reason: null, exitCode: null, signal: null });
+});
+
+test("anonymous starts and completions cannot establish a pairing", () => {
+  const metrics = metricsOf({ toolEvents: [
+    started(null, 1_000, { type: "tool_use", name: "Bash" }),
+    started(null, 2_000, { type: "tool_use", name: "Read" }),
+    completed(null, 3_000, { type: "tool_result", is_error: false }),
+    completed(null, 4_000, { type: "tool_result", is_error: true }),
+  ] });
+  assert.equal(metrics.tools.calls, 4);
+  assert.equal(metrics.tools.totalToolMs, 0);
+  assert.equal(metrics.tools.failed, 1);
+  assert.equal(metrics.modelActiveIsUpperBound, true);
+});
+
+test("overlapping tool calls consume their union of wall time", () => {
+  const metrics = metricsOf({ session: session({ outputTokens: 8_000 }), toolEvents: [
+    started("a", 10_000, { type: "tool_use", name: "Bash" }),
+    started("b", 20_000, { type: "tool_use", name: "Bash" }),
+    completed("a", 30_000, { type: "tool_result", is_error: false }),
+    completed("b", 40_000, { type: "tool_result", is_error: false }),
+  ] });
+  assert.equal(metrics.tools.calls, 2);
+  assert.equal(metrics.tools.totalToolMs, 30_000);
+  assert.equal(metrics.modelActiveMs, 70_000);
+  assert.equal(metrics.outputTokensPerSecond, 114.29);
+  assert.equal(metrics.modelActiveIsUpperBound, false);
+});
+
+test("the public tools shape contains only the specified counters and breakdown", () => {
+  assert.deepEqual(Object.keys(metricsOf().tools).sort(), ["byName", "calls", "failed", "totalToolMs", "unclassified"]);
 });

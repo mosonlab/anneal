@@ -1565,15 +1565,25 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
     includes both cache subsets: `input`, `cachedRead`, `cacheWrite`,
     `uncachedInput`, `output` and `cacheHitRatio` (`cachedRead / input`, a
     fraction in `[0, 1]`). `uncachedInput` and `cacheHitRatio` are `null` when
-    a component is missing, when the split is internally inconsistent, or when
-    `input` is `0`; the raw reported columns still appear.
-  - `metrics.tools` reports `calls`, `failed`, `unclassified`, `totalToolMs`,
-    `unpairedCalls` and `byName` (the five busiest tool names, most calls
+    a component is missing or the split is internally inconsistent; the raw
+    reported columns still appear. A valid zero-input split yields
+    `uncachedInput = 0` and `cacheHitRatio = null`.
+  - `metrics.tools` reports `calls`, `failed`, `unclassified`, `totalToolMs`
+    and `byName` (the five busiest tool names, most calls
     first, each with `calls` and `failed`). Calls are paired by `toolCallId`.
     A completion whose payload states no readable outcome counts in
     `unclassified` and never as a success. A start with no completion, or a
     completion with no start, still counts in `calls` with an unknown duration
-    and is counted in `unpairedCalls`, which makes `totalToolMs` a lower bound.
+    which makes `totalToolMs` a lower bound. Unpaired starts do not count in
+    `unclassified`. Missing IDs never establish a pairing. `totalToolMs` is the
+    union of paired intervals, so parallel calls count wall time only once.
+    One query across all run sessions selects only tool start/completion events,
+    projecting names and outcome markers into `payload` in SQL; tool output
+    bodies are never loaded for metrics. Provider discriminators and outcome
+    marker types must match: Claude `tool_result.is_error`, PI
+    `tool_execution_end.isError`, and Codex `command_execution.exit_code`
+    (numeric, with any non-null item-level `error` taking precedence as failure).
+    A Codex status alone cannot establish an outcome.
   - `metrics.modelActiveMs` is `executingMs` less tool time and Inbox wait,
     clamped at `0`, and `null` when `executingMs` is unknown. An unknown
     subtrahend is subtracted as `0`, which can only overstate the remainder:
@@ -1581,7 +1591,8 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
   - `metrics.outputTokensPerSecond` is `output / (modelActiveMs / 1000)`. It is
     an **effective session-average rate** over model-active time — not a
     provider peak rate — and is `null` when `output` is unknown or
-    `modelActiveMs` is unknown or `0`.
+    `modelActiveMs` is unknown or `0`. When `modelActiveIsUpperBound` is true,
+    the duration is an upper bound (≤) and this rate is a lower bound (≥).
   - `metrics.termination` carries the Session's own account of how the run
     ended: `reason`, `exitCode` and `signal`.
 

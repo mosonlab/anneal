@@ -82,7 +82,9 @@ export const duration = (from: string | null | undefined, to: string | null | un
 /** At most one decimal, so `20` stays `20` and `19.94` becomes `19.9`. */
 const trim = (value: number): string => value.toFixed(1).replace(/\.0$/u, "");
 
-const measured = (value: number | null | undefined): value is number =>
+export const UNKNOWN = "—";
+
+export const measured = (value: number | null | undefined): value is number =>
   value !== null && value !== undefined && Number.isFinite(value);
 
 /** A span that arrives already in milliseconds, where `duration` above takes a
@@ -91,7 +93,7 @@ const measured = (value: number | null | undefined): value is number =>
  *  rather than rounding to a zero that reads as "no time at all", and a
  *  measured `0` still renders as `0`. */
 export const durationMs = (value: number | null | undefined): string => {
-  if (!measured(value)) return "—";
+  if (!measured(value)) return UNKNOWN;
   if (value < 1000) return formatT("format.millis", { n: Math.round(value) });
   const seconds = Math.round(value / 1000);
   if (seconds < 60) return formatT("format.seconds", { n: seconds });
@@ -104,10 +106,10 @@ export const durationMs = (value: number | null | undefined): string => {
 export const percent = (ratio: number | null | undefined): string | null =>
   measured(ratio) ? `${trim(ratio * 100)}%` : null;
 
-/** An output rate as prose. Whether it is a measurement or a ceiling is the
+/** An output rate as prose. Whether it is a measurement or a bound is the
  *  caller's to say; this only formats the number. */
 export const tokensPerSecond = (value: number | null | undefined): string =>
-  measured(value) ? formatT("format.tokensPerSecond", { n: trim(value) }) : "—";
+  measured(value) ? formatT("format.tokensPerSecond", { n: trim(value) }) : UNKNOWN;
 
 export const durationWithInboxWait = (
   from: string | null | undefined,

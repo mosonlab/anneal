@@ -33,9 +33,9 @@ import { inputTokenSplit } from "./costs.js";
  *           unclassified (apps/web/src/tests/session-stream.test.tsx).
  *   CODEX   Both events carry the `command_execution` item itself:
  *           `{ id, type: "command_execution", status, exit_code }`, with an
- *           optional item-level `error`. An item-level `error`, `status ===
- *           "failed"` or a non-zero `exit_code` is a failure; `exit_code === 0`
- *           or `status === "completed"` is a success
+ *           optional item-level `error`. An item-level `error` or a non-zero
+ *           numeric `exit_code` is a failure; `exit_code === 0` is a success.
+ *           Status alone cannot classify an outcome
  *           (packages/runner/src/adapters.test.ts). Codex reports no tool name
  *           beyond the item type.
  *   PI      TOOL_STARTED is `{ type: "tool_execution_start", toolCallId,
@@ -73,8 +73,9 @@ export type RunMetricsSession = {
   signal: string | null;
 };
 
-/** One persisted TOOL_STARTED or TOOL_COMPLETED row. `payload` is the provider
- *  value as stored, so it is `unknown` and every access through it is guarded. */
+/** One TOOL_STARTED or TOOL_COMPLETED row. The route projects provider names
+ *  and outcome markers into `payload`; fixtures may supply the stored value.
+ *  It remains `unknown` and every access through it is guarded. */
 export type RunMetricsToolEvent = {
   type: string;
   at: Date;
@@ -127,7 +128,9 @@ const phaseMetrics = (
   provisioningMs: elapsed(session?.provisionedAt, session?.startedAt),
   // A live run has no `endedAt` yet; its executing phase is measured to now so
   // the diagnostics of a running session are not a blank row.
-  executingMs: session === null ? null : elapsed(session.startedAt, session.endedAt ?? now),
+  executingMs: session === null ? null : elapsed(session.startedAt, session.endedAt ?? (
+    session.executionStatus === "RUNNING" || session.executionStatus === "WAITING_INBOX" ? now : null
+  )),
   inboxWaitMs: inboxWaitMs(session),
   cleanupMs: elapsed(session?.cleanupStartedAt, session?.cleanupEndedAt),
 });
@@ -155,19 +158,22 @@ const tokenMetrics = (session: RunMetricsSession | null): RunTokenMetrics => {
 type ToolOutcome = "ok" | "failed" | "unclassified";
 
 const claudeOutcome = (payload: Record<string, unknown>): ToolOutcome => {
+  if (payload.type !== "tool_result") return "unclassified";
   if (payload.is_error === true) return "failed";
   return payload.is_error === false ? "ok" : "unclassified";
 };
 
 const codexOutcome = (payload: Record<string, unknown>): ToolOutcome => {
+  if (payload.type !== "command_execution") return "unclassified";
   if (payload.error !== undefined && payload.error !== null) return "failed";
-  const status = stringField(payload, "status");
-  if (status === "failed") return "failed";
-  if (typeof payload.exit_code === "number") return payload.exit_code === 0 ? "ok" : "failed";
-  return status === "completed" ? "ok" : "unclassified";
+  if (typeof payload.exit_code === "number" && Number.isFinite(payload.exit_code)) {
+    return payload.exit_code === 0 ? "ok" : "failed";
+  }
+  return "unclassified";
 };
 
 const piOutcome = (payload: Record<string, unknown>): ToolOutcome => {
+  if (payload.type !== "tool_execution_end") return "unclassified";
   if (payload.isError === true) return "failed";
   return payload.isError === false ? "ok" : "unclassified";
 };
@@ -193,7 +199,7 @@ const toolName = (runner: RunnerKind | null, payload: unknown): string | null =>
 
 type OpenCall = { name: string; startedAt: Date };
 
-type ToolCall = { name: string; durationMs: number | null; outcome: ToolOutcome };
+type ToolCall = { interval: readonly [number, number] | null; name: string; durationMs: number | null; outcome: ToolOutcome | "unpaired" };
 
 /** Pair TOOL_STARTED with TOOL_COMPLETED by `toolCallId`. Adapters fall back to
  *  a literal "unknown" id, so a repeated id is matched first-in-first-out
@@ -207,7 +213,16 @@ const pairCalls = (
   const calls: ToolCall[] = [];
   const ordered = [...toolEvents].sort((left, right) => left.at.getTime() - right.at.getTime());
   for (const event of ordered) {
-    const key = event.toolCallId ?? "";
+    const key = event.toolCallId;
+    if (key === null) {
+      calls.push({
+        name: toolName(runner, event.payload) ?? UNKNOWN_TOOL_NAME,
+        interval: null,
+        durationMs: null,
+        outcome: event.type === "TOOL_COMPLETED" ? toolOutcome(runner, event.payload) : "unpaired",
+      });
+      continue;
+    }
     if (event.type === "TOOL_STARTED") {
       const queue = open.get(key) ?? [];
       queue.push({ name: toolName(runner, event.payload) ?? UNKNOWN_TOOL_NAME, startedAt: event.at });
@@ -217,6 +232,7 @@ const pairCalls = (
       const start = queue?.shift() ?? null;
       calls.push({
         name: start?.name ?? toolName(runner, event.payload) ?? UNKNOWN_TOOL_NAME,
+        interval: start === null ? null : [start.startedAt.getTime(), event.at.getTime()],
         durationMs: start === null ? null : Math.max(0, event.at.getTime() - start.startedAt.getTime()),
         outcome: toolOutcome(runner, event.payload),
       });
@@ -225,7 +241,7 @@ const pairCalls = (
   // Whatever is still open never completed: a call the run made whose duration
   // and outcome the stored events cannot settle.
   for (const queue of open.values()) {
-    for (const start of queue) calls.push({ name: start.name, durationMs: null, outcome: "unclassified" });
+    for (const start of queue) calls.push({ name: start.name, interval: null, durationMs: null, outcome: "unpaired" });
   }
   return calls;
 };
@@ -244,16 +260,29 @@ const byName = (calls: readonly ToolCall[]): RunToolNameMetrics[] => {
     .slice(0, TOP_TOOL_NAMES);
 };
 
+/** Parallel calls share wall time. Count their merged intervals only once. */
+const toolWallMs = (calls: readonly ToolCall[]): number => {
+  const intervals = calls.flatMap((call) => call.interval ? [call.interval] : [])
+    .sort((left, right) => left[0] - right[0]);
+  let total = 0;
+  let end = -Infinity;
+  for (const [start, stop] of intervals) {
+    total += Math.max(0, stop - Math.max(start, end));
+    end = Math.max(end, stop);
+  }
+  return total;
+};
+
 const toolMetrics = (
   runner: RunnerKind | null,
   toolEvents: readonly RunMetricsToolEvent[],
-): RunToolMetrics => {
+): RunToolMetrics & { unpairedCalls: number } => {
   const calls = pairCalls(runner, toolEvents);
   return {
     calls: calls.length,
     failed: calls.filter((call) => call.outcome === "failed").length,
     unclassified: calls.filter((call) => call.outcome === "unclassified").length,
-    totalToolMs: calls.reduce((sum, call) => sum + (call.durationMs ?? 0), 0),
+    totalToolMs: toolWallMs(calls),
     unpairedCalls: calls.filter((call) => call.durationMs === null).length,
     byName: byName(calls),
   };
@@ -276,12 +305,12 @@ export const runMetrics = (input: {
   const { run, session } = input;
   const phases = phaseMetrics(run, session, input.now ?? new Date());
   const tokens = tokenMetrics(session);
-  const tools = toolMetrics(session?.runner ?? null, input.toolEvents);
+  const { unpairedCalls, ...tools } = toolMetrics(session?.runner ?? null, input.toolEvents);
   // Model-active time is what is left of the executing phase once the tools
   // and the Inbox had their turn. An unknown subtrahend is subtracted as 0,
   // which can only overstate the remainder — hence the upper-bound flag, which
   // also covers a tool call whose duration the events never closed.
-  const modelActiveIsUpperBound = phases.inboxWaitMs === null || tools.unpairedCalls > 0;
+  const modelActiveIsUpperBound = phases.inboxWaitMs === null || unpairedCalls > 0;
   const modelActiveMs = phases.executingMs === null
     ? null
     : Math.max(0, phases.executingMs - tools.totalToolMs - (phases.inboxWaitMs ?? 0));
