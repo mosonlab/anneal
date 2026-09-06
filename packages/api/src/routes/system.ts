@@ -7,7 +7,6 @@ import type {
   VersionInfo,
 } from "@anneal/db/console-contract";
 import { getMimeType } from "hono/utils/mime";
-import { z } from "zod";
 
 import { projectRunnerBackend } from "../runner-backend-health.js";
 import { versionPayload } from "../version.js";
@@ -120,28 +119,6 @@ export const registerSystemRoutes = (app: RouteApp, deps: RouteDeps): (() => voi
       try {
         const content = await readBoundedBody(context.req.raw, FILE_WRITE_LIMIT);
         return context.json(await (await getFileStore()).write(context.req.query("path") ?? "", content));
-      } catch (error: unknown) {
-        const response = fileErrorResponse(context, error);
-        if (response) return response;
-        throw error;
-      }
-    });
-    app.post("/files/mkdir", async (context) => {
-      try {
-        const { path } = await readJson(context.req.raw, z.object({ path: z.string() }));
-        await (await getFileStore()).mkdir(path);
-        return context.json({ ok: true });
-      } catch (error: unknown) {
-        const response = fileErrorResponse(context, error);
-        if (response) return response;
-        throw error;
-      }
-    });
-    app.post("/files/move", async (context) => {
-      try {
-        const { from, to } = await readJson(context.req.raw, z.object({ from: z.string(), to: z.string() }));
-        await (await getFileStore()).move(from, to);
-        return context.json({ ok: true });
       } catch (error: unknown) {
         const response = fileErrorResponse(context, error);
         if (response) return response;

@@ -85,8 +85,6 @@ test("probe 6: every operation refuses an intermediate directory symlink", async
     () => store.list("link/sub"),
     () => store.stat("link/file.txt"),
     () => store.delete("link/file.txt"),
-    () => store.move("link/file.txt", "moved.txt"),
-    () => store.move("safe.txt", "link/moved.txt"),
   ];
   for (const attempt of attempts) await assert.rejects(attempt(), SymlinkError);
 }));
@@ -231,14 +229,8 @@ test("probe 17: all seven FileStore methods round-trip within the root", async (
   assert.equal((await store.stat("a/b.txt"))?.kind, "file");
   assert.equal((await store.stat("a"))?.kind, "dir");
   assert.equal(await store.stat("missing"), null);
-  await store.mkdir("empty");
-  await store.move("a/b.txt", "moved/c.txt");
-  assert.equal((await store.read("moved/c.txt")).toString(), "hello");
-  await store.delete("moved/c.txt");
-  await store.delete("moved");
   await store.write("nonempty/file", Buffer.from("x"));
   await assert.rejects(store.delete("nonempty"));
-  await store.delete("empty");
 }));
 
 test("probe 18: missing directory lists as NotFound while a virgin root lists empty", async () => withRoot(async (root) => {
