@@ -362,8 +362,9 @@ run_local() {
 
 REMOTE_OUTPUT=""
 REMOTE_STATUS="$GATE_EXIT_NO_VERDICT"
+PRIMARY_CAPACITY_WARNED=0
 run_remote() {
-  local label="$1" server="$2"
+  local label="$1" server="$2" worker_capacity=""
   printf 'gate-dispatch: running on %s (%s)\n' "$label" "$server" >&2
   # The push and the gate share the slot: a push racing another dispatch's gate
   # is safe (the worker's worktrees are per-run and detached), but the slot is
@@ -383,6 +384,24 @@ run_remote() {
   }
   REMOTE_OUTPUT="$(AGENTOS_GATE_SERVER='' bash "${SCRIPT_DIR}/remote-gate.sh" "$server" "$OID" --master "$MASTER_OID")"
   REMOTE_STATUS=$?
+
+  # The dispatcher's primary slot count and the worker's own worker-capacity are
+  # two copies of one number kept in two places, and drift between them has no
+  # symptom of its own: the extra dispatch simply waits on the worker's execution
+  # lock until somebody wonders why an ssh session is doing nothing. The worker
+  # states its capacity in the output already transported here, so say it once
+  # where both numbers are known. Nothing acts on it; a worker that says nothing
+  # is an older worker or an attempt that never arrived, and is not news.
+  if [ "$label" = primary ] && [ "$PRIMARY_CAPACITY_WARNED" -eq 0 ]; then
+    worker_capacity="$(printf '%s\n' "$REMOTE_OUTPUT" \
+      | sed -n 's/.*run-gate: worker capacity \([0-9][0-9]*\).*/\1/p' | head -n 1)"
+    if [ -n "$worker_capacity" ] && [ "$worker_capacity" -ne "${#PRIMARY_SLOTS[@]}" ] 2>/dev/null; then
+      PRIMARY_CAPACITY_WARNED=1
+      printf 'gate-dispatch: warning — the primary worker reports worker-capacity %s but this dispatcher configures %s primary slot(s); one of the two is wrong\n' \
+        "$worker_capacity" "${#PRIMARY_SLOTS[@]}" >&2
+    fi
+  fi
+  return 0
 }
 
 no_verdict() {
