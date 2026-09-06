@@ -21,7 +21,7 @@
 // file the gate sources needs neither.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import nodeTest from "node:test";
@@ -44,6 +44,116 @@ const hostSizingPath = fileURLToPath(new URL("./gate-worker/host-sizing.sh", imp
 const verdictPath = fileURLToPath(new URL("./gate-worker/verdict.sh", import.meta.url));
 
 const test = (name, body) => nodeTest(name, { concurrency: true }, body);
+
+// Read declarations only: a path in a comment or an unused npm alias does not
+// mean the gate executes it. Line continuations make each group one declaration.
+const gateSource = readFileSync(new URL("./merge-gate.sh", import.meta.url), "utf8");
+const gateDeclarations = gateSource.replace(/\\\n/g, " ").split("\n")
+  .filter((line) => /^(?:step|parallel_steps) /.test(line));
+const rootScripts = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts;
+// Only the gate's current direct node --test commands and npm aliases count.
+// Keep selectors attached to their command rather than treating paths as proof.
+const testCommands = (declarations) => declarations.flatMap((declaration) =>
+  declaration.split(" :: ").flatMap((member) => {
+    const alias = /\bnpm run ([\w:-]+)/.exec(member);
+    const command = alias ? rootScripts[alias[1]] ?? "" : member;
+    const invocation = /\bnode (?:--import \S+ )?--test\s+(.+)/.exec(command);
+    if (!invocation) return [];
+    const args = invocation[1].match(/'[^']*'|"[^"]*"|[^\s]+/g) ?? [];
+    const selectors = [...invocation[1].matchAll(/--test-(skip|name)-pattern(?:=|\s+)(?:'([^']*)'|"([^"]*)"|([^\s]+))/g)]
+      .map((match) => ({ kind: match[1], pattern: match[2] ?? match[3] ?? match[4] }));
+    assert.equal((invocation[1].match(/--test-(?:skip|name)-pattern/g) ?? []).length,
+      selectors.length, "unparsed test selector");
+    return [{ suites: args.filter((arg) => /^scripts\/[\w/.-]+\.test\.mjs$/.test(arg)), selectors }];
+  }),
+);
+const namedSuites = (declarations) => new Set(testCommands(declarations).flatMap((command) => command.suites));
+const assertSelectorCoverage = (declarations) => {
+  const commands = testCommands(declarations);
+  for (const command of commands) {
+    if (command.selectors.length === 0) continue;
+    // Fail closed for new combinations until their coverage is explicitly proved.
+    assert.equal(command.selectors.length, 1, "combined test selectors need a coverage proof");
+    const selector = command.selectors[0];
+    const complements = commands.filter((other) => other !== command &&
+      other.selectors.length === 1 &&
+      other.selectors[0].kind !== selector.kind &&
+      other.selectors[0].pattern === selector.pattern);
+    assert.ok(complements.some((other) => other.suites.some((suite) => command.suites.includes(suite))),
+      `uncompensated test selector: ${selector.kind} ${selector.pattern}`);
+    // A skip command may also name suites with no matching test. For these,
+    // accept only an anchored literal whose test title is absent from the file.
+    for (const suite of command.suites) {
+      if (complements.some((other) => other.suites.includes(suite))) continue;
+      const literal = /^\^([\w ]+)\$$/.exec(selector.pattern)?.[1];
+      assert.ok(selector.kind === "skip" && literal &&
+        !readFileSync(new URL(`../${suite}`, import.meta.url), "utf8").includes(literal),
+      `uncompensated test selector for ${suite}`);
+    }
+  }
+};
+const assertInstallFreeOrder = (declarations) => {
+  const install = declarations.findIndex((line) => line.startsWith('parallel_steps "dependencies and the install-free suites" '));
+  const postgres = declarations.findIndex((line) => line.startsWith('step "throwaway PostgreSQL is accepting connections" '));
+  assert.ok(install >= 0 && postgres > install, "install-free group must precede PostgreSQL");
+};
+
+test("COVERAGE every scripts test is named by an executed gate step", () => {
+  const suites = readdirSync(new URL("./", import.meta.url), { recursive: true })
+    .filter((path) => path.endsWith(".test.mjs"))
+    .map((path) => `scripts/${path}`);
+  assert.ok(suites.length > 0);
+  assertSelectorCoverage(gateDeclarations);
+  const covered = namedSuites(gateDeclarations);
+  assert.deepEqual(suites.filter((path) => !covered.has(path)).sort(), [], "scripts suites missing from gate steps");
+});
+
+test("COVERAGE unused aliases do not count as executed suites", () => {
+  assert.deepEqual([...namedSuites(['step "unrelated" true'])], []);
+});
+
+test("COVERAGE removing the complementary hygiene step leaves an execution gap", () => {
+  const incomplete = gateDeclarations.map((line) => line.replace(
+    /"secret hygiene built-checkout integration" node --test .*? :: /, "",
+  ));
+  assert.throws(() => assertSelectorCoverage(incomplete), /uncompensated test selector/);
+});
+
+test("COVERAGE a suite mention outside node --test does not count", () => {
+  assert.deepEqual([...namedSuites(['step "mention" echo scripts/example.test.mjs'])], []);
+});
+
+test("GROUP-SHAPE rejects PostgreSQL before the install-free group", () => {
+  const reversed = [...gateDeclarations];
+  const install = reversed.findIndex((line) => line.startsWith('parallel_steps "dependencies and the install-free suites" '));
+  const postgres = reversed.findIndex((line) => line.startsWith('step "throwaway PostgreSQL is accepting connections" '));
+  [reversed[install], reversed[postgres]] = [reversed[postgres], reversed[install]];
+  assert.throws(() => assertInstallFreeOrder(reversed), /install-free group must precede PostgreSQL/);
+});
+
+test("GROUP-SHAPE added operational suites share the install-free group", () => {
+  const groups = gateDeclarations.filter((line) => line.startsWith("parallel_steps "));
+  const installFree = groups.find((line) => line.startsWith('parallel_steps "dependencies and the install-free suites" '));
+  assert.ok(installFree, "install-free group must exist");
+  assert.match(installFree, /"npm ci" install_dependencies ::/);
+  const expected = ["setup-local", "verify-secret-hygiene", "compose-binding", "repo-contract-merge-gate", "merge-lease-adapter"];
+  for (const name of expected) {
+    const path = `scripts/${name}.test.mjs`;
+    assert.ok(namedSuites([installFree]).has(path), `${path} must run alongside dependency installation`);
+    assert.equal(groups.filter((group) => namedSuites([group]).has(path)).length, name === "verify-secret-hygiene" ? 2 : 1);
+  }
+  assert.match(installFree, /"operational script fixtures" node --test --test-skip-pattern='\^the command runs over this checkout and reports classes only\$' scripts\/setup-local\.test\.mjs scripts\/verify-secret-hygiene\.test\.mjs scripts\/compose-binding\.test\.mjs scripts\/repo-contract-merge-gate\.test\.mjs scripts\/merge-lease-adapter\.test\.mjs ::/);
+  const proof = groups.find((line) => line.startsWith('parallel_steps "the proof waves" '));
+  assert.ok(proof);
+  assert.match(proof, /"secret hygiene built-checkout integration" node --test --test-name-pattern='\^the command runs over this checkout and reports classes only\$' scripts\/verify-secret-hygiene\.test\.mjs ::/);
+  const hygieneTests = readFileSync(new URL("./verify-secret-hygiene.test.mjs", import.meta.url), "utf8");
+  assert.ok(hygieneTests.includes('test("the command runs over this checkout and reports classes only",'), "split integration selector must match an existing test");
+  for (const [, alias] of installFree.matchAll(/\bnpm run ([\w:-]+)/g)) {
+    assert.ok(Object.hasOwn(rootScripts, alias), `install-free npm alias must exist: ${alias}`);
+  }
+  assert.doesNotMatch(installFree, /await_postgres|prisma|dbtest|test:db/);
+  assertInstallFreeOrder(gateDeclarations);
+});
 
 // The two helpers host-sizing.sh is owed. `note` is the gate's log format, not
 // the sizing's, so the fixture supplies a silent one and reads the derived
@@ -363,8 +473,8 @@ GATED_HEAD=abc123
 `;
 
 // Runs a group, waits until the member that is meant to block has reported its
-// pid, then signals the harness the way an operator kills a hung gate.
-const interruptGroup = async (members) => {
+// pid and any requested parent-side observation, then signals the harness.
+const interruptGroup = async (members, observed = "") => {
   const root = mkdtempSync(join(tmpdir(), "merge-gate-interrupted-group."));
   try {
     const memberPidFile = join(root, "member.pid");
@@ -382,13 +492,15 @@ const interruptGroup = async (members) => {
     while (Date.now() < deadline) {
       try {
         memberPid = readFileSync(memberPidFile, "utf8").trim();
-        if (memberPid !== "") break;
+        if (memberPid !== "" && stdout.includes(observed)) break;
       } catch {
         // Not written yet.
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     assert.notEqual(memberPid, "", "the blocking member never reported its pid");
+
+    assert.ok(stdout.includes(observed), "the parent never reported the required observation");
 
     harness.kill("SIGTERM");
     const status = await new Promise((resolve) => harness.on("exit", (code, signal) => resolve(code ?? signal)));
@@ -414,9 +526,16 @@ test("VERDICT a failure seen before the signal survives it", async () => {
   // is reaped rather than in the group's closing accounting: that accounting
   // never runs when a later member is still blocked. Without it the gate would
   // answer "no verdict" about a commit one of its steps had already failed.
+  // A sibling starting does not prove the parent reaped the failure. Wrap the
+  // real recorder to announce that observation before allowing SIGTERM. Delay
+  // the bad member so the old sibling-start handshake reliably signals too soon.
   const run = await interruptGroup(
     (pidFile) =>
-      `parallel_steps "the suites" "bad" sh -c 'exit 1' :: "stuck" sh -c 'printf %s "$$" > "$0"; exec sleep 30' ${pidFile}`,
+      `recorder=$(declare -f record_real_failure)\n` +
+      `eval "\${recorder/record_real_failure/original_record_real_failure}"\n` +
+      `record_real_failure() { original_record_real_failure "$@"; printf 'FAILURE_RECORDED\\n'; }\n` +
+      `parallel_steps "the suites" "bad" sh -c 'sleep 0.2; exit 1' :: "stuck" sh -c 'printf %s "$$" > "$0"; exec sleep 30' ${pidFile}`,
+    "FAILURE_RECORDED\n",
   );
   assert.equal(run.status, 1);
   assert.match(run.stdout, /MERGE GATE: FAIL \(bad\)/);
