@@ -18,7 +18,8 @@ export const gitCredentialHelperTool = "git-credential-runner.sh";
 
 /**
  * The exact inventory a Run receives. It must stay equal to the release bundle
- * manifest in `packages/runner/scripts/build-runtime-tools.mjs`: the
+ * manifest declared in `scripts/deploy/runtime-tool-inventory.mjs` and
+ * re-exported by `packages/runner/scripts/build-runtime-tools.mjs`: the
  * materialization copies, verifies and mode-checks precisely these paths and
  * rejects any other entry at the destination. `packages/runner/scripts/runtime-tool-inventory.test.mjs`
  * enforces this equality.
