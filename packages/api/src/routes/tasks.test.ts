@@ -269,10 +269,41 @@ const retryRequest = async (
   return { response, created, last };
 };
 
-const taskDetailDatabase = (task: Record<string, unknown>): PrismaClient => ({
+type SessionEventQuery = { where?: Record<string, any>; select?: Record<string, unknown>; sql?: string; values?: unknown[] };
+
+/** `events.queries` records every event query the detail route
+ *  issues, which is what proves the diagnostics read does not grow per run. */
+const taskDetailDatabase = (
+  task: Record<string, unknown>,
+  events: { rows?: Array<Record<string, unknown>>; queries?: SessionEventQuery[] } = {},
+): PrismaClient => ({
   task: { findUnique: async () => task, findMany: async () => [task] },
   run: { groupBy: async () => [] },
-  sessionEvent: { findMany: async () => [] },
+  $queryRaw: async (query: { sql: string; values: unknown[] }) => {
+    events.queries?.push(query);
+    // Model the SQL projection, including a large provider output that must
+    // never be selected into the metrics input.
+    assert.match(query.sql, /jsonb_build_object/u);
+    assert.doesNotMatch(query.sql, /SELECT[\s\S]*?,\s*"payload"\s*(?:,|FROM)/u);
+    const keys = [...query.sql.matchAll(/'([^']+)',/gu)].map((match) => match[1]!);
+    assert.deepEqual(keys, ["type", "name", "toolName", "is_error", "isError", "exit_code", "error"]);
+    return (events.rows ?? []).map((row) => ({
+      ...row,
+      payload: Object.fromEntries(Object.entries(row.payload as Record<string, unknown>).filter(([key]) => keys.includes(key))),
+    }));
+  },
+  sessionEvent: {
+    findMany: async (args: SessionEventQuery) => {
+      events.queries?.push(args);
+      const types = args.where?.type?.in as string[] | undefined;
+      const sessionIds = args.where?.sessionId?.in as string[] | undefined
+        ?? (args.where?.sessionId === undefined ? undefined : [args.where.sessionId as string]);
+      return (events.rows ?? []).filter((row) => (
+        (types === undefined || types.includes(row.type as string))
+        && (sessionIds === undefined || sessionIds.includes(row.sessionId as string))
+      ));
+    },
+  },
   agentRepoAccess: { findMany: async () => [{ projectId: task.projectId, agentId: task.assigneeAgentId, repoId: task.repoId }] },
   mergeRecoveryAttempt: { findFirst: async () => null },
 } as unknown as PrismaClient);
@@ -1164,5 +1195,131 @@ test("board and full task views order by createdAt descending with a stable id t
       const body = await response.json() as Array<{ id: string }>;
       assert.deepEqual(body.map(({ id }) => id), ["newest", "a-tie", "b-tie", "older-recently-updated"]);
     }
+  });
+});
+
+/* ------------------------------------- GET /tasks/:taskId run diagnostics */
+
+/** A detail-shaped Run row with the Session columns the diagnostics read. */
+const diagnosticsRun = (
+  runNumber: number,
+  overrides: { sessionId: string } & Record<string, unknown>,
+): Record<string, unknown> => ({
+  id: `run-${runNumber}`,
+  projectId: "project-1",
+  taskId: "task-1",
+  runNumber,
+  status: "SUCCEEDED",
+  runner: "CLAUDE",
+  model: "claude-opus-5",
+  codexServiceTier: "DEFAULT",
+  subagentModel: null,
+  readyAt: new Date("2026-09-01T10:00:00.000Z"),
+  queuedAt: new Date("2026-09-01T10:00:00.000Z"),
+  startedAt: new Date("2026-09-01T10:00:20.000Z"),
+  endedAt: new Date("2026-09-01T10:02:00.000Z"),
+  pushStatus: "PUSHED",
+  pushedBranch: null,
+  baseSha: null,
+  headSha: null,
+  terminationReason: null,
+  failureClass: null,
+  budgetGrants: 0,
+  session: {
+    id: overrides.sessionId,
+    runner: "CLAUDE",
+    executionStatus: "SUCCEEDED",
+    resumeAttempt: 0,
+    provisionedAt: new Date("2026-09-01T10:00:05.000Z"),
+    startedAt: new Date("2026-09-01T10:00:20.000Z"),
+    endedAt: new Date("2026-09-01T10:02:00.000Z"),
+    cleanupStartedAt: null,
+    cleanupEndedAt: null,
+    inputTokens: 1_000,
+    cachedInputTokens: 600,
+    cacheCreationInputTokens: 150,
+    outputTokens: 400,
+    costUsd: null,
+    nativeChildUsed: false,
+    terminationReason: "provider completed",
+    exitCode: 0,
+    signal: null,
+  },
+  ...overrides,
+});
+
+const toolEventRow = (
+  sessionId: string,
+  seq: number,
+  type: string,
+  toolCallId: string,
+  payload: unknown,
+): Record<string, unknown> => ({
+  id: `${sessionId}-${seq}`,
+  sessionId,
+  type,
+  at: new Date(`2026-09-01T10:00:${String(20 + seq).padStart(2, "0")}.000Z`),
+  toolCallId,
+  payload,
+});
+
+const DIAGNOSTICS_TOOL_EVENTS = [
+  toolEventRow("session-2", 1, "TOOL_STARTED", "toolu_1", { type: "tool_use", id: "toolu_1", name: "Bash" }),
+  toolEventRow("session-2", 3, "TOOL_COMPLETED", "toolu_1", { type: "tool_result", tool_use_id: "toolu_1", is_error: false, content: "large-tool-output".repeat(100_000) }),
+  toolEventRow("session-1", 1, "TOOL_STARTED", "toolu_9", { type: "tool_use", id: "toolu_9", name: "Edit" }),
+  toolEventRow("session-1", 5, "TOOL_COMPLETED", "toolu_9", { type: "tool_result", tool_use_id: "toolu_9", is_error: true }),
+];
+
+const diagnosticsTask = (): Record<string, unknown> => taskRow({
+  id: "task-1",
+  projectId: "project-1",
+  description: "work",
+  maxDurationMin: 240,
+  stallTimeoutMin: 10,
+  repo: null,
+  stepOutput: [],
+  // Newest first, exactly as the route orders them.
+  runs: [
+    diagnosticsRun(2, { sessionId: "session-2" }),
+    diagnosticsRun(1, { sessionId: "session-1" }),
+  ],
+});
+
+test("task detail attaches read-time diagnostics to every run from one tool-event query", async () => {
+  await withTokens(async () => {
+    const queries: SessionEventQuery[] = [];
+    const database = taskDetailDatabase(diagnosticsTask(), { rows: DIAGNOSTICS_TOOL_EVENTS, queries });
+    const response = await createApp(database).request("/tasks/task-1", {
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { runs: Array<{ runNumber: number; metrics: any }> };
+
+    // Two runs, one events query: the route's query count must not grow with
+    // the number of runs.
+    const toolQueries = queries.filter((query) => query.sql !== undefined);
+    assert.equal(toolQueries.length, 1);
+    assert.match(toolQueries[0]!.sql!, /FROM "SessionEvent"/u);
+    assert.deepEqual(toolQueries[0]!.values, ["session-2", "session-1", "TOOL_STARTED", "TOOL_COMPLETED"]);
+    assert.doesNotMatch(JSON.stringify(body), /large-tool-output/u);
+
+    assert.equal(body.runs.length, 2);
+    for (const run of body.runs) assert.notEqual(run.metrics, undefined);
+    const newest = body.runs.find((run) => run.runNumber === 2)!;
+    assert.deepEqual(newest.metrics.phases, {
+      queuedMs: 5_000, provisioningMs: 15_000, executingMs: 100_000, inboxWaitMs: 0, cleanupMs: null,
+    });
+    assert.deepEqual(newest.metrics.tokens, {
+      input: 1_000, cachedRead: 600, cacheWrite: 150, uncachedInput: 250, output: 400, cacheHitRatio: 0.6,
+    });
+    assert.equal(newest.metrics.tools.calls, 1);
+    assert.equal(newest.metrics.tools.failed, 0);
+    assert.deepEqual(newest.metrics.termination, {
+      reason: "provider completed", exitCode: 0, signal: null,
+    });
+    // Each run reads only its own session's events.
+    const oldest = body.runs.find((run) => run.runNumber === 1)!;
+    assert.equal(oldest.metrics.tools.calls, 1);
+    assert.equal(oldest.metrics.tools.failed, 1);
   });
 });
