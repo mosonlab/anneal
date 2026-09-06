@@ -77,6 +77,9 @@ const EXPECTED_RUNTIME_PATHS = RUNTIME_TOOL_FILES
   .map(({ destination }) => `packages/runner/dist/runtime-tools/${destination}`)
   .sort();
 const RUNTIME_TOOL_MANIFEST_PATH = "packages/runner/scripts/build-runtime-tools.mjs";
+// The verifier reads the inventory from scripts/deploy, the directory every
+// builder copies whole, so a target-only tool is declared there.
+const RUNTIME_TOOL_INVENTORY_PATH = "scripts/deploy/runtime-tool-inventory.mjs";
 const COMPLETE_ARTIFACT_PATHS = Object.freeze([
   "packages/api/dist",
   "packages/runner/dist",
@@ -1803,7 +1806,7 @@ test("a target runtime-tool addition passes its target inventory verifier", () =
   const source = join(deployRoot, "source");
   mkdirSync(source);
   minimalBuildTree(source, revisions.to);
-  const targetManifestPath = join(source, RUNTIME_TOOL_MANIFEST_PATH);
+  const targetManifestPath = join(source, RUNTIME_TOOL_INVENTORY_PATH);
   const targetManifest = readFileSync(targetManifestPath, "utf8").replace(
     "export const RUNTIME_TOOL_FILES = Object.freeze([",
     'export const RUNTIME_TOOL_FILES = Object.freeze([\n  Object.freeze({ source: "target-only.sh", destination: "new-tools/nested/new-target-tool.sh" }),',
