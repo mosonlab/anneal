@@ -524,7 +524,61 @@ recovery, removes `.agentos-deploy/escalated.json`, and logs
 notification fails, the marker remains. Confirm the SELF-CLEAR entry and
 closed recovery notification before dismissing the original failure.
 
-For any non-allowlisted escalation or an eligible escalation at the cap,
+### Escalation classes
+
+Every marker falls into exactly one of three classes, decided by its `reason`
+first and its recorded target commit `to` second:
+
+- **retryable-transient** — a reason on the allowlist above. The retry cap and
+  self-clear rules in this section own it end to end; the commit main points at
+  does not change its answer, in either direction.
+- **commit-scoped** — any other reason on a marker whose `to` is a full commit
+  oid: the failure was determined by that commit (its artifact build, its
+  migration, its verification). It blocks that commit and only that commit.
+- **host-scoped** — a reason naming host state rather than the commit, or any
+  marker whose `to` is missing or not a commit oid. It blocks every deploy.
+  The set is `database-backup-failed`, `database-backup-timeout`,
+  `release-directory-assembly-failed`, `release-pointer-activation-failed`,
+  `build-swap-failed`, `release-pointer-rollback-failed`,
+  `release-pointer-rollback-unavailable`,
+  `previous-service-verification-failed`, `stale-deploy-owner-recovered`,
+  `deploy-interrupted`, `environment-unreadable`, `environment-invalid`,
+  `workspace-layout-invalid`, `escalation-state-unreadable`,
+  `escalation-state-changed`, and `unexpected-error` — defined next to the
+  retryable allowlist in `scripts/deploy/quiet-window-deploy.mjs`.
+
+### Supersession by a newer commit
+
+When a commit-scoped marker is latched and `origin/main` has moved to a
+different commit, the tick reads the new target and proceeds with it, logging
+
+```text
+SUPERSEDE escalation reason=<reason> failed-commit=<oid> target=<oid>
+```
+
+The marker is never deleted by this logic: it stays on disk as history until an
+operator runs `--clear-escalation`. The supersession is an additive ledger
+fact instead — every event of the superseding deployment, and its `state.json`,
+carry
+
+```json
+"superseded_escalation": {
+  "failed_commit": "<the commit that latched>",
+  "reason": "<why it latched>",
+  "escalated_at": "<when it latched>"
+}
+```
+
+The commit that latched is never attempted again on its own: while `origin/main`
+still points at it the tick stops with
+`STOP escalation-active commit-unchanged commit=<oid>` and exit 2. If the new
+commit fails too, it latches against its own oid under the same rules. A target
+read that fails while a commit-scoped marker is latched also stops with
+`STOP escalation-active target-unreadable reason=<reason>`, leaving the marker
+untouched: an unreadable remote cannot prove main moved.
+
+For any host-scoped escalation, an eligible escalation at the cap, or a
+commit-scoped escalation whose commit is still the target,
 inspect the ledger, logs, pointer identities, service states, and Inbox record;
 repair the named cause, build and verify the artifact again, and rerun
 `--dry-run`.

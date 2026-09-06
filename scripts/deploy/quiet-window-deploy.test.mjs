@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   cpSync,
@@ -58,6 +59,7 @@ import {
   canonicalSyncRefusedLines,
   createDeployHost,
   deployRootFromEnvironment,
+  HOST_SCOPED_ESCALATION_REASONS,
   loadDeployBinaries,
   probeSourceRemoteCommit,
   verifyStableServicePaths,
@@ -513,6 +515,7 @@ test("an upgrade decides mode, target and escalation state under one lock acquis
     targetCommit: revisions.to,
     lock: state.lock,
     retryEscalation: RETRY_ESCALATION,
+    supersededEscalation: null,
   });
   // The failure this covers: the target read and the deployment each ran their
   // own escalation check, argv parse and lock acquisition. Every one of these
@@ -551,14 +554,121 @@ test("a recovered stale owner releases the lock and refuses the invocation", asy
   assert.deepEqual(state.calls, ["load-environment", "load-binaries", "acquire-lock", "release-lock"]);
 });
 
-test("an active escalation releases the lock and stops before the target read", async () => {
+test("a host-scoped escalation releases the lock and stops before the target read", async () => {
   const state = startupFixture({
     checkEscalation: async () => ({ active: true }),
-    readRemoteMain: async () => assert.fail("an active escalation must not read the target"),
+    readRemoteMain: async () => assert.fail("a host-scoped escalation must not read the target"),
   });
 
   assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
   assert.deepEqual(state.calls, ["load-environment", "load-binaries", "acquire-lock", "release-lock"]);
+});
+
+const SUPERSEDABLE = Object.freeze({
+  failedCommit: revisions.from,
+  reason: "release-artifact-build-failed",
+  escalatedAt: "2026-09-05T02:00:00.000Z",
+});
+
+const commitScopedFixture = (overrides = {}) => {
+  const state = startupFixture(overrides);
+  state.startup.checkEscalation = async () => {
+    state.calls.push("check-escalation");
+    return { active: true, supersedable: SUPERSEDABLE };
+  };
+  return state;
+};
+
+test("a commit-scoped escalation admits a newer main commit and records the supersession", async () => {
+  // The failure this covers: a build failure on one commit latched the whole
+  // job, so the fix commit pushed to main could never deploy itself.
+  const state = commitScopedFixture();
+
+  const invocation = await decideInvocation(state.startup, "upgrade");
+
+  assert.deepEqual(invocation, {
+    mode: "upgrade",
+    targetCommit: revisions.to,
+    lock: state.lock,
+    retryEscalation: null,
+    supersededEscalation: SUPERSEDABLE,
+  });
+  assert.deepEqual(state.calls, [
+    "load-environment",
+    "load-binaries",
+    "acquire-lock",
+    "check-escalation",
+    "read-remote-main",
+  ]);
+  assert.deepEqual(state.logs, [
+    `SUPERSEDE escalation reason=release-artifact-build-failed failed-commit=${revisions.from} target=${revisions.to}`,
+  ]);
+});
+
+test("the commit a commit-scoped escalation latched is never retried", async () => {
+  const state = commitScopedFixture({
+    readRemoteMain: async () => { state.calls.push("read-remote-main"); return revisions.from; },
+  });
+
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
+  assert.deepEqual(state.logs, [`STOP escalation-active commit-unchanged commit=${revisions.from}`]);
+  assert.equal(state.calls.includes("release-lock"), true);
+});
+
+test("an unreadable target under a commit-scoped escalation latches without replacing the marker", async () => {
+  const state = commitScopedFixture({
+    readRemoteMain: async () => { throw new DeployFailure("remote-main-unreadable", "exit-128"); },
+  });
+
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
+  assert.deepEqual(state.logs, ["STOP escalation-active target-unreadable reason=remote-main-unreadable"]);
+  assert.equal(state.calls.some((call) => call.startsWith("persist-failure")), false);
+});
+
+test("a superseded escalation reaches the deployment ledger as an additive fact", (t) => {
+  const stateDir = mkdtempSync(join(tmpdir(), "anneal-deploy-supersede-ledger-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const attempt = openDeploymentAttempt({
+    deployRoot: stateDir,
+    targetCommit: revisions.to,
+    transactionId: randomUUID(),
+  });
+  attempt.establish({ revisions, supersededEscalation: SUPERSEDABLE });
+  const ledger = createDeploymentLedger({
+    stateDir,
+    deploymentId: attempt.transactionId,
+    targetCommit: attempt.targetCommit,
+  });
+
+  ledger.start(attempt.ledgerMetadata());
+
+  const event = JSON.parse(readFileSync(ledger.eventsPath, "utf8").trim().split("\n").at(-1));
+  assert.deepEqual(event.superseded_escalation, {
+    failed_commit: revisions.from,
+    reason: "release-artifact-build-failed",
+    escalated_at: "2026-09-05T02:00:00.000Z",
+  });
+  assert.equal(JSON.parse(readFileSync(ledger.statePath, "utf8")).superseded_escalation.failed_commit, revisions.from);
+});
+
+test("the host-scoped reason set covers host state and excludes commit-determined failures", () => {
+  for (const reason of [
+    "database-backup-failed",
+    "release-pointer-activation-failed",
+    "release-pointer-rollback-failed",
+    "stale-deploy-owner-recovered",
+    "unexpected-error",
+  ]) {
+    assert.equal(HOST_SCOPED_ESCALATION_REASONS.has(reason), true, reason);
+  }
+  for (const reason of [
+    "release-artifact-build-failed",
+    "release-artifact-digest-mismatch",
+    "guarded-migration-refused",
+    "service-verification-failed",
+  ]) {
+    assert.equal(HOST_SCOPED_ESCALATION_REASONS.has(reason), false, reason);
+  }
 });
 
 test("an unreadable target persists the failure and releases the lock", async () => {

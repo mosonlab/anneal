@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { checkExistingEscalation } from "./quiet-window-escalation.mjs";
+import { checkExistingEscalation, escalationScope } from "./quiet-window-escalation.mjs";
 import {
   clearEscalationRecord,
   ESCALATION_RETRY_CAP,
@@ -15,7 +15,9 @@ import {
 } from "./quiet-window-escalation-record.mjs";
 
 const revision = "b".repeat(40);
+const failedCommit = "c".repeat(40);
 const retryableReasons = new Set(["remote-main-unreadable"]);
+const hostScopedReasons = new Set(["database-backup-failed"]);
 const retryableEscalation = {
   reason: "remote-main-unreadable",
   detail: "exit-128",
@@ -38,6 +40,7 @@ const fixture = (t, escalation = retryableEscalation) => {
       escalationPath,
       log: (line) => { logs.push(line); },
       retryableReasons,
+      hostScopedReasons,
       retryCap: ESCALATION_RETRY_CAP,
       retryEscalationNotification: async () => { retryCalls += 1; },
     },
@@ -109,6 +112,79 @@ test("an escalation outside the shipped allowlist stays latched", async (t) => {
   assert.deepEqual(result, { active: true });
   assert.equal(existsSync(state.escalationPath), true);
   assert.equal(state.retryCalls(), 1);
+});
+
+test("the three escalation classes are decided by reason first and target second", () => {
+  const scope = (record) => escalationScope({ record, retryableReasons, hostScopedReasons });
+
+  // The allowlist owns its class whatever commit the marker names: a new
+  // commit must not shorten the retry policy or extend it past the cap.
+  assert.equal(scope({ reason: "remote-main-unreadable", to: failedCommit }), "retryable-transient");
+  assert.equal(scope({ reason: "database-backup-failed", to: failedCommit }), "host-scoped");
+  assert.equal(scope({ reason: "release-artifact-build-failed", to: failedCommit }), "commit-scoped");
+  // A marker that does not name the commit it failed on proves nothing about
+  // which commits are affected, so it blocks all of them.
+  assert.equal(scope({ reason: "release-artifact-build-failed" }), "host-scoped");
+  assert.equal(scope({ reason: "release-artifact-build-failed", to: "unknown" }), "host-scoped");
+  assert.equal(scope({ reason: "release-artifact-build-failed", to: `${failedCommit}x` }), "host-scoped");
+  assert.equal(scope({}), "host-scoped");
+});
+
+test("a commit-scoped escalation latches while reporting the commit it failed on", async (t) => {
+  const state = fixture(t, {
+    reason: "release-artifact-build-failed",
+    to: failedCommit,
+    escalatedAt: "2026-08-30T15:00:00.000Z",
+  });
+
+  const result = await checkExistingEscalation(state.options);
+
+  assert.equal(result.active, true);
+  assert.deepEqual(result.supersedable, {
+    failedCommit,
+    reason: "release-artifact-build-failed",
+    escalatedAt: "2026-08-30T15:00:00.000Z",
+  });
+  assert.equal(existsSync(state.escalationPath), true);
+  assert.deepEqual(state.logs, [
+    `STOP escalation-active scope=commit-scoped commit=${failedCommit} path=${state.escalationPath}`,
+  ]);
+});
+
+test("a host-scoped escalation latches without a commit to supersede", async (t) => {
+  const state = fixture(t, {
+    reason: "database-backup-failed",
+    to: failedCommit,
+    escalatedAt: "2026-08-30T15:00:00.000Z",
+  });
+
+  const result = await checkExistingEscalation(state.options);
+
+  assert.deepEqual(result, { active: true });
+  assert.deepEqual(state.logs, [
+    `STOP escalation-active scope=host-scoped path=${state.escalationPath}`,
+  ]);
+});
+
+test("a commit-scoped marker without a usable target latches as host-scoped", async (t) => {
+  const state = fixture(t, {
+    reason: "release-artifact-build-failed",
+    to: "unknown",
+    escalatedAt: "2026-08-30T15:00:00.000Z",
+  });
+
+  assert.deepEqual(await checkExistingEscalation(state.options), { active: true });
+  assert.equal(existsSync(state.escalationPath), true);
+});
+
+test("a retryable marker at the cap latches without becoming supersedable", async (t) => {
+  const state = fixture(t, {
+    ...retryableEscalation,
+    to: failedCommit,
+    attempts: ESCALATION_RETRY_CAP,
+  });
+
+  assert.deepEqual(await checkExistingEscalation(state.options), { active: true });
 });
 
 const markerFixture = (t) => {

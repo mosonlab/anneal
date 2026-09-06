@@ -117,6 +117,44 @@ const RETRYABLE_ESCALATION_REASONS = new Set([
   "deploy-barrier-unavailable",
 ]);
 
+/** Failures owned by this host rather than by the commit that was being
+ * deployed. Every one of them blocks the next deploy whatever commit main
+ * points at; anything else that latches with a readable target commit is
+ * commit-scoped and is superseded by a newer commit. */
+export const HOST_SCOPED_ESCALATION_REASONS = new Set([
+  // The backup did not complete, so the next deploy would advance the schema
+  // with no restore point behind it.
+  "database-backup-failed",
+  "database-backup-timeout",
+  // Assembling the release tree failed — a full disk or an unwritable releases
+  // directory stops every release, not this one.
+  "release-directory-assembly-failed",
+  // The pointer swap did not finish: `current` may be half-activated and the
+  // running revision is unproven until an operator looks.
+  "release-pointer-activation-failed",
+  "build-swap-failed",
+  // The rollback that should have restored the previous release did not
+  // finish, so the host is left on an unknown revision.
+  "release-pointer-rollback-failed",
+  "release-pointer-rollback-unavailable",
+  // The restored services could not be proven healthy after a rollback.
+  "previous-service-verification-failed",
+  // A previous deploy process died holding the lock, or was interrupted after
+  // its upgrade phases started: anything it touched is unproven.
+  "stale-deploy-owner-recovered",
+  "deploy-interrupted",
+  // Operator configuration or the appliance layout on this host is unusable.
+  "environment-unreadable",
+  "environment-invalid",
+  "workspace-layout-invalid",
+  // The marker itself could not be read or changed under us, so the failure
+  // class it recorded is unknown.
+  "escalation-state-unreadable",
+  "escalation-state-changed",
+  // An unclassified failure never earns an automatic attempt at a new commit.
+  "unexpected-error",
+]);
+
 const generatedPrismaClientIsComplete = (root) =>
   existsSync(join(root, "node_modules/.prisma/client/index.js"))
   && existsSync(join(root, "node_modules/.prisma/client/schema.prisma"));
@@ -603,6 +641,7 @@ const createDeployStartup = () => ({
     retryEscalationNotification,
     log,
     retryableReasons: RETRYABLE_ESCALATION_REASONS,
+    hostScopedReasons: HOST_SCOPED_ESCALATION_REASONS,
     retryCap: ESCALATION_RETRY_CAP,
   }),
   readRemoteMain: targetRevision,
@@ -1165,6 +1204,7 @@ const main = async () => {
   });
   attempt.establish({
     retryEscalation: invocation.retryEscalation,
+    supersededEscalation: invocation.supersededEscalation ?? null,
     ...(invocation.lock === null ? {} : { resources: [invocation.lock] }),
   });
   const host = createDeployHost({ deployRole });

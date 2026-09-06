@@ -10,14 +10,45 @@ import {
 
 const fail = (reason, detail = "") => { throw new DeployFailure(reason, detail); };
 
+const OID = /^[0-9a-f]{40}$/u;
+
+/** The commit a marker latched against. `null` means the marker names no
+ * usable target, which is never treated as commit-scoped: a failure whose
+ * target is unknown could have come from anything on this host. */
+export const escalationTargetCommit = (record) => {
+  const to = record?.to;
+  return typeof to === "string" && OID.test(to) ? to : null;
+};
+
+/** Classify a marker into the three escalation classes.
+ *
+ * - `retryable-transient`: an external cause on the shipped allowlist. The
+ *   marker self-clears after a successful attempt while under the retry cap,
+ *   and latches like today once the cap is reached — the allowlist owns this
+ *   class entirely, so a new commit does not change its answer.
+ * - `commit-scoped`: the failure was determined by the commit the marker names
+ *   (its build, its migration, its verification). A different commit is a
+ *   different question and may be attempted.
+ * - `host-scoped`: the failure is a property of this host, or the marker does
+ *   not name the commit it failed on. Every deploy stays blocked. */
+export const escalationScope = ({ record, retryableReasons, hostScopedReasons }) => {
+  const reason = String(record?.reason ?? "unknown-failure");
+  if (retryableReasons?.has(reason)) return "retryable-transient";
+  if (hostScopedReasons?.has(reason)) return "host-scoped";
+  return escalationTargetCommit(record) === null ? "host-scoped" : "commit-scoped";
+};
+
 /** Inspect and possibly clear an escalation while the caller owns the deploy
  * process lock. Comparing the marker identity prevents a changed marker from
- * being removed. */
+ * being removed. A latched marker reports the class it latched in: a
+ * commit-scoped one carries the commit it failed on, so the caller can decide
+ * whether the commit main now points at is a new question. */
 export const checkExistingEscalation = async ({
   escalationPath,
   retryEscalationNotification,
   log,
   retryableReasons,
+  hostScopedReasons,
   retryCap = ESCALATION_RETRY_CAP,
 }) => {
   const marker = readEscalationRecord({ path: escalationPath });
@@ -52,7 +83,20 @@ export const checkExistingEscalation = async ({
     };
   }
   await retryEscalationNotification();
-  log(`STOP escalation-active path=${escalationPath}`);
+  const scope = escalationScope({ record: marker.record, retryableReasons, hostScopedReasons });
+  if (scope === "commit-scoped") {
+    const failedCommit = escalationTargetCommit(marker.record);
+    log(`STOP escalation-active scope=commit-scoped commit=${failedCommit} path=${escalationPath}`);
+    return {
+      active: true,
+      supersedable: Object.freeze({
+        failedCommit,
+        reason: String(marker.record.reason ?? "unknown-failure"),
+        escalatedAt: String(marker.record.escalatedAt ?? "unknown"),
+      }),
+    };
+  }
+  log(`STOP escalation-active scope=${scope} path=${escalationPath}`);
   return { active: true };
 };
 
