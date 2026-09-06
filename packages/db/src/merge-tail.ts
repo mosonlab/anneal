@@ -13,13 +13,6 @@ export const REGRESSION_VERIFICATION_OUTPUT_KINDS = [
 export const isRegressionVerificationOutputKind = (kind: string | null | undefined): boolean =>
   REGRESSION_VERIFICATION_OUTPUT_KINDS.some((candidate) => candidate === kind);
 export const MERGE_READINESS_OUTPUT_KIND = "merge-authorization";
-export const DIRECT_MERGE_READINESS_STEP_INDEX = 6;
-export const MERGE_READINESS_STEP_INDEX = 11;
-export const LEGACY_DIRECT_MERGE_READINESS_STEP_INDEX = 6;
-export const LEGACY_MERGE_READINESS_STEP_INDEX = 11;
-/** The adjudication-era graphs carried one extra node, so their readiness sat one ordinal later. */
-export const LEGACY_PRE_ADJUDICATION_DIRECT_MERGE_READINESS_STEP_INDEX = 7;
-export const LEGACY_PRE_ADJUDICATION_MERGE_READINESS_STEP_INDEX = 12;
 export const MERGE_TAIL_KIND = {
   baseDriftRecovery: "mergeTail.baseDriftRecovery",
   leaseHandoff: "mergeTail.leaseHandoff",
