@@ -5,6 +5,7 @@ import { PR_TEMPLATE_NAME } from "@anneal/db";
 
 import {
   normalizeLineEndings,
+  SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS,
   prepareSpecificationVerification,
   SPEC_TRANSCRIPTION_UNREADABLE_REASON,
   SPEC_TRANSCRIPTION_REFUSAL_REASON,
@@ -211,6 +212,81 @@ test("a read deadline overrun is transient and exhausts the bounded retry schedu
   assert.equal(verdict?.reason, SPEC_TRANSCRIPTION_UNREADABLE_REASON);
   assert.equal(verdict?.classification, "transient");
   assert.match(verdict?.message ?? "", /last failure: repository content read exceeded the 5ms server deadline/u);
+});
+
+test("a read slower than the first deadline but faster than the last succeeds within one claim", async () => {
+  assert.ok(
+    SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS.every((timeoutMs, index) => (
+      index === 0 || timeoutMs > SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS[index - 1]!
+    )),
+    "the per-attempt deadlines must escalate so a slow host is retried on a longer clock",
+  );
+  const [firstDeadlineMs] = SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS;
+  const readDurationMs = firstDeadlineMs + 300;
+  assert.ok(readDurationMs < SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS.at(-1)!);
+  let reads = 0;
+  const verdict = await verifyPreparedSpecification(
+    {
+      key: "key",
+      repository: "acme/repo",
+      remoteUrl: "https://github.com/acme/repo.git",
+      path: ".chain/feature/spec-check/spec.md",
+      implementationHeadSha: "b".repeat(40),
+      authoritativeBytes: bytes("authoritative"),
+    },
+    { readFileAtCommit: async (_repository, _path, _commitSha, signal) => {
+      reads += 1;
+      return new Promise<Uint8Array>((resolve, reject) => {
+        const timer = setTimeout(() => resolve(bytes("authoritative")), readDurationMs);
+        signal.addEventListener("abort", () => {
+          clearTimeout(timer);
+          reject(new DOMException("aborted", "AbortError"));
+        }, { once: true });
+      });
+    } },
+    new AbortController().signal,
+    { retryDelaysMs: [0, 0], wait: async () => {} },
+  );
+  assert.equal(verdict, null);
+  assert.equal(reads, 2);
+});
+
+test("an all-deadline transient refusal is marked a timeout and any other transient is not", async () => {
+  const verification = {
+    key: "key",
+    repository: "acme/repo",
+    remoteUrl: "https://github.com/acme/repo.git",
+    path: ".chain/feature/spec-check/spec.md",
+    implementationHeadSha: "b".repeat(40),
+    authoritativeBytes: bytes("authoritative"),
+  };
+  const options = { retryDelaysMs: [0, 0], attemptTimeoutsMs: [5, 5, 5], wait: async () => {} };
+  const timedOut = await verifyPreparedSpecification(
+    verification,
+    { readFileAtCommit: async (_repository, _path, _commitSha, signal) => (
+      new Promise<Uint8Array>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+      })
+    ) },
+    new AbortController().signal,
+    options,
+  );
+  assert.equal(timedOut?.transientCause, "timeout");
+  let reads = 0;
+  const mixed = await verifyPreparedSpecification(
+    verification,
+    { readFileAtCommit: async (_repository, _path, _commitSha, signal) => {
+      reads += 1;
+      if (reads === 2) throw new GitHubReadError("proxy flap", "transport");
+      return new Promise<Uint8Array>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+      });
+    } },
+    new AbortController().signal,
+    options,
+  );
+  assert.equal(mixed?.classification, "transient");
+  assert.equal(mixed?.transientCause, "other");
 });
 
 test("a permanent repository response failure refuses without retrying", async () => {

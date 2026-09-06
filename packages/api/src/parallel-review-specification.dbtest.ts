@@ -329,9 +329,90 @@ test("an expired transient specification read budget fails even if the repositor
     },
   });
   assert.equal((settlement.metadata as Record<string, unknown>).classification, "transient");
+  assert.equal((settlement.metadata as Record<string, unknown>).transientCause, "other");
+  assert.equal((settlement.metadata as Record<string, unknown>).budgetMs, 5 * 60_000);
   assert.equal(await db.inboxMessage.count({
     where: { dedupeKey: `spec-transcription-unreadable:${runId}` },
   }), 1);
+  // A non-timeout transient never earns the extended window or its notice.
+  assert.equal(await db.inboxMessage.count({
+    where: { dedupeKey: `specification-read-deadline-extended:${deferral.taskId}` },
+  }), 0);
+});
+
+test("a specification read that only ever misses its deadline defers past five minutes and parks at the timeout ceiling", async () => {
+  const fixture = await instantiateDirect();
+  await completeImplementation(fixture, "deadline-read-implementation");
+  const app = createApp(db, {
+    specificationReader: {
+      // Exactly what the per-attempt deadline produces when the host is merely
+      // slow: a transient failure of kind `timeout`, without the real wait.
+      readFileAtCommit: async () => {
+        throw new GitHubReadError("repository content read exceeded the 6000ms server deadline", "timeout");
+      },
+    },
+  });
+  const poll = () => app.request("/runner/tasks/claim", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ runnerId: "deadline-read-review", leaseSeconds: 120 }),
+  });
+  assert.equal((await poll()).status, 204);
+  const firstDeferral = await db.taskActivity.findFirstOrThrow({
+    where: { metadata: { path: ["condition"], equals: "specification-read-claim-deferred" } },
+    select: { id: true, taskId: true, metadata: true },
+  });
+  assert.equal((firstDeferral.metadata as Record<string, unknown>).transientCause, "timeout");
+  const runId = String((firstDeferral.metadata as Record<string, unknown>).runId);
+  const extendedKey = `specification-read-deadline-extended:${firstDeferral.taskId}`;
+  const reopen = async (budgetAgeMs: number) => {
+    await db.taskActivity.update({
+      where: { id: firstDeferral.id },
+      data: { createdAt: new Date(Date.now() - budgetAgeMs) },
+    });
+    await db.run.update({ where: { id: runId }, data: { readyAt: new Date(0) } });
+    await db.run.updateMany({
+      where: {
+        taskId: { in: [fixture.solTaskId, fixture.blindTaskId] },
+        id: { not: runId },
+        status: RunStatus.QUEUED,
+      },
+      data: { readyAt: new Date(Date.now() + 60_000) },
+    });
+  };
+
+  // Past the ordinary five-minute budget the task keeps deferring, and the
+  // extension announces itself exactly once however many deferrals follow.
+  await reopen(6 * 60_000);
+  assert.equal((await poll()).status, 204);
+  const stillQueued = await db.run.findUniqueOrThrow({ where: { id: runId } });
+  assert.equal(stillQueued.status, RunStatus.QUEUED);
+  assert.equal(
+    (await db.task.findUniqueOrThrow({ where: { id: firstDeferral.taskId } })).status !== TaskStatus.BACKLOG,
+    true,
+  );
+  assert.equal(await db.inboxMessage.count({ where: { dedupeKey: extendedKey } }), 1);
+  await reopen(10 * 60_000);
+  assert.equal((await poll()).status, 204);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: runId } })).status, RunStatus.QUEUED);
+  assert.equal(await db.inboxMessage.count({ where: { dedupeKey: extendedKey } }), 1);
+
+  await reopen(31 * 60_000);
+  assert.equal((await poll()).status, 204);
+  const parked = await db.run.findUniqueOrThrow({ where: { id: runId } });
+  assert.equal(parked.status, RunStatus.FAILED);
+  assert.equal(parked.retryable, false);
+  assert.match(parked.failureReason ?? "", /spec-read-deadline-exceeded/u);
+  assert.match(
+    parked.failureReason ?? "",
+    /specification read exceeded its per-attempt deadline under host load on all \d+ deferred attempts over \d+ms \(deferral ceiling 1800000ms\)/u,
+  );
+  assert.equal(/unreadable/u.test(parked.failureReason ?? ""), false);
+  const task = await db.task.findUniqueOrThrow({ where: { id: firstDeferral.taskId } });
+  assert.equal(task.status, TaskStatus.BACKLOG);
+  assert.equal(task.failureReason, parked.failureReason);
+  assert.equal(await db.inboxMessage.count({ where: { dedupeKey: `spec-read-deadline-exceeded:${runId}` } }), 1);
+  assert.equal(await db.inboxMessage.count({ where: { dedupeKey: extendedKey } }), 1);
 });
 
 test("one poll settles every review sibling whose transient specification read budget expired", async () => {
