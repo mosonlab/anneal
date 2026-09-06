@@ -1,0 +1,11 @@
+-- Platform-caused refunds this task has already been granted: lease loss,
+-- a claim invalidated by late salvage, a merge-tail requeue. Kept apart from
+-- "budgetGrants" because the bound it feeds must not be raised by the refund
+-- it is bounding — a refund raises "budgetGrants" and "maxRunsPerTask" by
+-- construction, so a bound read off either can never be reached.
+--
+-- Existing rows default to 0. A task whose history already contains refunds
+-- therefore starts its count from zero rather than being retroactively parked,
+-- which is the constraint this column was added under: the bound applies to
+-- future reconciliations only.
+ALTER TABLE "Run" ADD COLUMN "leaseLossRefunds" INTEGER NOT NULL DEFAULT 0;
