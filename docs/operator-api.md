@@ -1218,8 +1218,13 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   do not parse malformed Route-looking prose. The Route line conflicts with an
   explicit `stepOverrides` assignee for the implementation step, never with the
   selected staffing profile, which it simply outranks for that step.
-- An `afterTaskId` binding is released only by `DELETE /tasks/:taskId/chain`
-  on the bound chain; archiving the bound chain does not release it.
+- One predecessor task accepts several bound successor chains: binding a
+  second chain to a predecessor that already has one is accepted, and the
+  predecessor records one `Chain <id> bound to predecessor <name>` activity per
+  binding. The binding stays one-way and one hop deep. An `afterTaskId` binding
+  is released only by `DELETE /tasks/:taskId/chain` on that bound chain, which
+  leaves the predecessor's other successors bound; archiving a bound chain does
+  not release it.
 
 ```sh
 curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/instantiate" \
@@ -1588,7 +1593,9 @@ curl "$BASE_URL/tasks/$TASK_ID/chain" -H "Authorization: Bearer $OPERATOR_TOKEN"
 - Required path parameter: `taskId`, naming either a direct Chain member or a
   detached merge-tail repair task bound to the Chain by its repair marker.
 - Deletes every Task in the project-scoped Chain, including its marker-bound
-  repair tasks, atomically.
+  repair tasks, atomically. When the deleted Chain was bound by `afterTaskId`,
+  this releases that binding only; every other chain bound to the same
+  predecessor stays bound.
 - Refusals: `404 Not Found` when the Task does not exist; `409 Conflict` when
   the Task belongs to no Chain, any Chain member has an active Run, or a member
   has retained Run/Session history. Active Run and retained-history refusals
@@ -1920,7 +1927,9 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/retry" -H "Authorization: Bearer $OPERATO
 
 - Required path parameter: `taskId`.
 - Refusals: `409 Conflict` when the task is the first step of a chain bound by
-  `afterTaskId` and the predecessor task is not `DONE`.
+  `afterTaskId` and the predecessor task is not `DONE`. Each chain bound to a
+  predecessor is admitted on its own: once the predecessor is `DONE` every one
+  of them becomes startable, and starting one does not start or refuse another.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$TASK_ID/start" -H "Authorization: Bearer $OPERATOR_TOKEN"
