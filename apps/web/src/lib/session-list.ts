@@ -69,7 +69,12 @@ export const sessionSelectionSearch = (selection: SessionListSelection): string 
     const value = selection[parameter];
     if (value !== null) query.set(parameter, value);
   }
-  if (selection.range !== "all") query.set("range", selection.range);
+  // `all` is the default and stays out of an otherwise empty hash, but dates
+  // kept from an earlier custom window would be read back as an inferred
+  // custom range, so a remembered window keeps the preset spelled out.
+  if (selection.range !== "all" || selection.since !== null || selection.until !== null) {
+    query.set("range", selection.range);
+  }
   if (selection.since !== null) query.set("since", selection.since);
   if (selection.until !== null) query.set("until", selection.until);
   return query.toString();

@@ -214,6 +214,14 @@ test("a hash query round-trips through the selection, preserving invalid values"
   assert.equal(invalid.runner, "pi");
   assert.equal(sessionSelectionSearch(EMPTY_SESSION_SELECTION), "");
   assert.equal(sessionSelectionSearch(selection({ range: "7d", since: "2026-08-01" })), "range=7d&since=2026-08-01");
+
+  // Retained dates are read back as an inferred custom range unless the hash
+  // spells the preset out, so `all` stays explicit while it remembers them.
+  const anyTime = selection({ range: "all", since: "2026-08-01", until: "2026-08-03" });
+  assert.equal(sessionSelectionSearch(anyTime), "range=all&since=2026-08-01&until=2026-08-03");
+  const restored = readSessionSelection(new URLSearchParams(sessionSelectionSearch(anyTime)));
+  assert.deepEqual(restored, anyTime);
+  assert.deepEqual(sessionRangeWindow(restored, new Date()), { since: null, until: null });
 });
 
 test("a range preset resolves to the window the route filters requestedAt on", () => {

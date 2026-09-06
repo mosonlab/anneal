@@ -333,6 +333,18 @@ test("custom dates survive switching presets", async () => {
   } finally { await page.dispose(); }
 });
 
+test("Any time clears a custom window while remembering its dates", async () => {
+  const page = await mountSessions([], "#/sessions?range=custom&since=2026-08-01&until=2026-08-03");
+  try {
+    await select(page, "data-session-filter-range", "all");
+    assert.equal(listRequests(page).at(-1)?.get("since"), null, "Any time asks for the whole history");
+    assert.equal(listRequests(page).at(-1)?.get("until"), null);
+    assert.equal(page.container.querySelector<HTMLSelectElement>("[data-session-filter-range]")?.value, "all", "the preset stays on Any time after a reload of the hash");
+    await select(page, "data-session-filter-range", "custom");
+    assert.equal(page.container.querySelector<HTMLInputElement>("[data-session-filter-since]")?.value, "2026-08-01");
+  } finally { await page.dispose(); }
+});
+
 test("Today refreshes across midnight without a selection change", async (context) => {
   context.mock.timers.enable({ apis: ["Date"], now: new Date(2026, 7, 16, 23, 59, 59) });
   const page = await mountSessions([], "#/sessions?range=today");
