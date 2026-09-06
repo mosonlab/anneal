@@ -57,9 +57,7 @@
     "db:preflight-goal-execution": "npm run db:preflight-goal-execution -w @anneal/db",
     "db:files-precheck": "npm run db:files-precheck -w @anneal/db",
     "db:migrate-goal-execution": "npm run db:migrate-goal-execution -w @anneal/db",
-    "db:verify-goal-execution": "npm run db:verify-goal-execution -w @anneal/db",
     "db:verify-starter-onboarding": "npm run db:verify-starter-onboarding -w @anneal/db",
-    "db:export-goal-lineage": "npm run db:export-goal-lineage -w @anneal/db",
     "postinstall": "npm run db:generate"
   },
   "devDependencies": {
