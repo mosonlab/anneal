@@ -182,7 +182,22 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
         </span>,
     ]),
     ...(task.latestRun === null ? [] : [
-      <RunLine run={task.latestRun} mergeOutcome={task.mergeOutcome} elapsed="caller" />,
+      <span className="contents">
+        <RunLine run={task.latestRun} mergeOutcome={task.mergeOutcome} elapsed="caller" />
+        {/* A readiness Step that was sent back to Regression looks, from its run
+            line alone, like any other rerun. The pill is what says the reruns
+            were the base moving under an authorized candidate, and how many
+            extra attempts that cost. Only the chain's readiness Step ever
+            counts one, so a zero renders nothing rather than a pill on every
+            card ([A8]). */}
+        {task.readinessRequeues === 0 ? null : (
+          <span data-card-readiness-requeues="">
+            <Pill tone="amber" className={TASK_PILL}>
+              {t("tasks.pill.readinessRequeue", { n: task.readinessRequeues, grants: task.readinessGrants })}
+            </Pill>
+          </span>
+        )}
+      </span>,
     ]),
     ...(modelLine === null ? [] : [<span className="min-w-0 [overflow-wrap:anywhere]" aria-label={t("tasks.card.model", { model: modelLine })}>
       {modelLine}
