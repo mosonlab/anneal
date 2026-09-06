@@ -78,10 +78,8 @@ Implementation has five routes:
 
 - **senior-dev-luna-max** (template default): a brief with mechanical Acceptance
   is work that tier finishes under the chain's review and regression tail.
-- **senior-dev-astra-medium**, with the reason on the same line, when the hazard is one
-  the acceptance suite cannot witness even when stated: concurrency and
-  transaction-boundary semantics, lock or lease ownership windows,
-  cross-module contract migrations. A senior-dev-astra-medium route without a reason is a
+- **senior-dev-astra-medium**, with the reason on the same line, for an
+  owner-defined hazard. A senior-dev-astra-medium route without a reason is a
   brief defect.
 - **senior-dev-sol-high**, with the reason on the same line, only when the
   Astra model is unavailable for that work. It is never a default.
@@ -93,19 +91,14 @@ Implementation has five routes:
 - **frontend-dev-opus-medium** for frontend implementation work (UI components, pages,
   client-side behavior).
 
+The [Implementation assignee routing](governance/task-routing-v1.md#implementation-assignee-routing)
+section owns the default, hazard escalation, exact `Route:` grammar, refusal
+codes, and `stepOverrides` interaction. Follow that section when selecting a
+route or writing the route line.
+
 Tier answers how hard the diff is; chain shape answers how settled the spec
 is — a brief that cannot reach mechanical Acceptance is compound-shaped
 regardless of tier.
-
-Direct-template instantiation parses and validates the `Route:` line and applies
-it to the implementation step. On that template, a line starting with `Route:`
-that does not match the grammar exactly is refused at instantiation rather than
-silently ignored. Explicit `stepOverrides` are a separate API
-mechanism; do not supply both for that step. A well-formed `Route:` line on a
-template that does not consume implementation routes refuses instantiation with
-`implementation_route_template_unsupported`; remove the line or route that
-template through `stepOverrides`. Those templates do not interpret malformed
-Route-looking prose.
 
 ## Skeleton
 
