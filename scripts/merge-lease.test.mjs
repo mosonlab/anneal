@@ -81,7 +81,7 @@ const runLease = (fixture, args, holder = "machine@fixture", options = {}) =>
     encoding: "utf8",
     // merge-lease.sh does real git work against a real origin. Bounded so a
     // wedged lease still fails the case; the default matches the cases that
-    // already opt in, and is sized for the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s), not for an idle host.
+    // already opt in, and is sized for the loaded gate worker of 2026-09-06 (load1 20-55), not for an idle host.
     timeout: options.timeout ?? 60_000,
     env: { ...FIXTURE_ENV, MERGE_LEASE_HOLDER: holder, ...options.env },
   });

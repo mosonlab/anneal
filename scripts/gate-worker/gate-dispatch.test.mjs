@@ -215,7 +215,7 @@ test("sixteen concurrent claimers on one slot produce exactly one holder", (t) =
   // How long it holds is therefore a condition, not a duration: every claimer
   // records that it tried, and the winner holds until the parent has seen all
   // sixteen records. A fixed hold instead races the last claimer's `bash` start,
-  // and on the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s) the
+  // and on the loaded gate worker of 2026-09-06 (load1 20-55) the
   // rival that starts late is exactly the one that finds a dead pid.
   const claimer = `
     . "${libPath}"
@@ -260,7 +260,7 @@ test("eight concurrent claimers across two slots produce exactly two holders", (
   const release = join(root, "release");
   // Same handshake as the single-slot case: both winners hold their slot until
   // every claimer has recorded an attempt, so a claimer that starts late on
-  // the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s) still meets a
+  // the loaded gate worker of 2026-09-06 (load1 20-55) still meets a
   // live holder rather than a lock naming a dead pid.
   const claimer = `
     . "${libPath}"
@@ -325,7 +325,7 @@ test("a killed holder's lock is released by the signal traps", (t) => {
     // spawnSync's own timeout is the kill, so this budget is not a deadline
     // under test: it only has to outlast bash sourcing lib.sh and taking the
     // slot. Bounded because the kill is what exercises the trap, and sized for
-    // the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s), not for an idle host.
+    // the loaded gate worker of 2026-09-06 (load1 20-55), not for an idle host.
     { encoding: "utf8", timeout: 15_000, killSignal: "SIGTERM" },
   );
   // The holder must have taken the slot before the timeout killed it, or a
@@ -449,7 +449,7 @@ const startDispatch = (repo, cache, args, env = {}, options = {}) => {
 
 // Bounded so a dispatcher that never reaches the condition fails the named
 // assertion rather than hanging the suite, and sized for
-// the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s), not for an idle host.
+// the loaded gate worker of 2026-09-06 (load1 20-55), not for an idle host.
 const waitFor = async (condition, message, timeoutMs = 60_000) => {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {

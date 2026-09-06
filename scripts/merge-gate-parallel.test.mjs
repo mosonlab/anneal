@@ -305,7 +305,7 @@ test("PARALLEL-DURATION charges each member for its own time, not the wait befor
   // The property is relative, not absolute: the quick member must be charged
   // strictly less than the member it waited behind. A wall-clock ceiling would
   // instead charge it for its own `sh` start-up, which on
-  // the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s) is not the parent's wait this case is about.
+  // the loaded gate worker of 2026-09-06 (load1 20-55) is not the parent's wait this case is about.
   assert.ok(
     quick.seconds < slow.seconds,
     `the quick member should not be charged for the slow one: ${quick.line} / ${slow.line}`,
@@ -536,7 +536,7 @@ const interruptGroup = async (members, observed = "") => {
     // Waits for a spawned bash harness to reach the member and for the member to
     // publish its pid. Bounded so a harness that never gets there fails the
     // assertion below rather than hanging, and sized for
-    // the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s), not for an idle host.
+    // the loaded gate worker of 2026-09-06 (load1 20-55), not for an idle host.
     const deadline = Date.now() + 60_000;
     let memberPid = "";
     while (Date.now() < deadline) {
@@ -613,7 +613,7 @@ test("PARALLEL-INTERRUPT stops members still running before the gate tears down"
     // test would pass by racing rather than by stopping anything.
     // Bounded so a harness that never starts the member fails the assertion
     // below rather than hanging, and sized for
-    // the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s), not for an idle host.
+    // the loaded gate worker of 2026-09-06 (load1 20-55), not for an idle host.
     const deadline = Date.now() + 60_000;
     let memberPid = "";
     while (Date.now() < deadline) {

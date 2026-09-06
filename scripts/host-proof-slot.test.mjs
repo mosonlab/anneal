@@ -40,7 +40,7 @@ const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mil
 // The predicates below wait on a detached bash wrapper plus the node child it
 // admits to write a marker. Bounded so a wrapper that never admits fails here
 // rather than hanging the suite, and sized for
-// the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s), not for an idle host.
+// the loaded gate worker of 2026-09-06 (load1 20-55), not for an idle host.
 const waitFor = async (predicate, timeout = 60_000) => {
   const deadline = Date.now() + timeout;
   while (!predicate()) {
@@ -81,7 +81,7 @@ const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 // either for a fixed duration or — when a release path is given — until the test
 // creates that file. The release form turns an overlap between concurrently
 // admitted children into a condition the wrapper produced, instead of a window
-// the test guessed: on the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s)
+// the test guessed: on the loaded gate worker of 2026-09-06 (load1 20-55)
 // a fixed window is a race the test loses rather than a property it checks.
 // The hold is still bounded, so a release that never arrives ends the child and
 // fails the overlap assertion instead of hanging the suite.
@@ -424,7 +424,7 @@ test("a background grandchild cannot inherit and pin the acquired slot", async (
   // The property is that the successor was not blocked by the orphan's hold, so
   // what has to be true is a gap between the two, not a small absolute number.
   // Widening the gap rather than the ceiling is what makes this survive
-  // the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s): the successor's
+  // the loaded gate worker of 2026-09-06 (load1 20-55): the successor's
   // own node start can eat a bare one-second ceiling on its own. The ceiling
   // stays far below the hold, so a retained slot descriptor still fails here,
   // and both stay bounded.
