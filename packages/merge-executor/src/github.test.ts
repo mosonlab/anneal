@@ -350,3 +350,110 @@ test("a bound key omitted entirely is refused, and named in the reason", async (
   const { client } = clientWith([{ status: 200, body: JSON.stringify(withoutRef) }]);
   assert.equal((await client.readPullRequest(reference)).status, "api-error");
 });
+
+/* --------------------------------------------- did the ref update land? ---- */
+
+/** The four calls of a merge whose head tree carries no `.chain/`. */
+const mergeWithoutSanitizing = (final: HttpResponse | "lost") => {
+  const head = "a".repeat(40);
+  const headTree = "1".repeat(40);
+  const mergeCommit = "c".repeat(40);
+  const responses: HttpResponse[] = [
+    { status: 200, body: JSON.stringify({ tree: { sha: headTree } }) },
+    { status: 200, body: JSON.stringify({ truncated: false, tree: [{ path: "src/a.ts" }] }) },
+    { status: 201, body: JSON.stringify({ sha: mergeCommit }) },
+  ];
+  let index = 0;
+  const http: Http = async () => {
+    const next = responses[index++];
+    if (next) return next;
+    if (final === "lost") throw new Error("ECONNRESET");
+    return final;
+  };
+  return {
+    head,
+    mergeCommit,
+    client: makeGitHubClient({
+      restUrl: "https://api.github.test", graphqlUrl: "https://api.github.test/graphql",
+      token: TOKEN, timeoutMs: 1_000, http,
+    }),
+  };
+};
+
+test("a lost updateRefs response is uncertain rather than refused, and carries the commit it may have landed", async () => {
+  const { client, head, mergeCommit } = mergeWithoutSanitizing("lost");
+  const response = await client.mergePullRequest(
+    { owner: "owner", name: "name", number: 7 }, head,
+    { ref: "main", sha: "b".repeat(40), repositoryId: "R_repo" },
+  );
+  // A compare-and-swap whose answer never arrived may be on the branch already.
+  // Only the caller's read-back can say, and it needs this SHA to ask.
+  assert.deepEqual(response, {
+    status: "ref-update-uncertain",
+    reason: "network: ECONNRESET",
+    mergeCommitSha: mergeCommit,
+  });
+
+  // A 5xx on the same mutation is the same absence of information.
+  const serverError = mergeWithoutSanitizing({ status: 502, body: "Bad Gateway" });
+  assert.equal((await serverError.client.mergePullRequest(
+    { owner: "owner", name: "name", number: 7 }, serverError.head,
+    { ref: "main", sha: "b".repeat(40), repositoryId: "R_repo" },
+  )).status, "ref-update-uncertain");
+});
+
+test("a deterministic REST rejection keeps its class instead of degrading to a lost outcome", async () => {
+  const merge = (client: ReturnType<typeof makeGitHubClient>) => client.mergePullRequest(
+    { owner: "owner", name: "name", number: 7 }, "a".repeat(40),
+    { ref: "main", sha: "b".repeat(40), repositoryId: "R_repo" },
+  );
+
+  // A 422 on the merge-commit creation is an answer: the payload was rejected,
+  // and sending it again gets the same rejection.
+  const rejected = clientWith([
+    { status: 200, body: JSON.stringify({ tree: { sha: "1".repeat(40) } }) },
+    { status: 200, body: JSON.stringify({ truncated: false, tree: [{ path: "src/a.ts" }] }) },
+    { status: 422, body: JSON.stringify({ message: "Invalid request" }) },
+  ]);
+  const response = await merge(rejected.client);
+  assert.equal(response.status, "unprocessable");
+  assert.match(response.status === "unprocessable" ? response.reason : "", /merge commit creation failed: HTTP 422/u);
+
+  for (const [status, expected] of [[401, "forbidden"], [403, "forbidden"], [404, "not-found"], [400, "not-found"], [422, "not-found"]] as const) {
+    const { client } = clientWith([{ status, body: "no" }]);
+    assert.equal((await merge(client)).status, expected, String(status));
+  }
+
+  // The lost classes are unchanged: a 5xx, a 429 and an unreadable 2xx body all
+  // leave the write's fate open.
+  for (const response of [
+    { status: 500, body: "boom" },
+    { status: 429, body: "slow down" },
+    { status: 200, body: "<html>" },
+  ]) {
+    const { client } = clientWith([response]);
+    assert.equal((await merge(client)).status, "unknown", String(response.status));
+  }
+});
+
+test("a GraphQL timeout on updateRefs carries the uncertain merge identity", async () => {
+  const { client, head, mergeCommit } = mergeWithoutSanitizing({
+    status: 200, body: JSON.stringify({ errors: [{ type: "TIMEOUT", message: "The request timed out" }] }),
+  });
+  assert.deepEqual(await client.mergePullRequest(reference, head,
+    { ref: "main", sha: "b".repeat(40), repositoryId: "R_repo" }), {
+    status: "ref-update-uncertain", reason: "TIMEOUT: The request timed out", mergeCommitSha: mergeCommit,
+  });
+});
+
+test("a null updateRefs payload retains the uncertain merge identity", async () => {
+  const { client, head, mergeCommit } = mergeWithoutSanitizing({
+    status: 200, body: JSON.stringify({ data: { updateRefs: null } }),
+  });
+  assert.deepEqual(await client.mergePullRequest(reference, head,
+    { ref: "main", sha: "b".repeat(40), repositoryId: "R_repo" }), {
+    status: "ref-update-uncertain",
+    reason: "updateRefs response did not prove the atomic ref update",
+    mergeCommitSha: mergeCommit,
+  });
+});
