@@ -60,6 +60,8 @@ import {
   DEFAULT_SERVICE_OBSERVATION_WINDOW_MS,
   deployRootFromEnvironment,
   loadDeployBinaries,
+  loadEnvironment,
+  observeReadiness,
   probeSourceRemoteCommit,
   resolveObservationWindowMs,
   verifyStableServicePaths,
@@ -1599,6 +1601,8 @@ test("rollback re-proves liveness, wrapper binding, and prior API identity on bo
       environment: controlPlaneEnvironment(),
       observationWindowMs: 0,
       fetchImpl: hostFetch,
+      serviceVerificationTimeoutMs: 5,
+      serviceVerificationWait: async () => {},
       verifyRecoveredServices: (serviceControl) => verifyStableServicePaths(serviceControl, {
         repositoryRoot: root,
         environment: { DEPLOY_NODE_BINARY: "/usr/bin/node" },
@@ -2604,4 +2608,85 @@ test("canonical prompt sync uses the host command seam", async (t) => {
   await host.syncCanonicalPrompts(attempt);
   assert.equal(spawns.length, 1);
   assert.ok(spawns[0].args.includes("packages/db/prisma/sync-canonical-prompts.ts"));
+});
+
+for (const regression of ["unit", "api"]) {
+  test(`rollback detects ${regression} regression during its observation window`, async () => {
+    let samples = 0;
+    let observations = 0;
+    const host = createDeployHost({
+      environment: controlPlaneEnvironment(),
+      observationWindowMs: 10,
+      serviceVerificationWait: async () => {},
+      serviceControl: { platform: "linux", restart: async () => {} },
+      verifyRecoveredServices: async () => {
+        if (++samples > 1) throw new DeployFailure("service-wrapper-verification-failed",
+          regression === "unit" ? "service-start-failed:com.agentos.runner" : "service-readiness-failed:com.agentos.api");
+      },
+      fetchImpl: controlPlaneFetch({ commit: revisions.from, registry: () => runnerRegistry({
+        commit: revisions.from,
+        lastSeenAt: new Date(1_800_000_000_000 + ++observations * 1_000).toISOString(),
+      }) }),
+    });
+    const attempt = openDeploymentAttempt({ deployRoot: "/fixture", targetCommit: revisions.to, transactionId: "rollback-regression" });
+    attempt.establish({ revisions });
+    await assert.rejects(host.restorePreviousServices(attempt),
+      (error) => error.reason === "previous-service-verification-failed"
+        && error.detail.includes("observation-window-regressed")
+        && error.detail.includes(regression === "unit" ? "com.agentos.runner" : "com.agentos.api"));
+    assert.equal(samples, 2);
+  });
+}
+
+test("observation overrides reject overflow and durations beyond five minutes", () => {
+  for (const value of ["9".repeat(400), "9007199254740992", "300001", "20000000"]) {
+    assert.throws(() => resolveObservationWindowMs({ AGENTOS_DEPLOY_OBSERVATION_WINDOW_MS: value }),
+      (error) => error.reason === "deploy-observation-window-invalid");
+  }
+  assert.equal(resolveObservationWindowMs({ AGENTOS_DEPLOY_OBSERVATION_WINDOW_MS: "300000" }), 300000);
+});
+
+test("a first green sample near the deadline cannot complete the window after timeout", async () => {
+  let now = 0;
+  let samples = 0;
+  await assert.rejects(observeReadiness({
+    sample: async () => { samples++; now = 9; return null; },
+    observationWindowMs: 2, timeoutMs: 10, now: () => now,
+    wait: async (ms) => { assert.equal(ms, 1); now += ms; },
+    failureReason: "service-verification-failed",
+  }), (error) => error.detail === "observation-window-incomplete-2ms");
+  assert.equal(samples, 1);
+  now = 0;
+  await assert.rejects(observeReadiness({
+    sample: async () => { now = 11; return null; },
+    observationWindowMs: 0, timeoutMs: 10, now: () => now,
+    wait: async () => assert.fail("expired sample must not wait"),
+    failureReason: "service-verification-failed",
+  }), (error) => error.reason === "service-verification-failed");
+});
+
+test("control-plane registration sends the deployment file token over an inherited token", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "deploy-file-token-"));
+  const envPath = join(root, ".env");
+  const saved = { ...process.env };
+  t.after(() => {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+    rmSync(root, { recursive: true, force: true });
+  });
+  Object.assign(process.env, controlPlaneEnvironment(), {
+    OPERATOR_TOKEN: "inherited-token", DATABASE_URL: "fixture", FEISHU_DEFAULT_CHAT_ID: "fixture",
+  });
+  writeFileSync(envPath, "OPERATOR_TOKEN=file-token\nGITHUB_READ_TOKEN=fixture\n", { mode: 0o600 });
+  await loadEnvironment("control-plane", envPath);
+  const host = createDeployHost({
+    deployRole: "control-plane",
+    serviceControl: { restart: async () => {} },
+    fetchImpl: async (url, options) => {
+      assert.ok(url.endsWith("/runners"));
+      assert.equal(options.headers.authorization, "Bearer file-token");
+      return runnerRegistry({ commit: revisions.from });
+    },
+  });
+  await host.restartServices();
 });

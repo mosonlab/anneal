@@ -80,7 +80,7 @@ export const requireRunnerDeployPreflight = (environment = process.env) => {
  * answers on its own loopback port, so no destination is configurable here. */
 export const requireControlPlaneRegistrationAccess = (environment = process.env) => {
   const operatorToken = environment?.OPERATOR_TOKEN;
-  if (typeof operatorToken !== "string" || operatorToken === "") {
+  if (typeof operatorToken !== "string" || operatorToken.trim() === "") {
     fail("runner-registration-verification-unavailable", "OPERATOR_TOKEN-missing");
   }
   return Object.freeze({

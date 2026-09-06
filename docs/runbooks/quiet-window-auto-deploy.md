@@ -433,11 +433,12 @@ After the first all-green sample, verification keeps sampling every unit's
 `is-active`, the control-plane API probe, and the local runner registrations,
 once a second, for a minimum observation window of **20 seconds** by default.
 Set `AGENTOS_DEPLOY_OBSERVATION_WINDOW_MS` in the deployment environment to
-override it. Any sample that regresses inside the window fails the deploy with
+override it with an integer from 0 through 300000 (five minutes). Any sample that regresses inside the window fails the deploy with
 `observation-window-regressed-<reason>`, naming the failing unit or the
 unregistered runner id, and escalates through the normal escalation path; the
 deploy never self-heals. The overall verification timeout is the upper bound
-and is raised to at least the window plus ten seconds.
+and equals the window plus thirty seconds (50 seconds at the default window).
+Raising the window raises the phase’s maximum duration by the same amount.
 
 The `VERIFIED` ledger entry records what the check actually proved:
 `service_verification.units_checked`, `service_verification.runners_registered`,
