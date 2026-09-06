@@ -111,6 +111,8 @@ curl "$BASE_URL/files/content?path=README.md" -H "Authorization: Bearer $OPERATO
 
 ### PUT `/files/content`
 
+Writing a file creates any missing parent directories within the Files Root.
+
 - Required parameters: raw request body containing the file bytes.
 - Optional query: `path` (empty path targets the Files Root and is normally
   rejected by the underlying file operation).
@@ -118,26 +120,6 @@ curl "$BASE_URL/files/content?path=README.md" -H "Authorization: Bearer $OPERATO
 ```sh
 curl -X PUT "$BASE_URL/files/content?path=notes/today.md" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" --data-binary @notes/today.md
-```
-
-### POST `/files/mkdir`
-
-- Required JSON field: `path`.
-
-```sh
-curl -X POST "$BASE_URL/files/mkdir" \
-  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"path":"notes"}'
-```
-
-### POST `/files/move`
-
-- Required JSON fields: `from`, `to`.
-
-```sh
-curl -X POST "$BASE_URL/files/move" \
-  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"from":"draft.md","to":"archive/draft.md"}'
 ```
 
 ### DELETE `/files`
@@ -1479,7 +1461,13 @@ The `board` view is a compact card projection. It includes `createdAt` for
 stable queue ordering, `assigneeType` so a human-owned task can be
 distinguished from an agent task whose agent assignment is missing, and
 `budgetRemaining`, the same run-budget verdict `GET /tasks/:taskId` and
-`GET /tasks/:taskId/startability` report.
+`GET /tasks/:taskId/startability` report. It also includes
+`leaseLossRefunds`: how many attempts the platform has refunded this task
+because it lost a Run — a lease declared LOST by reconciliation, a claim
+invalidated by a late salvage publication, a merge-tail requeue — as opposed to
+attempts its agent spent. It is bounded at three per task; at the bound the
+platform stops requeueing and parks the task for an operator, so a card showing
+`3` is one loss away from `REVIEW`. See "Lost-Run reconciliation" below.
 For a Chain member, the first emitted member also carries the
 `chainAggregate` projection. Its `activation.state` is one of
 `parked-unactivated`, `waiting-on-predecessor`, `running`, `idle`, `held`, or
@@ -1542,7 +1530,9 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
   reports in its checklist: whether the task's configured budget plus the
   grants its Runs carry still leaves an attempt. `POST /tasks/:taskId/retry`
   refuses with `409 Conflict` and `Run budget exhausted` when it is `false`;
-  raise `maxSessionsPerTask` through `PATCH /tasks/:taskId` to lift it.
+  raise `maxSessionsPerTask` through `PATCH /tasks/:taskId` to lift it. It is a
+  separate verdict from the board's `leaseLossRefunds`: a task can have budget
+  left and still be out of platform refunds.
 - `editableBrief` is the prompt text a caller may rewrite through `PATCH
   /tasks/:taskId` with `description`, already extracted: the brief alone for a
   Chain step that authors one, the whole stored description for an ordinary
@@ -2270,11 +2260,49 @@ Task. A later matching mechanical claim closes all open mismatch alerts.
 ### GET `/sessions`
 
 - Required parameters: none.
-- Optional query: `projectId`, `limit` (1–200, default `50`), and `before` (an
-  ISO date cursor).
+- Optional scope: `projectId`, `limit` (1–200, default `50`), and `before` (an
+  ISO date cursor, exclusive, on `requestedAt`).
+- Optional filters: `status`, `agentId`, `runner`, `taskId`, `chainId`,
+  `since`, `until`, and `q`.
+
+Every named filter narrows the list further: the filters combine with each
+other, with `projectId`, and with the `before` cursor by AND, and `limit` still
+caps the page. `since` and `until` are ISO timestamps read against
+`requestedAt`, inclusive at both ends, and share that column with the cursor.
+`agentId`, `taskId` and `chainId` are exact ids; `chainId` matches the chain of
+the session's Task. `runner` is an exact `RunnerKind`.
+
+`status` is a lifecycle bucket, not a persisted execution status. It accepts
+`live` (`REQUESTED`, `PROVISIONING`, `RUNNING`, `WAITING_INBOX`), `done`
+(`SUCCEEDED`), `failed` (`FAILED`, `TIMED_OUT`, `LOST`), and `cancelled`
+(`CANCELLED`). Every execution status belongs to exactly one bucket.
+
+`q` is a case-insensitive substring search over human-authored text only: the
+Task name, the Run branch, and the session's `failureReason`. A row matching
+any of the three is returned. It never searches ids or event payloads, so an id
+is addressed through `taskId`, `chainId` or `agentId` rather than through `q`. `%`, `_`, and backslash are matched literally.
+
+`since` and `until` require a valid ISO calendar timestamp with time and a
+`Z` or numeric timezone offset; parseable prose and overflowing dates refuse.
+
+A request naming no filter answers exactly what it answered before the filters
+existed. A present-but-unusable filter is refused rather than ignored, so a
+narrowed list never silently widens; a present-but-empty value (`status=`) is
+unusable for the same reason. Each refusal is `400 Bad Request` with a body
+carrying `error` and `code`: `session-filter-status-invalid`,
+`session-filter-agent-id-invalid`, `session-filter-runner-invalid`,
+`session-filter-task-id-invalid`, `session-filter-chain-id-invalid`,
+`session-filter-since-invalid`, `session-filter-until-invalid`, and
+`session-filter-q-invalid`. An unparseable `before` remains tolerated: the
+cursor is dropped, and the request is not refused.
+
+Each returned session carries its Task as `{ id, name, chainId, chainName }`.
+`chainId` is the persisted chain and is what `chainId` filters on; `chainName`
+is display-only and is `null` whenever the returned rows cannot prove a name.
 
 ```sh
-curl "$BASE_URL/sessions?projectId=$PROJECT_ID&limit=50" -H "Authorization: Bearer $OPERATOR_TOKEN"
+curl "$BASE_URL/sessions?projectId=$PROJECT_ID&status=failed&runner=CODEX&since=2026-08-01T00:00:00Z&q=gate&limit=50" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
 
 ### GET `/sessions/:sessionId`
@@ -2343,3 +2371,31 @@ refund is preserved. After fixing the cause of the rejected completion, recover
 by calling `POST /tasks/:taskId/retry`; the new Run does not require increasing
 `maxSessionsPerTask`. Mechanical Runs without that rejection record and agent
 Runs continue through the normal lost-Run retry path.
+
+That retry path is bounded and spaced. Each lost lease refunds the attempt it
+cost, and each refund raises the ceiling it is measured against, so the run
+budget alone can never end a pure lease-loss sequence. A task may therefore have
+at most three attempts refunded this way — counted on the Run as
+`leaseLossRefunds`, projected on the board card of the same name, and shared
+with the other platform-caused refunds (late-salvage claim invalidation, and the
+merge-tail requeue). Each replacement is queued with the completion path's
+exponential delay derived from that count (30s, then 60s, then 120s) rather than
+immediately, so a runner host that is down is given time to come back.
+
+At the bound nothing is requeued: the Task moves to `REVIEW` with
+`failureReason` beginning `Lease-loss retry refused: Lease-loss refunds
+exhausted`, an Inbox message, and a TaskActivity carrying
+`metadata.refusal = "lease-loss-refunds-exhausted"`. The refused refund is not
+granted, so the Task's recorded budget is what it was before the loss. Recover
+by raising `maxSessionsPerTask` through `PATCH /tasks/:taskId` and calling
+`POST /tasks/:taskId/retry`; an operator retry is not a platform refund, so it
+neither spends one nor resets the count, and a later lease loss on the retried
+Run is refused the same way. A late-salvage claim invalidation at the bound
+behaves the same: the stale claim is still revoked, because its clone base is
+wrong, but nothing replaces it and the Task is parked with the same reason.
+
+Readiness requeues that exhaust this shared bound also park the Regression and
+readiness Tasks in `REVIEW`, with a TaskActivity on Regression carrying
+`metadata.refusal = "lease-loss-refunds-exhausted"`. A recovery readiness requeue
+also parks its integrator and marks the recovery `BLOCKED_DOWNSTREAM`. The
+refund reason is preserved even when the ordinary run budget is also exhausted.

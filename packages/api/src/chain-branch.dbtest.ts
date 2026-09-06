@@ -722,8 +722,11 @@ test("late salvage revokes and repairs a replacement claimed before start", asyn
   await db.run.update({ where: { id: run.id }, data: {
     status: "RUNNING", leaseExpiresAt: new Date(Date.now() - 60_000), heartbeatAt: null,
   } });
-  await reconcileDatabaseRuns(db, new Date());
+  const reconciledAt = new Date();
+  await reconcileDatabaseRuns(db, reconciledAt);
   const replacement = await db.run.findFirstOrThrow({ where: { taskId: task.body.id, runNumber: 2 } });
+  assert.ok(replacement.readyAt.getTime() > reconciledAt.getTime(), "lease-loss replacement waits for backoff");
+  await db.run.update({ where: { id: replacement.id }, data: { readyAt: new Date(0) } });
   const staleClaim = await claimRun(replacement.id);
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: replacement.id } })).status, "CLAIMED");
 

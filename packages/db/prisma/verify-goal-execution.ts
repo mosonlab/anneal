@@ -6,7 +6,7 @@
  * rehearsal, and whenever a Goal execution invariant is in doubt. It prints
  * counts and IDs only.
  *
- *   DATABASE_URL=...?schema=... npm run db:verify-goal-execution
+ *   DATABASE_URL=...?schema=... npm run db:verify-goal-execution -w @anneal/db
  */
 import { PrismaClient } from "@prisma/client";
 

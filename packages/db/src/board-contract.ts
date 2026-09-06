@@ -264,7 +264,11 @@ export type Session<DateTime = string, DecimalValue = string> = {
    *  session rows nested inside a Run. `run.repo` is a nullable relation, and
    *  its remoteUrl is what makes the Branch field a link. */
   agent?: { id: string; title: string } | null;
-  task?: { id: string; name: string } | null;
+  /** `chainId` is the persisted chain the task belongs to, and what the
+   *  Sessions list filters on. `chainName` is display-only and derived from the
+   *  rows in the same response, so it is null whenever those rows cannot prove
+   *  a name — the id is what addresses the chain either way. */
+  task?: { id: string; name: string; chainId: string | null; chainName: string | null } | null;
   goal?: { id: string; title: string } | null;
   run?: {
     id: string;
@@ -538,6 +542,12 @@ export type BoardCard<DateTime = string> = {
    *  `taskStartability`, which is the only thing that reads a task's configured
    *  budget together with the grants its runs carry. */
   budgetRemaining: boolean;
+  /** How many attempts this task has had refunded because the platform lost a
+   *  Run — lease loss, an invalidated claim, a merge-tail requeue — as opposed
+   *  to attempts its agent spent. Bounded by `LEASE_LOSS_REFUND_CAP`; at the
+   *  bound the platform stops requeueing and parks the task for an operator,
+   *  so this is the number that says whether that is about to happen. */
+  leaseLossRefunds: number;
   /** Carried once by one visible member of each Chain; null otherwise. */
   chainAggregate: ChainAggregate<DateTime> | null;
 };
