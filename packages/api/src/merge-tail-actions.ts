@@ -268,6 +268,10 @@ export const MERGE_TAIL_REPAIR_BINDING_MISMATCH_KIND = "mergeTailRepair.bindingM
 export type RepairBindingMismatch = {
   reason: string;
   recoveryId: string;
+  /** The Run the recovery is bound to, which is the aggregate's
+   *  `recoveryRunId` column and never its similarly named `boundSourceRunId`
+   *  column — that one names the Run the recovery was opened from, which this
+   *  invariant does not compare. */
   boundSourceRunId: string | null;
   repairedRunId: string;
   /** Present only for a complete aggregate that may still be blocked for

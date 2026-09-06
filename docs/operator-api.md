@@ -1788,8 +1788,10 @@ it rather than handing an agent work it cannot report.
 - Either way the overlap is recorded as a control-plane TaskActivity on the
   regression task whose `metadata.kind` is `mergeTailRepair.bindingMismatch`,
   carrying `recoveryId`, `boundSourceRunId`, `repairedRunId` and `phase`
-  (`open` or `settlement`). Read it with `GET /tasks/:taskId/activity`; it
-  names both mechanisms without reading the API journal.
+  (`open` or `settlement`). `boundSourceRunId` is the Run the recovery is bound
+  to — the aggregate's recovery Run — not the Run the recovery was opened from.
+  Read it with `GET /tasks/:taskId/activity`; it names both mechanisms without
+  reading the API journal.
 
 The exit is the reentry route, not another Run of the stranded repair. A
 detached repair task is an agent task, so its status is controlled by
