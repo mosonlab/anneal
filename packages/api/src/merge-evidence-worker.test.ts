@@ -38,12 +38,19 @@ test("a second evidence tick is skipped while the first is still in flight", asy
 
   const timer = startEvidenceWorker(db, reader);
   try {
-    await delay(900);
+    await waitFor(() => ticks >= 1, "the evidence worker did not start");
+    await delay(750);
     assert.equal(ticks, 1, "the interval fired repeatedly but only one tick may run at a time");
     releaseFirstTick();
-    await delay(600);
-    assert.ok(ticks > 1, "the guard was never cleared, so no later tick ran");
+    await waitFor(() => ticks > 1, "the guard was never cleared, so no later tick ran");
   } finally {
+    releaseFirstTick();
     if (timer) clearInterval(timer);
   }
 });
+
+async function waitFor(predicate: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (!predicate() && Date.now() < deadline) await delay(25);
+  assert.ok(predicate(), message);
+}
