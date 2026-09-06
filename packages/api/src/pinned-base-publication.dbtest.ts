@@ -187,11 +187,30 @@ const seedPinnedChain = async (runs: Array<{
     name: "Review",
     description: "review",
   } });
+  // The dependent is queued the way production queued it: while its base still
+  // counted as published. Run birth derives the pinned range too (chain.dbtest:
+  // a successor whose implementation Run holds no publishable base is refused
+  // and never created), so the row a claim parks is always one that predates
+  // the poisoning — the incident's own review Runs, queued before this rule
+  // existed. Seeding it means publishing the base for the birth and taking the
+  // marker back afterwards.
+  const publishedForBirth = new Date("2026-09-06T09:00:00.000Z");
+  await db.run.updateMany({
+    where: { taskId: implementationTask.id },
+    data: { pushedBranch: `agentos/chain/${label}`, basePublishedAt: publishedForBirth },
+  });
   const reviewRun = await db.$transaction((tx) => enqueueTaskRun(
     tx as never,
     reviewTask.id,
     new Date("2026-09-06T10:00:00.000Z"),
   ));
+  for (const [index, seed] of runs.entries()) {
+    if (seed.published) continue;
+    await db.run.update({
+      where: { id: seededRuns[index]!.id },
+      data: { pushedBranch: null, basePublishedAt: null },
+    });
+  }
   return { implementationTask, seededRuns, reviewTask, reviewRun };
 };
 
