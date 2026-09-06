@@ -1,6 +1,6 @@
 interface:
   display_name: "Anneal Simplification Discovery"
   short_description: "Prove simplification candidates before implementation"
-  default_prompt: "Use $agentos-find-simplifications for a read-only full-repository survey from a Sol High task, using Luna Max survey workers and presenting evidence-backed themes for the operator to approve."
+  default_prompt: "Use $agentos-find-simplifications for a read-only full-repository survey from a Sol High task, using Luna Max survey workers, and present evidence-backed themes with either the default route or hazard: <which> for the operator to approve."
 policy:
   allow_implicit_invocation: false
