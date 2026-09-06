@@ -21,18 +21,21 @@ export const RUNTIME_TOOL_FILES = Object.freeze([
 
 // Destination components declare the subdirectory layout (including gate-worker).
 // Both build and deployment compare this derived inventory with independent reads.
-export const expectedDirectoryEntries = new Map([["", new Set()]]);
-for (const { destination } of RUNTIME_TOOL_FILES) {
-  const components = destination.split("/");
-  let directory = "";
-  for (const [index, name] of components.entries()) {
-    expectedDirectoryEntries.get(directory).add(name);
-    if (index < components.length - 1) {
-      directory = directory ? `${directory}/${name}` : name;
-      if (!expectedDirectoryEntries.has(directory)) expectedDirectoryEntries.set(directory, new Set());
+export const expectedDirectoryEntries = () => {
+  const entries = new Map([["", new Set()]]);
+  for (const { destination } of RUNTIME_TOOL_FILES) {
+    const components = destination.split("/");
+    let directory = "";
+    for (const [index, name] of components.entries()) {
+      entries.get(directory).add(name);
+      if (index < components.length - 1) {
+        directory = directory ? `${directory}/${name}` : name;
+        if (!entries.has(directory)) entries.set(directory, new Set());
+      }
     }
   }
-}
+  return entries;
+};
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultRepositoryRoot = resolve(scriptDirectory, "../../..");
@@ -69,7 +72,7 @@ const directory = (filesystem, path, label) => {
 const assertGeneratedTree = (filesystem, outputRoot, sourceRoot) => {
   directory(filesystem, outputRoot, "generated-root");
 
-  for (const [relativeDirectory, names] of expectedDirectoryEntries) {
+  for (const [relativeDirectory, names] of expectedDirectoryEntries()) {
     const current = relativeDirectory === "" ? outputRoot : join(outputRoot, relativeDirectory);
     if (relativeDirectory !== "") directory(filesystem, current, `generated-${relativeDirectory}`);
     const entries = filesystem.readdirSync(current, { withFileTypes: true })
@@ -141,7 +144,7 @@ export const buildRuntimeTools = ({
   let stageRoot;
   try {
     stageRoot = filesystem.mkdtempSync(join(distRoot, ".runtime-tools-stage-"));
-    for (const relativeDirectory of expectedDirectoryEntries.keys()) {
+    for (const relativeDirectory of expectedDirectoryEntries().keys()) {
       if (relativeDirectory) filesystem.mkdirSync(join(stageRoot, relativeDirectory), { recursive: true, mode: 0o755 });
     }
     for (const { source, destination } of RUNTIME_TOOL_FILES) {

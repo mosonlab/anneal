@@ -16,7 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { buildRuntimeTools, RUNTIME_TOOL_FILES } from "./build-runtime-tools.mjs";
+import { buildRuntimeTools, RUNTIME_TOOL_FILES, expectedDirectoryEntries } from "./build-runtime-tools.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -196,4 +196,21 @@ test("buildRuntimeTools derives new nested directories from manifest destination
     readFileSync(join(context.outputRoot, destination)),
     readFileSync(join(context.repositoryRoot, source)),
   );
+});
+
+test("directory inventory readers cannot widen later build allowlists", (t) => {
+  const context = fixture(t);
+  const entries = expectedDirectoryEntries();
+  entries.get("").add("unexpected.sh");
+  entries.set("unexpected-directory", new Set());
+  assert.equal(expectedDirectoryEntries().get("").has("unexpected.sh"), false);
+  assert.equal(expectedDirectoryEntries().has("unexpected-directory"), false);
+  const filesystem = {
+    ...nodeFs,
+    readdirSync: (path, options) => [
+      ...nodeFs.readdirSync(path, options),
+      { name: "unexpected.sh" },
+    ],
+  };
+  assert.throws(() => buildRuntimeTools({ ...context, filesystem }), /generated-tree-inventory-mismatch/u);
 });

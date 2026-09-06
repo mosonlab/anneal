@@ -67,7 +67,7 @@ const sortedEntryNames = (path) => readdirSync(path, { withFileTypes: true }).ma
 const assertRuntimeToolInventory = (releaseDirectory) => {
   const runtimeRoot = join(releaseDirectory, RUNTIME_TOOL_ROOT);
   assertRuntimeToolDirectory(releaseDirectory, RUNTIME_TOOL_ROOT);
-  for (const [directory, expectedNames] of expectedDirectoryEntries) {
+  for (const [directory, expectedNames] of expectedDirectoryEntries()) {
     const relativeDirectory = directory ? `${RUNTIME_TOOL_ROOT}/${directory}` : RUNTIME_TOOL_ROOT;
     const directoryPath = join(releaseDirectory, relativeDirectory);
     if (directory) assertRuntimeToolDirectory(releaseDirectory, relativeDirectory);
