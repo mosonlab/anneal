@@ -80,8 +80,6 @@ export type ReadResult =
 
 export type MergeResponse =
   | { status: "merged"; sha: string }
-  | { status: "head-moved" }
-  | { status: "not-mergeable" }
   | { status: "forbidden"; reason: string }
   | { status: "not-found"; reason: string }
   | { status: "unprocessable"; reason: string }

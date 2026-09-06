@@ -131,6 +131,9 @@ const EXPECTED_RUNTIME_PATHS = RUNTIME_TOOL_FILES
   .map(({ destination }) => `packages/runner/dist/runtime-tools/${destination}`)
   .sort();
 const RUNTIME_TOOL_MANIFEST_PATH = "packages/runner/scripts/build-runtime-tools.mjs";
+// The verifier reads the inventory from scripts/deploy, the directory every
+// builder copies whole, so a target-only tool is declared there.
+const RUNTIME_TOOL_INVENTORY_PATH = "scripts/deploy/runtime-tool-inventory.mjs";
 const COMPLETE_ARTIFACT_PATHS = Object.freeze([
   "packages/api/dist",
   "packages/runner/dist",
@@ -2214,7 +2217,7 @@ test("a target runtime-tool addition passes its target inventory verifier", () =
   const source = join(deployRoot, "source");
   mkdirSync(source);
   minimalBuildTree(source, revisions.to);
-  const targetManifestPath = join(source, RUNTIME_TOOL_MANIFEST_PATH);
+  const targetManifestPath = join(source, RUNTIME_TOOL_INVENTORY_PATH);
   const targetManifest = readFileSync(targetManifestPath, "utf8").replace(
     "export const RUNTIME_TOOL_FILES = Object.freeze([",
     'export const RUNTIME_TOOL_FILES = Object.freeze([\n  Object.freeze({ source: "target-only.sh", destination: "new-tools/nested/new-target-tool.sh" }),',
@@ -2484,6 +2487,33 @@ test("artifact verification accepts an unrelated nested lib.sh", () => {
       artifactPaths: COMPLETE_ARTIFACT_PATHS,
       optionalArtifactPaths: [],
     });
+    assert.doesNotThrow(
+      () => verifyReleaseArtifact({ deployRoot, revision: revisions.to, releaseName: assembled.releaseName }),
+    );
+  } finally {
+    removeTree(deployRoot);
+  }
+});
+
+test("artifact verification succeeds on an artifact built without packages/runner/scripts", () => {
+  // The previously deployed builder's path list: `scripts/deploy` whole, but
+  // not the runtime-tool manifest. Loading the target's verifier out of that
+  // artifact is what failed with ERR_MODULE_NOT_FOUND, so the verifier's
+  // module graph has to close over `scripts/deploy` alone.
+  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-artifact-old-builder-"));
+  const source = join(deployRoot, "source");
+  mkdirSync(source);
+  minimalBuildTree(source, revisions.to);
+  try {
+    const assembled = assembleReleaseDirectory({
+      stageRoot: source,
+      deployRoot,
+      revision: revisions.to,
+      artifactPaths: COMPLETE_ARTIFACT_PATHS.filter((path) => path !== RUNTIME_TOOL_MANIFEST_PATH),
+      optionalArtifactPaths: [],
+    });
+    assert.ok(!existsSync(join(assembled.releaseDirectory, RUNTIME_TOOL_MANIFEST_PATH)));
+    assert.ok(existsSync(join(assembled.releaseDirectory, RUNTIME_TOOL_INVENTORY_PATH)));
     assert.doesNotThrow(
       () => verifyReleaseArtifact({ deployRoot, revision: revisions.to, releaseName: assembled.releaseName }),
     );
