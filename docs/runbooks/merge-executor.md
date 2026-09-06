@@ -333,6 +333,89 @@ For later restarts use `sudo systemctl restart
 agentos-merge-executor.service`. A unit failure is a stop; do not remove the
 hardening directives or run the process as root to make it start.
 
+### Linux release follower
+
+On Linux, a separate root-owned systemd timer follows the control plane's
+verified `current` release and adopts it into the executor runtime. The
+follower is outside the quiet-window service inventory and never reads or
+executes the control-plane checkout. Install one trusted copy of the follower
+under the executor root; the copy remains stable while release directories
+change:
+
+```sh
+sudo install -d -o root -g root -m 0755 /opt/agentos/merge-executor/bin
+sudo install -o root -g root -m 0755 \
+  scripts/deploy/merge-executor-follower.mjs \
+  /opt/agentos/merge-executor/bin/merge-executor-follower.mjs
+```
+
+Create its own root-only JSON configuration. Do not point the follower at
+`/etc/agentos/merge-executor.env`; that file belongs to the executor process.
+Substitute the control-plane deployment root and the absolute Node path that
+the executor unit uses:
+
+```json
+{
+  "deployRoot": "<deploy-root>",
+  "executorRoot": "/opt/agentos/merge-executor",
+  "unit": "agentos-merge-executor.service",
+  "nodePath": "<absolute-node>"
+}
+```
+
+The file must be a regular file owned by root with mode 0600. The production
+defaults are `/usr/bin/chown`, `/usr/bin/chmod`, `/usr/bin/systemctl`,
+`/usr/bin/journalctl`, and `/usr/bin/sleep`; command substitutions are for
+hermetic tests and are not needed in this file:
+
+```sh
+sudo install -d -o root -g root -m 0755 /etc/agentos
+sudo install -o root -g root -m 0600 \
+  /path/to/merge-executor-follower.json \
+  /etc/agentos/merge-executor-follower.json
+```
+
+Render the follower unit and timer from the templates in `scripts/deploy/`.
+The renderer writes only the two service definitions; it does not install or
+run the follower:
+
+```sh
+sudo node scripts/deploy/merge-executor-follower-templates.mjs \
+  --node-path <absolute-node> \
+  --follower-path /opt/agentos/merge-executor/bin/merge-executor-follower.mjs \
+  --config-path /etc/agentos/merge-executor-follower.json \
+  --unit-output /etc/systemd/system/agentos-merge-executor-follower.service \
+  --timer-output /etc/systemd/system/agentos-merge-executor-follower.timer
+sudo chown root:root \
+  /etc/systemd/system/agentos-merge-executor-follower.service \
+  /etc/systemd/system/agentos-merge-executor-follower.timer
+sudo chmod 0644 \
+  /etc/systemd/system/agentos-merge-executor-follower.service \
+  /etc/systemd/system/agentos-merge-executor-follower.timer
+```
+
+The timer runs once after boot and every five minutes after activation. Validate
+and enable it as root:
+
+```sh
+sudo systemd-analyze verify \
+  /etc/systemd/system/agentos-merge-executor-follower.service \
+  /etc/systemd/system/agentos-merge-executor-follower.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now agentos-merge-executor-follower.timer
+sudo systemctl status agentos-merge-executor-follower.timer
+sudo systemctl start agentos-merge-executor-follower.service
+sudo systemctl show agentos-merge-executor-follower.service \
+  --property=Result --property=ExecMainStatus
+sudo journalctl --unit agentos-merge-executor-follower.service --no-pager -n 50
+```
+
+After the first run, check that the executor's `current` points to the
+control-plane commit and that the adopted release is root-owned without group
+or world write permission. A mid-deploy control-plane pointer or a failed
+manifest check leaves the executor untouched; the next timer tick retries.
+The follower never modifies the executor environment file or its service unit.
+
 ### Why no passwordless sudo or generic root helper is installed
 
 Normal executor work needs no privilege: it reads one owner-only key, calls the
@@ -340,12 +423,15 @@ loopback or configured API, and calls GitHub. Administrator authority is needed
 only for account creation, key installation, root-owned runtime/config updates,
 and service-manager changes. These are infrequent, separately reviewed actions.
 
-Neither profile installs passwordless sudo, a setuid binary, nor a generic root
-copy/restart helper. Such a helper would turn a compromise of the repository
-operator or executor into durable root execution and would erase the root-owned
-adoption boundary. The macOS start script is not such a helper: launchd starts
-it after selecting the unprivileged uid, it executes one fixed path, and it has
-no sudo or write operation.
+Neither profile installs passwordless sudo or a setuid binary. The Linux
+follower is a fixed-purpose, root-owned service installed by an administrator;
+its root-only configuration, release-manifest verification, fixed executor
+root, and fixed unit name keep it from becoming a generic root copy/restart
+helper. A generic helper would turn a compromise of the repository operator or
+executor into durable root execution and erase the root-owned adoption boundary.
+The macOS start script is also not a root helper: launchd starts it after
+selecting the unprivileged uid, it executes one fixed path, and it has no sudo
+or write operation.
 
 ## Post-install verification
 
@@ -449,10 +535,12 @@ On a code regression, stop the service, repoint `current` to the previous
 root-owned release, restart, and repeat verification. Do not roll back
 configuration or keys unless the failure is demonstrably in those inputs.
 
-The repository's quiet-window auto-deploy includes
-`packages/merge-executor/dist` in the serving checkout's build publication.
-That may update the serving checkout's executor dist, but it **does not adopt
-that build into `/opt/agentos/merge-executor/current` and does not restart a
-separately root-owned executor service**. Root-owned adoption remains the
-explicit administrator procedure above; treating an auto-deploy build as
-already adopted runs stale code while reporting a misleading upgrade.
+On Linux, the repository's quiet-window auto-deploy publishes
+`packages/merge-executor/dist` in the verified serving release, but the
+auto-deploy stage itself does not adopt that build into the root-owned
+executor's `current` pointer. The follower adopts that release on its next
+timer tick and restarts the executor. It does not modify the executor
+environment file or unit. The manual procedure above remains the rollback
+path: stop the follower timer before repointing `current`, restart the
+executor, verify it, and re-enable the timer afterward. The Darwin profile
+stays manual and has no follower timer.
