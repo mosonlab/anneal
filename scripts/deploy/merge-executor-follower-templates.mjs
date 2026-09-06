@@ -39,7 +39,7 @@ const render = (template, replacements, errorName) => {
 /** Escape a path for one systemd ExecStart token. Paths are kept absolute and
  * are validated before escaping so a rendered definition cannot add argv. */
 const systemdPath = (value, name) => {
-  if (typeof value !== "string" || !isAbsolute(value) || /[\u0000\r\n$']/u.test(value)) {
+  if (typeof value !== "string" || !isAbsolute(value) || value.includes("\0") || /[\r\n$']/u.test(value)) {
     throw new Error(`merge-executor-follower-template-${name}-invalid`);
   }
   return value
@@ -110,7 +110,7 @@ const parseArguments = (argv) => {
 };
 
 const writeRenderedFile = (path, content) => {
-  if (!isAbsolute(path) || /[\u0000\r\n]/u.test(path)) {
+  if (!isAbsolute(path) || path.includes("\0") || /[\r\n]/u.test(path)) {
     throw new Error("merge-executor-follower-template-output-invalid");
   }
   mkdirSync(dirname(path), { recursive: true });
