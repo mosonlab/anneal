@@ -170,6 +170,9 @@ export const buildChildEnvironment = (
   const environment = workspaceEnvironment(config);
   // RUNNER_GATE_FALLBACK_SERVER opts sessions into the dispatcher's two-host topology.
   if (config.gateFallbackServer) {
+    if (!config.gateServer) {
+      throw new Error("RUNNER_GATE_FALLBACK_SERVER requires RUNNER_GATE_SERVER");
+    }
     delete environment.AGENTOS_GATE_SERVER;
     environment.AGENTOS_GATE_PRIMARY_SERVER = config.gateServer;
     environment.AGENTOS_GATE_FALLBACK_SERVER = config.gateFallbackServer;
