@@ -88,8 +88,9 @@ merge automation, or a migration does. Deleting dead code is never a hazard.
 
 Use `senior-dev-sol-high` for that same hazardous work only when the Astra
 model is unavailable; it is never a default. Use
-`senior-dev-opus-medium` when the operator names it to spend Claude capacity
-on the implementation instead of Codex capacity; it is never a default.
+`senior-dev-opus-medium`, or `senior-dev-opus-high` for that same work at the
+higher effort, when the operator names it to spend Claude capacity
+on the implementation instead of Codex capacity; neither is ever a default.
 Use `frontend-dev-opus-medium` for work primarily consisting of a new or
 redesigned web page or UI surface, and `frontend-dev-opus-high` for that same
 work when the operator names it because the frontend work is harder; it is
