@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const CONTENDED_EXIT = 75;
 const MACHINE_LINE = /^MERGE LEASE: (.+)$/gmu;
+const HOLDER_LINE = /^MERGE LEASE HOLDER: (.+)$/gmu;
 
 export const resolveMergeLeaseScriptPath = ({ environment = process.env, repoRoot } = {}) => {
   if (environment.AGENTOS_RELEASE_ROOT) {
@@ -18,6 +19,7 @@ export const resolveMergeLeaseScriptPath = ({ environment = process.env, repoRoo
 
 export const buildMergeLeaseArgv = ({ operation, scriptPath, task, reason, timeoutMinutes }) => {
   if (operation === "release") return [scriptPath, "release", "--task", task];
+  if (operation === "status") return [scriptPath, "status"];
   if (operation === "acquire") {
     return [
       scriptPath,
@@ -31,6 +33,50 @@ export const buildMergeLeaseArgv = ({ operation, scriptPath, task, reason, timeo
     ];
   }
   throw new Error(`Unsupported merge lease operation: ${operation}`);
+};
+
+/**
+ * Who holds the lease, as `merge-lease.sh` says it on the line beside its prose.
+ * `null` means the script said nothing parseable about a holder: no line at all,
+ * an explicit `none`, or a line this reader cannot trust. The caller decides
+ * what that absence means -- for a contended acquire it is a holder the script
+ * could not name, and for a status read it is no lease at all.
+ */
+export const parseMergeLeaseHolder = (output) => {
+  const lines = [...output.matchAll(HOLDER_LINE)];
+  if (lines.length !== 1) return null;
+  const spoken = lines[0][1]?.trim();
+  if (!spoken || spoken === "none") return null;
+  let holder;
+  try {
+    holder = JSON.parse(spoken);
+  } catch {
+    return null;
+  }
+  if (!holder || typeof holder !== "object" || Array.isArray(holder)) return null;
+  const optional = (value) => (typeof value === "string" && value.length > 0 ? value : null);
+  if (typeof holder.holder !== "string" || holder.holder.length === 0) return null;
+  if (typeof holder.acquiredAt !== "string" || Number.isNaN(Date.parse(holder.acquiredAt))) return null;
+  return {
+    holder: holder.holder,
+    task: optional(holder.task),
+    reason: optional(holder.reason),
+    acquiredAt: holder.acquiredAt,
+    sha: optional(holder.sha),
+  };
+};
+
+/**
+ * A hold in whole seconds, or null when either end of it is not a time. Both
+ * the chain tail (packages/api/src/merge-lease-hold.ts) and the merge train
+ * measure their hold this way, so the two numbers mean the same thing; a clock
+ * adjustment must not produce a negative hold in either.
+ */
+export const mergeLeaseHoldSeconds = (acquiredAt, releasedAt) => {
+  const acquiredAtMs = Date.parse(acquiredAt);
+  const releasedAtMs = releasedAt instanceof Date ? releasedAt.getTime() : Date.parse(releasedAt);
+  if (!Number.isFinite(acquiredAtMs) || !Number.isFinite(releasedAtMs)) return null;
+  return Math.max(0, Math.floor((releasedAtMs - acquiredAtMs) / 1_000));
 };
 
 export const parseMergeLeaseRelease = (output) => {
@@ -62,11 +108,25 @@ export const classifyMergeLeaseExecution = ({ operation, code, stdout = "", stde
   const detail = outputDetail({ stdout, stderr });
   if (operation === "acquire") {
     if (code === 0) return { outcome: "acquired", detail };
-    if (code === CONTENDED_EXIT) return { outcome: "contended", detail };
+    if (code === CONTENDED_EXIT) {
+      const holder = parseMergeLeaseHolder(detail);
+      return { outcome: "contended", detail, ...(holder ? { holder } : {}) };
+    }
     return {
       outcome: "unreachable",
       detail: detail || (error instanceof Error ? error.message : `merge-lease.sh acquire exited ${String(code)}`),
     };
+  }
+
+  if (operation === "status") {
+    if (code !== 0) {
+      return {
+        outcome: "unreachable",
+        detail: detail || (error instanceof Error ? error.message : `merge-lease.sh status exited ${String(code)}`),
+      };
+    }
+    const holder = parseMergeLeaseHolder(detail);
+    return holder ? { outcome: "held", holder, detail } : { outcome: "none", detail };
   }
 
   if (operation !== "release") throw new Error(`Unsupported merge lease operation: ${operation}`);
@@ -116,3 +176,6 @@ const execute = async ({ operation, repoRoot, environment, processTimeoutMs, tas
 export const acquireMergeLease = (options) => execute({ operation: "acquire", ...options });
 
 export const releaseMergeLease = (options) => execute({ operation: "release", ...options });
+
+/** Read the current holder without touching it. `status` writes nothing to origin. */
+export const readMergeLeaseHolder = (options = {}) => execute({ operation: "status", ...options });

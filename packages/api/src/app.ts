@@ -13,7 +13,7 @@ import {
   principalMayAccess,
 } from "./auth.js";
 import { LOOPBACK_BROWSER_ORIGINS, originMayReachHandlers } from "./local-origin.js";
-import { releaseMergeLease } from "./merge-lease.js";
+import { readMergeLeaseHolderAdapter, releaseMergeLease } from "./merge-lease.js";
 import { preflightRepository } from "./onboarding-preflight.js";
 import { createArchivedRunNoticeScheduler } from "./reconcile.js";
 import { refusalFor } from "./refusal.js";
@@ -22,6 +22,7 @@ import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAgentsRoutes } from "./routes/agents.js";
 import { registerGoalsRoutes } from "./routes/goals.js";
 import { registerInboxRoutes } from "./routes/inbox.js";
+import { registerMergeLeaseRoutes } from "./routes/merge-lease.js";
 import { registerRunnerRoutes } from "./routes/runner.js";
 import { registerSessionRoutes } from "./routes/session.js";
 import { registerStaffingProfileRoutes } from "./routes/staffing-profiles.js";
@@ -115,6 +116,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
       ...options.projectBootstrapLoaders,
     },
     releaseChainLease,
+    readLeaseHolder: options.readMergeLeaseHolder ?? readMergeLeaseHolderAdapter,
     runners,
     appendFencedActivity,
   };
@@ -130,6 +132,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   registerStaffingProfileRoutes(app, routeDeps);
 
   registerTasksRoutes(app, routeDeps);
+  registerMergeLeaseRoutes(app, routeDeps);
   registerInboxRoutes(app, routeDeps);
   const registerRunnerTail = registerRunnerRoutes(app, routeDeps, {
     noteArchivedQueuedRunsOnClaim,

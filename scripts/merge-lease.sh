@@ -9,8 +9,9 @@
 #
 # Writing code and pushing a feature branch do not need this lease. Hold it only
 # while integrating the latest main, proving the exact candidate, and advancing
-# main. There is deliberately no heartbeat: a machine may steal a lease only
-# after 45 minutes, while a human may steal it immediately. Release removes only
+# main. There is deliberately no heartbeat: a steal waits 45 minutes unless the
+# caller passes --human, which is the operator saying so in the argv rather than
+# a property of the terminal they happen to be typing into. Release removes only
 # a lease you hold; breaking somebody else's lease requires steal. Acquire and
 # release need --task because the default holder is user@host, which every agent
 # window on one machine shares: without a task only the machine is identified,
@@ -33,7 +34,10 @@ FORCE=0
 HOLDER="${MERGE_LEASE_HOLDER:-}"
 
 usage() {
-  sed -n '2,18p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'
+  # The header block, however long it grows: everything from line 2 up to the
+  # first line that is not a comment. A fixed range silently truncated the text
+  # mid-sentence the last time the header gained a line.
+  sed -n '2,${/^[^#]/q;p;}' "$0" | sed 's/^#\{1,2\} \{0,1\}//'
   exit "${1:-0}"
 }
 
@@ -391,13 +395,35 @@ release_outcome() {
   esac
 }
 
+# The holder in one line, for a reader that is not a person. `status` prints the
+# pretty blob for the operator and `acquire` prints prose about waiting; neither
+# says who holds the lease in a form the control plane can parse, which is why a
+# contended readiness tick used to report nothing but the fact of contention.
+# The fields come from load_lease rather than from the raw blob so the line is
+# single-line JSON whatever formatting the blob on origin happens to carry.
+holder_machine_line() {
+  local rendered
+  rendered="$(node -e '
+    const [holder, task, acquiredAt, reason, sha] = process.argv.slice(1);
+    const lease = { holder, acquiredAt, reason, sha };
+    if (task) lease.task = task;
+    process.stdout.write(JSON.stringify(lease));
+  ' "$LEASE_HOLDER" "$LEASE_TASK" "$LEASE_ACQUIRED_AT" "$LEASE_REASON" "$REMOTE_SHA")" \
+    || return 1
+  printf 'MERGE LEASE HOLDER: %s\n' "$rendered" >&2
+}
+
 case "$COMMAND" in
   status)
     load_lease
     if [ -z "$REMOTE_SHA" ]; then
       printf 'merge-lease: no lease held\n'
+      printf 'MERGE LEASE HOLDER: none\n' >&2
     else
+      # stdout stays the lease blob and nothing else: `status | jq` is how an
+      # operator reads it. The machine line goes to stderr beside it.
       printf '%s\n' "$LEASE_PRETTY"
+      holder_machine_line || die "could not render the lease holder line"
     fi
     ;;
   acquire)
@@ -427,6 +453,9 @@ case "$COMMAND" in
       esac
       if [ "$(date +%s)" -ge "$deadline" ]; then
         printf 'merge-lease: timed out waiting for %s after %s minute(s)\n' "$LEASE_REF" "$TIMEOUT_MINUTES" >&2
+        # Name the holder on the way out. Contention is the one acquire outcome
+        # an operator cannot act on without knowing who is holding the lease.
+        [ -z "$LEASE_JSON" ] || holder_machine_line || true
         exit "$EXIT_TIMEOUT"
       fi
       printf 'merge-lease: held by %s; polling again in %ss\n' "$REMOTE_SHA" "$POLL_SECONDS" >&2
@@ -468,14 +497,15 @@ case "$COMMAND" in
     fi
     observed_sha="$REMOTE_SHA"
     observed_json="$LEASE_JSON"
-    is_human="$HUMAN"
-    if [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; then
-      is_human=1
-    fi
-    if [ "$is_human" -ne 1 ]; then
+    # Only --human waives the threshold. A terminal on any standard stream used
+    # to stand in for a person, which made the 45-minute rule depend on how the
+    # caller was launched rather than on what it claimed to be: an operator who
+    # ran this interactively bypassed the machine rule without ever saying so,
+    # and the same command in a pipeline did not. The flag is the claim.
+    if [ "$HUMAN" -ne 1 ]; then
       age_seconds=$(( $(date +%s) - LEASE_ACQUIRED_EPOCH ))
       if [ "$age_seconds" -le "$STALE_SECONDS" ]; then
-        die "machine steal refused: lease age ${age_seconds}s has not exceeded ${STALE_SECONDS}s"
+        die "machine steal refused: lease age ${age_seconds}s has not exceeded ${STALE_SECONDS}s; $(( STALE_SECONDS - age_seconds ))s remain, or pass --human to steal now"
       fi
     fi
     printf 'merge-lease: stealing lease from %s\n' "$observed_json" >&2
