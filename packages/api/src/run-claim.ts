@@ -135,6 +135,13 @@ const SPECIFICATION_READ_DEFERRAL_BUDGET_MS = 5 * 60_000;
 const SPECIFICATION_READ_TIMEOUT_DEFERRAL_CEILING_MS = 30 * 60_000;
 const SPECIFICATION_READ_DEADLINE_EXTENDED_CONDITION = "specification-read-deadline-extended";
 const SPECIFICATION_READ_DEFERRAL_DELAYS_MS = [15_000, 30_000, 60_000] as const;
+/** The single mapping from "every failure was a deadline hit" to its ceiling. */
+const specificationReadDeferralBudgetMs = (allTimeouts: boolean): number => (
+  allTimeouts ? SPECIFICATION_READ_TIMEOUT_DEFERRAL_CEILING_MS : SPECIFICATION_READ_DEFERRAL_BUDGET_MS
+);
+const asRecord = (value: unknown): Record<string, unknown> => (
+  typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}
+);
 
 const openMechanicalContractMismatchAlert = async (
   tx: Prisma.TransactionClient,
@@ -481,10 +488,7 @@ export const claimRun = async (
       const priorDeferrals = await priorSpecificationReadDeferrals(candidate);
       const budgetStartedAt = priorDeferrals[0]?.createdAt;
       if (!budgetStartedAt) return null;
-      const latestMetadata = priorDeferrals.at(-1)?.metadata;
-      const latestEvidence = typeof latestMetadata === "object" && latestMetadata !== null && !Array.isArray(latestMetadata)
-        ? latestMetadata as Record<string, unknown>
-        : {};
+      const latestEvidence = asRecord(priorDeferrals.at(-1)?.metadata);
       const persistedDetail = typeof latestEvidence.lastUnderlyingErrorDetail === "string"
         ? latestEvidence.lastUnderlyingErrorDetail
         : null;
@@ -495,12 +499,9 @@ export const claimRun = async (
       // A deferral written before the split carries no cause; read it as a
       // non-timeout transient so an in-flight budget keeps its 5-minute window.
       const allTimeouts = priorDeferrals.every((deferral) => (
-        typeof deferral.metadata === "object" && deferral.metadata !== null && !Array.isArray(deferral.metadata)
-        && (deferral.metadata as Record<string, unknown>).transientCause === "timeout"
+        asRecord(deferral.metadata).transientCause === "timeout"
       ));
-      const budgetMs = allTimeouts
-        ? SPECIFICATION_READ_TIMEOUT_DEFERRAL_CEILING_MS
-        : SPECIFICATION_READ_DEFERRAL_BUDGET_MS;
+      const budgetMs = specificationReadDeferralBudgetMs(allTimeouts);
       return {
         attemptCount: priorDeferrals.length,
         budgetStartedAt,
@@ -516,17 +517,22 @@ export const claimRun = async (
       state: NonNullable<Awaited<ReturnType<typeof specificationReadDeferralState>>>,
       implementationHeadSha: string,
     ) => {
+      // An episode extended for timeouts and then broken by one other transient
+      // parks on the 5-minute budget but has already run longer than it, so the
+      // window the refusal names is the observed one, not the budget constant.
+      const elapsedMs = now.getTime() - state.budgetStartedAt.getTime();
       const refusal = state.allTimeouts
         ? specificationReadDeadlineExceededRefusal({
           attempts: state.attemptCount,
-          elapsedMs: now.getTime() - state.budgetStartedAt.getTime(),
+          elapsedMs,
           ceilingMs: SPECIFICATION_READ_TIMEOUT_DEFERRAL_CEILING_MS,
           lastUnderlyingError: state.lastUnderlyingError,
         })
-        : specificationReadBudgetExhaustedRefusal(
-          SPECIFICATION_READ_DEFERRAL_BUDGET_MS,
-          state.lastUnderlyingError,
-        );
+        : specificationReadBudgetExhaustedRefusal({
+          budgetMs: state.budgetMs,
+          elapsedMs,
+          lastUnderlyingError: state.lastUnderlyingError,
+        });
       await parkQueuedCandidate(candidate, {
         reason: refusal.message,
         condition: refusal.reason,
@@ -559,9 +565,7 @@ export const claimRun = async (
       // ceiling for the whole episode: only a purely slow read earns it.
       const transientCause = refusal.transientCause === "timeout" ? "timeout" : "other";
       const allTimeouts = transientCause === "timeout" && (state?.allTimeouts ?? true);
-      const budgetMs = allTimeouts
-        ? SPECIFICATION_READ_TIMEOUT_DEFERRAL_CEILING_MS
-        : SPECIFICATION_READ_DEFERRAL_BUDGET_MS;
+      const budgetMs = specificationReadDeferralBudgetMs(allTimeouts);
       const budgetDeadlineAt = new Date(budgetStartedAt.getTime() + budgetMs);
       if (now.getTime() >= budgetDeadlineAt.getTime()) {
         return exhaustTransientSpecificationRead(candidate, {
@@ -613,6 +617,11 @@ export const claimRun = async (
       });
       // A sustained overload is worth exactly one notice per task: the first
       // deferral that outlives the ordinary budget, none of the ones after it.
+      // The dedupe key is scoped to the Task, not to the Run's deferral episode,
+      // so a task that hits this condition again after an operator retry stays
+      // silent - the open notice already tells the operator this task is being
+      // held by host load, and one row per episode is the noise this notice
+      // exists to avoid. Parking still announces itself per Run.
       const extendedPastOrdinaryBudget = allTimeouts
         && now.getTime() >= budgetStartedAt.getTime() + SPECIFICATION_READ_DEFERRAL_BUDGET_MS;
       if (extendedPastOrdinaryBudget) {

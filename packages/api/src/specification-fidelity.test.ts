@@ -6,6 +6,8 @@ import { PR_TEMPLATE_NAME } from "@anneal/db";
 import {
   normalizeLineEndings,
   SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS,
+  SPECIFICATION_READ_REQUEST_BUDGET_MS,
+  SPECIFICATION_READ_RETRY_DELAYS_MS,
   prepareSpecificationVerification,
   SPEC_TRANSCRIPTION_UNREADABLE_REASON,
   SPEC_TRANSCRIPTION_REFUSAL_REASON,
@@ -221,9 +223,12 @@ test("a read slower than the first deadline but faster than the last succeeds wi
     )),
     "the per-attempt deadlines must escalate so a slow host is retried on a longer clock",
   );
-  const [firstDeadlineMs] = SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS;
-  const readDurationMs = firstDeadlineMs + 300;
-  assert.ok(readDurationMs < SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS.at(-1)!);
+  // The shipped ladder's shape is asserted above; the behaviour it produces is
+  // driven on a scaled copy so the test does not spend seconds on real timers -
+  // and does not flake on exactly the loaded host this change is about.
+  const attemptTimeoutsMs = [12, 24, 60];
+  const readDurationMs = attemptTimeoutsMs[0]! + 8;
+  assert.ok(readDurationMs < attemptTimeoutsMs.at(-1)!);
   let reads = 0;
   const verdict = await verifyPreparedSpecification(
     {
@@ -245,10 +250,40 @@ test("a read slower than the first deadline but faster than the last succeeds wi
       });
     } },
     new AbortController().signal,
-    { retryDelaysMs: [0, 0], wait: async () => {} },
+    { retryDelaysMs: [0, 0], attemptTimeoutsMs, wait: async () => {} },
   );
   assert.equal(verdict, null);
   assert.equal(reads, 2);
+});
+
+test("the attempt ladder and its backoffs stay inside the runner's claim request budget", () => {
+  const total = SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS.reduce((sum, ms) => sum + ms, 0)
+    + SPECIFICATION_READ_RETRY_DELAYS_MS.reduce((sum, ms) => sum + ms, 0);
+  assert.ok(
+    total < SPECIFICATION_READ_REQUEST_BUDGET_MS,
+    `the read costs ${total}ms in the worst case, which the runner's claim request cannot absorb`,
+  );
+});
+
+test("an abort that is not this function's deadline is an ordinary transient, not a timeout", async () => {
+  const verdict = await verifyPreparedSpecification(
+    {
+      key: "key",
+      repository: "acme/repo",
+      remoteUrl: "https://github.com/acme/repo.git",
+      path: ".chain/feature/spec-check/spec.md",
+      implementationHeadSha: "b".repeat(40),
+      authoritativeBytes: bytes("authoritative"),
+    },
+    { readFileAtCommit: async () => {
+      throw new DOMException("aborted", "AbortError");
+    } },
+    new AbortController().signal,
+    { retryDelaysMs: [0, 0], attemptTimeoutsMs: [5_000, 5_000, 5_000], wait: async () => {} },
+  );
+  assert.equal(verdict?.reason, SPEC_TRANSCRIPTION_UNREADABLE_REASON);
+  assert.equal(verdict?.classification, "transient");
+  assert.equal(verdict?.transientCause, "other");
 });
 
 test("an all-deadline transient refusal is marked a timeout and any other transient is not", async () => {

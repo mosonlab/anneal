@@ -183,11 +183,17 @@ export const specificationReadDeadlineExceededRefusal = (
   "timeout",
 );
 
+/**
+ * An episode that saw any non-timeout transient parks on the ordinary budget.
+ * The window it actually ran can exceed that budget - an all-timeout episode
+ * extended past it and then saw one other transient - so the message names the
+ * observed elapsed window alongside the budget it was measured against.
+ */
 export const specificationReadBudgetExhaustedRefusal = (
-  budgetMs: number,
-  lastUnderlyingError: string,
+  evidence: { budgetMs: number; elapsedMs: number; lastUnderlyingError: string },
 ): SpecificationRefusal => specificationUnreadableRefusal(
-  `transient read deferral budget exhausted after ${budgetMs}ms; last underlying error: ${lastUnderlyingError}`,
+  `transient read deferral budget exhausted after ${evidence.elapsedMs}ms`
+  + ` (budget ${evidence.budgetMs}ms); last underlying error: ${evidence.lastUnderlyingError}`,
   "transient",
   "other",
 );
@@ -393,9 +399,15 @@ export const classifySpecificationReadFailure = (error: unknown): SpecificationR
   return code && TRANSIENT_SYSTEM_ERROR_CODES.has(code) ? "transient" : "non-transient";
 };
 
-/** A deadline hit is retried on a longer clock; every other transient is not. */
+/**
+ * A deadline hit is retried on a longer clock; every other transient is not.
+ * Only an observed deadline expiry counts: this function's own per-attempt
+ * timer converts one into `GitHubReadError(..., "timeout")` before classifying,
+ * so a raw `AbortError` reaching here was aborted by something else and is an
+ * ordinary transient, not evidence that the host is merely slow.
+ */
 export const specificationReadTransientCause = (error: unknown): SpecificationReadTransientCause => (
-  (error instanceof GitHubReadError && error.kind === "timeout") || isAbortError(error) ? "timeout" : "other"
+  error instanceof GitHubReadError && error.kind === "timeout" ? "timeout" : "other"
 );
 
 type SpecificationReadRetryOptions = {
@@ -405,15 +417,27 @@ type SpecificationReadRetryOptions = {
 };
 
 /**
+ * The runner aborts its claim request at `RUNNER_API_TIMEOUT_MS`, whose shipped
+ * default is 10000ms (`packages/runner/src/config.ts`). The whole read - every
+ * attempt deadline plus every backoff between them - runs inside that request,
+ * so a ladder that reaches the ceiling would abort the claim before the control
+ * plane could defer, park, or notice anything. Half of the shipped default
+ * leaves room for the route work that precedes the read.
+ */
+export const SPECIFICATION_READ_REQUEST_BUDGET_MS = 10_000 / 2;
+
+/**
  * An escalating per-attempt deadline ladder, not three identical deadlines. A
  * host under load makes every read slower by the same factor, so repeating one
  * 1200ms deadline fails all three attempts deterministically rather than
  * probabilistically. The first attempt keeps the fast deadline for the healthy
  * case; the later two give a merely slow read room to finish inside the same
- * claim. The ladder bounds the claim-side read at ~9.6s plus its two backoffs.
+ * claim. How much room is capped by `SPECIFICATION_READ_REQUEST_BUDGET_MS`, so
+ * the escalation that matters for a sustained overload is the claim-side
+ * deferral ceiling, not this ladder.
  */
-export const SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS = [1_200, 2_400, 6_000] as const;
-const SPECIFICATION_READ_RETRY_DELAYS_MS = [100, 300] as const;
+export const SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS = [1_200, 1_500, 1_800] as const;
+export const SPECIFICATION_READ_RETRY_DELAYS_MS = [100, 300] as const;
 
 const failureDetail = (error: unknown): string => (
   error instanceof Error ? error.message : "repository content read failed"
@@ -475,7 +499,7 @@ export const verifyPreparedSpecification = async (
           ? `after ${attempt} retries (${attempt + 1} total attempts); last failure: ${detail}`
           : detail,
         failureKind,
-        failureKind === "transient" && !sawNonTimeoutFailure ? "timeout" : "other",
+        failureKind === "transient" ? (sawNonTimeoutFailure ? "other" : "timeout") : undefined,
       );
     }
     await wait(delayMs, signal);

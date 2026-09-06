@@ -2249,8 +2249,14 @@ depends on what failed. A window whose every failure was a per-attempt deadline
 hit — a read that is slow, not broken — is extended to a ceiling of 1800000ms
 (30 minutes); any other transient failure in the window keeps the ordinary
 budget of 300000ms (5 minutes) and its `spec-transcription-unreadable` parking
-reason. The first deferral that outlives the 5-minute budget opens exactly one
-deduplicated Inbox notice per Task, and none of the later ones do. At the
+reason, whose message names the window the episode actually ran alongside that
+budget. Only a per-attempt deadline that this read observed counts as a deadline
+hit; an abort raised by the repository reader itself is an ordinary transient.
+The first deferral that outlives the 5-minute budget opens exactly one
+deduplicated Inbox notice per Task, and none of the later ones do. That notice
+is deduplicated for the Task's lifetime and is never reopened, so a Task that
+meets this condition again after an operator retry raises no second notice;
+parking still announces itself once per Run. At the
 30-minute ceiling the Task is parked in Backlog with the distinct reason
 `spec-read-deadline-exceeded`, whose message names the deadline, the number of
 deferred attempts, and the elapsed window rather than reporting the
