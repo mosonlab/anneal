@@ -133,7 +133,6 @@ const expectedRoutes = [
   "POST /inbox/messages/:messageId/decision",
   "POST /inbox/messages/:messageId/reply",
   "POST /inbox/messages/:messageId/close",
-  "POST /inbox/messages/:messageId/supersede",
   "POST /runner/availability",
   "POST /runner/preflight",
   "POST /runner/workspaces/reclaimable",

@@ -31,7 +31,6 @@ export const zh = {
   "agents.field.codexServiceTier": "Codex 服务层级",
   "agents.field.environment": "环境",
   "agents.field.environment.hint": "该 agent 的沙箱与环境变量作用域。",
-  "agents.field.environment.hint.missing": "无环境列表端点，请粘贴 Environment ID（POST /projects/:id/agents 必填）。",
   "agents.field.environment.label": "Environment ID",
   "agents.field.model": "模型",
   "agents.field.name.hint": "在项目内唯一；YAML 与 CLI 使用它。",
@@ -236,7 +235,6 @@ export const zh = {
   "costs.chart.empty": "该区间内没有任何花费。",
   "costs.chart.title": "每日花费",
   "costs.chart.tooltip": "{agent} · {date} · {amount}",
-  "costs.gap.what": "成本看板",
   "costs.head.subtitle": "{project} 中已结束 run 的花费。",
   "costs.head.title": "成本",
   "costs.hint.complete": "该区间内每个已结束的 run 都上报了成本。",
@@ -480,8 +478,6 @@ export const zh = {
   "newTask.template.option": "{name}（{n} 个步骤）",
   "newTask.templates.empty": "这个项目还没有模板。",
   "newTask.title": "新建任务",
-
-  "notice.gap": "控制面尚无 {endpoint}，{what}暂无数据来源。页面按真实空响应渲染，端点上线后自动生效。",
 
   "onboarding.back": "上一步",
   "onboarding.confirm.acknowledge": "我已知晓：启动 agent 以我的用户身份在本机运行，没有沙箱，并可向我填写的仓库推送。",
@@ -728,7 +724,6 @@ export const zh = {
   "sessions.filter.live": "进行中",
   "sessions.filter.loaded": "筛选仅适用于已加载的会话。",
   "sessions.filter.status": "状态",
-  "sessions.gap.what": "会话列表",
   "sessions.head.subtitle": "{project} 中的每一次 agent 运行，最新的在前",
   "sessions.head.title": "会话",
   "sessions.hover.result": "结果",
