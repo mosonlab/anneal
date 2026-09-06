@@ -106,7 +106,10 @@ test("a recovery bound to another Run is classified with all three ids", async (
   assert.equal(binding.case, "mismatch");
   const mismatch = binding.case === "mismatch" ? binding.mismatch : null;
   assert.equal(mismatch?.recoveryId, recoveryContext.aggregateId);
-  assert.equal(mismatch?.boundSourceRunId, recoveryContext.recoveryRunId);
+  // The Run the invariant compares, and the aggregate's own differently valued
+  // column of that name: an operator reading the activity sees both.
+  assert.equal(mismatch?.boundRecoveryRunId, recoveryContext.recoveryRunId);
+  assert.equal(mismatch?.boundSourceRunId, recoveryContext.sourceRunId);
   assert.equal(mismatch?.repairedRunId, "repaired-run-9");
   assert.match(mismatch?.reason ?? "", /^merge-tail-repair-binding-mismatch: /u);
   // REPAIRING may still be parked for the operator reentry route.
@@ -136,7 +139,8 @@ test("the open-time check reads the binding alone, not the recovery phase", asyn
     regressionTaskId: recoveryContext.regressionTaskId,
     sourceRunId: "regression-run-2",
   });
-  assert.equal(mismatch?.boundSourceRunId, recoveryContext.recoveryRunId);
+  assert.equal(mismatch?.boundRecoveryRunId, recoveryContext.recoveryRunId);
+  assert.equal(mismatch?.boundSourceRunId, recoveryContext.sourceRunId);
   assert.equal(mismatch?.repairedRunId, "regression-run-2");
 });
 
@@ -147,7 +151,10 @@ test("an unbound repair parks the repair task, the Run and the recovery", async 
   const notices: Array<Record<string, any>> = [];
   const recoveryUpdates: Array<Record<string, any>> = [];
   const tx = {
-    run: { update: async (args: Record<string, any>) => { runUpdates.push(args); return {}; } },
+    run: {
+      update: async (args: Record<string, any>) => { runUpdates.push(args); return {}; },
+      count: async () => 0,
+    },
     mergeRecoveryAttempt: {
       findUnique: async () => ({ status: MergeRecoveryStatus.REPAIRING }),
       update: async (args: Record<string, any>) => { recoveryUpdates.push(args); return {}; },
@@ -171,6 +178,7 @@ test("an unbound repair parks the repair task, the Run and the recovery", async 
     repairTaskId: "repair-1",
     repairTaskStatus: TaskStatus.DOING,
     regressionTaskId: recoveryContext.regressionTaskId,
+    documentationTaskId: "documentation-1",
     mismatch: binding.mismatch,
     run: { agentId: "agent-1", sessionId: "session-1", completedAt: new Date("2026-09-06T14:04:00.000Z") },
   });
@@ -187,9 +195,16 @@ test("an unbound repair parks the repair task, the Run and the recovery", async 
   assert.equal(recorded?.taskId, recoveryContext.regressionTaskId);
   assert.equal(recorded?.metadata.phase, "settlement");
   assert.equal(recorded?.metadata.recoveryId, recoveryContext.aggregateId);
-  assert.equal(recorded?.metadata.boundSourceRunId, recoveryContext.recoveryRunId);
+  assert.equal(recorded?.metadata.boundRecoveryRunId, recoveryContext.recoveryRunId);
+  assert.equal(recorded?.metadata.boundSourceRunId, recoveryContext.sourceRunId);
   assert.equal(recorded?.metadata.repairedRunId, "repaired-run-9");
   assert.equal(recorded?.metadata.repairTaskId, "repair-1");
+  // The Documentation Step the settlement re-opened for this repair does not
+  // stay TODO for a repair whose completion was rejected.
+  assert.deepEqual(taskUpdates.find((update) => update.where.id === "documentation-1"), {
+    where: { id: "documentation-1" },
+    data: { status: TaskStatus.REVIEW, failureReason: binding.mismatch.reason },
+  });
   // Parked for the operator reentry route rather than left REPAIRING.
   assert.equal(recoveryUpdates[0]?.data.status, MergeRecoveryStatus.BLOCKED_DOWNSTREAM);
   assert.equal(notices.length, 1);
@@ -199,7 +214,7 @@ test("an unbound repair with no parkable recovery still stops the tail with a no
   const taskUpdates: Array<Record<string, any>> = [];
   const notices: Array<Record<string, any>> = [];
   const tx = {
-    run: { update: async () => ({}) },
+    run: { update: async () => ({}), count: async () => 0 },
     task: {
       update: async (args: Record<string, any>) => { taskUpdates.push(args); return {}; },
       updateMany: async () => ({ count: 1 }),
@@ -228,6 +243,56 @@ test("an unbound repair with no parkable recovery still stops the tail with a no
   }]);
   assert.equal(notices.length, 1);
   assert.match(String(notices[0]?.create.body), /merge-tail-repair-binding-mismatch/u);
+});
+
+test("an unbound repair leaves a recovery that still has an active Run alone", async () => {
+  // The mismatch is usually a newer recovery that took the chain over while the
+  // repair ran. Blocking it would stop the healthy mechanism, and it would also
+  // withhold the operator exit: the reentry route refuses while a tail task
+  // still has an active Run.
+  const taskUpdates: Array<Record<string, any>> = [];
+  const notices: Array<Record<string, any>> = [];
+  const recoveryUpdates: Array<Record<string, any>> = [];
+  let counted: Record<string, any> | null = null;
+  const tx = {
+    run: {
+      update: async () => ({}),
+      count: async (args: Record<string, any>) => { counted = args; return 1; },
+    },
+    mergeRecoveryAttempt: {
+      findUnique: async () => ({ status: MergeRecoveryStatus.REPAIRING }),
+      update: async (args: Record<string, any>) => { recoveryUpdates.push(args); return {}; },
+    },
+    task: {
+      update: async (args: Record<string, any>) => { taskUpdates.push(args); return {}; },
+      updateMany: async (args: Record<string, any>) => { taskUpdates.push(args); return { count: 1 }; },
+    },
+    taskActivity: { create: async () => ({}) },
+    inboxMessage: { upsert: async (args: Record<string, any>) => { notices.push(args); return {}; } },
+  } as unknown as Prisma.TransactionClient;
+  const binding = await activeRepairRecoverySourceRun(recoveryTx(recoveryRow()), {
+    regressionTaskId: recoveryContext.regressionTaskId,
+    sourceRunId: "repaired-run-9",
+  });
+  assert.equal(binding.case, "mismatch");
+  if (binding.case !== "mismatch") return;
+
+  await stopUnboundRepair(tx, {
+    runId: "run-1",
+    repairTaskId: "repair-1",
+    regressionTaskId: recoveryContext.regressionTaskId,
+    mismatch: binding.mismatch,
+    run: { agentId: "agent-1", sessionId: "session-1", completedAt: new Date("2026-09-06T14:04:00.000Z") },
+  });
+
+  assert.deepEqual((counted as unknown as Record<string, any> | null)?.where.taskId, {
+    in: [recoveryContext.regressionTaskId, recoveryContext.readinessTaskId, recoveryContext.integratorTaskId],
+  });
+  // The repair itself still parks; the recovery and its tasks do not move.
+  assert.deepEqual(taskUpdates.map((update) => update.where.id), ["repair-1"]);
+  assert.deepEqual(recoveryUpdates, []);
+  // The overlap still reaches an operator.
+  assert.equal(notices.length, 1);
 });
 
 const stopTx = (recoveryStatus: MergeRecoveryStatus) => {

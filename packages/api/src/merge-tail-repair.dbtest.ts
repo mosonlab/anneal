@@ -1503,7 +1503,7 @@ const seedRecoveryBoundTo = async (
     observedBaseSha: BASE,
     currentBaseSha: BASE,
   } });
-  return { integrator, readiness, recovery };
+  return { integrator, readiness, recovery, sourceRun };
 };
 
 /** Run A: a Regression Run of the same chain that is not the Run whose verdict
@@ -1528,7 +1528,7 @@ const exerciseWithRecoveryBoundElsewhere = async (outcome: RegressionOutcome = "
     body: verdict(outcome), commitSha: HEAD,
   } });
   const recoveryRun = await seedOtherRegressionRun(seeded);
-  const { recovery } = await seedRecoveryBoundTo(seeded, recoveryRun.id);
+  const { recovery, sourceRun } = await seedRecoveryBoundTo(seeded, recoveryRun.id);
   const input = {
     task: seeded.regression,
     run: {
@@ -1538,7 +1538,7 @@ const exerciseWithRecoveryBoundElsewhere = async (outcome: RegressionOutcome = "
     now: new Date(),
   };
   assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, input)), "handled");
-  return { ...seeded, input, recoveryRun, recovery };
+  return { ...seeded, input, recoveryRun, recoverySourceRun: sourceRun, recovery };
 };
 
 /**
@@ -1609,7 +1609,10 @@ test("the binding mismatch is recorded on the regression task with all three ids
   assert.ok(metadata);
   assert.equal(metadata.phase, "open");
   assert.equal(metadata.recoveryId, seeded.recovery.id);
-  assert.equal(metadata.boundSourceRunId, seeded.recoveryRun.id);
+  // The Run the recovery is bound to, and the aggregate's own differently
+  // valued `boundSourceRunId` column: the activity names both mechanisms.
+  assert.equal(metadata.boundRecoveryRunId, seeded.recoveryRun.id);
+  assert.equal(metadata.boundSourceRunId, seeded.recoverySourceRun.id);
   assert.equal(metadata.repairedRunId, seeded.run.id);
   assert.ok(String(metadata.reason).includes(MERGE_TAIL_REPAIR_BINDING_MISMATCH), String(metadata.reason));
 });
@@ -1617,11 +1620,13 @@ test("the binding mismatch is recorded on the regression task with all three ids
 test("a repair completion the platform cannot bind is rejected without a 500", async () => {
   // The card is opened while nothing contradicts it; the aggregate that names
   // another Run appears while the repair is in flight, which is the only way a
-  // genuine repair reaches settlement unbindable.
-  const seeded = await exercise("gate-fail");
+  // genuine repair reaches settlement unbindable. The chain owns a
+  // Documentation Step, so the settlement's documentation requeue is part of
+  // what the rejection has to undo.
+  const seeded = await exercise("gate-fail", { withLibrarian: true });
   const repair = await repairFor(seeded, "gate-fix");
   const recoveryRun = await seedOtherRegressionRun(seeded);
-  const { recovery } = await seedRecoveryBoundTo(seeded, recoveryRun.id);
+  const { recovery, readiness, integrator, sourceRun } = await seedRecoveryBoundTo(seeded, recoveryRun.id);
 
   const { run, result } = await completeRepairThroughAction(
     seeded,
@@ -1634,7 +1639,8 @@ test("a repair completion the platform cannot bind is rejected without a 500", a
   assert.ok(result.message.includes(MERGE_TAIL_REPAIR_BINDING_MISMATCH), result.message);
   assert.deepEqual(result.detail, {
     recoveryId: recovery.id,
-    boundSourceRunId: recoveryRun.id,
+    boundRecoveryRunId: recoveryRun.id,
+    boundSourceRunId: sourceRun.id,
     repairedRunId: seeded.run.id,
   });
 
@@ -1647,6 +1653,23 @@ test("a repair completion the platform cannot bind is rejected without a 500", a
   assert.equal(parked.status, TaskStatus.REVIEW);
   assert.equal(parked.failureReason, settled.failureReason);
 
+  // No tail task of the recovery has a live Run, so the tail parks in exactly
+  // the state the reentry route reopens.
+  assert.equal(
+    (await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: recovery.id } })).status,
+    MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
+  );
+  for (const taskId of [seeded.regression.id, readiness.id, integrator.id]) {
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: taskId } })).status, TaskStatus.REVIEW);
+  }
+  // The Documentation Step the settlement re-opened is not left announcing a
+  // repair the platform refused, and it is not dispatched.
+  assert.ok(seeded.librarian);
+  const documentation = await db.task.findUniqueOrThrow({ where: { id: seeded.librarian.id } });
+  assert.equal(documentation.status, TaskStatus.REVIEW);
+  assert.ok((documentation.failureReason ?? "").includes(MERGE_TAIL_REPAIR_BINDING_MISMATCH), documentation.failureReason ?? "");
+  assert.equal(await db.run.count({ where: { taskId: seeded.librarian.id } }), 0);
+
   const recorded = await db.taskActivity.findFirstOrThrow({ where: {
     taskId: seeded.regression.id,
     actorType: "control-plane",
@@ -1656,7 +1679,55 @@ test("a repair completion the platform cannot bind is rejected without a 500", a
   assert.ok(metadata);
   assert.equal(metadata.phase, "settlement");
   assert.equal(metadata.recoveryId, recovery.id);
-  assert.equal(metadata.boundSourceRunId, recoveryRun.id);
+  assert.equal(metadata.boundRecoveryRunId, recoveryRun.id);
+  assert.equal(metadata.boundSourceRunId, sourceRun.id);
   assert.equal(metadata.repairedRunId, seeded.run.id);
   assert.equal(metadata.repairTaskId, repair.id);
+});
+
+test("a rejected repair leaves a recovery that is still running alone", async () => {
+  // The overlap the incident produced: the newer recovery requeued the
+  // Regression task and enqueued its own Run. Blocking it would stop the
+  // mechanism that owns the chain, and the reentry route refuses
+  // `merge_tail_repair_active_run` while that Run is alive, so the rejection
+  // records the overlap and stops at the notice.
+  const seeded = await exercise("gate-fail");
+  const repair = await repairFor(seeded, "gate-fix");
+  const recoveryRun = await seedOtherRegressionRun(seeded);
+  const { recovery, readiness, integrator } = await seedRecoveryBoundTo(seeded, recoveryRun.id);
+  await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.TODO } });
+  const liveRun = await db.run.create({ data: {
+    projectId: seeded.project.id, taskId: seeded.regression.id, agentId: seeded.regressionAgent.id,
+    repoId: seeded.repo.id, runNumber: 3, dedupeKey: `task:${seeded.regression.id}:run:3`,
+    runner: "CODEX", model: seeded.regressionAgent.model, promptHash: "hash",
+    status: "QUEUED", branch: BRANCH, targetBranch: "main",
+  } });
+
+  const { result } = await completeRepairThroughAction(
+    seeded,
+    repair.id,
+    "Fixed the failing regression and reran the affected suite.",
+  );
+  assert.ok("message" in result, JSON.stringify(result));
+  assert.equal(result.reason, "merge-tail-repair-unbound");
+
+  // The live recovery keeps its aggregate, its tasks and its Run.
+  assert.equal(
+    (await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: recovery.id } })).status,
+    MergeRecoveryStatus.REPAIRING,
+  );
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.TODO);
+  for (const taskId of [readiness.id, integrator.id]) {
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: taskId } })).status, TaskStatus.DOING);
+  }
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: liveRun.id } })).status, "QUEUED");
+  // Only the repair parks, and the overlap still reaches an operator.
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: repair.id } })).status, TaskStatus.REVIEW);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: seeded.regression.id,
+    metadata: { path: ["kind"], equals: MERGE_TAIL_REPAIR_BINDING_MISMATCH_KIND },
+  } }), 1);
+  assert.equal(await db.inboxMessage.count({
+    where: { taskId: seeded.regression.id, body: { startsWith: "Autonomous merge tail stopped:" } },
+  }), 1);
 });

@@ -852,20 +852,6 @@ export const completeRun = async (
     const repairSourceRunId = typeof repairMarker?.raw.sourceRunId === "string"
       ? repairMarker.raw.sourceRunId
       : null;
-    // Which recovery, if any, this repair completion settles — decided before
-    // the terminal write, because a repair the platform cannot bind is not an
-    // internal server error and must not escape this transaction as one. The
-    // Run carries the reason and the repair Task parks; the completion answers
-    // a classified rejection.
-    const repairRecoveryBinding = repairMarker?.regressionTaskId && repairSourceRunId
-      ? await activeRepairRecoverySourceRun(tx, {
-          regressionTaskId: repairMarker.regressionTaskId,
-          sourceRunId: repairSourceRunId,
-        })
-      : null;
-    const unboundRepair = repairRecoveryBinding?.case === "mismatch" && repairMarker?.regressionTaskId
-      ? { regressionTaskId: repairMarker.regressionTaskId, mismatch: repairRecoveryBinding.mismatch }
-      : null;
     // Preserve a failed completion's diagnostic reason even when a definitive
     // mechanical result overrides its protocol classification. Ordinary
     // reported success still carries no failure reason; an unbound repair's
@@ -887,6 +873,22 @@ export const completeRun = async (
     if (auxiliaryTargetTaskId && auxiliaryTargetTaskId !== run.task?.id) {
       await lockTaskMutationRows(tx, auxiliaryTargetTaskId);
     }
+    // Which recovery, if any, this repair completion settles — read under the
+    // repair target chain's mutex taken just above, because the recovery
+    // aggregate is that chain's, and every other writer of it takes the same
+    // lock. Decided before the terminal write, because a repair the platform
+    // cannot bind is not an internal server error and must not escape this
+    // transaction as one: the Run carries the reason, the repair Task parks,
+    // and the completion answers a classified rejection.
+    const repairRecoveryBinding = repairMarker?.regressionTaskId && repairSourceRunId
+      ? await activeRepairRecoverySourceRun(tx, {
+          regressionTaskId: repairMarker.regressionTaskId,
+          sourceRunId: repairSourceRunId,
+        })
+      : null;
+    const unboundRepair = repairRecoveryBinding?.case === "mismatch" && repairMarker?.regressionTaskId
+      ? { regressionTaskId: repairMarker.regressionTaskId, mismatch: repairRecoveryBinding.mismatch }
+      : null;
     if (run.task && typeof (tx.task as { findUnique?: unknown }).findUnique === "function") {
       await tx.task.findUnique({ where: { id: run.task.id }, select: { status: true } });
     }
@@ -1269,6 +1271,7 @@ export const completeRun = async (
             repairTaskId: run.taskId,
             ...(completionTaskStatus ? { repairTaskStatus: completionTaskStatus } : {}),
             regressionTaskId: unboundRepair.regressionTaskId,
+            documentationTaskId: repairDocumentationTask?.id ?? null,
             mismatch: unboundRepair.mismatch,
             run: { agentId: run.agentId, sessionId: run.session.id, completedAt: now },
           });
@@ -1277,6 +1280,7 @@ export const completeRun = async (
             message: unboundRepair.mismatch.reason,
             detail: {
               recoveryId: unboundRepair.mismatch.recoveryId,
+              boundRecoveryRunId: unboundRepair.mismatch.boundRecoveryRunId,
               boundSourceRunId: unboundRepair.mismatch.boundSourceRunId,
               repairedRunId: unboundRepair.mismatch.repairedRunId,
             },
