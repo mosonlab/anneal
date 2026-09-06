@@ -65,6 +65,14 @@ export class DeploymentAttempt {
       ...(publication?.releaseIdentity ? { releaseIdentity: publication.releaseIdentity } : {}),
       ...(publication?.pointerTransition ? { pointerTransition: publication.pointerTransition } : {}),
       ...(verification?.activatedBuildStamp ? { activatedBuildStamp: verification.activatedBuildStamp } : {}),
+      ...(verification ? {
+        serviceVerification: {
+          unitsChecked: verification.unitsChecked,
+          runnersRegistered: verification.runnerIds,
+          observationWindowMs: verification.observationWindowMs,
+          observedForMs: verification.observedForMs,
+        },
+      } : {}),
       ...(this.fact("rollbackPointerOutcome") ? { rollbackPointerOutcome: this.fact("rollbackPointerOutcome") } : {}),
       ...metadata,
     };

@@ -37,6 +37,7 @@ const LEDGER_STATE_SET = new Set(DEPLOYMENT_LEDGER_STATES);
 const TERMINAL_STATES = new Set(["SUCCEEDED", "FAILED", "MANUAL_RECOVERY"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const MAX_VERIFICATION_ENTRIES = 128;
 const SECRET_TEXT = /(DATABASE_URL|(?:API|AUTH|ACCESS|REFRESH|PRIVATE)[_-]?(?:KEY|TOKEN|SECRET)|PASSWORD|\.env|(?:gh[pousr]_\w+)|(?:xox[bap]-[A-Za-z0-9-]+)|(?:sk-[A-Za-z0-9_-]+)|(?:Bearer\s+\S+)|(?:postgres(?:ql)?:\/\/)|(?:https?:\/\/[^/\s]+:[^@\s]+@))/iu;
 
 const invalid = (detail) => {
@@ -95,6 +96,34 @@ const safeBuildStamp = (value) => {
   const dirty = value.dirty === true ? true : value.dirty === false ? false : null;
   if (packageName === null && commit === null && dirty === null) return null;
   return { packageName, commit, dirty };
+};
+
+const safeIdentifierList = (value) => {
+  if (!Array.isArray(value)) return null;
+  return value.map((entry) => safeText(entry)).filter((entry) => entry !== null).slice(0, MAX_VERIFICATION_ENTRIES);
+};
+
+const safeDurationMs = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
+
+/** What the post-restart verification actually proved: the units it sampled,
+ * the local runners it saw re-registered, and how long everything stayed
+ * green. Recorded so a green deploy is auditable after the fact. */
+const safeServiceVerification = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const unitsChecked = safeIdentifierList(value.unitsChecked);
+  const runnersRegistered = safeIdentifierList(value.runnersRegistered);
+  const observationWindowMs = safeDurationMs(value.observationWindowMs);
+  const observedForMs = safeDurationMs(value.observedForMs);
+  if (unitsChecked === null && runnersRegistered === null
+      && observationWindowMs === null && observedForMs === null) {
+    return null;
+  }
+  return {
+    units_checked: unitsChecked ?? [],
+    runners_registered: runnersRegistered ?? [],
+    observation_window_ms: observationWindowMs,
+    observed_for_ms: observedForMs,
+  };
 };
 
 const safeReasonCode = (value) => safeText(value, "unknown-failure");
@@ -273,6 +302,7 @@ export const createDeploymentLedger = ({
     migrationTailBefore: null,
     migrationTailAfter: null,
     activatedBuildStamp: null,
+    serviceVerification: null,
     releaseDirectoryIdentity: null,
     pointerOldTarget: null,
     pointerNewTarget: null,
@@ -299,6 +329,7 @@ export const createDeploymentLedger = ({
       migrationTailBefore: safeMigrationTail(metadata.migrationTailBefore) ?? context.migrationTailBefore,
       migrationTailAfter: safeMigrationTail(metadata.migrationTailAfter) ?? context.migrationTailAfter,
       activatedBuildStamp: safeBuildStamp(metadata.activatedBuildStamp) ?? context.activatedBuildStamp,
+      serviceVerification: safeServiceVerification(metadata.serviceVerification) ?? context.serviceVerification,
       releaseDirectoryIdentity: safeReleaseDirectoryIdentity(metadata.releaseDirectoryIdentity) ?? context.releaseDirectoryIdentity,
       pointerOldTarget: safePointerTarget(metadata.pointerOldTarget) ?? context.pointerOldTarget,
       pointerNewTarget: safePointerTarget(metadata.pointerNewTarget) ?? context.pointerNewTarget,
@@ -315,6 +346,7 @@ export const createDeploymentLedger = ({
       migration_tail_before: nextContext.migrationTailBefore,
       migration_tail_after: nextContext.migrationTailAfter,
       activated_build_stamp: nextContext.activatedBuildStamp,
+      service_verification: nextContext.serviceVerification,
       release_directory_identity: nextContext.releaseDirectoryIdentity,
       pointer_old_target: nextContext.pointerOldTarget,
       pointer_new_target: nextContext.pointerNewTarget,

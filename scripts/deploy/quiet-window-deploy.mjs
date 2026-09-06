@@ -75,6 +75,7 @@ import {
   controlPlaneApiBaseUrl,
   readRunnerControlPlaneRevision,
   readRunnerTargetRevision,
+  requireControlPlaneRegistrationAccess,
   requireRunnerDeployPreflight,
   resolveDeployRoleOrFail,
 } from "./runner-role-target.mjs";
@@ -344,6 +345,13 @@ const loadEnvironment = async (deployRole = resolveDeployRoleOrFail()) => {
   if (loaded.error || !process.env.DATABASE_URL) fail("environment-unreadable", "DATABASE_URL-missing");
   if (!process.env.FEISHU_DEFAULT_CHAT_ID) fail("environment-unreadable", "FEISHU_DEFAULT_CHAT_ID-missing");
   if (!loaded.parsed?.GITHUB_READ_TOKEN?.trim()) fail("environment-unreadable", "GITHUB_READ_TOKEN-missing");
+  // A control-plane host that also runs local runners verifies their
+  // re-registration against its own API, so the operator token is required
+  // here rather than skipped as a runner-only credential.
+  const localRunners = runnerIdsFromInventory(resolveServiceInventory(process.env, deployRole).entries);
+  if (localRunners.length > 0 && !loaded.parsed?.OPERATOR_TOKEN?.trim()) {
+    fail("environment-unreadable", "OPERATOR_TOKEN-missing");
+  }
 };
 
 const resolveExecutable = (variable, fallback) => {
@@ -700,6 +708,21 @@ const makeWritable = (root) => {
   visit(root);
 };
 
+/** How long every unit and every readiness probe must stay green before a
+ * restart counts as a proven deployment. A service that starts and dies a
+ * second later, or a runner process that stays active without registering,
+ * is only visible to a sampler that keeps looking after the first green. */
+export const DEFAULT_SERVICE_OBSERVATION_WINDOW_MS = 20_000;
+
+export const resolveObservationWindowMs = (environment = process.env) => {
+  const configured = environment?.AGENTOS_DEPLOY_OBSERVATION_WINDOW_MS;
+  if (configured === undefined || configured === "") return DEFAULT_SERVICE_OBSERVATION_WINDOW_MS;
+  if (!/^[0-9]+$/u.test(String(configured))) {
+    fail("deploy-observation-window-invalid", String(configured));
+  }
+  return Number(configured);
+};
+
 export const createDeployHost = ({
   serviceControl: providedServiceControl,
   runCommand = runDeployCommand,
@@ -709,7 +732,10 @@ export const createDeployHost = ({
   deployRole = resolveDeployRoleOrFail(environment),
   fetchImpl = fetch,
   blockingRunsAdapter = null,
-  serviceVerificationTimeoutMs = 30_000,
+  observationWindowMs = resolveObservationWindowMs(environment),
+  // The pre-window allowance to reach the first all-green sample is unchanged;
+  // the window is added on top of it rather than taken out of it.
+  serviceVerificationTimeoutMs = observationWindowMs + 30_000,
   serviceVerificationWait = sleep,
 } = {}) => {
   const hostChecked = (reason, program, args, options) => checked(reason, program, args, {
@@ -728,6 +754,44 @@ export const createDeployHost = ({
     ?? (() => blockingRuns(deployRole === "runner" ? localRunnerIds : null));
   const apiBaseUrl = runnerConfig?.apiBaseUrl ?? null;
   const operatorToken = runnerConfig?.operatorToken ?? null;
+  // Every host that owns local runners proves they re-registered, whichever
+  // role it deploys. A runner host reads its control plane over the network;
+  // a control-plane host reads its own loopback API with the operator token
+  // its deployment already carries. Resolved on first use so a phase that
+  // never verifies registrations does not require the credential.
+  let registrationAccessCache;
+  const registrationAccess = () => {
+    if (registrationAccessCache === undefined) {
+      registrationAccessCache = localRunnerIds.length === 0
+        ? null
+        : deployRole === "runner"
+          ? { apiBaseUrl, operatorToken }
+          : requireControlPlaneRegistrationAccess(environment);
+    }
+    return registrationAccessCache;
+  };
+  const registrationSnapshot = async () => {
+    const access = registrationAccess();
+    if (access === null) return null;
+    return localRegistrationSnapshot(
+      await readRunnerRegistry({ ...access, fetchImpl }),
+      localRunnerIds,
+    );
+  };
+  /** One deterministic refusal string, or null when every local runner has
+   * re-registered on the build under proof. Registry transport failures are
+   * refusals to retry, not deploy failures. */
+  const registrationRefusal = async ({ before, targetCommit }) => {
+    try {
+      const payload = await readRunnerRegistry({ ...registrationAccess(), fetchImpl });
+      return runnerRegistrationRefusal({ payload, runnerIds: localRunnerIds, before, targetCommit });
+    } catch (error) {
+      if (error instanceof DeployFailure && error.reason !== "runner-registration-verification-unavailable") throw error;
+      return error instanceof DeployFailure
+        ? `${error.reason}-${error.detail}`
+        : error instanceof Error ? error.name : "probe-failed";
+    }
+  };
   let canonicalSyncRefusals = [];
   const notifyDeployOutcome = async (record) => notify(canonicalSyncNoticeRecord(record, canonicalSyncRefusals));
   return createProductionHost({
@@ -1000,13 +1064,7 @@ export const createDeployHost = ({
       };
     },
     restartServices: async () => {
-      const runnerRegistrationsBeforeRestart = deployRole === "runner"
-        ? localRegistrationSnapshot(await readRunnerRegistry({
-            apiBaseUrl,
-            operatorToken,
-            fetchImpl,
-          }), localRunnerIds)
-        : null;
+      const runnerRegistrationsBeforeRestart = await registrationSnapshot();
       for (const label of serviceLabels) {
         await serviceControl.restart(label, { reason: "service-restart-failed" });
       }
@@ -1014,83 +1072,92 @@ export const createDeployHost = ({
     },
     verifyServices: async (attempt) => {
       const revisions = attempt.requireFact("revisions");
-      const deadline = Date.now() + serviceVerificationTimeoutMs;
-      let lastReason = "not-ready";
-      while (Date.now() < deadline) {
+      const access = registrationAccess();
+      const before = access === null ? null : attempt.requireFact("runnerRegistrationsBeforeRestart");
+      let activatedBuildStamp = null;
+
+      const apiRefusal = async () => {
+        try {
+          const port = environment.API_PORT ?? "3000";
+          const health = await fetchImpl(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
+          const version = await fetchImpl(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) });
+          const payload = version.ok ? await version.json() : {};
+          if (health.ok && version.ok && payload.commit === revisions.to && payload.dirty === false) {
+            activatedBuildStamp = {
+              packageName: payload.packageName,
+              commit: payload.commit,
+              dirty: payload.dirty,
+            };
+            return null;
+          }
+          return `health-${health.status}-version-${version.status}-commit-${String(payload.commit ?? "unknown")}`;
+        } catch (error) {
+          if (error instanceof DeployFailure) throw error;
+          return error instanceof Error ? error.name : "probe-failed";
+        }
+      };
+
+      // One sample of the whole readiness criterion: every unit active, the
+      // API answering on the activated build where this role owns one, and
+      // every local runner re-registered. A control-plane deploy requires all
+      // three; neither probe substitutes for the other.
+      const readinessRefusal = async () => {
         const state = await serviceState(serviceControl, serviceLabels);
         if (!state.ok) {
           const manager = serviceControl.platform === "linux" ? "systemd" : "launchd";
-          lastReason = `${manager}-unavailable-${state.unavailable.join(",")}`;
+          return `${manager}-unavailable-${state.unavailable.join(",")}`;
         }
-        else if (deployRole === "runner") {
-          try {
-            const payload = await readRunnerRegistry({
-              apiBaseUrl,
-              operatorToken,
-              fetchImpl,
-            });
-            const refusal = runnerRegistrationRefusal({
-              payload,
-              runnerIds: localRunnerIds,
-              before: attempt.requireFact("runnerRegistrationsBeforeRestart"),
-              targetCommit: revisions.to,
-            });
-            if (refusal === null) {
-              throwIfInterrupted();
-              return {
-                serviceVerification: {
-                  runnerIds: localRunnerIds,
-                  activatedBuildCommit: revisions.to,
-                },
-              };
-            }
-            lastReason = refusal;
-          } catch (error) {
-            if (error instanceof DeployFailure && error.reason !== "runner-registration-verification-unavailable") throw error;
-            lastReason = error instanceof DeployFailure
-              ? `${error.reason}-${error.detail}`
-              : error instanceof Error ? error.name : "probe-failed";
+        if (deployRole !== "runner") {
+          const refusal = await apiRefusal();
+          if (refusal !== null) return refusal;
+        }
+        if (access === null) return null;
+        return registrationRefusal({ before, targetCommit: revisions.to });
+      };
+
+      const deadline = Date.now() + serviceVerificationTimeoutMs;
+      let lastReason = "not-ready";
+      let windowOpenedAt = null;
+      for (;;) {
+        const refusal = await readinessRefusal();
+        if (refusal === null) {
+          windowOpenedAt ??= Date.now();
+          const observedForMs = Date.now() - windowOpenedAt;
+          if (observedForMs >= observationWindowMs) {
+            throwIfInterrupted();
+            return {
+              serviceVerification: {
+                unitsChecked: serviceLabels,
+                runnerIds: access === null ? [] : localRunnerIds,
+                activatedBuildCommit: revisions.to,
+                observationWindowMs,
+                observedForMs,
+                ...(activatedBuildStamp === null ? {} : { activatedBuildStamp }),
+              },
+            };
           }
+        } else if (windowOpenedAt !== null) {
+          // The first all-green sample is not the outcome: a unit that dies or
+          // a runner that stops registering inside the window fails the deploy.
+          fail("service-verification-failed", `observation-window-regressed-${refusal}`);
         } else {
-          try {
-            const port = process.env.API_PORT ?? "3000";
-            const health = await fetchImpl(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
-            const version = await fetchImpl(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) });
-            const payload = version.ok ? await version.json() : {};
-            if (health.ok && version.ok && payload.commit === revisions.to && payload.dirty === false) {
-              throwIfInterrupted();
-              return {
-                serviceVerification: {
-                  activatedBuildStamp: {
-                    packageName: payload.packageName,
-                    commit: payload.commit,
-                    dirty: payload.dirty,
-                  },
-                },
-              };
-            }
-            lastReason = `health-${health.status}-version-${version.status}-commit-${String(payload.commit ?? "unknown")}`;
-          } catch (error) {
-            if (error instanceof DeployFailure) throw error;
-            lastReason = error instanceof Error ? error.name : "probe-failed";
-          }
+          lastReason = refusal;
         }
+        if (Date.now() >= deadline) break;
         await serviceVerificationWait(1_000);
       }
-      fail("service-verification-failed", lastReason);
+      fail(
+        "service-verification-failed",
+        windowOpenedAt === null ? lastReason : `observation-window-incomplete-${observationWindowMs}ms`,
+      );
     },
     restorePreviousServices: async (attempt) => {
       let runnerRegistrationsBeforeRestore = null;
       let runnerRegistrationSnapshotFailure = null;
-      if (deployRole === "runner") {
-        try {
-          runnerRegistrationsBeforeRestore = localRegistrationSnapshot(
-            await readRunnerRegistry({ apiBaseUrl, operatorToken, fetchImpl }),
-            localRunnerIds,
-          );
-        } catch (error) {
-          runnerRegistrationSnapshotFailure = error;
-        }
+      try {
+        runnerRegistrationsBeforeRestore = await registrationSnapshot();
+      } catch (error) {
+        runnerRegistrationSnapshotFailure = error;
       }
       for (const label of serviceLabels) {
         await serviceControl.restart(label, {
@@ -1108,31 +1175,33 @@ export const createDeployHost = ({
         const failure = failureOf(runnerRegistrationSnapshotFailure);
         fail("previous-service-verification-failed", `${failure.reason}-${failure.detail}`);
       }
-      if (runnerRegistrationsBeforeRestore !== null) {
-        const deadline = Date.now() + serviceVerificationTimeoutMs;
-        const previousCommit = attempt.requireFact("revisions").from;
-        let lastReason = "not-ready";
-        do {
-          try {
-            const payload = await readRunnerRegistry({ apiBaseUrl, operatorToken, fetchImpl });
-            const refusal = runnerRegistrationRefusal({
-              payload,
-              runnerIds: localRunnerIds,
-              before: runnerRegistrationsBeforeRestore,
-              targetCommit: previousCommit,
-            });
-            if (refusal === null) return;
-            lastReason = refusal;
-          } catch (error) {
-            if (error instanceof DeployFailure && error.reason !== "runner-registration-verification-unavailable") throw error;
-            lastReason = error instanceof DeployFailure
-              ? `${error.reason}-${error.detail}`
-              : error instanceof Error ? error.name : "probe-failed";
-          }
-          await serviceVerificationWait(1_000);
-        } while (Date.now() < deadline);
-        fail("previous-service-verification-failed", lastReason);
+      if (runnerRegistrationsBeforeRestore === null) return;
+      // A rollback proves the same thing a deploy does: the restored runners
+      // are back on the previous build and stay there for the same window.
+      const deadline = Date.now() + serviceVerificationTimeoutMs;
+      const previousCommit = attempt.requireFact("revisions").from;
+      let lastReason = "not-ready";
+      let windowOpenedAt = null;
+      for (;;) {
+        const refusal = await registrationRefusal({
+          before: runnerRegistrationsBeforeRestore,
+          targetCommit: previousCommit,
+        });
+        if (refusal === null) {
+          windowOpenedAt ??= Date.now();
+          if (Date.now() - windowOpenedAt >= observationWindowMs) return;
+        } else if (windowOpenedAt !== null) {
+          fail("previous-service-verification-failed", `observation-window-regressed-${refusal}`);
+        } else {
+          lastReason = refusal;
+        }
+        if (Date.now() >= deadline) break;
+        await serviceVerificationWait(1_000);
       }
+      fail(
+        "previous-service-verification-failed",
+        windowOpenedAt === null ? lastReason : `observation-window-incomplete-${observationWindowMs}ms`,
+      );
     },
     escalate: writeEscalation,
     markEscalationNotified: async () => markEscalationNotified({ path: ESCALATION_PATH }),
