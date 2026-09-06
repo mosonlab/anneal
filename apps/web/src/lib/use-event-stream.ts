@@ -17,7 +17,6 @@ export const BACKOFF_CEILING_MS = 15_000;
 
 export type EventPage = {
   events: SessionEvent[];
-  nextAfterSeq: number | null;
   hasMore: boolean;
   total: number;
 };
@@ -30,15 +29,21 @@ export const nextIntervalMs = (emptyPolls: number): number => {
   return Math.min(POLL_MS * 2 ** (emptyPolls - (BACKOFF_AFTER_EMPTY - 1)), BACKOFF_CEILING_MS);
 };
 
-/** Tolerates an API that still returns a bare array (deploy ordering, spec §6).
- *  The old route ignores `afterSeq` and returns the run's whole history every
- *  time, so the adapter must *filter*, not merely wrap: wrapping alone would
- *  re-append every event on every poll. */
-export const toEnvelope = (body: unknown, afterSeq: number | null): EventPage => {
-  if (!Array.isArray(body)) return body as EventPage;
-  const rows = body as SessionEvent[];
-  const events = afterSeq === null ? rows : rows.filter((row) => row.seq > afterSeq);
-  return { events, nextAfterSeq: events.at(-1)?.seq ?? null, hasMore: false, total: rows.length };
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** Validate the event route envelope at the network boundary. Row contents
+ * retain the API contract; rendering tolerance lives in session-stream.ts. */
+export const parseEventPage = (body: unknown): EventPage => {
+  if (!isRecord(body)
+    || !Array.isArray(body.events)
+    || typeof body.hasMore !== "boolean"
+    || typeof body.total !== "number"
+    || !Number.isInteger(body.total)
+    || body.total < 0) {
+    throw new Error("Invalid session event page response");
+  }
+  return { events: body.events as SessionEvent[], hasMore: body.hasMore, total: body.total };
 };
 
 export const useEventStream = (runId: string | null, terminal: boolean): {
@@ -84,13 +89,12 @@ export const useEventStream = (runId: string | null, terminal: boolean): {
       const afterSeq = highestSeqRef.current;
       const query = `?limit=${EVENT_PAGE}${afterSeq === null ? "" : `&afterSeq=${afterSeq}`}`;
       const body = await api.get<unknown>(`/runs/${runId}/events${query}`);
-      return cancelled ? null : toEnvelope(body, afterSeq);
+      return cancelled ? null : parseEventPage(body);
     };
 
     const absorb = (page: EventPage): number => {
       // Dedup by seq: unique and ascending per session, so one comparison is
-      // enough. Belt and braces on top of toEnvelope — it also covers a new-API
-      // response that overlaps after a reload().
+      // enough. Keep this guard for an overlapping page after a reload().
       const held = highestSeqRef.current;
       const fresh = page.events.filter((row) => held === null || row.seq > held);
       setTotal(page.total);
