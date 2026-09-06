@@ -26,6 +26,7 @@ import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import nodeTest from "node:test";
 import { fileURLToPath } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 
 // Sourced by the harnesses below rather than restated in them. The verdict's
 // exit codes and the four lines that carry them live in one file, and a fixture
@@ -415,6 +416,7 @@ const runVerdict = (scenario) => {
     const script = join(root, "verdict.sh");
     writeFileSync(script, `${VERDICT_HARNESS}\n${scenario}\n`);
     const result = spawnSync("bash", [script], { encoding: "utf8" });
+    assert.match(stripVTControlCharacters(result.stdout ?? "").trim().split("\n").at(-1) ?? "", /^(?:MERGE GATE:|GATE NOT RUN:)/);
     return { status: result.status, stdout: result.stdout ?? "" };
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -450,6 +452,38 @@ test("VERDICT a step that really failed is still a FAIL naming it", () => {
   assert.equal(run.status, 1);
   assert.match(run.stdout, /MERGE GATE: FAIL \(a step\)/);
   assert.doesNotMatch(run.stdout, /GATE NOT RUN/);
+});
+
+test("VERDICT a cleanup that failed after every step passed is not a FAIL", () => {
+  // The container would not delete, or the lock would not release. That is the
+  // host failing to finish tearing this run down, and it says nothing about the
+  // commit: reporting FAIL here hands a reviewer a judgement no step formed.
+  // It is not a PASS either — the gate promises the container is gone — so it
+  // is the code that already means "every step passed and this may still not
+  // authorise a merge".
+  const run = runVerdict(`release_lock() { return 1; }\nexit 0`);
+  assert.equal(run.status, 3);
+  assert.match(run.stdout, /MERGE GATE: NOT AUTHORITATIVE \(cleanup: the merge gate lock could not be released\)/);
+  assert.doesNotMatch(run.stdout, /MERGE GATE: FAIL/);
+  assert.doesNotMatch(run.stdout, /MERGE GATE: PASS/);
+});
+
+test("VERDICT container cleanup failure and intentional retention end with their verdict", () => {
+  const failed = runVerdict(`POSTGRES_STARTED=1\ndocker() { return 1; }\nexit 0`);
+  assert.equal(failed.status, 3);
+  assert.match(failed.stdout, /NOT AUTHORITATIVE \(cleanup: postgres container stub could not be removed\)/);
+  const kept = runVerdict(`KEEP_POSTGRES=1\nexit 0`);
+  assert.equal(kept.status, 3);
+  assert.match(kept.stdout, /NOT AUTHORITATIVE \(--keep-postgres\)/);
+});
+
+test("VERDICT a cleanup that failed after a step failed is still that step's FAIL", () => {
+  // The boundary. This run did judge the commit, and nothing about the teardown
+  // afterwards may turn that judgement into an errand.
+  const run = runVerdict(`release_lock() { return 1; }\nFAILED_STEP="a step"\nexit 1`);
+  assert.equal(run.status, 1);
+  assert.match(run.stdout, /MERGE GATE: FAIL \(a step\)/);
+  assert.doesNotMatch(run.stdout, /NOT AUTHORITATIVE/);
 });
 
 test("VERDICT a clean run still passes and still names its commit", () => {
