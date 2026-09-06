@@ -31,8 +31,6 @@ export const MUTATING_OPERATIONS = [
   "disablePullRequestAutoMerge",
   "dequeuePullRequest",
 ] as const;
-export type MutatingOperation = (typeof MUTATING_OPERATIONS)[number];
-
 export type CheckEntry =
   | { kind: "CheckRun"; name: string; conclusion: string | null; status: string | null }
   | { kind: "StatusContext"; context: string; state: string | null };
@@ -510,5 +508,3 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
 
   return { readPullRequest, mergePullRequest, disableAutoMerge, dequeuePullRequest, graphql };
 };
-
-export type GitHubClient = ReturnType<typeof makeGitHubClient>;
