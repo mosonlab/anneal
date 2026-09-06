@@ -59,14 +59,28 @@ type ChainSuccessor = Prisma.TaskGetPayload<{ include: { runs: true; assigneeAge
  * guards count against it across ALL of a task's runs — a latest-run-only read
  * misses an older WAITING_INBOX run hiding behind a newer terminal one.
  * `app.ts`'s `activeRunStatuses` remains a different concept (a lease).
+ *
+ * The answer is spelled as a `Record<RunStatus, boolean>` rather than a list so
+ * that adding a RunStatus to the schema is a compile error here — the copies in
+ * `packages/api/src/workspace-reclaim.ts` and `apps/web/src/lib/board.ts` are
+ * derived from or checked against this one, and a list would let a new status
+ * default silently to "terminal" in all three.
  */
-export const ACTIVE_RUN_STATUSES: RunStatus[] = [
-  RunStatus.QUEUED,
-  RunStatus.CLAIMED,
-  RunStatus.PROVISIONING,
-  RunStatus.RUNNING,
-  RunStatus.WAITING_INBOX,
-];
+const RUN_STATUS_IS_ACTIVE: Readonly<Record<RunStatus, boolean>> = {
+  [RunStatus.QUEUED]: true,
+  [RunStatus.CLAIMED]: true,
+  [RunStatus.PROVISIONING]: true,
+  [RunStatus.RUNNING]: true,
+  [RunStatus.WAITING_INBOX]: true,
+  [RunStatus.SUCCEEDED]: false,
+  [RunStatus.FAILED]: false,
+  [RunStatus.TIMED_OUT]: false,
+  [RunStatus.CANCELLED]: false,
+  [RunStatus.LOST]: false,
+};
+
+export const ACTIVE_RUN_STATUSES: RunStatus[] = Object.values(RunStatus)
+  .filter((status) => RUN_STATUS_IS_ACTIVE[status]);
 
 /**
  * "This task is a live reference to its assignee." Every status here is one the
