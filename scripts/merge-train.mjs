@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import {
   acquireMergeLease,
   isMergeLeaseReleaseAnomaly,
+  mergeLeaseHoldSeconds,
   releaseMergeLease,
 } from "./merge-lease-adapter.mjs";
 
@@ -147,6 +148,7 @@ const realAdapters = {
   readMain,
   readPullRequest: defaultReadPullRequest,
   releaseLease: releaseMergeTrainLease,
+  now: () => new Date(),
   sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
 };
 
@@ -270,6 +272,10 @@ const validateLeaseWaitMinutes = (value) => {
   }
 };
 
+/**
+ * Coordinate one fixed FIFO batch: build, gate, then publish the longest
+ * contiguous passing prefix under the merge lease.
+ */
 export const coordinateMergeTrain = async ({
   repoRoot, task, candidates, leaseWaitMinutes = DEFAULT_LEASE_WAIT_MINUTES, adapters: overrides = {},
 }) => {
@@ -307,6 +313,15 @@ export const coordinateMergeTrain = async ({
   let buildWorktreeAdded = false;
   let leaseHeld = false;
   let safeToRelease = false;
+  // The chain tail records every confirmed release as a hold duration
+  // (packages/api/src/merge-lease-hold.ts). The train held the same lease and
+  // recorded nothing, so the two kinds of hold could not be compared. Both now
+  // measure the release the same way, from the acquiredAt in the lease blob the
+  // release confirmed. The release is in the `finally` below, which runs before
+  // a returned result reaches the caller, so the hold is attached to the result
+  // object the publication path built rather than carried out beside it.
+  let leaseHeldForSeconds = null;
+  let publication = null;
   let primaryError = null;
   try {
     buildWorktreeAdded = true;
@@ -357,7 +372,7 @@ export const coordinateMergeTrain = async ({
     safeToRelease = true;
     let liveMain = await adapters.readMain(repoRoot);
     if (liveMain !== baseSha) {
-      return {
+      publication = {
         status: "stale-base",
         baseSha,
         liveMain,
@@ -367,6 +382,7 @@ export const coordinateMergeTrain = async ({
         gateResults,
         published: [],
       };
+      return publication;
     }
 
     let candidateDrift = null;
@@ -392,7 +408,7 @@ export const coordinateMergeTrain = async ({
 
     const warnings = await verifyPublishedCandidates(repoRoot, published, adapters);
     const allPendingPublished = published.length === pending.length;
-    return {
+    publication = {
       status: allPendingPublished ? "published-all" : published.length > 0 ? "published-prefix" : "candidate-drift",
       baseSha,
       liveMain,
@@ -404,6 +420,7 @@ export const coordinateMergeTrain = async ({
       published,
       warnings,
     };
+    return publication;
   } catch (error) {
     primaryError = error;
     throw error;
@@ -416,6 +433,18 @@ export const coordinateMergeTrain = async ({
           if (isMergeLeaseReleaseAnomaly(release)) {
             const detail = release.detail ?? release.heldFor ?? release.heldBy ?? "no detail";
             cleanupError = new Error(`merge Lease release ${release.outcome}: ${detail}`);
+          } else if (release.outcome === "released") {
+            leaseHeldForSeconds = mergeLeaseHoldSeconds(release.acquiredAt, adapters.now());
+            // The lease is already back either way, so a hold that cannot be
+            // measured is a missing measurement rather than a failed release:
+            // it is said out loud and the publication result stands.
+            if (leaseHeldForSeconds === null) {
+              process.stderr.write(
+                `merge-train: released the merge lease but could not measure the hold from acquiredAt ${String(release.acquiredAt)}\n`,
+              );
+            } else {
+              process.stderr.write(`merge-train: held the merge lease for ${leaseHeldForSeconds}s\n`);
+            }
           }
         } catch (error) {
           cleanupError = error;
@@ -444,6 +473,9 @@ export const coordinateMergeTrain = async ({
       if (!primaryError) throw cleanupError;
       process.stderr.write(`merge-train: cleanup also failed: ${cleanupError.message}\n`);
     }
+    // `heldForSeconds` is the name the chain tail records its hold under
+    // (packages/api/src/merge-lease-hold.ts), so the two are comparable.
+    if (publication && leaseHeldForSeconds !== null) publication.heldForSeconds = leaseHeldForSeconds;
   }
 };
 
@@ -458,6 +490,7 @@ publishes only the longest contiguous passing prefix under the merge lease.
   --lease-wait-minutes <n>  Wait up to n whole minutes for the publication lease
                             (default: 10; 0 tries immediately).
 On lease-contended, JSON includes leaseWaitedMs (elapsed acquisition milliseconds).
+When the lease was held and released, JSON includes heldForSeconds.
 `);
 };
 
@@ -511,6 +544,7 @@ const main = async () => {
   const summary = {
     status: result.status,
     ...(result.status === "lease-contended" ? { leaseWaitedMs: result.leaseWaitedMs } : {}),
+    ...(result.heldForSeconds === undefined ? {} : { heldForSeconds: result.heldForSeconds }),
     baseSha: result.baseSha,
     liveMain: result.liveMain ?? result.baseSha,
     alreadyDelivered: result.alreadyDelivered.map((candidate) => candidate.pullRequest),

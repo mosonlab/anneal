@@ -50,6 +50,8 @@ import {
   type WithMergeLease,
 } from "./merge-lease.js";
 import type { MergeLeaseTarget } from "./merge-lease-hold.js";
+import { clearLeaseContention, noteLeaseContention } from "./merge-lease-contention.js";
+import type { MergeLeaseHolder } from "../../../scripts/merge-lease-adapter.mjs";
 import {
   claimReadinessStep,
   READINESS_CLAIM_LEASE_MS,
@@ -718,6 +720,52 @@ const applyReadinessDecision = async (
   });
 };
 
+/**
+ * Contention bookkeeping is what the tick reports, not what it depends on: the
+ * lease is held either way and this chain comes back on the next tick. A failed
+ * write is said out loud here rather than raised, because the readiness catch
+ * below stops the merge tail, and losing visibility of a contention must not
+ * also stop the chain that reported it.
+ */
+const recordContention = async (
+  db: PrismaClient,
+  input: {
+    target: MergeLeaseTarget | null;
+    readinessTaskId: string;
+    holder: MergeLeaseHolder | null;
+    now: Date;
+    claim: ReadinessClaimHandle;
+  },
+): Promise<void> => {
+  if (!input.target) return;
+  try {
+    await noteLeaseContention(db, {
+      target: input.target,
+      readinessTaskId: input.readinessTaskId,
+      holder: input.holder,
+      now: input.now,
+      claim: input.claim,
+    });
+  } catch (error: unknown) {
+    console.error(`Recording merge Lease contention for chain ${input.target.chainId} failed`, error);
+  }
+};
+
+const forgetContention = async (
+  db: PrismaClient,
+  target: MergeLeaseTarget | null,
+  readinessTaskId: string,
+  now: Date,
+  claim: ReadinessClaimHandle,
+): Promise<void> => {
+  if (!target) return;
+  try {
+    await clearLeaseContention(db, { target, readinessTaskId, now, claim });
+  } catch (error: unknown) {
+    console.error(`Clearing merge Lease contention for chain ${target.chainId} failed`, error);
+  }
+};
+
 const runReadinessDecision = async (
   db: PrismaClient,
   read: ClaimedReadiness,
@@ -732,6 +780,19 @@ const runReadinessDecision = async (
     kind: "pre-acquire",
     release: releaseChainLease,
   });
+  const target: MergeLeaseTarget | null = readiness.chainId
+    ? { projectId: readiness.projectId, chainId: readiness.chainId }
+    : null;
+
+  // The alert window measures continuous contention, so anything other than
+  // another refusal breaks the run. Only an authorization reaches for the
+  // Lease; a skip, deferral, requeue or stop settles before it and ends the
+  // episode here, while this Handle still owns the Step -- a settling
+  // transition clears the claim, and the fenced write would then be refused.
+  if (decision.kind !== "authorize") {
+    await forgetContention(db, target, readiness.id, read.input.now, claim);
+  }
+
   const application = await applyReadinessDecision(
     read,
     decision,
@@ -739,10 +800,6 @@ const runReadinessDecision = async (
     preAcquireRunner,
   );
   if (application.kind === "settled") return;
-
-  const target: MergeLeaseTarget | null = readiness.chainId
-    ? { projectId: readiness.projectId, chainId: readiness.chainId }
-    : null;
 
   // From the base this authorization pins to the merge that consumes it,
   // `main` must not move. The Handle records the successor Run before its
@@ -752,6 +809,12 @@ const runReadinessDecision = async (
       const ownership = await claim.ownershipAfterLoss(db);
       return { leaseOutcome: heldLeaseOutcome(ownership, regression.id), value: "claim-lost" as const };
     }
+
+    // Taking the Lease is the answer other than contention that ends the
+    // episode, and it is recorded here rather than after the window closes:
+    // the settlement below may be the terminal transition, which clears the
+    // claim this write is fenced by.
+    await forgetContention(db, target, readiness.id, read.input.now, claim);
 
     // Regression evidence is durable before this short Lease window. Repeat
     // the remote decision after acquisition so a base move between the first
@@ -778,8 +841,20 @@ const runReadinessDecision = async (
       value,
     };
   }, db);
-  if (leased.outcome === "contended") return;
+  if (leased.outcome === "contended") {
+    await recordContention(db, {
+      target,
+      readinessTaskId: readiness.id,
+      holder: leased.holder ?? null,
+      now: read.input.now,
+      claim,
+    });
+    return;
+  }
   if (leased.outcome === "unreachable") {
+    // An origin this tick could not reach is not another refusal by the holder,
+    // so it breaks the run of contended results the window counts.
+    await forgetContention(db, target, readiness.id, read.input.now, claim);
     if (!leased.releaseDeferred) {
       await recordLeaseDeferral(db, {
         readinessTaskId: readiness.id,
@@ -790,6 +865,8 @@ const runReadinessDecision = async (
     }
     return;
   }
+  // The remaining outcome is a Lease this tick took: the episode was already
+  // ended inside the window, above, while the claim was still ours.
   if (leased.value === "authorized") result.authorized += 1;
 };
 
@@ -825,6 +902,15 @@ export const readinessTick = async (
       if (error instanceof LeaseReleaseDeferralRecordError) throw error;
       const refusalCode = error instanceof MergeRecoveryRefusalError ? error.refusalCode : null;
       const reason = `readiness evaluation failed: ${error instanceof Error ? error.message : String(error)}`;
+      // Stopping the tail is not another refusal by the holder either, and the
+      // stop below releases the claim this write is fenced by.
+      await forgetContention(
+        db,
+        readiness.chainId ? { projectId: readiness.projectId, chainId: readiness.chainId } : null,
+        readiness.id,
+        new Date(),
+        read.claim,
+      );
       const runner = createReadinessSettlementRunner(db, {
         kind: "pre-acquire",
         release: releaseChainLease,
