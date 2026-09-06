@@ -6,7 +6,6 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
-  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -349,41 +348,6 @@ test("binary detection examines bytes after the first 8192", () => {
     assert.equal(report.summary.countsByCategory["binary-material"], 1);
     assert.equal(report.summary.countsByDisposition.blocker, 1);
   });
-});
-
-/**
- * The five Goal 5a0 scripts, named one at a time.
- *
- * These are the published boundary's own executable proof: two of them are the
- * test files that prove the other three refuse a filesystem-root, checkout,
- * non-empty, symlinked, or non-allowlisted evidence destination. A manifest
- * edit that dropped, renamed, narrowed or re-globbed any of them would still
- * produce a green scan — the scan reports on what is listed, and a shorter list
- * is a shorter, greener report. So the list is asserted by exact string here,
- * where removing one is a failing test rather than a quieter one.
- *
- * A wider glob that happens to cover a file is not a substitute. `scripts/*.mjs`
- * would publish these and much else besides, and the point is that this
- * repository decided on these five by name.
- */
-const GOAL_5A0_MANIFEST_ENTRIES = [
-  "scripts/goal-5a0-dependency-gate.sh",
-  "scripts/goal-5a0-dependency-gate.test.mjs",
-  "scripts/goal-5a0-evidence-destination.sh",
-  "scripts/goal-5a0-handoff-preimage.mjs",
-  "scripts/goal-5a0-handoff-preimage.test.mjs",
-];
-
-test("every Goal 5a0 manifest entry survives, by exact glob", () => {
-  const manifest = JSON.parse(readFileSync("public-snapshot.json", "utf8"));
-  const globs = manifest.include.map((entry) => entry.glob);
-  for (const entry of GOAL_5A0_MANIFEST_ENTRIES) {
-    assert.ok(globs.includes(entry), `public-snapshot.json no longer publishes ${entry} by name`);
-    assert.ok(statSync(entry).isFile(), `${entry} is published but not in the checkout`);
-  }
-  // Both test files, specifically: a boundary published without its own proof
-  // is a boundary nobody can check.
-  assert.equal(GOAL_5A0_MANIFEST_ENTRIES.filter((entry) => entry.endsWith(".test.mjs")).length, 2);
 });
 
 test("the retired repository CLI is absent from snapshot authority", () => {

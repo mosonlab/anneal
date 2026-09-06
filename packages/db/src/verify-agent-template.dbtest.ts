@@ -511,7 +511,7 @@ test("--project refuses the differences canonical sync would adopt", async () =>
 test("default verification keeps the complete-inventory requirement and success sentence", async () => {
   const verified = verify();
   assert.equal(verified.status, 0, verified.output);
-  assert.match(verified.output, /Agent\/template contract verified for 19 active agents and 24 steps across 3 templates\./u);
+  assert.match(verified.output, /Agent\/template contract verified for 20 active agents and 24 steps across 3 templates\./u);
 
   const canonical = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const customized = await prisma.agent.findUniqueOrThrow({
