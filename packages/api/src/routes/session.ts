@@ -24,9 +24,11 @@ import {
 } from "@anneal/db";
 import type { PrismaClient } from "@anneal/db";
 import type { Session as SessionContract } from "@anneal/db/board-contract";
+import { parseSessionListFilters } from "@anneal/db/session-filter-contract";
 import type { SerializesTo } from "@anneal/db/wire-serialization";
 import { z } from "zod";
 
+import { chainDisplayByTask } from "../board.js";
 import {
   isCanonicalBlindFindingsStep,
   outputIsImmutableOncePersisted,
@@ -53,6 +55,7 @@ import {
   type RunFence,
   withFencedRun,
 } from "../run-fence.js";
+import { sessionListWhere } from "../session-list-query.js";
 import {
   FILE_WRITE_LIMIT,
   fileErrorResponse,
@@ -549,6 +552,10 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
       task: {
         select: {
           id: true, name: true,
+          // The chain the Sessions list filters on, and the template step that
+          // is the only lossless proof of an instantiated chain's name.
+          chainId: true,
+          templateStep: { select: { name: true } },
           stepOutput: { select: { kind: true, body: true, runId: true } },
           // §SF-1: an unauthored output row can only mean the task's newest run.
           runs: { orderBy: { runNumber: "desc" }, take: 1, select: { id: true } },
@@ -578,23 +585,65 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
       return { ...session, mergeOutcome: owns ? projectMergeOutcome(output) : null };
     };
 
+    type ChainIdentitySubject = {
+      projectId: string;
+      task: {
+        id: string;
+        name: string;
+        chainId: string | null;
+        templateStep: { name: string } | null;
+      } | null;
+    };
+    /**
+     * Projects each session's task down to the chain identity the wire contract
+     * declares. The list supplies all tasks for the chains represented on the page,
+     * so filtering and paging cannot hide a direct chain's name. A
+     * lone row proves one only through its template-step suffix. The include
+     * fields the merge outcome needed do not survive the projection.
+     */
+    const chainIdentityFrom = <T extends ChainIdentitySubject>(page: readonly T[], chainTasks?: Parameters<typeof chainDisplayByTask>[0]) => {
+      const display = chainDisplayByTask(chainTasks ?? page.flatMap((session) => (session.task === null ? [] : [{
+        id: session.task.id,
+        projectId: session.projectId,
+        name: session.task.name,
+        chainId: session.task.chainId,
+        templateStep: session.task.templateStep,
+      }])));
+      return ({ task, ...session }: T) => ({
+        ...session,
+        task: task === null ? null : {
+          id: task.id,
+          name: task.name,
+          chainId: task.chainId,
+          chainName: display.get(task.id)?.chainName ?? null,
+        },
+      });
+    };
+
     app.get("/sessions", async (context) => {
+      // A present-but-unusable filter refuses by name rather than being dropped:
+      // a narrowed list that silently widened would read as an answer.
+      const parsed = parseSessionListFilters((parameter) => context.req.query(parameter));
+      if (parsed.refusal !== undefined) {
+        return refusalJson(context, refusal("invalid-request", parsed.refusal.message, { code: parsed.refusal.code }));
+      }
       const projectId = context.req.query("projectId");
       const limit = Math.min(Math.max(Number.parseInt(context.req.query("limit") ?? "50", 10) || 50, 1), 200);
       const before = context.req.query("before");
-      const beforeDate = before ? new Date(before) : null;
-      const sessions = (await db.session.findMany({
-        where: {
-          ...(projectId ? { projectId } : {}),
-          // An unparseable cursor drops the filter rather than reaching Prisma as
-          // an Invalid Date and surfacing as a 500.
-          ...(beforeDate && !Number.isNaN(beforeDate.getTime()) ? { requestedAt: { lt: beforeDate } } : {}),
-        },
+      const page = (await db.session.findMany({
+        where: sessionListWhere(parsed.filters, { projectId, before: before ? new Date(before) : null }),
         include: sessionInclude,
         orderBy: { requestedAt: "desc" },
         take: limit,
-      })).map(withMergeOutcome) satisfies SessionResponse[];
-      return context.json(sessions);
+      })).map(withMergeOutcome);
+      const chains = new Map(page.flatMap((session) => session.task?.chainId
+        ? [[`${session.projectId}\u0000${session.task.chainId}`, { projectId: session.projectId, chainId: session.task.chainId }] as const]
+        : []));
+      const chainTasks = chains.size === 0 ? [] : await db.task.findMany({
+        where: { OR: [...chains.values()] },
+        select: { id: true, projectId: true, name: true, chainId: true, templateStep: { select: { name: true } } },
+      });
+      return context.json(page.map(chainIdentityFrom(page, chainTasks)) satisfies SessionResponse[]);
     });
 
     app.get("/sessions/:sessionId", async (context) => {
@@ -602,9 +651,9 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
         where: { id: id.parse(context.req.param("sessionId")) },
         include: sessionInclude,
       });
-      return session
-        ? context.json(withMergeOutcome(session) satisfies SessionResponse)
-        : context.json({ error: "Session not found" }, 404);
+      if (session === null) return context.json({ error: "Session not found" }, 404);
+      const row = withMergeOutcome(session);
+      return context.json(chainIdentityFrom([row])(row) satisfies SessionResponse);
     });
 
     app.post("/runs/:runId/cancel", async (context) => {
