@@ -3,6 +3,8 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { createRequire } from "node:module";
 import { join, sep } from "node:path";
 
+import { RUNTIME_TOOL_FILES, expectedDirectoryEntries } from "../../packages/runner/scripts/build-runtime-tools.mjs";
+
 import {
   DEPLOY_OPTIONAL_ARTIFACT_PATHS,
   DEPLOY_REQUIRED_ARTIFACT_PATHS,
@@ -16,19 +18,6 @@ const SHA = /^[0-9a-f]{40}$/u;
 const RELEASE = /^(?<commit>[0-9a-f]{40})-(?<digest>[0-9a-f]{64})$/u;
 const RELEASE_ARTIFACT_SCRIPT = "scripts/deploy/release-artifact.mjs";
 const RUNTIME_TOOL_ROOT = "packages/runner/dist/runtime-tools";
-const RUNTIME_TOOL_DESTINATIONS = Object.freeze([
-  "git-credential-runner.sh",
-  "regression-verification.sh",
-  "gate-worker/gate-dispatch.sh",
-  "gate-worker/lib.sh",
-  "gate-worker/mirror-push.sh",
-  "gate-worker/remote-gate.sh",
-  "gate-worker/run-gate.sh",
-]);
-const RUNTIME_TOOL_ENTRIES = new Map([
-  ["", new Set(["gate-worker", "git-credential-runner.sh", "regression-verification.sh"])],
-  ["gate-worker", new Set(["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"])],
-]);
 
 const CLONE_ATTEMPT_LIMIT = 3;
 const CLONE_RETRY_DELAYS_MS = Object.freeze([2_000, 8_000]);
@@ -78,7 +67,7 @@ const sortedEntryNames = (path) => readdirSync(path, { withFileTypes: true }).ma
 const assertRuntimeToolInventory = (releaseDirectory) => {
   const runtimeRoot = join(releaseDirectory, RUNTIME_TOOL_ROOT);
   assertRuntimeToolDirectory(releaseDirectory, RUNTIME_TOOL_ROOT);
-  for (const [directory, expectedNames] of RUNTIME_TOOL_ENTRIES) {
+  for (const [directory, expectedNames] of expectedDirectoryEntries()) {
     const relativeDirectory = directory ? `${RUNTIME_TOOL_ROOT}/${directory}` : RUNTIME_TOOL_ROOT;
     const directoryPath = join(releaseDirectory, relativeDirectory);
     if (directory) assertRuntimeToolDirectory(releaseDirectory, relativeDirectory);
@@ -87,10 +76,9 @@ const assertRuntimeToolInventory = (releaseDirectory) => {
     if (JSON.stringify(observedNames) !== JSON.stringify(expected)) {
       runtimeFailure(`${relativeDirectory}-inventory-mismatch`);
     }
-    for (const name of expectedNames) {
-      if (name === "gate-worker") continue;
-      assertRuntimeToolFile(releaseDirectory, `${relativeDirectory}/${name}`);
-    }
+  }
+  for (const { destination } of RUNTIME_TOOL_FILES) {
+    assertRuntimeToolFile(releaseDirectory, `${RUNTIME_TOOL_ROOT}/${destination}`);
   }
 
   // Runtime tools are runner-owned. Reject another runtime-tools component or
@@ -118,7 +106,7 @@ const assertRuntimeToolInventory = (releaseDirectory) => {
   walk(releaseDirectory, "");
   return Object.freeze({
     root: runtimeRoot,
-    files: Object.freeze(RUNTIME_TOOL_DESTINATIONS.map((destination) => `${RUNTIME_TOOL_ROOT}/${destination}`)),
+    files: Object.freeze(RUNTIME_TOOL_FILES.map(({ destination }) => `${RUNTIME_TOOL_ROOT}/${destination}`)),
   });
 };
 
