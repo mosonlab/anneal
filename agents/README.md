@@ -11,6 +11,14 @@ and full-tail readiness contract are maintained in the
 [Tier 0 / Tier 1 onboarding runbook](../docs/runbooks/add-a-project.md).
 Follow its Tier 1 checklist when onboarding another Project.
 
+For an already-seeded canonical project, `senior-dev-opus-high` and
+`frontend-dev-opus-high` rely on adoption of pre-existing active project Agent
+rows by name when their `canonicalRole` is null. Neither role is in
+`SPECIAL_CANONICAL_AGENTS` in `packages/db/prisma/sync-canonical-prompts.ts`, so
+ordinary canonical sync does not recreate a missing or archived row for these
+roles and refuses an incomplete canonical inventory. Fresh seeds install both
+roles from the source inventory.
+
 ## Changing a canonical prompt
 
 Editing any file under `templates/`, or changing a canonical template's

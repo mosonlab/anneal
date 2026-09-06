@@ -74,7 +74,7 @@ it can.
 
 ## Routing
 
-Implementation has six routes:
+Implementation has seven routes:
 
 - **senior-dev-luna-max** (template default): a brief with mechanical Acceptance
   is work that tier finishes under the chain's review and regression tail.

@@ -177,50 +177,26 @@ test("named canonical roles use their model catalog runner and retired role name
   assert.equal(canonical.has("review-adjudicator-opus"), false);
 });
 
-/**
- * The two frontend roles are one prompt at two efforts: the only permitted
- * difference is the `name` and `model` frontmatter lines, so a prompt edit that
- * lands on one file and not the other stops here rather than in production.
- */
-test("the frontend roles differ only in their name and model frontmatter lines", async () => {
-  const [medium, high] = await Promise.all([
-    roleSource("frontend-dev-opus-medium"),
-    roleSource("frontend-dev-opus-high"),
-  ]);
+/** Opus effort variants must preserve every line except name and model. */
+const withoutNameAndModelLines = (source: string): string[] => source
+  .split("\n")
+  .filter((line) => !/^(name|model):/u.test(line));
 
-  assert.equal(frontmatterValue(high, "name"), "frontend-dev-opus-high");
-  assert.equal(frontmatterValue(high, "model"), "claude-opus-5:high");
-  assert.equal(frontmatterValue(medium, "model"), "claude-opus-5:medium");
+for (const role of ["frontend-dev", "senior-dev"] as const) {
+  test(`the ${role} Opus roles differ only in their name and model frontmatter lines`, async () => {
+    const [medium, high] = await Promise.all([
+      roleSource(`${role}-opus-medium`),
+      roleSource(`${role}-opus-high`),
+    ]);
 
-  const withoutNameAndModelLines = (source: string): string[] => source
-    .split("\n")
-    .filter((line) => !/^(name|model):/u.test(line));
-  assert.deepEqual(withoutNameAndModelLines(high), withoutNameAndModelLines(medium));
-  assert.equal(bodyOf(high), bodyOf(medium));
-});
+    assert.equal(frontmatterValue(high, "name"), `${role}-opus-high`);
+    assert.equal(frontmatterValue(high, "model"), "claude-opus-5:high");
+    assert.equal(frontmatterValue(medium, "model"), "claude-opus-5:medium");
 
-/**
- * The two senior-dev Opus roles are one prompt at two efforts: the only
- * permitted difference is the `name` and `model` frontmatter lines, so a prompt
- * edit that lands on one file and not the other stops here rather than in
- * production.
- */
-test("the senior-dev Opus roles differ only in their name and model frontmatter lines", async () => {
-  const [medium, high] = await Promise.all([
-    roleSource("senior-dev-opus-medium"),
-    roleSource("senior-dev-opus-high"),
-  ]);
-
-  assert.equal(frontmatterValue(high, "name"), "senior-dev-opus-high");
-  assert.equal(frontmatterValue(high, "model"), "claude-opus-5:high");
-  assert.equal(frontmatterValue(medium, "model"), "claude-opus-5:medium");
-
-  const withoutNameAndModelLines = (source: string): string[] => source
-    .split("\n")
-    .filter((line) => !/^(name|model):/u.test(line));
-  assert.deepEqual(withoutNameAndModelLines(high), withoutNameAndModelLines(medium));
-  assert.equal(bodyOf(high), bodyOf(medium));
-});
+    assert.deepEqual(withoutNameAndModelLines(high), withoutNameAndModelLines(medium));
+    assert.equal(bodyOf(high), bodyOf(medium));
+  });
+}
 
 test("the split review prompts enforce persisted-range, blindness, and regression contracts", async () => {
   const [planReview, firstReview, blindReview, regressionVerification] = await Promise.all([
