@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import type { Stats } from "node:fs";
-import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type { RunOutcome } from "@anneal/db";
 import { RUN_COMPLETION_CONTRACT_VERSION, type MechanicalClaim } from "@anneal/db/claim-contract";
@@ -13,7 +13,7 @@ import { RUN_COMPLETION_CONTRACT_VERSION, type MechanicalClaim } from "@anneal/d
 import { makeAgentOsClient } from "./agentos.js";
 import type { ExecutorConfig } from "./config.js";
 import { mintInstallationToken } from "./github-app-auth.js";
-import { claimOnce, pollClaims, runClaim } from "./index.js";
+import { claimOnce, pollClaims, runClaim, type ClaimOnceResult } from "./index.js";
 import { makeLog, makeRedactor } from "./redaction.js";
 
 const config: ExecutorConfig = {
@@ -22,6 +22,7 @@ const config: ExecutorConfig = {
   runnerId: "merge-executor-1",
   leaseSeconds: 120,
   pollIntervalMs: 5_000,
+  contractRecheckMs: 60_000,
   apiTimeoutMs: 1_000,
   githubRestUrl: "https://api.github.test",
   githubGraphqlUrl: "https://api.github.test/graphql",
@@ -57,11 +58,11 @@ test("an idle claim poll never enters the run-scoped mint path", async () => {
   let runCalls = 0;
   const fetchImpl: typeof fetch = async () => new Response(null, { status: 204 });
   const result = await claimOnce(config, "/private/app.pem", log, fetchImpl, async () => { runCalls += 1; });
-  assert.equal(result, "idle");
+  assert.deepEqual(result, { kind: "idle" });
   assert.equal(runCalls, 0);
 });
 
-test("a completion-contract mismatch stops claim polling with one error and no retry", async () => {
+test("a completion-contract mismatch is reported to the caller with both versions and no retry", async () => {
   const requests: Array<{ url: string; body: string }> = [];
   const errors: string[] = [];
   const capturedLog = makeLog(makeRedactor(), {
@@ -82,7 +83,11 @@ test("a completion-contract mismatch stops claim polling with one error and no r
 
   const result = await claimOnce(config, "/private/app.pem", capturedLog, fetchImpl, async () => { runCalls += 1; });
 
-  assert.equal(result, "contract-mismatch");
+  assert.deepEqual(result, {
+    kind: "contract-mismatch",
+    executorVersion: RUN_COMPLETION_CONTRACT_VERSION - 1,
+    apiVersion: RUN_COMPLETION_CONTRACT_VERSION,
+  });
   assert.equal(runCalls, 0);
   assert.equal(requests.length, 1);
   assert.deepEqual(JSON.parse(requests[0]!.body), {
@@ -90,32 +95,103 @@ test("a completion-contract mismatch stops claim polling with one error and no r
     leaseSeconds: 120,
     contractVersion: RUN_COMPLETION_CONTRACT_VERSION,
   });
-  assert.equal(errors.length, 1);
-  assert.match(errors[0]!, new RegExp(`executorVersion.*${RUN_COMPLETION_CONTRACT_VERSION - 1}`, "u"));
-  assert.match(errors[0]!, new RegExp(`apiVersion.*${RUN_COMPLETION_CONTRACT_VERSION}`, "u"));
+  // The poll loop owns the mismatch log, because only it knows whether this is
+  // a new state or the same incompatibility observed one recheck later.
+  assert.equal(errors.length, 0);
 });
 
-test("a completion-contract mismatch parks the daemon until shutdown", async () => {
+test("a mismatched daemon rechecks on its own interval, logs each state change once, and runs until shutdown", async () => {
+  // The daemon used to exit here (node exited 13 on the unsettled await), so
+  // the service manager restarted it every ten seconds forever. It now stays
+  // alive, re-claims on the recheck interval, and resumes by itself when the
+  // API side adopts a compatible contract.
   const controller = new AbortController();
+  const slept: number[] = [];
+  const errors: string[] = [];
+  const infos: string[] = [];
+  const capturedLog = makeLog(makeRedactor(), {
+    log: (line: string) => infos.push(line),
+    warn: () => {},
+    error: (line: string) => errors.push(line),
+  });
+  const results: ClaimOnceResult[] = [
+    { kind: "contract-mismatch", executorVersion: 1, apiVersion: 2 },
+    { kind: "contract-mismatch", executorVersion: 1, apiVersion: 2 },
+    { kind: "idle" },
+  ];
   let claimCalls = 0;
   let settled = false;
+
   const polling = pollClaims({
     signal: controller.signal,
-    pollIntervalMs: 1,
-    log,
+    pollIntervalMs: 5_000,
+    contractRecheckMs: 60_000,
+    log: capturedLog,
     claim: async () => {
       claimCalls += 1;
-      return "contract-mismatch";
+      return results[claimCalls - 1] ?? { kind: "idle" };
+    },
+    sleep: async (ms: number) => {
+      slept.push(ms);
+      // Shut down inside the sleep that follows the cleared claim, so the loop
+      // is observed returning from a wait rather than from a claim.
+      if (claimCalls === 3) controller.abort();
     },
   }).then(() => { settled = true; });
 
-  await new Promise<void>((resolve) => { setImmediate(resolve); });
-  assert.equal(claimCalls, 1);
-  assert.equal(settled, false);
-
-  controller.abort();
   await polling;
+
   assert.equal(settled, true);
+  assert.equal(claimCalls, 3);
+  assert.deepEqual(slept, [60_000, 60_000, 5_000]);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0]!, /mechanical completion contract mismatch/u);
+  assert.match(errors[0]!, /executorVersion.*1/u);
+  assert.match(errors[0]!, /apiVersion.*2/u);
+  assert.equal(infos.length, 1);
+  assert.match(infos[0]!, /contract mismatch cleared/u);
+});
+
+test("a mismatched daemon process stays alive and still exits 0 on SIGTERM", async () => {
+  // The regression this stands in front of is a *process* fact: awaiting an
+  // abort listener alone left nothing keeping the event loop alive, so node
+  // exited 13 within a second. Only a real child process can show the park.
+  const here = fileURLToPath(new URL(".", import.meta.url));
+  const scratch = mkdtempSync(join(tmpdir(), "merge-executor-park-"));
+  try {
+    const script = join(scratch, "park.mjs");
+    writeFileSync(script, `
+import { pollClaims } from ${JSON.stringify(pathToFileURL(join(here, "index.ts")).href)};
+import { makeLog, makeRedactor } from ${JSON.stringify(pathToFileURL(join(here, "redaction.ts")).href)};
+
+const shutdown = new AbortController();
+process.on("SIGTERM", () => { shutdown.abort(); });
+await pollClaims({
+  signal: shutdown.signal,
+  pollIntervalMs: 1000,
+  contractRecheckMs: 50,
+  log: makeLog(makeRedactor(), { log: () => {}, warn: () => {}, error: () => {} }),
+  claim: async () => ({ kind: "contract-mismatch", executorVersion: 1, apiVersion: 2 }),
+});
+`);
+    const child = spawn(
+      process.execPath,
+      ["--conditions=development", "--import", import.meta.resolve("tsx"), script],
+      { cwd: scratch, env: { PATH: process.env.PATH ?? "" }, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    const exited = new Promise<number | null>((resolve) => { child.on("exit", (code) => resolve(code)); });
+
+    await new Promise<void>((resolve) => { setTimeout(resolve, 300); });
+    assert.equal(child.exitCode, null, `child exited early: ${stderr}`);
+
+    child.kill("SIGTERM");
+    assert.equal(await exited, 0, `child stderr was ${JSON.stringify(stderr)}`);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 });
 
 test("the mechanical start request matches the promptless API contract", async () => {

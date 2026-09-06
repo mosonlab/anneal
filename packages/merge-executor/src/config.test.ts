@@ -42,3 +42,19 @@ test("a missing or aliased executor token refuses the start", () => {
     /must not equal OPERATOR_TOKEN/u,
   );
 });
+
+test("the contract recheck interval defaults to a minute and refuses a non-positive value", () => {
+  // A mismatched daemon parks alive and re-claims on this interval, so the
+  // value bounds how often an incompatible executor talks to the API. A zero
+  // or negative setting would turn the park into a busy loop.
+  assert.equal(loadExecutorConfig(base).contractRecheckMs, 60_000);
+  assert.equal(loadExecutorConfig({ ...base, MERGE_EXECUTOR_CONTRACT_RECHECK_MS: "50" }).contractRecheckMs, 50);
+  assert.throws(
+    () => loadExecutorConfig({ ...base, MERGE_EXECUTOR_CONTRACT_RECHECK_MS: "0" }),
+    /MERGE_EXECUTOR_CONTRACT_RECHECK_MS must be a positive integer/u,
+  );
+  assert.throws(
+    () => loadExecutorConfig({ ...base, MERGE_EXECUTOR_CONTRACT_RECHECK_MS: "-1" }),
+    /MERGE_EXECUTOR_CONTRACT_RECHECK_MS must be a positive integer/u,
+  );
+});
