@@ -3,8 +3,7 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { createRequire } from "node:module";
 import { join, sep } from "node:path";
 
-import { RUNTIME_TOOL_FILES, expectedDirectoryEntries } from "../../packages/runner/scripts/build-runtime-tools.mjs";
-
+import { RUNTIME_TOOL_FILES, expectedDirectoryEntries } from "./runtime-tool-inventory.mjs";
 import {
   DEPLOY_OPTIONAL_ARTIFACT_PATHS,
   DEPLOY_REQUIRED_ARTIFACT_PATHS,
@@ -180,6 +179,18 @@ const verifyReleaseArtifactContents = (artifact) => {
   });
 };
 
+/**
+ * Load the verifier that the artifact itself ships.
+ *
+ * Rule: this module's static import graph may only reach Node builtins and
+ * modules inside `scripts/deploy/`. The artifact this loader reads was built
+ * by an older release, and that older builder decided which files it contains;
+ * `scripts/deploy` has been copied whole by every builder, so only a module
+ * that lives there is guaranteed to exist beside the verifier. An import that
+ * escapes the directory makes every artifact built before that import shipped
+ * unverifiable, and the release carrying the fix unverifiable with it.
+ * `release-artifact-import-graph.test.mjs` enforces this mechanically.
+ */
 const loadTargetVerifier = (root) => {
   const verifierPath = join(root, RELEASE_ARTIFACT_SCRIPT);
   let status;

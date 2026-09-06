@@ -181,11 +181,16 @@ test("buildRuntimeTools derives new nested directories from manifest destination
   const scriptPath = join(context.root, "build-runtime-tools.mjs");
   const destination = "additional/nested/tool.sh";
   const source = RUNTIME_TOOL_FILES[0].source;
-  const script = readFileSync(new URL("./build-runtime-tools.mjs", import.meta.url), "utf8");
-  writeFileSync(scriptPath, script.replace(
+  // The inventory is declared in scripts/deploy, so a copy of the build script
+  // gets a copy of the inventory beside it rather than the repository's.
+  const inventorySpecifier = "../../../scripts/deploy/runtime-tool-inventory.mjs";
+  const inventorySource = readFileSync(new URL(inventorySpecifier, import.meta.url), "utf8");
+  writeFileSync(join(context.root, "runtime-tool-inventory.mjs"), inventorySource.replace(
     "export const RUNTIME_TOOL_FILES = Object.freeze([",
     `export const RUNTIME_TOOL_FILES = Object.freeze([\n  Object.freeze(${JSON.stringify({ source, destination })}),`,
   ));
+  const script = readFileSync(new URL("./build-runtime-tools.mjs", import.meta.url), "utf8");
+  writeFileSync(scriptPath, script.replaceAll(inventorySpecifier, "./runtime-tool-inventory.mjs"));
   const target = await import(pathToFileURL(scriptPath).href);
   target.buildRuntimeTools(context);
   assert.deepEqual(inventory(context.outputRoot), [
