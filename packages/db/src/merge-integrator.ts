@@ -32,7 +32,7 @@ export const AUTHORIZED_MERGE_METHOD = "merge";
 
 /**
  * These ordinals describe persisted graph topology. Step role recognition uses
- * stepRole(); canonicalStepOrdinals supplies topology from the canonical registry.
+ * stepRole(); a chain's own persisted template steps supply its topology.
  */
 export const INTEGRATOR_STEP_INDEX = 12;
 export const DIRECT_INTEGRATOR_STEP_INDEX = 7;

@@ -3,9 +3,7 @@ import test from "node:test";
 
 import { PR_TEMPLATE_NAME } from "./agent-contract.js";
 import {
-  canonicalStepOrdinals,
   canonicalTemplateIdentity,
-  CURRENT_CANONICAL_STEP_ORDINALS,
   LEGACY_TEMPLATE_GENERATIONS,
 } from "./canonical-template-transition.js";
 import {
@@ -15,7 +13,7 @@ import {
 } from "./canonical-template-installation.js";
 import type { TemplateStepSource } from "./template-sources.js";
 
-test("the pull-request template has current identity, prompt history, and explicit repair ordinals", () => {
+test("the pull-request template has current identity and prompt history", () => {
   assert.equal(PR_TEMPLATE_NAME, "pr-engineer-workflow");
   assert.deepEqual(canonicalTemplateIdentity(PR_TEMPLATE_NAME), {
     canonicalName: PR_TEMPLATE_NAME,
@@ -40,18 +38,6 @@ test("the pull-request template has current identity, prompt history, and explic
       promptDigest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8",
     }],
   );
-  assert.deepEqual(CURRENT_CANONICAL_STEP_ORDINALS[PR_TEMPLATE_NAME], {
-    implementation: 1,
-    "sol-findings": 2,
-    "blind-findings": 3,
-    "fixed-implementation": 4,
-  });
-  assert.deepEqual(canonicalStepOrdinals(PR_TEMPLATE_NAME, null), {
-    implementation: 1,
-    "sol-findings": 2,
-    "blind-findings": 3,
-    "fixed-implementation": 4,
-  });
 });
 
 test("a matching no-history pull-request row is current, never a rollover", () => {

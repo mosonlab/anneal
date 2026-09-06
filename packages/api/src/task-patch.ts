@@ -14,6 +14,7 @@ import {
   Prisma,
   type PrismaClient,
   produceMergeAuthorization,
+  recordMergeEvidenceRefusal,
   rejectMergeReadinessGate,
   releaseMergeReadinessGate,
   ScheduleKind,
@@ -592,7 +593,10 @@ export const patchTask = async (
         await activateChainSuccessor(tx, updated, { sourceRunId: null }, new Date());
       }
       return { task: finalTask };
-    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted }).catch(async (error: unknown) => {
+      await recordMergeEvidenceRefusal(db, error);
+      throw error;
+    });
     if ("message" in written) return written;
     return { task: written.task };
   }
