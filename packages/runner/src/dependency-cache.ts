@@ -659,11 +659,16 @@ export const materializeWorkspaceDependencies = async (
         } as DependencyCacheProgress,
       };
     });
-    await timed("retention", report, () => store.enforceByteBudget(
-      locked.usableKey,
-      locked.newlyPublishedKey,
-      report,
-    ));
+    // Only a publication can grow the population, so only a publication pays
+    // for the exclusive byte-budget walk. A hit that also sized the cache would
+    // convoy every concurrent restore behind one full inode walk per runner.
+    if (locked.newlyPublishedKey !== undefined) {
+      await timed("retention", report, () => store.enforceByteBudget(
+        locked.usableKey,
+        locked.newlyPublishedKey,
+        report,
+      ));
+    }
     report(locked.successEvent);
     return locked.result;
   } finally {
