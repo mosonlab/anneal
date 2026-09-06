@@ -9,6 +9,17 @@ written.
 
 ## Unreleased
 
+- Session events are now bounded end to end. A runner holds at most 32 MiB and
+  20 000 undelivered events per Run: when that fills, the oldest liveness events
+  (streaming deltas, raw provider frames, captured stderr) are dropped and an
+  `EVENTS_DROPPED` event records how many and which sequence range; lifecycle,
+  tool, error and terminal events are never dropped. A single event payload
+  above 256 KiB is truncated to a `truncated` marker carrying its original size.
+  `POST /runner/runs/:runId/events` enforces the same per-event cap and a
+  request-body cap, answering 413 with the offending event's index so the runner
+  drops that one event and resends the rest. Heartbeats now carry
+  `eventQueueBytes`.
+
 - Removed `POST /inbox/messages/:messageId/supersede`;
   `POST /inbox/messages/:messageId/close` is now the only Inbox route whose sole
   purpose is closing a message. Archiving a task still closes its open merge-tail

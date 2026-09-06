@@ -25,6 +25,8 @@ Local runner -----> ephemeral git workspace
 - The local runner claims work with a fenced lease, clones the selected
   repository into a controlled per-run workspace, creates or resumes the run
   branch, preflights the selected CLI, and records structured provider events.
+  Those events are buffered in memory and delivered independently of lease
+  renewal, so the buffer is bounded: see the event caps below.
 - Codex and Claude receive the Anneal session tools over a per-run stdio MCP
   server. Pi receives the corresponding task tools through an extension.
 - Anneal does not ship a repository command-line interface. Operators use the
@@ -72,6 +74,21 @@ Local runner -----> ephemeral git workspace
   and Git/workspace provisioning and delivery commands. Conventional host proxy
   variables are ignored. A `RUNNER_RUN_AS_PREFIX` launcher must preserve the
   explicit environment; proxy URLs are not serialized into provider argv.
+- Session events are bounded end to end. The runner holds at most 32 MiB and
+  20 000 undelivered events per Run, truncates any single payload above 256 KiB
+  to a `truncated` marker carrying its original size, and forms batches of at
+  most 250 events or 1 MiB. The API enforces the same per-event cap and reads at
+  most the batch cap plus envelope overhead of request body, refusing more with
+  413. Because event delivery is detached from lease renewal, a Run whose event
+  writes keep failing stays leased and keeps producing events; without the bound
+  the runner grows until the host runs out of memory, sooner with several
+  runners on it. Bounding means choosing what to lose: liveness detail
+  (streaming deltas, raw provider frames, captured stderr) is dropped
+  oldest-first, lifecycle, tool, error and terminal events never are, and every
+  drop or truncation is itself recorded as an event. A 413 the API raises names
+  the one offending event, so the runner loses that event rather than wedging an
+  ordered queue that only advances on success. Both caps are declared once, in
+  `@anneal/db/session-event-limits`.
 - Exactly one API control plane may own a canonical workspace root. Ownership is
   acquired from the protected, API-only `CONTROL_PLANE_STATE_DIR` before Prisma
   is imported or reconciliation begins. Runner daemons remain ordinary clients,

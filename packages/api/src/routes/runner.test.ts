@@ -13,6 +13,12 @@ import {
   RUN_COMPLETION_CONTRACT_VERSION,
   mechanicalContractMismatch,
 } from "@anneal/db/claim-contract";
+import {
+  SESSION_EVENTS_REQUEST_MAX_BYTES,
+  SESSION_EVENTS_REQUEST_TOO_LARGE_CODE,
+  SESSION_EVENT_PAYLOAD_MAX_BYTES,
+  SESSION_EVENT_PAYLOAD_TOO_LARGE_CODE,
+} from "@anneal/db/session-event-limits";
 
 import { createApp } from "../test-app.js";
 import { withTokens } from "./test-support.js";
@@ -924,5 +930,75 @@ test("successful completion commits output and parks an archived chain successor
       if (previousRoot === undefined) delete process.env.RUNNER_WORKSPACE_ROOT;
       else process.env.RUNNER_WORKSPACE_ROOT = previousRoot;
     }
+  });
+});
+
+const eventsRequest = (body: unknown): Request => new Request("http://api.test/runner/runs/run-1/events", {
+  method: "POST",
+  headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
+  body: JSON.stringify(body),
+});
+
+test("an event over the payload cap is refused by index before database access", async () => {
+  await withTokens(async () => {
+    const events = [0, 1, 2, 3, 4].map((seq) => ({
+      seq,
+      source: "CLAUDE",
+      type: seq === 3 ? "TOOL_COMPLETED" : "MODEL_DELTA",
+      payload: { text: "x".repeat(seq === 3 ? SESSION_EVENT_PAYLOAD_MAX_BYTES + 1 : 8) },
+    }));
+    const response = await createApp({} as PrismaClient).fetch(eventsRequest({
+      runnerId: "runner-1", fencingToken: "fence-1", events,
+    }));
+
+    assert.equal(response.status, 413);
+    const body = await response.json() as Record<string, unknown>;
+    assert.equal(body["code"], SESSION_EVENT_PAYLOAD_TOO_LARGE_CODE);
+    assert.equal(body["eventIndex"], 3, "the runner drops exactly the named event and resends the rest");
+    assert.equal(body["seq"], 3);
+    assert.equal(body["limitBytes"], SESSION_EVENT_PAYLOAD_MAX_BYTES);
+    assert.ok((body["payloadBytes"] as number) > SESSION_EVENT_PAYLOAD_MAX_BYTES);
+  });
+});
+
+test("a batch inside the payload cap reaches the append", async () => {
+  await withTokens(async () => {
+    const database = {
+      $transaction: async () => ({ sessionId: "session-1" }),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).fetch(eventsRequest({
+      runnerId: "runner-1",
+      fencingToken: "fence-1",
+      events: [{ seq: 0, source: "CLAUDE", type: "MODEL_DELTA", payload: { text: "x".repeat(1024) } }],
+    }));
+
+    assert.equal(response.status, 200);
+  });
+});
+
+test("a request body over the events cap is refused unparsed", async () => {
+  await withTokens(async () => {
+    const oversized = JSON.stringify({
+      runnerId: "runner-1",
+      fencingToken: "fence-1",
+      // Individually legal events whose batch exceeds the whole-request cap.
+      events: Array.from({ length: 16 }, (_unused, seq) => ({
+        seq,
+        source: "CLAUDE",
+        type: "MODEL_DELTA",
+        payload: { text: "x".repeat(SESSION_EVENT_PAYLOAD_MAX_BYTES / 2) },
+      })),
+    });
+    assert.ok(oversized.length > SESSION_EVENTS_REQUEST_MAX_BYTES, "the fixture must exceed the cap it tests");
+    const response = await createApp({} as PrismaClient).fetch(new Request("http://api.test/runner/runs/run-1/events", {
+      method: "POST",
+      headers: { Authorization: "Bearer runner-unit-token", "Content-Type": "application/json" },
+      body: oversized,
+    }));
+
+    assert.equal(response.status, 413);
+    const body = await response.json() as Record<string, unknown>;
+    assert.equal(body["code"], SESSION_EVENTS_REQUEST_TOO_LARGE_CODE);
+    assert.equal(body["limitBytes"], SESSION_EVENTS_REQUEST_MAX_BYTES);
   });
 });

@@ -11,6 +11,13 @@ import {
   SessionEventSource,
   SessionExecutionStatus,
 } from "@anneal/db";
+import {
+  SESSION_EVENT_BATCH_MAX_EVENTS,
+  SESSION_EVENT_PAYLOAD_MAX_BYTES,
+  SESSION_EVENT_PAYLOAD_TOO_LARGE_CODE,
+  sessionEventPayloadTooLarge,
+  jsonByteLength,
+} from "@anneal/db/session-event-limits";
 import { z } from "zod";
 
 import type { Principal } from "./auth.js";
@@ -52,6 +59,10 @@ export const heartbeatInput = z.object({
   processAlive: z.boolean(),
   lastProgressEventAt: z.coerce.date().nullable().optional(),
   inFlightTool: z.record(z.string(), z.unknown()).nullable().optional(),
+  /** Undelivered session-event bytes this Run is holding in runner memory.
+   * Observability only: the runner's own bound is what protects that memory,
+   * and this route neither acts on the number nor persists it. */
+  eventQueueBytes: z.number().int().nonnegative().optional(),
   ...runnerTelemetryFields,
 });
 
@@ -100,8 +111,36 @@ export const eventsInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
   fencingToken: fence,
   providerConversationId: z.string().nullable().optional(),
-  events: z.array(eventInput).min(1).max(250),
+  events: z.array(eventInput).min(1).max(SESSION_EVENT_BATCH_MAX_EVENTS),
 });
+
+/**
+ * The refusal for the one event of a batch whose payload exceeds the cap.
+ *
+ * It names the index rather than failing the batch, because the runner removes
+ * events from its queue only once they are accepted: an unnamed 413 would leave
+ * an unacceptable event at the head of an ordered queue forever. `code` is the
+ * discriminator the runner matches on, and the sizes are here so the operator
+ * reading the log does not have to reconstruct why the event was refused.
+ */
+export const oversizedEventRefusal = (
+  events: readonly { seq: number; type: string; payload: unknown }[],
+): Refusal | null => {
+  const index = events.findIndex((event) => sessionEventPayloadTooLarge(event.payload));
+  if (index === -1) return null;
+  const event = events[index]!;
+  return {
+    reason: "event-payload-too-large",
+    message: `Session event ${event.seq} (${event.type}) payload exceeds the ${SESSION_EVENT_PAYLOAD_MAX_BYTES} byte cap`,
+    detail: {
+      code: SESSION_EVENT_PAYLOAD_TOO_LARGE_CODE,
+      eventIndex: index,
+      seq: event.seq,
+      payloadBytes: jsonByteLength(event.payload),
+      limitBytes: SESSION_EVENT_PAYLOAD_MAX_BYTES,
+    },
+  };
+};
 
 export type StartRunBody = z.infer<typeof mechanicalStartInput> & { promptHash: string | null };
 export type HeartbeatRunBody = z.infer<typeof heartbeatInput>;

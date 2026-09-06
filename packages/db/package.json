@@ -61,6 +61,11 @@
       "development": "./src/wire-serialization.ts",
       "import": "./dist/wire-serialization.js"
     },
+    "./session-event-limits": {
+      "types": "./src/session-event-limits.ts",
+      "development": "./src/session-event-limits.ts",
+      "import": "./dist/session-event-limits.js"
+    },
     "./claim-contract": {
       "types": "./src/claim-contract.ts",
       "development": "./src/claim-contract.ts",

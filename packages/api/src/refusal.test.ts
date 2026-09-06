@@ -33,6 +33,7 @@ const familyExample = {
   403: { reason: "forbidden", message: "forbidden" },
   404: { reason: "not-found", message: "missing" },
   409: { reason: "conflict", message: "conflict" },
+  413: { reason: "event-payload-too-large", message: "event too large" },
   422: { reason: "graph_empty", message: "empty graph" },
 } as const satisfies Record<RefusalStatus, Refusal>;
 
@@ -53,6 +54,8 @@ const refusalByReason = {
   "pinned-base-commit": { reason: "pinned-base-commit", message: "pinned base" },
   "merge-evidence": { reason: "merge-evidence", message: "merge evidence" },
   "merge-confirmation": { reason: "merge-confirmation", message: "merge confirmation" },
+  "event-payload-too-large": { reason: "event-payload-too-large", message: "event too large" },
+  "events-request-too-large": { reason: "events-request-too-large", message: "events request too large" },
   "inbox-question-not-found": { reason: "inbox-question-not-found", message: "missing question" },
   "approval-gate-decision-invalid": { reason: "approval-gate-decision-invalid", message: "invalid decision" },
   "inbox-choice-mismatch": { reason: "inbox-choice-mismatch", message: "choice mismatch" },
@@ -63,7 +66,7 @@ const refusalByReason = {
   },
 } as const satisfies Record<RefusalReason, Refusal>;
 
-const families: readonly RefusalStatus[] = [400, 403, 404, 409, 422];
+const families: readonly RefusalStatus[] = [400, 403, 404, 409, 413, 422];
 
 test("each status family answers with its own status", () => {
   for (const [status, refusal] of Object.entries(familyExample)) {

@@ -35,7 +35,7 @@ test("heartbeat cancellation is an Authority verdict with its durable request", 
       status: 200, headers: { "Content-Type": "application/json" },
     });
   };
-  const progress = { processAlive: true, lastProgressEventAt: null, inFlightTool: null };
+  const progress = { processAlive: true, lastProgressEventAt: null, inFlightTool: null, eventQueueBytes: 0 };
   try {
     answer({ ok: false, cancellation: request });
     assert.deepEqual(await session().heartbeat(progress), { held: false, reason: "cancelled", request });
