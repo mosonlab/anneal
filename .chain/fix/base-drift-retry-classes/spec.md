@@ -1,0 +1,20 @@
+Merge tail: base-drift recovery separates waiting, transport and validation failures and exhausts on time and count
+
+Goal: a base-drift recovery that is merely waiting for the same chain's active Run, or that hit a transient GitHub read failure, is not counted as a failed validation attempt; the attempt budget exhausts only when real classification failures accumulate over a minimum elapsed time.
+
+Background: `packages/api/src/base-drift-recovery-decision.ts` `classifyRetryBudget` (`:364-377`) compares only a count against `MAX_BASE_DRIFT_VALIDATION_ATTEMPTS` (30, `packages/db/src/merge-tail.ts:37`) with no backoff or time window. Two inputs feed the retry branch: `chain-active` (`:190-207`), returned while any Run of the same project and chain is active (`merge-base-drift-worker.ts:136-137`), and `reader-failure` (`merge-base-drift-worker.ts:568`, an 8 s abort at `:549`; the GitHub reader already retries at 250/1000 ms, `github-read.ts:134,306,318`). The worker ticks every 2 s (`:50-52`), so a chain whose sibling Run stays active for about a minute exhausts the budget; `settleIneligibleLocked` (`:249-278`) then calls `exhaust` (`merge-tail-state.ts:394-437`), the `MergeRecoveryAttempt` becomes FAILED, the task moves to REVIEW, and the only offered action is `abandon` (`merge-integrator.ts` `"base-drift": ["abandon"]`). Reference merge queues (rust-lang/bors PauseQueue, Mergify "stays in the queue") never spend a candidate's budget on upstream unavailability or on ordinary waiting.
+
+Changes:
+1. Split the retry accounting into three named classes on the `MergeRecoveryAttempt` record: `waiting` (chain-active), `transport` (reader-failure and other reader/transport errors), `validation` (a real classification that failed). Only `validation` counts toward `MAX_BASE_DRIFT_VALIDATION_ATTEMPTS`.
+2. `waiting` and `transport` retries get a per-attempt backoff (next-eligible time stored on the attempt, doubling from the 2 s tick up to a cap of 60 s) and their own elapsed-time ceiling (propose 6 hours for waiting, 30 minutes for transport); crossing a ceiling settles the attempt with a distinct refusal naming the class and the elapsed time, and the task's activity says which class exhausted.
+3. Exhaustion of `validation` requires both the count and a minimum elapsed time since the first validation failure (propose 30 minutes), so a burst of failures inside one incident cannot exhaust it alone.
+4. Record every class transition and the current counters/next-eligible time in the recovery activity so the board's task detail can show why a recovery is waiting.
+5. Keep `abandon` available; additionally offer `re-validate` after a class ceiling settles (resets that class's counters only), so an operator can resume without re-instantiating the chain.
+
+Out of scope: the readiness requeue budget before authorization (B-02), merge lease semantics, the merge-train chains (A/B/C, held), the `MergeRecoveryRefusalCode` dead codes (B-04), `fillValidationIdentity`, the executor.
+
+Constraints: an in-flight attempt created before this change continues under the new accounting with its existing count treated as `validation`; no migration may reinterpret history silently — if a new column is added, backfill is explicit. Every settle path writes a `TaskActivity`; nothing exhausts silently. dbtests run only on the merge gate.
+
+Acceptance: `npm run test -w @anneal/api` and `-w @anneal/db` green; dbtests cover: 40 consecutive `chain-active` ticks do not exhaust and the attempt's next-eligible time grows to the cap; 30 `validation` failures inside 5 minutes do not exhaust, the same 30 spread over 31 minutes do; a `transport` ceiling settles with its own refusal and `re-validate` reopens it; the activity log names the class on each settle. `docs/operator-api.md` documents the new refusal names and the `re-validate` action.
+
+Route: implementation=senior-dev-opus-high - merge-tail recovery is a defense-list path; a wrong class boundary either strands recoveries or lets a bad candidate wait forever, neither of which the acceptance suite can witness under a live GitHub
