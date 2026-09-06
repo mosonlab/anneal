@@ -7,9 +7,9 @@ import {
   isIntegratorStep,
   markerFromMetadata,
   MERGE_READINESS_OUTPUT_KIND,
-  MERGE_READINESS_REQUEUE_KIND,
   MERGE_TAIL_KIND,
   projectMergeOutcome,
+  readinessRequeueActivityWhere,
   readinessRequeueTotals,
   runOwnsMergeOutcome,
   runSessionUsageCost,
@@ -915,10 +915,7 @@ const readReadinessRequeueTotals = async (
   const totals = new Map<string, ReadinessRequeueTotals>();
   if (readinessTaskIds.length === 0) return totals;
   const activities = await db.taskActivity.findMany({
-    where: {
-      taskId: { in: readinessTaskIds },
-      metadata: { path: ["kind"], equals: MERGE_READINESS_REQUEUE_KIND },
-    },
+    where: readinessRequeueActivityWhere({ in: readinessTaskIds }),
     select: { taskId: true, metadata: true },
   });
   const byTask = new Map<string, { metadata: Prisma.JsonValue }[]>();

@@ -2,7 +2,12 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { DependencyProvisioning, PrismaClient, recordReadinessRequeue } from "@anneal/db";
+import {
+  DependencyProvisioning,
+  MERGE_READINESS_REQUEUE_KIND,
+  PrismaClient,
+  recordReadinessRequeue,
+} from "@anneal/db";
 
 import { COSTS_TOP_RUNS, readProjectCosts } from "./costs.js";
 import { createApp } from "./test-app.js";
@@ -525,6 +530,30 @@ test("a chain's readiness requeues and their grants are summed onto the chain ro
       reason: "base moved before authorization",
     });
   }
+
+  // Rows the counters must not read: the public activity route preserves
+  // caller-supplied metadata, so any actor can post this kind, and a row
+  // without an ordinal is not a requeue the board can place either.
+  await db.taskActivity.createMany({ data: [
+    {
+      taskId: readiness.id,
+      actorType: "operator",
+      body: "operator note shaped like a requeue",
+      metadata: { kind: MERGE_READINESS_REQUEUE_KIND, ordinal: 3, budgetGrant: 9 },
+    },
+    {
+      taskId: readiness.id,
+      actorType: "agent",
+      body: "agent note shaped like a requeue",
+      metadata: { kind: MERGE_READINESS_REQUEUE_KIND, ordinal: 4, budgetGrant: 9 },
+    },
+    {
+      taskId: readiness.id,
+      actorType: "control-plane",
+      body: "unnumbered row",
+      metadata: { kind: MERGE_READINESS_REQUEUE_KIND, budgetGrant: 9 },
+    },
+  ] });
 
   const report = await readProjectCosts(db, project.id, 7, "UTC", new Date());
 

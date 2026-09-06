@@ -14,6 +14,23 @@ type Tx = Prisma.TransactionClient;
  */
 export const MERGE_READINESS_REQUEUE_KIND = "mergeReadiness.requeue";
 export const MERGE_READINESS_REQUEUE_SCHEMA_VERSION = 1;
+/**
+ * Only the control plane settles a requeue. The public activity route keeps
+ * caller-supplied metadata on an `operator` row, so an ordinary note carrying
+ * this kind would otherwise advance the next ordinal and inflate the counters;
+ * every reader and the ordinal itself qualify on the actor as well as the kind.
+ */
+export const MERGE_READINESS_REQUEUE_ACTOR_TYPE = "control-plane";
+
+/**
+ * The one row set the counters are folded over, so the board and the costs view
+ * cannot drift apart on which activity is a requeue.
+ */
+export const readinessRequeueActivityWhere = <T>(taskId: T) => ({
+  taskId,
+  actorType: MERGE_READINESS_REQUEUE_ACTOR_TYPE,
+  metadata: { path: ["kind"], equals: MERGE_READINESS_REQUEUE_KIND },
+});
 
 /** One recorded pre-authorization requeue, as the counters read it. */
 export type ReadinessRequeue = {
@@ -68,25 +85,20 @@ export const readinessRequeueTotals = (
   };
 };
 
-/** Every requeue a readiness Task recorded, oldest first. */
-export const readReadinessRequeues = async (tx: Tx, taskId: string): Promise<ReadinessRequeue[]> => {
-  const rows = await tx.taskActivity.findMany({
-    where: { taskId, metadata: { path: ["kind"], equals: MERGE_READINESS_REQUEUE_KIND } },
-    select: { metadata: true },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-  });
-  return rows.flatMap((row) => {
-    const requeue = readinessRequeueFromMetadata(row.metadata);
-    return requeue ? [requeue] : [];
-  });
-};
-
 /**
  * Records one pre-authorization requeue on the readiness Task.
  *
  * The caller passes its settlement transaction, so the count cannot drift from
- * the grants: a settlement that rolls back takes its counter row with it, and
- * the ordinal is read under the same transaction that writes the next one.
+ * the grants: a settlement that rolls back takes its counter row with it.
+ *
+ * Precondition: the caller holds the readiness claim for this chain
+ * (`readiness-claim.ts`), whose row-locked Step serializes the settlements of
+ * one chain. Sharing a transaction does not serialize anything by itself --
+ * under READ COMMITTED two concurrent counts would both read the same prior
+ * total -- so the claim, not the transaction, is what makes the ordinal unique.
+ *
+ * `budgetGrant` must be a non-negative integer: it is stored verbatim in JSON
+ * metadata and read back as an integer by the costs SQL.
  */
 export const recordReadinessRequeue = async (
   tx: Tx,
@@ -99,11 +111,11 @@ export const recordReadinessRequeue = async (
     reason: string;
   },
 ): Promise<ReadinessRequeue> => {
+  if (!Number.isInteger(input.budgetGrant) || input.budgetGrant < 0) {
+    throw new Error(`readiness requeue budgetGrant must be a non-negative integer, got ${String(input.budgetGrant)}`);
+  }
   const prior = await tx.taskActivity.count({
-    where: {
-      taskId: input.readinessTaskId,
-      metadata: { path: ["kind"], equals: MERGE_READINESS_REQUEUE_KIND },
-    },
+    where: readinessRequeueActivityWhere(input.readinessTaskId),
   });
   const requeue: ReadinessRequeue = {
     ordinal: prior + 1,
@@ -113,7 +125,7 @@ export const recordReadinessRequeue = async (
   };
   await tx.taskActivity.create({ data: {
     taskId: input.readinessTaskId,
-    actorType: "control-plane",
+    actorType: MERGE_READINESS_REQUEUE_ACTOR_TYPE,
     body: `Merge readiness requeue ${String(requeue.ordinal)}: ${input.reason};`
       + ` ${input.staleBaseSha} -> ${input.currentBaseSha}; ${String(input.budgetGrant)} extra attempt granted`,
     metadata: {

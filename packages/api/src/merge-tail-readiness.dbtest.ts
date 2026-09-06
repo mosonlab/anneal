@@ -7,6 +7,7 @@ import {
   DependencyProvisioning,
   INTEGRATOR_SENTINEL_MODEL,
   MergeLeaseEventState,
+  MergeRecoveryStatus,
   MERGE_READINESS_REQUEUE_KIND,
   MERGE_TAIL_KIND,
   Prisma,
@@ -519,6 +520,24 @@ test("consecutive pre-authorization requeues are counted on the readiness card",
   const seeded = await seedReadiness();
   const firstDrift = "d".repeat(40);
   const secondDrift = "e".repeat(40);
+  // The public activity route preserves caller-supplied metadata, so an
+  // operator or an agent can post a row carrying this kind. Seeded before the
+  // first settlement, a counted one would both inflate the card and push the
+  // first real ordinal past 1.
+  await db.taskActivity.createMany({ data: [
+    {
+      taskId: seeded.readiness.id,
+      actorType: "operator",
+      body: "operator note shaped like a requeue",
+      metadata: { kind: MERGE_READINESS_REQUEUE_KIND, ordinal: 1, budgetGrant: 9 },
+    },
+    {
+      taskId: seeded.readiness.id,
+      actorType: "agent",
+      body: "agent note shaped like a requeue",
+      metadata: { kind: MERGE_READINESS_REQUEUE_KIND, ordinal: 2, budgetGrant: 9 },
+    },
+  ] });
   assert.equal(
     (await readinessTick(db, reader([], snapshot({ baseSha: firstDrift })), new Date(), 5, releaseChainLease, runWithMergeLease)).requeued,
     1,
@@ -545,6 +564,7 @@ test("consecutive pre-authorization requeues are counted on the readiness card",
   const requeues = await db.taskActivity.findMany({
     where: {
       taskId: seeded.readiness.id,
+      actorType: "control-plane",
       metadata: { path: ["kind"], equals: MERGE_READINESS_REQUEUE_KIND },
     },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
@@ -568,6 +588,79 @@ test("consecutive pre-authorization requeues are counted on the readiness card",
   assert.equal(readinessCard.readinessGrants, 2);
   // The counters belong to the readiness Step; no other card in the chain
   // claims its chain's requeues.
+  const regressionCard = cards.find((card) => card.id === seeded.regression.id);
+  assert.ok(regressionCard);
+  assert.equal(regressionCard.readinessRequeues, 0);
+  assert.equal(regressionCard.readinessGrants, 0);
+});
+
+test("a requeue that carries a recovery aggregate is counted the same way", async () => {
+  const seeded = await seedReadiness();
+  const driftedBase = "d".repeat(40);
+  const sourceRun = await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
+  const stop = await db.taskActivity.create({ data: {
+    taskId: seeded.integrator.id,
+    actorType: "control-plane",
+    body: "merge stopped on base drift",
+    metadata: { kind: MERGE_TAIL_KIND.readiness, state: "stopped" },
+  } });
+  const authorization = await db.taskActivity.create({ data: {
+    taskId: seeded.readiness.id,
+    actorType: "control-plane",
+    body: "merge authorized",
+    metadata: { kind: MERGE_TAIL_KIND.readiness, state: "authorized" },
+  } });
+  // A recovery already awaiting authorization: readiness settles this requeue
+  // through enterRepair rather than through its own branch, and the counter has
+  // to come out the same on either path.
+  const aggregate = await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: seeded.integrator.id,
+    sourceStopId: stop.id,
+    attempt: 1,
+    status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
+    boundSourceRunId: sourceRun.id,
+    authorizationActivityId: authorization.id,
+    recoveryRunId: sourceRun.id,
+    readinessTaskId: seeded.readiness.id,
+    regressionTaskId: seeded.regression.id,
+    repository: "acme/widgets",
+    prNumber: 41,
+    targetBranch: "main",
+    authorizedHeadSha: HEAD,
+    authorizedBaseSha: BASE,
+    observedBaseSha: BASE,
+    currentBaseSha: BASE,
+  } });
+
+  assert.equal(
+    (await readinessTick(db, reader([], snapshot({ baseSha: driftedBase })), new Date(), 5, releaseChainLease, runWithMergeLease)).requeued,
+    1,
+  );
+
+  assert.equal(
+    (await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } })).status,
+    MergeRecoveryStatus.REPAIRING,
+  );
+  const requeues = await db.taskActivity.findMany({
+    where: {
+      taskId: seeded.readiness.id,
+      actorType: "control-plane",
+      metadata: { path: ["kind"], equals: MERGE_READINESS_REQUEUE_KIND },
+    },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  });
+  assert.equal(requeues.length, 1);
+  assert.deepEqual(readinessRequeueFromMetadata(requeues[0]!.metadata), {
+    ordinal: 1, staleBaseSha: BASE, currentBaseSha: driftedBase, budgetGrant: 1,
+  });
+  // One grant, one extra Regression attempt, exactly as on the ordinary path.
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
+
+  const cards = await readBoard(db, { projectId: seeded.project.id, archived: "false" });
+  const readinessCard = cards.find((card) => card.id === seeded.readiness.id);
+  assert.ok(readinessCard);
+  assert.equal(readinessCard.readinessRequeues, 1);
+  assert.equal(readinessCard.readinessGrants, 1);
   const regressionCard = cards.find((card) => card.id === seeded.regression.id);
   assert.ok(regressionCard);
   assert.equal(regressionCard.readinessRequeues, 0);

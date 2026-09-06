@@ -121,6 +121,8 @@ const nativeBoardCard = (): NativeBoardCard => ({
   repairOf: null,
   budgetRemaining: true,
   chainAggregate: null,
+  readinessRequeues: 0,
+  readinessGrants: 0,
 });
 
 const nativeRun: NativeTaskList["runs"][number] = {

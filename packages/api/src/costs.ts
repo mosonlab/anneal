@@ -1,4 +1,5 @@
 import {
+  MERGE_READINESS_REQUEUE_ACTOR_TYPE,
   MERGE_READINESS_REQUEUE_KIND,
   MERGE_TAIL_KIND,
   MODEL_TOKEN_PRICES,
@@ -763,19 +764,27 @@ export const readProjectCosts = async (
             AND activity."actorType" = 'control-plane'
             AND activity."metadata"->>'kind' = ${MERGE_TAIL_KIND.repairAttempt}
         ), '[]'::jsonb) AS "repairMarkers",
+        -- The same rows the board folds: control-plane only, and numbered,
+        -- because an unnumbered row is not a requeue the counters can place.
         (
           SELECT COUNT(*)::int
           FROM "TaskActivity" AS requeue
           WHERE requeue."taskId" = task."id"
-            AND requeue."actorType" = 'control-plane'
+            AND requeue."actorType" = ${MERGE_READINESS_REQUEUE_ACTOR_TYPE}
             AND requeue."metadata"->>'kind' = ${MERGE_READINESS_REQUEUE_KIND}
+            AND jsonb_typeof(requeue."metadata"->'ordinal') = 'number'
         ) AS "readinessRequeues",
         COALESCE((
-          SELECT SUM((requeue."metadata"->>'budgetGrant')::int)::int
+          SELECT SUM(CASE
+              WHEN jsonb_typeof(requeue."metadata"->'budgetGrant') = 'number'
+                THEN (requeue."metadata"->>'budgetGrant')::numeric
+              ELSE 0
+            END)::int
           FROM "TaskActivity" AS requeue
           WHERE requeue."taskId" = task."id"
-            AND requeue."actorType" = 'control-plane'
+            AND requeue."actorType" = ${MERGE_READINESS_REQUEUE_ACTOR_TYPE}
             AND requeue."metadata"->>'kind' = ${MERGE_READINESS_REQUEUE_KIND}
+            AND jsonb_typeof(requeue."metadata"->'ordinal') = 'number'
         ), 0) AS "readinessGrants"
       FROM "Task" AS task
       JOIN candidate_tasks ON candidate_tasks."id" = task."id"
