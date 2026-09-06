@@ -53,6 +53,9 @@ const readerReturning = (value: PullRequestSnapshot | (() => Promise<PullRequest
   },
 });
 
+/** The gate signature for the head and base every snapshot below reports. */
+const ATTESTED = { headSha: "a".repeat(40), baseHeadSha: "b".repeat(40) };
+
 const openGate = async (chain: Awaited<ReturnType<typeof seedIntegratorChain>>) => db.$transaction(
   (tx) => gateQuestion(tx, chain.gateTask.id, chain.gateRun.id, null),
   { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
@@ -171,7 +174,7 @@ test("approving an unfilled or unavailable card is refused, and the card stays o
 });
 
 test("two simultaneous approvals of one filled card produce exactly one authorization", async () => {
-  const chain = await seedIntegratorChain(db, { label: "concurrent" });
+  const chain = await seedIntegratorChain(db, { label: "concurrent", gateAttestation: ATTESTED });
   const card = await openGate(chain);
   await evidenceTick(db, readerReturning(snapshot()), new Date());
   const other = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
@@ -192,7 +195,7 @@ test("two simultaneous approvals of one filled card produce exactly one authoriz
 });
 
 test("a replayed Feishu event produces no second authorization", async () => {
-  const chain = await seedIntegratorChain(db, { label: "replay" });
+  const chain = await seedIntegratorChain(db, { label: "replay", gateAttestation: ATTESTED });
   const card = await openGate(chain);
   await evidenceTick(db, readerReturning(snapshot()), new Date());
   const first = await db.$transaction((tx) => applyInboxDecisionTx(tx, {

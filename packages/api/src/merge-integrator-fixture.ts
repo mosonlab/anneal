@@ -56,6 +56,13 @@ export const seedIntegratorChain = async (
      * readiness shapes model a tail that has already reached readiness.
      */
     gatedReadiness?: boolean;
+    /**
+     * The gate signature to persist for this chain, as the Regression run would
+     * have written it. The approval-gate shapes have no Regression node at all,
+     * so a test that authorizes a merge through one has to seed the row itself;
+     * the readiness shapes carry the frozen v1 Regression exemption instead.
+     */
+    gateAttestation?: { headSha: string; baseHeadSha: string };
   } = {},
 ) => {
   const label = options.label ?? "mi";
@@ -145,6 +152,14 @@ export const seedIntegratorChain = async (
     approvalGate: false, opensPullRequest: false, chainId, chainIndex: integratorStep.stepIndex, chainLayer: integratorStep.layer,
     status: TaskStatus.TODO, targetBranch: "master",
   } }) : null;
+  if (options.gateAttestation) {
+    await db.mergeGateAttestation.create({ data: {
+      chainId, taskId: gateTask.id, runId: null,
+      headSha: options.gateAttestation.headSha,
+      baseHeadSha: options.gateAttestation.baseHeadSha,
+      proof: `MERGE GATE: PASS ${options.gateAttestation.headSha}`,
+    } });
+  }
   const delivered = await seedDeliveredRun(db, {
     project: project.id, task: gateTask.id, agent: agent.id, repo: repo.id,
     prNumbers: options.prNumbers ?? [123],
