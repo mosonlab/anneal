@@ -111,6 +111,8 @@ curl "$BASE_URL/files/content?path=README.md" -H "Authorization: Bearer $OPERATO
 
 ### PUT `/files/content`
 
+Writing a file creates any missing parent directories within the Files Root.
+
 - Required parameters: raw request body containing the file bytes.
 - Optional query: `path` (empty path targets the Files Root and is normally
   rejected by the underlying file operation).
@@ -118,26 +120,6 @@ curl "$BASE_URL/files/content?path=README.md" -H "Authorization: Bearer $OPERATO
 ```sh
 curl -X PUT "$BASE_URL/files/content?path=notes/today.md" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" --data-binary @notes/today.md
-```
-
-### POST `/files/mkdir`
-
-- Required JSON field: `path`.
-
-```sh
-curl -X POST "$BASE_URL/files/mkdir" \
-  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"path":"notes"}'
-```
-
-### POST `/files/move`
-
-- Required JSON fields: `from`, `to`.
-
-```sh
-curl -X POST "$BASE_URL/files/move" \
-  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"from":"draft.md","to":"archive/draft.md"}'
 ```
 
 ### DELETE `/files`
