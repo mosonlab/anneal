@@ -312,6 +312,25 @@ fi
 step "Gate layout under ${GATE_HOME}"
 run mkdir -p "$GATE_HOME"
 
+# How much of this host one gate may size itself for, written down rather than
+# inferred. The default is the worker's capacity — the value run-gate.sh used
+# before this file existed — so provisioning a worker again never changes the
+# sizing it already has. The case that needs a larger number is a worker that
+# shares its machine with runners: one gate at a time, and not the whole box.
+# The runbook says so; this file is where that decision goes. Never overwritten,
+# because it is an operator's acceptance, not a fact about the box.
+host_share_file="${GATE_HOME}/host-share"
+if [ -f "$host_share_file" ]; then
+  ok "host share $(tr -d '[:space:]' < "$host_share_file" 2>/dev/null) in ${host_share_file}"
+else
+  default_host_share="$(tr -d '[:space:]' < "${GATE_HOME}/worker-capacity" 2>/dev/null || true)"
+  case "$default_host_share" in
+    ''|0|*[!0-9]*) default_host_share=1 ;;
+  esac
+  run_sh "printf '%s\n' '${default_host_share}' > '${host_share_file}'"
+  did "wrote ${host_share_file} (a gate takes 1/${default_host_share} of this host)"
+fi
+
 repo_dirs="$(find "$GATE_HOME" -mindepth 2 -maxdepth 2 -type d -name mirror.git 2>/dev/null)"
 if [ -n "$repo_dirs" ]; then
   while IFS= read -r mirror; do

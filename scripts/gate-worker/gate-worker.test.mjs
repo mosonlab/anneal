@@ -468,6 +468,53 @@ cp "$1" "$FAKE_SSH_HOME/$destination"
 
 // --- run-gate.sh: the worker's state is never a verdict ----------------------
 
+// Every run-gate.sh reaps orphaned gate containers before it does anything
+// else, so no fixture may be allowed to reach a real docker: these suites run
+// inside the gate itself, on the worker, beside live gate containers, and a
+// fixture that removed one would be a destructive host operation dressed as a
+// test. This stand-in's whole world is the directory DOCKER_FIXTURE_STATE names
+// — one file per container, its first line the gate pid label and its second
+// the worktree label — and a case that names no such directory has no
+// containers at all.
+const DOCKER_STUB = `#!/usr/bin/env bash
+set -uo pipefail
+state="\${DOCKER_FIXTURE_STATE:-}"
+[ -n "$state" ] || exit 0
+for last; do :; done
+case "\${1:-}" in
+  ps) ls "$state/containers" 2>/dev/null ;;
+  inspect)
+    [ -f "$state/containers/$last" ] || exit 1
+    sed -n '1p;2p' "$state/containers/$last"
+    ;;
+  rm)
+    [ -f "$state/containers/$last" ] || exit 1
+    printf '%s\n' "$last" >> "$state/removed"
+    rm -f "$state/containers/$last"
+    ;;
+  *) exit 0 ;;
+esac
+`;
+
+// The containers a case says are on its worker. A null label pair is a
+// container that carries no gate labels at all.
+const dockerState = (t, containers) => {
+  const state = join(scratch(t), "docker");
+  mkdirSync(join(state, "containers"), { recursive: true });
+  for (const [name, labels] of Object.entries(containers)) {
+    writeFileSync(
+      join(state, "containers", name),
+      labels === null ? "" : `${labels.pid}\n${labels.worktree}\n`,
+    );
+  }
+  return state;
+};
+
+const containerSurvives = (state, name) => existsSync(join(state, "containers", name));
+
+// A pid that is certainly not running: a process that has already exited.
+const deadPid = () => spawnSync("bash", ["-c", "echo $$"], { encoding: "utf8" }).stdout.trim();
+
 // A gate home the way mirror-push.sh leaves one: run-gate.sh beside a bare
 // mirror, deriving its own GATE_HOME from where it was installed.
 const gateHome = (t, { verdict, workerRoot, name = "home" } = {}) => {
@@ -493,7 +540,10 @@ const gateHome = (t, { verdict, workerRoot, name = "home" } = {}) => {
   writeFileSync(join(home, "lib.sh"), readFileSync(libPath));
   writeFileSync(join(home, "run-gate.sh"), readFileSync(runGatePath));
   chmodSync(join(home, "run-gate.sh"), 0o755);
-  return { root, home, oid };
+  mkdirSync(join(root, "bin"), { recursive: true });
+  writeFileSync(join(root, "bin", "docker"), DOCKER_STUB);
+  chmodSync(join(root, "bin", "docker"), 0o755);
+  return { root, home, oid, bin: join(root, "bin") };
 };
 
 const remoteDispatchFixture = (t) => {
@@ -555,8 +605,10 @@ destination="\${2#*:}"
 mkdir -p "$(dirname "$FAKE_SSH_HOME/$destination")"
 cp "$1" "$FAKE_SSH_HOME/$destination"
 `);
+  writeFileSync(join(fakeBin, "docker"), DOCKER_STUB);
   chmodSync(join(fakeBin, "ssh"), 0o755);
   chmodSync(join(fakeBin, "scp"), 0o755);
+  chmodSync(join(fakeBin, "docker"), 0o755);
   return { root, repo, oid, fakeHome, fakeBin };
 };
 
@@ -566,7 +618,10 @@ const runGate = (home, args, env = {}) =>
   spawnSync("bash", [join(home, "run-gate.sh"), ...args], {
     encoding: "utf8",
     timeout: 120_000,
-    env: { ...FIXTURE_ENV, ...env },
+    // The gate home's own bin first, so the reaper meets the stand-in above
+    // rather than the host's docker. gateHome put it one level up, beside the
+    // worker-capacity and host-share files this script reads.
+    env: { ...FIXTURE_ENV, PATH: `${join(home, "..", "bin")}:${FIXTURE_ENV.PATH ?? ""}`, ...env },
   });
 
 // A minimal clean checkout that reaches merge-gate.sh's first preflight after
@@ -1182,6 +1237,7 @@ test("the default worker capacity serializes gates from different repositories",
       timeout: 10_000,
       env: {
         ...FIXTURE_ENV,
+        PATH: `${join(workerRoot, "bin")}:${FIXTURE_ENV.PATH ?? ""}`,
         FIRST_HOME: first.home,
         FIRST_OID: first.oid,
         SECOND_HOME: second.home,
@@ -1204,7 +1260,7 @@ test("worker capacity two admits exactly two gates and keeps concurrent logs dis
   const release = join(workerRoot, "release");
   const verdict = `
     printf '%s\n' "$$" >> "$WORKER_LOCK_STARTS"
-    printf '%s\n' "\${AGENTOS_GATE_HOST_SHARE:-unset}" >> "$WORKER_HOST_SHARE"
+    printf '%s\n' "\${AGENTOS_GATE_HOST_SHARE:-unset}" >> "$WORKER_SHARE_SINK"
     while [ ! -f "$WORKER_LOCK_RELEASE" ]; do sleep 0.05; done
     printf 'MERGE GATE: PASS fixture\n'
   `;
@@ -1242,11 +1298,12 @@ test("worker capacity two admits exactly two gates and keeps concurrent logs dis
       timeout: 10_000,
       env: {
         ...FIXTURE_ENV,
+        PATH: `${join(workerRoot, "bin")}:${FIXTURE_ENV.PATH ?? ""}`,
         GATE_HOME: fixture.home,
         GATE_OID: fixture.oid,
         WORKER_ROOT: workerRoot,
         WORKER_LOCK_STARTS: starts,
-        WORKER_HOST_SHARE: hostShare,
+        WORKER_SHARE_SINK: hostShare,
         WORKER_LOCK_RELEASE: release,
       },
     },
@@ -1279,7 +1336,7 @@ test("the share run-gate states is the one merge-gate sizes from, and nothing re
     readFileSync(join(here, "host-sizing.sh"), "utf8"),
   ].join("\n");
 
-  assert.match(runGate, /export AGENTOS_GATE_HOST_SHARE="\$WORKER_CAPACITY"/);
+  assert.match(runGate, /export AGENTOS_GATE_HOST_SHARE="\$WORKER_HOST_SHARE"/);
   assert.doesNotMatch(
     runGate,
     /AGENTOS_DBTEST_CONCURRENCY|AGENTOS_GATE_UNIT_LANES|AGENTOS_GATE_DB_LANES/,
@@ -1309,6 +1366,173 @@ test("a worker capacity other than one or two is refused without a verdict", (t)
   assert.equal(result.status, 76, result.stdout + result.stderr);
   assert.match(result.stdout, /^GATE NOT RUN: worker capacity .* must be exactly 1 or 2/m);
   assert.doesNotMatch(result.stdout, /MERGE GATE/);
+});
+
+// --- the host's share, stated separately from its capacity -------------------
+
+test("the host share is the worker's own setting, not a restatement of its capacity", (t) => {
+  // The case this exists for: a gate worker that is also this host's runner box
+  // has one execution slot — one gate at a time — and must still not size that
+  // gate for the whole machine. Before the setting, capacity one meant the
+  // whole host, which is the contradiction the brief names.
+  const workerRoot = scratch(t);
+  const sink = join(workerRoot, "share-sink");
+  const fixture = gateHome(t, {
+    workerRoot,
+    verdict: `
+      printf '%s\n' "\${AGENTOS_GATE_HOST_SHARE:-unset}" > "$WORKER_SHARE_SINK"
+      printf 'MERGE GATE: PASS fixture\n'
+    `,
+  });
+  writeFileSync(join(workerRoot, "host-share"), "4\n");
+  const result = runGate(fixture.home, [fixture.oid], { WORKER_SHARE_SINK: sink });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(readFileSync(sink, "utf8").trim(), "4");
+  // Both numbers on the stream remote-gate.sh carries home, so the dispatcher
+  // can see a capacity it disagrees with.
+  assert.match(result.stderr, /run-gate: worker capacity 1, host share 4/);
+});
+
+test("an absent host share leaves the worker sized exactly as it was", (t) => {
+  const workerRoot = scratch(t);
+  const sink = join(workerRoot, "share-sink");
+  const fixture = gateHome(t, {
+    workerRoot,
+    verdict: `
+      printf '%s\n' "\${AGENTOS_GATE_HOST_SHARE:-unset}" > "$WORKER_SHARE_SINK"
+      printf 'MERGE GATE: PASS fixture\n'
+    `,
+  });
+  writeFileSync(join(workerRoot, "worker-capacity"), "2\n");
+  const result = runGate(fixture.home, [fixture.oid], { WORKER_SHARE_SINK: sink });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(readFileSync(sink, "utf8").trim(), "2");
+});
+
+test("a host share that is not a whole number of shares is refused without a verdict", (t) => {
+  const fixture = gateHome(t);
+  writeFileSync(join(fixture.root, "host-share"), "half\n");
+  const result = runGate(fixture.home, [fixture.oid]);
+  assert.equal(result.status, 76, result.stdout + result.stderr);
+  assert.match(result.stdout, /^GATE NOT RUN: host share .* must be a whole number of shares, at least 1/m);
+  assert.doesNotMatch(result.stdout, /MERGE GATE/);
+});
+
+// --- the bounded wait for a worker slot --------------------------------------
+
+// Slot one's lock, held by this fixture's own shell for as long as the gate it
+// then starts is waiting for it. The child reopens the path — a new open file
+// description — so its flock contends with this one exactly as a second gate's
+// would, and the lock outlives the child because this shell still holds it.
+const gateBehindAHeldSlot = (fixture, env = {}) =>
+  spawnSync(
+    "bash",
+    [
+      "-c",
+      `
+        set -uo pipefail
+        exec 9>"$SLOT_LOCK"
+        flock -n 9 || exit 90
+        "$GATE_HOME/run-gate.sh" "$GATE_OID"
+      `,
+    ],
+    {
+      encoding: "utf8",
+      timeout: 120_000,
+      env: {
+        ...FIXTURE_ENV,
+        PATH: `${fixture.bin}:${FIXTURE_ENV.PATH ?? ""}`,
+        SLOT_LOCK: join(fixture.root, ".full-gate.lock"),
+        GATE_HOME: fixture.home,
+        GATE_OID: fixture.oid,
+        ...env,
+      },
+    },
+  );
+
+test("a slot wait that outlasts its bound is GATE NOT RUN, not a held ssh session", (t) => {
+  // The hang: the dispatcher counts two slots on a worker whose worker-capacity
+  // file says one, and gate-dispatch.sh's own --timeout-minutes cannot
+  // interrupt an attempt that has already reached the worker. So the worker
+  // gives up itself, with the code the dispatcher already reads as "nothing
+  // ran" and takes to its fallback.
+  const fixture = gateHome(t);
+  const result = gateBehindAHeldSlot(fixture, { SLOT_WAIT_MINUTES: "0" });
+  assert.equal(result.status, 76, result.stdout + result.stderr);
+  assert.match(result.stdout, /^GATE NOT RUN: worker slot wait exceeded 0 minutes$/m);
+  assert.doesNotMatch(result.stdout, /MERGE GATE/);
+});
+
+test("a slot that is free is still taken, bound or no bound", (t) => {
+  const fixture = gateHome(t);
+  const result = runGate(fixture.home, [fixture.oid], { SLOT_WAIT_MINUTES: "0" });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /MERGE GATE: PASS fixture/);
+});
+
+test("a malformed SLOT_WAIT_MINUTES is refused rather than turned into an unbounded wait", (t) => {
+  const fixture = gateHome(t);
+  const result = runGate(fixture.home, [fixture.oid], { SLOT_WAIT_MINUTES: "-1; id" });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /SLOT_WAIT_MINUTES/);
+});
+
+// --- the orphaned-database reaper --------------------------------------------
+
+test("a gate container whose pid is dead and whose worktree is gone is removed", (t) => {
+  // merge-gate.sh's EXIT trap deletes its own container; an OOM kill, a SIGKILL
+  // or a power cut skips the trap, and `--rm` only deletes a container that
+  // stops. Two of these had been holding a 3 GiB tmpfs each for a fortnight
+  // when they were removed by hand on 2026-09-06.
+  const fixture = gateHome(t);
+  const dead = deadPid();
+  const container = `agentos-merge-gate-${dead}`;
+  const state = dockerState(t, {
+    [container]: { pid: dead, worktree: join(fixture.home, "worktrees", "gate-that-died") },
+  });
+  const result = runGate(fixture.home, [fixture.oid], { DOCKER_FIXTURE_STATE: state });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(containerSurvives(state, container), false, "the orphaned container survived");
+  assert.equal(readFileSync(join(state, "removed"), "utf8").trim(), container);
+  // Every removal names the pid and the worktree it was attributed to, because
+  // that attribution is the whole permission to remove it.
+  assert.match(
+    result.stderr,
+    new RegExp(`removing orphaned container ${container} \\(dead pid ${dead}, worktree .*gate-that-died is gone\\)`),
+  );
+});
+
+test("the reaper leaves alone every container it cannot prove is dead", (t) => {
+  const fixture = gateHome(t);
+  const dead = deadPid();
+  const live = String(process.pid);
+  const liveGate = `agentos-merge-gate-${live}`;
+  const unlabelled = "agentos-merge-gate-99999999";
+  const stillRunning = `agentos-merge-gate-${dead}-tree`;
+  const somebodyElses = "postgres-somebody-elses";
+  const state = dockerState(t, {
+    // A gate that is merely slow — a hung registry, a stalled pull. Removing
+    // its database would turn one box's problem into a false FAIL for a
+    // different dispatch.
+    [liveGate]: { pid: live, worktree: join(fixture.home, "worktrees", "live") },
+    // A pid that is gone but a worktree still on disk: this box cannot prove
+    // that run has ended.
+    [stillRunning]: { pid: dead, worktree: fixture.home },
+    // No labels at all: an older gate's container, or one started by hand.
+    [unlabelled]: null,
+    // Not this scheme's name, whatever it carries.
+    [somebodyElses]: { pid: dead, worktree: join(fixture.home, "worktrees", "gone") },
+  });
+  const result = runGate(fixture.home, [fixture.oid], { DOCKER_FIXTURE_STATE: state });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(existsSync(join(state, "removed")), false, "the reaper removed a container it could not attribute");
+  for (const name of [liveGate, stillRunning, unlabelled, somebodyElses]) {
+    assert.equal(containerSurvives(state, name), true, `${name} was removed`);
+  }
+  assert.match(result.stderr, new RegExp(`leaving container ${liveGate} alone, its gate \\(pid ${live}\\) is still running`));
+  assert.match(result.stderr, new RegExp(`leaving container ${stillRunning} alone; its gate \\(pid ${dead}\\) is gone but its worktree`));
+  assert.match(result.stderr, new RegExp(`leaving container ${unlabelled} alone; it names no gate this script can check`));
+  assert.doesNotMatch(result.stderr, new RegExp(somebodyElses));
 });
 
 // --- the stale-worktree sweep ------------------------------------------------
@@ -1508,6 +1732,14 @@ test("the runbook's exit-code table is the table lib.sh defines", () => {
     runbook,
     new RegExp(`\\|\\s*\`${notAuthoritative}\`\\s*\\|[^|]*cleanup`, "u"),
     "the runbook's not-authoritative row does not name a cleanup that failed after a pass",
+  );
+  // A slot wait that gives up is the other host fact that must not read as a
+  // judgement, and it is new enough that an operator meeting it will look here
+  // first: it was an ssh session that hung, with no code and no line at all.
+  assert.match(
+    runbook,
+    new RegExp(`\\|\\s*\`${noVerdict}\`\\s*\\|[^|]*worker execution slot exceeded`, "u"),
+    "the runbook's no-verdict row does not name a slot wait that gave up",
   );
 });
 

@@ -4,17 +4,23 @@
 # What the caller owes this file: `die` and `note`. Everything here either
 # derives a width or refuses one, so a caller that cannot refuse cannot use it.
 
-# run-gate.sh states the worker's configured slot count, so a two-slot worker
-# gives each gate half the machine. Every parallel width below is derived from
-# this one number instead of each phase reading the CPU count for itself: two
+# run-gate.sh states the worker's host share, so a worker that says two gives
+# each gate half the machine. Every parallel width below is derived from this
+# one number instead of each phase reading the CPU count for itself: N
 # concurrent gates then add up to one host, rather than each sizing itself for a
 # whole machine it does not have. An absent variable means half the host because
 # the shared runner host is where it is unset; a gate worker always exports its
 # own share.
+#
+# Any share of one or more, not just one or two: the share is now the worker's
+# own `host-share` setting rather than a restatement of its slot count, and a
+# gate worker that shares its host with sixteen runners divides the machine by
+# more than the gates it runs at once. What the value must be is a whole number
+# the host can be divided by; what it must not be is a fraction, a zero or a
+# word, all of which would silently size a gate for a machine nobody has.
 GATE_HOST_SHARE="${AGENTOS_GATE_HOST_SHARE:-2}"
 case "${GATE_HOST_SHARE}" in
-  1|2) ;;
-  *) die "AGENTOS_GATE_HOST_SHARE must be 1 or 2, got ${GATE_HOST_SHARE}" ;;
+  0|*[!0-9]*|'') die "AGENTOS_GATE_HOST_SHARE must be a whole number of shares, at least 1, got ${GATE_HOST_SHARE}" ;;
 esac
 GATE_CPUS="$(node -e 'const { availableParallelism } = require("node:os");
 process.stdout.write(String(Math.max(1, Math.floor(availableParallelism() / Number(process.argv[1])))));' \
