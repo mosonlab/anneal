@@ -18,6 +18,19 @@ export const retryDelayMs = (runNumber: number, failureClass: FailureClass): num
   return Math.min(base * (2 ** Math.max(0, runNumber - 1)), 15 * 60_000);
 };
 
+/**
+ * When a replacement for a Run the platform lost may be claimed.
+ *
+ * The completion path has always spaced its retries; a lease-loss replacement
+ * was queued at `readyAt: now`, so a runner host that is down, wedged or out of
+ * disk got its replacement back at full speed and burned the task's refunds in
+ * seconds. The schedule is the completion path's, read off the refunds already
+ * granted rather than the run number, because that count is what this delay is
+ * a function of: the nth refund waits as long as the nth retry would.
+ */
+export const leaseLossRetryDelayMs = (leaseLossRefunds: number): number =>
+  retryDelayMs(Math.max(0, leaseLossRefunds) + 1, FailureClass.TRANSIENT_PROVIDER);
+
 export const jsonValue = (value: unknown): Prisma.InputJsonValue => value as Prisma.InputJsonValue;
 
 const replaceNul = (value: string): string => value.replaceAll("\u0000", "\\u0000");
