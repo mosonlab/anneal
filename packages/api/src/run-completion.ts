@@ -4,6 +4,7 @@ import {
   ACTIVE_RUN_STATUSES,
   advanceTemplateTask,
   attemptRunBirth,
+  basePublishedStamp,
   budgetGates,
   carryMergeRecoveryRun,
   CleanupStatus,
@@ -917,6 +918,12 @@ export const completeRun = async (
         // immediate post-push ACK recorded on this run.
         pushedBranch: body.pushedBranch ?? run.pushedBranch,
         baseSha: body.baseSha ?? run.baseSha,
+        // Second publication write, same rule as `pushedBranch` above: a
+        // runner whose immediate ACK never arrived still reports its push
+        // here, and that push carried this Run's base to the remote.
+        basePublishedAt: body.pushStatus === PushStatus.SUCCEEDED && (body.pushedBranch ?? run.pushedBranch)
+          ? basePublishedStamp({ baseSha: body.baseSha ?? run.baseSha, basePublishedAt: run.basePublishedAt }, now)
+          : run.basePublishedAt,
         headSha: body.headSha ?? null,
         salvageParentSha: body.salvageParentSha ?? null,
         pushStatus: body.pushStatus,

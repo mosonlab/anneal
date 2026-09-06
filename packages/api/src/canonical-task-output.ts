@@ -7,7 +7,7 @@ import {
   canonicalReviewArtifactSchema as reviewArtifact,
   isRegressionVerificationOutputKind,
   Prisma,
-  platformImplementationBaseSha,
+  recordedImplementationBaseSha,
   recordGateAttestation,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
   REGRESSION_VERIFICATION_SCHEMA_VERSION,
@@ -582,7 +582,10 @@ export const persistSessionTaskOutput = async (
   // the disagreement is recorded where an operator reads the task.
   if (step && isCanonicalAgentStep(step) && step.outputKind === "implementation") {
     const bodyBaseSha = implementationBodyBaseSha(input.body);
-    const platformBaseSha = await platformImplementationBaseSha(tx, input.task.id);
+    // The recorded base, not the pinned one: this Run has not pushed yet, so
+    // no base of this Task is published at output time. The advisory is about
+    // a body that disagrees with the platform's own record.
+    const platformBaseSha = await recordedImplementationBaseSha(tx, input.task.id);
     if (!platformBaseSha) {
       await tx.taskActivity.create({ data: {
         taskId: input.task.id,

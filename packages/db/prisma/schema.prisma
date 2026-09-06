@@ -1031,6 +1031,15 @@ model Run {
   /// that question: see the comment in workflow.ts.
   pushedBranch                  String?
   baseSha                       String?
+  /// When a push of this Run's branch was acknowledged while it held a
+  /// `baseSha`, which is the only evidence that the base commit itself reached
+  /// the remote. `baseSha` alone proves nothing: it is written when the
+  /// workspace is provisioned, so a Run that dies before its push leaves a
+  /// commit that exists in a discarded workspace and nowhere else. Written
+  /// beside every `pushedBranch` ACK and never restamped or cleared. Null on
+  /// rows written before this column existed, which `platformImplementationBaseSha`
+  /// reads through the Run's outcome instead.
+  basePublishedAt               DateTime?
   headSha                       String?
   /// The first parent of the WIP salvage commit a failed Run pushed, written
   /// only on the salvage path. With `headSha` — the salvage commit itself — it

@@ -7,6 +7,7 @@ import {
   type Run,
   RunnerKind,
   RunnerPreference,
+  RunStatus,
 } from "@prisma/client";
 
 import { catalogRunnerForModel, DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
@@ -310,7 +311,16 @@ export const isArchivedTaskError = (error: unknown): error is ArchivedTaskError 
   error instanceof Error && error.name === "ArchivedTaskError";
 
 export class PinnedBaseCommitError extends Error {
-  constructor(readonly taskId: string, readonly baseFromStepIndex: number, detail: string) {
+  constructor(
+    readonly taskId: string,
+    readonly baseFromStepIndex: number,
+    detail: string,
+    /** Present only when the refusal is an unpublished base: the implementation
+     *  Task whose Runs were read, and the base commit they recorded without
+     *  ever publishing it (null when no Run recorded one at all). An operator
+     *  reading the park needs both to tell this apart from a transport fault. */
+    readonly unpublishedBase?: { implementationTaskId: string; baseSha: string | null },
+  ) {
     super(`Pinned task ${taskId} cannot activate from step ${baseFromStepIndex}: ${detail}`);
     this.name = "PinnedBaseCommitError";
   }
@@ -357,15 +367,56 @@ const implementationHeadFromOutput = (
   return output.headSha;
 };
 
+/** The marker written beside every `pushedBranch` ACK: a push of this Run's
+ *  branch carries the commit it was provisioned at, so an acknowledged push is
+ *  the moment its `baseSha` became fetchable from the remote. The first ACK
+ *  wins — a second publication write never restamps it — and a Run that never
+ *  recorded a base has nothing to mark. */
+export const basePublishedStamp = (
+  run: { baseSha: string | null; basePublishedAt: Date | null },
+  now: Date,
+): Date | null => run.basePublishedAt ?? (run.baseSha ? now : null);
+
+/**
+ * Which of an implementation Task's Runs may name the pinned base: one that
+ * published the commit. A `baseSha` is recorded when the workspace is
+ * provisioned, before anything is pushed, so a Run that dies first leaves a
+ * base that lives in a discarded workspace and nowhere else — pinning to it
+ * strands every dependent step on the runner with `upload-pack: not our ref`.
+ * Rows written before `basePublishedAt` existed carry no marker, so their own
+ * outcome answers instead: a succeeded Run of a committing step pushed, a
+ * failed one cannot be assumed to have.
+ */
+const publishedBase = {
+  OR: [
+    { basePublishedAt: { not: null } },
+    { basePublishedAt: null, status: RunStatus.SUCCEEDED },
+  ],
+} satisfies Prisma.RunWhereInput;
+
 /**
  * Where the implementation Task actually started, from the platform's own
  * record rather than a SHA an agent typed: the earliest Run of that Task that
- * recorded a provisioning `baseSha`, which is the chain's specification commit.
- * A later recovery Run starts at the prior head or at a salvaged WIP commit, so
- * only the earliest recorded base names the range every review sibling and
- * every later fix or regression step must see. Null when no Run recorded one.
+ * published a provisioning `baseSha`, which is the chain's specification
+ * commit. A later recovery Run starts at the prior head or at a salvaged WIP
+ * commit, so only the earliest published base names the range every review
+ * sibling and every later fix or regression step must see. Null when no Run
+ * published one.
  */
 export const platformImplementationBaseSha = async (tx: Tx, taskId: string): Promise<string | null> => {
+  const run = await tx.run.findFirst({
+    where: { taskId, baseSha: { not: null }, ...publishedBase },
+    orderBy: { runNumber: "asc" },
+    select: { baseSha: true },
+  });
+  return run?.baseSha ?? null;
+};
+
+/** The earliest base the implementation Task's Runs recorded, published or
+ *  not. This is what the output-persistence advisory compares an authored body
+ *  against, and what names the offending commit when nothing is publishable —
+ *  never what a range is pinned to. */
+export const recordedImplementationBaseSha = async (tx: Tx, taskId: string): Promise<string | null> => {
   const run = await tx.run.findFirst({
     where: { taskId, baseSha: { not: null } },
     orderBy: { runNumber: "asc" },
@@ -414,10 +465,17 @@ export const pinnedImplementationRange = async (
   const implementationHeadSha = implementationHeadFromOutput(task.id, baseFromStepIndex, source);
   const implementationBaseSha = await platformImplementationBaseSha(tx, source.taskId);
   if (!implementationBaseSha) {
+    // The commit an unpublished Run recorded is named, not used: it is what
+    // tells an operator that a dead Run's local base poisoned this chain
+    // rather than that the runner lost its remote.
+    const recorded = await recordedImplementationBaseSha(tx, source.taskId);
     throw new PinnedBaseCommitError(
       task.id,
       baseFromStepIndex,
-      `implementation task ${source.taskId} has no Run with a recorded baseSha`,
+      recorded
+        ? `implementation task ${source.taskId} recorded baseSha ${recorded}, but no Run published a base`
+        : `implementation task ${source.taskId} has no Run that published a baseSha`,
+      { implementationTaskId: source.taskId, baseSha: recorded },
     );
   }
   if (!IMPLEMENTATION_SHA.test(implementationBaseSha)) {
