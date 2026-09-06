@@ -1165,6 +1165,25 @@ test("every gate-worker script parses", () => {
   }
 });
 
+// test:gate-worker is historical: it includes delivery concurrency suites too.
+// Keep both halves in parity rather than narrowing the alias to its old name.
+test("the gate-worker npm alias and delivery gate step run the same suites", () => {
+  const rootPackage = JSON.parse(readFileSync(join(here, "..", "..", "package.json"), "utf8"));
+  const alias = rootPackage.scripts?.["test:gate-worker"];
+  assert.equal(typeof alias, "string", "package.json must define test:gate-worker");
+  const aliasMatch = /^node --test\s+(.+)$/u.exec(alias);
+  assert.ok(aliasMatch, `test:gate-worker must be a node --test command, got ${JSON.stringify(alias)}`);
+  const aliasSuites = aliasMatch[1].trim().split(/\s+/u);
+
+  const gate = readFileSync(mergeGatePath, "utf8");
+  const gateMatch =
+    /^\s+"delivery concurrency and gate worker fixtures"\s+node --test\s+([\s\S]*?)\s+::/mu.exec(gate);
+  assert.ok(gateMatch, "merge-gate.sh must contain the delivery gate-worker step");
+  const gateSuites = gateMatch[1].replace(/\\\s*\n/gu, " ").trim().split(/\s+/u);
+
+  assert.deepEqual(aliasSuites, gateSuites, "test:gate-worker and the delivery gate step drifted apart");
+});
+
 test("the standalone worker provisioner pins the repository's .nvmrc version", () => {
   const nvmrc = readFileSync(join(here, "..", "..", ".nvmrc"), "utf8").trim();
   const provision = readFileSync(provisionPath, "utf8");

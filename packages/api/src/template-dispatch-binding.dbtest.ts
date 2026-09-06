@@ -152,15 +152,9 @@ const request = async (
   const prior = process.env.OPERATOR_TOKEN;
   process.env.OPERATOR_TOKEN = OPERATOR;
   try {
-    const response = await createApp(db).request(
-      `/projects/${projectId}/task-templates/${templateId}/instantiate`,
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
+    return await operatorRequest(
+      `/projects/${projectId}/task-templates/${templateId}/instantiate`, "POST", body,
     );
-    return { status: response.status, body: await response.json() };
   } finally {
     if (prior === undefined) delete process.env.OPERATOR_TOKEN;
     else process.env.OPERATOR_TOKEN = prior;
@@ -178,13 +172,18 @@ const instantiate = async (seed: Fixture, autoStart = false) => {
   return db.task.findMany({ where: { chainId: result.body.chainId }, orderBy: { chainIndex: "asc" } });
 };
 
-const patchTaskStatus = async (taskId: string, status: TaskStatus): Promise<Response> => createApp(db).request(
-  `/tasks/${taskId}`,
-  {
-    method: "PATCH",
-    headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ status }),
-  },
+const operatorRequest = async (path: string, method: "POST" | "DELETE" | "PATCH", body?: unknown): Promise<{ status: number; body: any }> => {
+  const response = await createApp(db).request(path, {
+    method,
+    headers: { Authorization: `Bearer ${OPERATOR}`, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const text = await response.text();
+  return { status: response.status, body: text === "" ? null : JSON.parse(text) };
+};
+
+const patchTaskStatus = async (taskId: string, status: TaskStatus) => operatorRequest(
+  `/tasks/${taskId}`, "PATCH", { status },
 );
 
 const rowCounts = async () => ({
@@ -335,7 +334,7 @@ test("status PATCH cannot move an unresolved bound first task away from TODO", a
     });
 
     const response = await patchTaskStatus(first.id, status);
-    const responseBody = await response.json() as { error: string };
+    const responseBody = response.body as { error: string };
     assert.equal(response.status, 409, JSON.stringify(responseBody));
     assert.match(responseBody.error, new RegExp(predecessor.name, "u"));
     assert.equal((await db.task.findUniqueOrThrow({ where: { id: first.id } })).status, TaskStatus.TODO);
@@ -424,8 +423,8 @@ test("after-task refusals are typed and leave no partial chain rows", async () =
   }
 });
 
-test("a predecessor can be bound once and the occupied pointer refusal preserves the first chain", async () => {
-  const seed = await fixture("occupied-binding");
+test("a predecessor accepts several bound successor chains and records one binding activity each", async () => {
+  const seed = await fixture("fan-out-binding");
   const predecessor = (await instantiate(seed)).at(-1)!;
   const first = await request(seed.project.id, seed.template.id, {
     repoId: seed.repo.id,
@@ -435,23 +434,43 @@ test("a predecessor can be bound once and the occupied pointer refusal preserves
   });
   assert.equal(first.status, 201, JSON.stringify(first.body));
   const firstTasks = await db.task.findMany({ where: { chainId: first.body.chainId }, orderBy: { chainIndex: "asc" } });
-  const before = await rowCounts();
   const second = await request(seed.project.id, seed.template.id, {
     repoId: seed.repo.id,
     variables: {},
     name: "second bound successor",
     afterTaskId: predecessor.id,
   });
-  assert.equal(second.status, 400, JSON.stringify(second.body));
-  assert.equal(second.body.code, "after_task_already_bound");
+  assert.equal(second.status, 201, JSON.stringify(second.body));
+  const third = await request(seed.project.id, seed.template.id, {
+    repoId: seed.repo.id,
+    variables: {},
+    name: "third bound successor",
+    afterTaskId: predecessor.id,
+  });
+  assert.equal(third.status, 201, JSON.stringify(third.body));
+
+  // The first chain is untouched by the later bindings.
   assert.deepEqual(
     await db.task.findMany({ where: { chainId: first.body.chainId }, orderBy: { chainIndex: "asc" } }),
     firstTasks,
   );
-  await assertNoPartialRows(before);
+  const bound = await db.task.findMany({
+    where: { dispatchAfterTaskId: predecessor.id },
+    select: { chainId: true, chainIndex: true },
+  });
+  assert.deepEqual(
+    bound.map((task) => task.chainId).sort(),
+    [first.body.chainId, second.body.chainId, third.body.chainId].sort(),
+  );
+  assert.deepEqual(bound.map((task) => task.chainIndex), [1, 1, 1]);
+  // One binding activity per successor, not one per predecessor.
+  assert.equal(
+    await db.taskActivity.count({ where: { taskId: predecessor.id, body: { contains: "bound to predecessor" } } }),
+    3,
+  );
 });
 
-test("concurrent binds serialize on the predecessor chain and create one successor", { timeout: 30_000 }, async () => {
+test("concurrent binds serialize on the predecessor chain and both succeed", { timeout: 30_000 }, async () => {
   const seed = await fixture("concurrent-binding");
   const predecessor = (await instantiate(seed)).at(-1)!;
   const body = { repoId: seed.repo.id, variables: {}, name: "concurrent successor", afterTaskId: predecessor.id };
@@ -459,10 +478,78 @@ test("concurrent binds serialize on the predecessor chain and create one success
     request(seed.project.id, seed.template.id, body),
     request(seed.project.id, seed.template.id, body),
   ]);
-  assert.deepEqual(results.map((result) => result.status).sort((a, b) => a - b), [201, 400]);
-  const refusal = results.find((result) => result.status === 400)!;
-  assert.equal(refusal.body.code, "after_task_already_bound", JSON.stringify(refusal.body));
-  assert.equal(await db.task.count(), STEP_COUNT * 2);
-  assert.equal(await db.task.count({ where: { dispatchAfterTaskId: predecessor.id } }), 1);
-  assert.equal(await db.taskActivity.count({ where: { taskId: predecessor.id, body: { contains: "bound to predecessor" } } }), 1);
+  assert.deepEqual(results.map((result) => result.status), [201, 201], JSON.stringify(results.map((r) => r.body)));
+  assert.notEqual(results[0]!.body.chainId, results[1]!.body.chainId);
+  assert.equal(await db.task.count(), STEP_COUNT * 3);
+  assert.equal(await db.task.count({ where: { dispatchAfterTaskId: predecessor.id } }), 2);
+  assert.equal(await db.taskActivity.count({ where: { taskId: predecessor.id, body: { contains: "bound to predecessor" } } }), 2);
+});
+
+test("every chain bound to one predecessor waits for it, starts independently, and survives a sibling's deletion", async () => {
+  const seed = await fixture("fan-out-lifecycle");
+  const predecessorTasks = await instantiate(seed);
+  const predecessor = predecessorTasks.at(-1)!;
+  const successors = [];
+  for (const name of ["successor A", "successor B"]) {
+    const created = await request(seed.project.id, seed.template.id, {
+      repoId: seed.repo.id,
+      variables: {},
+      name,
+      afterTaskId: predecessor.id,
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    const tasks = await db.task.findMany({ where: { chainId: created.body.chainId }, orderBy: { chainIndex: "asc" } });
+    successors.push({ chainId: created.body.chainId as string, first: tasks[0]! });
+  }
+  const [first, second] = successors as [typeof successors[number], typeof successors[number]];
+  assert.equal(first.first.dispatchAfterTaskId, predecessor.id);
+  assert.equal(second.first.dispatchAfterTaskId, predecessor.id);
+
+  // While the predecessor is TODO, neither bound first step may be started.
+  for (const successor of successors) {
+    const refused = await operatorRequest(`/tasks/${successor.first.id}/start`, "POST");
+    assert.equal(refused.status, 409, JSON.stringify(refused.body));
+    assert.match(String(refused.body.error), /predecessor .+ is not done/u);
+  }
+  assert.equal(await db.run.count({ where: { taskId: { in: successors.map((one) => one.first.id) } } }), 0);
+
+  // The predecessor settling makes both of them startable, and starting one
+  // leaves the other exactly where it was.
+  await db.task.update({ where: { id: predecessor.id }, data: { status: TaskStatus.DONE } });
+  const started = await operatorRequest(`/tasks/${first.first.id}/start`, "POST");
+  assert.equal(started.status, 201, JSON.stringify(started.body));
+  assert.equal(await db.run.count({ where: { taskId: first.first.id } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: second.first.id } }), 0);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: second.first.id } })).status, TaskStatus.TODO);
+  const startedSibling = await operatorRequest(`/tasks/${second.first.id}/start`, "POST");
+  assert.equal(startedSibling.status, 201, JSON.stringify(startedSibling.body));
+  assert.equal(await db.run.count({ where: { taskId: second.first.id } }), 1);
+});
+
+test("deleting one bound chain releases only its own binding", async () => {
+  const seed = await fixture("fan-out-release");
+  const predecessor = (await instantiate(seed)).at(-1)!;
+  const chainIds: string[] = [];
+  for (const name of ["released successor", "retained successor"]) {
+    const created = await request(seed.project.id, seed.template.id, {
+      repoId: seed.repo.id,
+      variables: {},
+      name,
+      afterTaskId: predecessor.id,
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.body));
+    chainIds.push(created.body.chainId as string);
+  }
+  const [releasedChainId, retainedChainId] = chainIds as [string, string];
+  const releasedFirst = await db.task.findFirstOrThrow({ where: { chainId: releasedChainId, chainIndex: 1 } });
+
+  const deleted = await operatorRequest(`/tasks/${releasedFirst.id}/chain`, "DELETE");
+  assert.equal(deleted.status, 204, JSON.stringify(deleted.body));
+  assert.equal(await db.task.count({ where: { chainId: releasedChainId } }), 0);
+  const stillBound = await db.task.findMany({
+    where: { dispatchAfterTaskId: predecessor.id },
+    select: { chainId: true },
+  });
+  assert.deepEqual(stillBound.map((task) => task.chainId), [retainedChainId]);
+  assert.equal(await db.task.count({ where: { chainId: retainedChainId } }), STEP_COUNT);
 });

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { checkExistingEscalation } from "./quiet-window-escalation.mjs";
+import { checkExistingEscalation, escalationScope } from "./quiet-window-escalation.mjs";
 import {
   clearEscalationRecord,
   ESCALATION_RETRY_CAP,
@@ -15,10 +15,15 @@ import {
 } from "./quiet-window-escalation-record.mjs";
 
 const revision = "b".repeat(40);
+const failedCommit = "c".repeat(40);
 const retryableReasons = new Set(["remote-main-unreadable"]);
+const hostScopedReasons = new Set(["database-backup-failed"]);
 const retryableEscalation = {
   reason: "remote-main-unreadable",
   detail: "exit-128",
+  // `persistAndNotifyFailure` records this sentinel when the attempt failed
+  // before it could determine a target commit.
+  to: "unknown",
   attempts: 1,
   escalatedAt: "2026-08-30T15:00:00.000Z",
 };
@@ -38,6 +43,7 @@ const fixture = (t, escalation = retryableEscalation) => {
       escalationPath,
       log: (line) => { logs.push(line); },
       retryableReasons,
+      hostScopedReasons,
       retryCap: ESCALATION_RETRY_CAP,
       retryEscalationNotification: async () => { retryCalls += 1; },
     },
@@ -109,6 +115,97 @@ test("an escalation outside the shipped allowlist stays latched", async (t) => {
   assert.deepEqual(result, { active: true });
   assert.equal(existsSync(state.escalationPath), true);
   assert.equal(state.retryCalls(), 1);
+});
+
+test("the three escalation classes are decided by target first and reason second", () => {
+  const scope = (record) => escalationScope({ record, retryableReasons, hostScopedReasons });
+
+  // With a usable target the allowlist owns its class whatever commit the
+  // marker names: a new commit must not shorten the retry policy or extend it
+  // past the cap.
+  assert.equal(scope({ reason: "remote-main-unreadable", to: failedCommit }), "retryable-transient");
+  assert.equal(scope({ reason: "database-backup-failed", to: failedCommit }), "host-scoped");
+  assert.equal(scope({ reason: "release-artifact-build-failed", to: failedCommit }), "commit-scoped");
+  // A marker that does not name the commit it failed on proves nothing about
+  // which commits are affected, so it blocks all of them.
+  assert.equal(scope({ reason: "release-artifact-build-failed" }), "host-scoped");
+  assert.equal(scope({ reason: "release-artifact-build-failed", to: "unknown" }), "host-scoped");
+  assert.equal(scope({ reason: "release-artifact-build-failed", to: `${failedCommit}x` }), "host-scoped");
+  assert.equal(scope({}), "host-scoped");
+});
+
+test("a commit-scoped escalation latches while reporting the commit it failed on", async (t) => {
+  const state = fixture(t, {
+    reason: "release-artifact-build-failed",
+    to: failedCommit,
+    escalatedAt: "2026-08-30T15:00:00.000Z",
+  });
+
+  const result = await checkExistingEscalation(state.options);
+
+  assert.equal(result.active, true);
+  assert.deepEqual(result.supersedable, {
+    failedCommit,
+    reason: "release-artifact-build-failed",
+    escalatedAt: "2026-08-30T15:00:00.000Z",
+  });
+  assert.equal(existsSync(state.escalationPath), true);
+  assert.deepEqual(state.logs, [
+    `STOP escalation-active scope=commit-scoped commit=${failedCommit} path=${state.escalationPath}`,
+  ]);
+});
+
+test("a host-scoped escalation latches without a commit to supersede", async (t) => {
+  const state = fixture(t, {
+    reason: "database-backup-failed",
+    to: failedCommit,
+    escalatedAt: "2026-08-30T15:00:00.000Z",
+  });
+
+  const result = await checkExistingEscalation(state.options);
+
+  assert.deepEqual(result, { active: true });
+  assert.deepEqual(state.logs, [
+    `STOP escalation-active scope=host-scoped path=${state.escalationPath}`,
+  ]);
+});
+
+test("a commit-scoped marker without a usable target latches as host-scoped", async (t) => {
+  const state = fixture(t, {
+    reason: "release-artifact-build-failed",
+    to: "unknown",
+    escalatedAt: "2026-08-30T15:00:00.000Z",
+  });
+
+  assert.deepEqual(await checkExistingEscalation(state.options), { active: true });
+  assert.equal(existsSync(state.escalationPath), true);
+});
+
+test("a retryable reason cannot rescue a marker whose target is missing or malformed", async (t) => {
+  const scope = (record) => escalationScope({ record, retryableReasons, hostScopedReasons });
+
+  // Target validation runs before the allowlist: only the deploy's own
+  // "no target determined" sentinel and a real oid describe a state this
+  // classifier can reason about.
+  assert.equal(scope({ reason: "remote-main-unreadable", to: "unknown" }), "retryable-transient");
+  assert.equal(scope({ reason: "remote-main-unreadable", to: failedCommit }), "retryable-transient");
+  assert.equal(scope({ reason: "remote-main-unreadable" }), "host-scoped");
+  assert.equal(scope({ reason: "remote-main-unreadable", to: `${failedCommit}x` }), "host-scoped");
+  assert.equal(scope({ reason: "remote-main-unreadable", to: null }), "host-scoped");
+
+  const state = fixture(t, { ...retryableEscalation, to: `${failedCommit}x` });
+  assert.deepEqual(await checkExistingEscalation(state.options), { active: true });
+  assert.equal(existsSync(state.escalationPath), true);
+});
+
+test("a retryable marker at the cap latches without becoming supersedable", async (t) => {
+  const state = fixture(t, {
+    ...retryableEscalation,
+    to: failedCommit,
+    attempts: ESCALATION_RETRY_CAP,
+  });
+
+  assert.deepEqual(await checkExistingEscalation(state.options), { active: true });
 });
 
 const markerFixture = (t) => {
@@ -195,4 +292,29 @@ test("clearing reports whether it removed a marker", (t) => {
   assert.equal(clearEscalationRecord({ path }), true);
   assert.equal(existsSync(path), false);
   assert.equal(clearEscalationRecord({ path }), false);
+});
+
+for (const change of ["host", "absent", "unreadable"]) {
+  test(`latched marker revalidation refuses ${change} after notification`, async (t) => {
+    const state = fixture(t, { reason: "release-artifact-build-failed", to: failedCommit });
+    const result = await checkExistingEscalation({
+      ...state.options,
+      retryEscalationNotification: async () => {
+        if (change === "absent") unlinkSync(state.escalationPath);
+        else writeFileSync(state.escalationPath, change === "host"
+          ? JSON.stringify({ reason: "database-backup-failed", to: failedCommit }) : "{");
+      },
+    });
+    assert.deepEqual(result, { active: true });
+  });
+}
+
+test("classification requires the host reason policy", () => {
+  assert.throws(() => escalationScope({ record: { to: failedCommit }, retryableReasons }),
+    /hostScopedReasons/);
+});
+
+test("unproven activation overrides even a retryable reason", async (t) => {
+  const state = fixture(t, { ...retryableEscalation, to: failedCommit, activationOutcomeProven: false });
+  assert.deepEqual(await checkExistingEscalation(state.options), { active: true });
 });

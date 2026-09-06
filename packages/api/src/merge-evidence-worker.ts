@@ -225,10 +225,22 @@ export const startEvidenceWorker = (
   reader: PullRequestReader,
 ): ReturnType<typeof setInterval> | null => {
   const interval = evidencePollIntervalMs();
+  // A tick reads GitHub for up to three requests under the read deadline, which
+  // can outlast the poll interval. Without this guard the overlapping ticks
+  // would re-fetch the same pending requests concurrently; the next tick simply
+  // skips, because there is nothing a second concurrent pass can observe that
+  // the one already running will not.
+  let inFlight = false;
   const timer = setInterval(() => {
-    void evidenceTick(db, reader).catch((error: unknown) => {
-      console.error("Merge evidence tick failed", error);
-    });
+    if (inFlight) return;
+    inFlight = true;
+    void evidenceTick(db, reader)
+      .catch((error: unknown) => {
+        console.error("Merge evidence tick failed", error);
+      })
+      .finally(() => {
+        inFlight = false;
+      });
   }, interval);
   timer.unref?.();
   return timer;
