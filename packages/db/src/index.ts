@@ -98,6 +98,7 @@ export {
   agentArchiveBlocker,
 } from "./chain-activation.js";
 export {
+  GATE_ATTESTATION_BASE_MISMATCH,
   type MergeAuthorizationResult,
   MergeEvidenceError,
   isMergeEvidenceError,

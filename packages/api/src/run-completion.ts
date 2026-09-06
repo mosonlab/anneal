@@ -6,8 +6,6 @@ import {
   attemptRunBirth,
   budgetGates,
   carryMergeRecoveryRun,
-  canonicalStepOrdinals,
-  canonicalTemplateIdentity,
   CleanupStatus,
   decideRunOutputSatisfaction,
   executionModeFor,
@@ -16,7 +14,6 @@ import {
   failurePhases,
   gateQuestion,
   INTEGRATOR_OUTPUT_KIND,
-  INTEGRATOR_TEMPLATE_NAME,
   isIntegratorStep,
   isMergeReadinessStep,
   isRegressionVerificationOutputKind,
@@ -325,6 +322,13 @@ export const externalFailureRefundDecision = ({
 
 const isDocumentationStep = (step: { outputKind: string } | null | undefined): boolean =>
   Boolean(step && stepRole(step) === "documentation");
+
+/**
+ * Metadata kind for a repair whose chain template owns no Documentation Step.
+ * Deliberately not a `MERGE_TAIL_KIND` member: it narrates one completion and
+ * is never read back as tail state.
+ */
+const MERGE_TAIL_DOCUMENTATION_ABSENT_KIND = "mergeTail.documentationStepAbsent";
 
 /**
  * Merge-tail repair markers point at an existing canonical task rather than a
@@ -799,43 +803,50 @@ export const completeRun = async (
             projectId: true,
             chainId: true,
             templateId: true,
-            chainIndex: true,
-            templateStep: { select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } } },
+            templateStep: { select: { outputKind: true, taskTemplate: { select: { name: true } } } },
           },
         })
       : null;
-    // A repair on any registered compound generation must put its
-    // Documentation Step back before Regression. Identity and ordinals come
-    // from the same registry that authorized the rollover.
-    const repairTemplateIdentity = repairRegression?.templateStep?.taskTemplate.name
-      ? canonicalTemplateIdentity(repairRegression.templateStep.taskTemplate.name)
-      : null;
-    const repairDocumentationOrdinals = repairTemplateIdentity?.canonicalName === INTEGRATOR_TEMPLATE_NAME
-      ? canonicalStepOrdinals(repairTemplateIdentity.canonicalName, repairTemplateIdentity.generation)
-      : null;
-    const repairDocumentationCandidate = repairRegression?.chainId && repairRegression.templateId
-      && repairDocumentationOrdinals
+    // A repair must put its chain's Documentation Step back before Regression.
+    // The Step comes from the repair target's own persisted template rows, so a
+    // chain minted from any generation is addressable — including a seed-era
+    // row whose retired graph shape was never registered anywhere.
+    const repairChain = repairRegression?.chainId && repairRegression.templateId
       && repairRegression.templateStep
-      && isRegressionVerificationOutputKind(repairRegression.templateStep.outputKind)
-      && repairRegression.chainIndex === repairDocumentationOrdinals.regression
-      && repairRegression.templateStep.stepIndex === repairDocumentationOrdinals.regression
-      && repairDocumentationOrdinals.documentation !== undefined
+      && stepRole(repairRegression.templateStep) === "regression"
+      ? {
+          projectId: repairRegression.projectId,
+          chainId: repairRegression.chainId,
+          templateId: repairRegression.templateId,
+          templateName: repairRegression.templateStep.taskTemplate.name,
+        }
+      : null;
+    const repairTemplateSteps = repairChain
+      ? await tx.taskTemplateStep.findMany({
+          where: { taskTemplateId: repairChain.templateId },
+          select: { id: true, outputKind: true },
+        })
+      : [];
+    const repairDocumentationStep = repairTemplateSteps.find(
+      (step) => stepRole(step) === "documentation",
+    ) ?? null;
+    const repairDocumentationTask = repairChain && repairDocumentationStep
       ? await tx.task.findFirst({
           where: {
-            projectId: repairRegression.projectId,
-            chainId: repairRegression.chainId,
-            templateId: repairRegression.templateId,
-            chainIndex: repairDocumentationOrdinals.documentation,
+            projectId: repairChain.projectId,
+            chainId: repairChain.chainId,
+            templateId: repairChain.templateId,
+            templateStepId: repairDocumentationStep.id,
             archivedAt: null,
-            templateStep: { stepIndex: repairDocumentationOrdinals.documentation },
           },
           orderBy: { chainIndex: "desc" },
-          select: { id: true, templateStep: { select: { outputKind: true } } },
+          select: { id: true },
         })
       : null;
-    const repairDocumentationTask = repairDocumentationCandidate
-      && isDocumentationStep(repairDocumentationCandidate.templateStep)
-      ? repairDocumentationCandidate
+    // A template that owns no Documentation Step is a fact about that chain, not
+    // an accident of a missing graph shape: say so rather than skipping in silence.
+    const repairDocumentationAbsence = repairChain && repairDocumentationStep === null
+      ? repairChain.templateName
       : null;
     // An auxiliary task is one whose own marker names the Regression it serves.
     const mergeTailAuxiliary = Boolean(repairMarker?.regressionTaskId);
@@ -1199,6 +1210,18 @@ export const completeRun = async (
               }, now);
             }
             if (advancement.auxiliaryTargetTaskId) {
+              if (repairDocumentationAbsence !== null) {
+                await tx.taskActivity.create({ data: {
+                  taskId: advancement.auxiliaryTargetTaskId,
+                  actorType: "control-plane",
+                  body: `Repair target template ${repairDocumentationAbsence} has no Documentation Step; the repair re-opens Regression directly`,
+                  metadata: {
+                    kind: MERGE_TAIL_DOCUMENTATION_ABSENT_KIND,
+                    schemaVersion: 1,
+                    templateName: repairDocumentationAbsence,
+                  },
+                } });
+              }
               const repairSourceRunId = typeof repairMarker?.raw.sourceRunId === "string"
                 ? repairMarker.raw.sourceRunId
                 : null;

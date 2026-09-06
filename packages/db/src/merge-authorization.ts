@@ -30,6 +30,9 @@ export class MergeEvidenceError extends Error {
 export const isMergeEvidenceError = (error: unknown): error is MergeEvidenceError =>
   error instanceof Error && error.name === "MergeEvidenceError";
 
+/** The named refusal for an attestation taken against another base. */
+export const GATE_ATTESTATION_BASE_MISMATCH = "gate-attestation-base-mismatch";
+
 export type MergeAuthorizationResult = {
   activityId: string;
   purpose: "gate" | "confirmation";
@@ -97,6 +100,17 @@ export const produceMergeAuthorization = async (
   });
   if (!attested.satisfied) {
     throw new MergeEvidenceError(`${attested.reason}; approval refused`);
+  }
+  // The gate signs a head *against a base*: the same tree merged onto a base
+  // that has moved is a different merge, and the row records which base was
+  // verified. `satisfied` alone would let an authorization inherit a signature
+  // taken against another base, which is the one thing the mechanical channel
+  // never does.
+  if (attested.attestation && attested.attestation.baseHeadSha !== payload.baseSha) {
+    throw new MergeEvidenceError(
+      `${GATE_ATTESTATION_BASE_MISMATCH}: the gate signed ${payload.headSha} onto base `
+      + `${attested.attestation.baseHeadSha}, but this authorization names base ${payload.baseSha}; approval refused`,
+    );
   }
 
   const activity = await tx.taskActivity.create({ data: {

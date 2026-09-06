@@ -1001,6 +1001,42 @@ test("repairs on every previously omitted legacy generation reopen the Librarian
   }
 });
 
+test("a repair on a seed-era template row reopens the Librarian Step", async () => {
+  // These markers were registered for identity alone: their retired graphs were
+  // never recorded, so routing through a registered shape skipped the Librarian
+  // in silence. The Step comes from the chain's own persisted template rows now.
+  for (const marker of ["10", "9", "human-12", "regression-first-13"]) {
+    const seeded = await exercise("review-fail", {
+      withLibrarian: true,
+      templateName: templateRolloverName(INTEGRATOR_TEMPLATE_NAME, marker, `template-${marker}`),
+    });
+    const repair = await repairFor(seeded, "review-fix");
+    await completeRepair(seeded, repair.id, `Closed ${marker} findings.`);
+    assert.ok(seeded.librarian, marker);
+    assert.equal(
+      (await db.task.findUniqueOrThrow({ where: { id: seeded.librarian.id } })).status,
+      TaskStatus.TODO,
+      marker,
+    );
+    assert.equal(await db.run.count({ where: { taskId: seeded.librarian.id } }), 1, marker);
+    assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1, marker);
+  }
+});
+
+test("a repair on a template with no Documentation Step says so rather than skipping in silence", async () => {
+  const seeded = await exercise("review-fail");
+  const repair = await repairFor(seeded, "review-fix");
+  await completeRepair(seeded, repair.id, "Closed MF-2 and reran its focused regression.");
+  const absence = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.regression.id,
+    actorType: "control-plane",
+    metadata: { path: ["kind"], equals: "mergeTail.documentationStepAbsent" },
+  } });
+  assert.match(absence.body, /has no Documentation Step/u);
+  // The tail still re-opens Regression directly, which is what it always did.
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
+});
+
 test("invalid Regression output opens a stop notice with no unusable operator choices", async () => {
   const seeded = await seedRegression();
   assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, {

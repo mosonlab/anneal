@@ -41,11 +41,13 @@ const BASE = "b".repeat(40);
 const PROOF = `MERGE GATE: PASS ${HEAD}`;
 const V2 = "regression-verification-v2";
 
-const passingBody = (head = HEAD): string => JSON.stringify({
+const OTHER_BASE = "e".repeat(40);
+
+const passingBody = (head = HEAD, base = BASE): string => JSON.stringify({
   schemaVersion: 2,
   outcome: "pass",
   headSha: head,
-  baseHeadSha: BASE,
+  baseHeadSha: base,
   gateVerdict: "PASS",
   gateProof: `MERGE GATE: PASS ${head}`,
 });
@@ -173,4 +175,49 @@ test("a chain whose Regression node is the frozen v1 generation is left alone", 
   const card = await filledCard(chain);
   await approve(card.id, "evt-legacy");
   assert.equal((await authorizations(chain.gateTask.id)).length, 1);
+});
+
+test("an attestation taken against another base does not authorize this merge", async () => {
+  // The gate signs a head against a base. This chain has a signature for the
+  // exact head the card names, taken while the branch sat on a different base:
+  // `satisfied` alone would have let it through.
+  const chain = await seedIntegratorChain(db, { label: "attest-base" });
+  const regression = await addRegressionStep(chain, V2);
+  await db.$transaction((tx) => recordGateAttestation(tx, {
+    chainId: chain.chainId, taskId: regression.task.id, runId: null,
+    kind: V2, body: passingBody(HEAD, OTHER_BASE),
+  }));
+  const card = await filledCard(chain);
+  await assert.rejects(() => approve(card.id, "evt-base-mismatch"), /gate-attestation-base-mismatch/u);
+  assert.equal((await authorizations(chain.gateTask.id)).length, 0, "no authorization was written");
+});
+
+test("the same head authorizes once the attested base is the base being merged onto", async () => {
+  const chain = await seedIntegratorChain(db, { label: "attest-base-match" });
+  const regression = await addRegressionStep(chain, V2);
+  await db.$transaction((tx) => recordGateAttestation(tx, {
+    chainId: chain.chainId, taskId: regression.task.id, runId: null,
+    kind: V2, body: passingBody(HEAD, BASE),
+  }));
+  const card = await filledCard(chain);
+  await approve(card.id, "evt-base-match");
+  assert.equal((await authorizations(chain.gateTask.id)).length, 1);
+});
+
+test("a Regression Step whose output kind this build does not recognise is not exempt", async () => {
+  // The exemption is a registered pre-attestation generation, not "no step of
+  // the current kind was found": renaming or adding a kind must not hand a
+  // chain the legacy carve-out.
+  const chain = await seedIntegratorChain(db, { label: "attest-unknown-kind" });
+  await addRegressionStep(chain, "regression-attestation");
+  const card = await filledCard(chain);
+  await assert.rejects(() => approve(card.id, "evt-unknown-kind"), /no merge gate attestation for head/u);
+  assert.equal((await authorizations(chain.gateTask.id)).length, 0, "no authorization was written");
+});
+
+test("a Regression Step on a generation later than the frozen one is not exempt", async () => {
+  const chain = await seedIntegratorChain(db, { label: "attest-v3" });
+  await addRegressionStep(chain, "regression-verification-v3");
+  const card = await filledCard(chain);
+  await assert.rejects(() => approve(card.id, "evt-v3"), /no merge gate attestation for head/u);
 });

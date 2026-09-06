@@ -25,6 +25,7 @@ import {
   REGRESSION_VERIFICATION_OUTPUT_KIND,
   parseRegressionVerdict,
 } from "./merge-tail.js";
+import { stepGeneration, stepRole } from "./step-role.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -96,6 +97,15 @@ export type GateAttestationRequirement =
   | { satisfied: false; reason: string };
 
 /**
+ * The Regression generations that predate the proof line, and are therefore the
+ * only ones a chain may present nothing for. Anything else — a later generation,
+ * or an outputKind this build does not recognise as a Regression Step at all —
+ * has to produce a row, because "no attestation found" must never be the same
+ * answer as "this chain was never asked for one".
+ */
+export const PRE_ATTESTATION_REGRESSION_GENERATIONS: readonly string[] = ["v1"];
+
+/**
  * Whether this chain may be authorized to merge `headSha`.
  *
  * `satisfied` with a null attestation is the legacy carve-out: a chain whose
@@ -117,15 +127,20 @@ export const requireGateAttestation = async (
   if (found) return { satisfied: true, attestation: found };
   // The generation probe reads the chain's *step*, not its output: an output is
   // absent both before the Regression run lands and on a frozen v1 chain, and
-  // only the second may skip the requirement.
-  const regressionStep = await tx.task.findFirst({
-    where: {
-      chainId: input.chainId,
-      templateStep: { outputKind: REGRESSION_VERIFICATION_OUTPUT_KIND },
-    },
-    select: { id: true },
+  // only the second may skip the requirement. The exemption is stated as a
+  // registered generation rather than inferred from a failed match on the
+  // current outputKind, so renaming or adding a kind cannot silently exempt a
+  // chain the gate never signed for.
+  const chainSteps = await tx.task.findMany({
+    where: { chainId: input.chainId, templateStep: { isNot: null } },
+    select: { templateStep: { select: { outputKind: true, taskTemplate: { select: { name: true } } } } },
   });
-  if (!regressionStep) return { satisfied: true, attestation: null };
+  const regressionStep = chainSteps
+    .map((task) => task.templateStep)
+    .find((step) => step !== null && stepRole(step) === "regression") ?? null;
+  if (regressionStep && PRE_ATTESTATION_REGRESSION_GENERATIONS.includes(stepGeneration(regressionStep))) {
+    return { satisfied: true, attestation: null };
+  }
   return {
     satisfied: false,
     reason: `no merge gate attestation for head ${input.headSha}; the gate never signed this commit`,
