@@ -9,8 +9,10 @@ written.
 
 ## Unreleased
 
-- Removed `POST /inbox/messages/:messageId/supersede`; `POST
-  /inbox/messages/:messageId/close` is the only Inbox closure transition.
+- Removed `POST /inbox/messages/:messageId/supersede`;
+  `POST /inbox/messages/:messageId/close` is now the only Inbox route whose sole
+  purpose is closing a message. Archiving a task still closes its open merge-tail
+  stop notices, and an approval decision still closes the gate's sibling cards.
 
 ## v0.8.0 — Developer Preview 8
 
