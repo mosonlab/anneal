@@ -111,6 +111,8 @@ curl "$BASE_URL/files/content?path=README.md" -H "Authorization: Bearer $OPERATO
 
 ### PUT `/files/content`
 
+Writing a file creates any missing parent directories within the Files Root.
+
 - Required parameters: raw request body containing the file bytes.
 - Optional query: `path` (empty path targets the Files Root and is normally
   rejected by the underlying file operation).

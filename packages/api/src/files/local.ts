@@ -250,6 +250,5 @@ export const createLocalFileStore = async (logicalRoot: string): Promise<FileSto
         mapPathError(error, path);
       }
     },
-
   };
 };
