@@ -19,6 +19,24 @@ export const RUNTIME_TOOL_FILES = Object.freeze([
   Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/run-gate.sh", destination: "gate-worker/run-gate.sh" }),
 ]);
 
+// Destination components declare the subdirectory layout (including gate-worker).
+// Both build and deployment compare this derived inventory with independent reads.
+export const expectedDirectoryEntries = () => {
+  const entries = new Map([["", new Set()]]);
+  for (const { destination } of RUNTIME_TOOL_FILES) {
+    const components = destination.split("/");
+    let directory = "";
+    for (const [index, name] of components.entries()) {
+      entries.get(directory).add(name);
+      if (index < components.length - 1) {
+        directory = directory ? `${directory}/${name}` : name;
+        if (!entries.has(directory)) entries.set(directory, new Set());
+      }
+    }
+  }
+  return entries;
+};
+
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultRepositoryRoot = resolve(scriptDirectory, "../../..");
 const defaultPackageRoot = resolve(scriptDirectory, "..");
@@ -51,15 +69,10 @@ const directory = (filesystem, path, label) => {
   return status;
 };
 
-const expectedDirectoryEntries = new Map([
-  ["", ["gate-worker", "git-credential-runner.sh", "regression-verification.sh"]],
-  ["gate-worker", ["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"]],
-]);
-
 const assertGeneratedTree = (filesystem, outputRoot, sourceRoot) => {
   directory(filesystem, outputRoot, "generated-root");
 
-  for (const [relativeDirectory, names] of expectedDirectoryEntries) {
+  for (const [relativeDirectory, names] of expectedDirectoryEntries()) {
     const current = relativeDirectory === "" ? outputRoot : join(outputRoot, relativeDirectory);
     if (relativeDirectory !== "") directory(filesystem, current, `generated-${relativeDirectory}`);
     const entries = filesystem.readdirSync(current, { withFileTypes: true })
@@ -131,7 +144,9 @@ export const buildRuntimeTools = ({
   let stageRoot;
   try {
     stageRoot = filesystem.mkdtempSync(join(distRoot, ".runtime-tools-stage-"));
-    filesystem.mkdirSync(join(stageRoot, "gate-worker"), { recursive: false, mode: 0o755 });
+    for (const relativeDirectory of expectedDirectoryEntries().keys()) {
+      if (relativeDirectory) filesystem.mkdirSync(join(stageRoot, relativeDirectory), { recursive: true, mode: 0o755 });
+    }
     for (const { source, destination } of RUNTIME_TOOL_FILES) {
       const sourcePath = resolve(sourceRoot, source);
       const destinationPath = join(stageRoot, destination);
