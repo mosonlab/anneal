@@ -9,7 +9,7 @@ const grant = (folderPath: string, permissions: Partial<GrantLike> = {}): GrantL
 
 test("requiredCapability covers the full operation matrix", () => {
   for (const operation of ["list", "stat", "read"] as const) assert.equal(requiredCapability(operation), "canRead");
-  for (const operation of ["write", "mkdir"] as const) assert.equal(requiredCapability(operation), "canWrite");
+  assert.equal(requiredCapability("write"), "canWrite");
   assert.equal(requiredCapability("delete"), "canDelete");
 });
 

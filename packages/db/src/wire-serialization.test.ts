@@ -120,6 +120,7 @@ const nativeBoardCard = (): NativeBoardCard => ({
   mergeOutcome: null,
   repairOf: null,
   budgetRemaining: true,
+  leaseLossRefunds: 0,
   chainAggregate: null,
 });
 

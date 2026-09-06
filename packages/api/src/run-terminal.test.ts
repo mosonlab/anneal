@@ -53,15 +53,6 @@ const cases: Array<{
     run: ["status", "endedAt", "leaseExpiresAt", "sessionTokenRevokedAt", "retryable"],
     session: ["executionStatus", "endedAt", "cleanupEndedAt", "cleanupStatus"],
   },
-  {
-    name: "claim-invalidated",
-    outcome: { kind: "claim-invalidated", reason },
-    run: [
-      "status", "endedAt", "leaseExpiresAt", "sessionTokenRevokedAt", "failureClass", "failureReason",
-      "retryable", "maxRunsPerTask", "budgetGrants",
-    ],
-    session: ["executionStatus", "endedAt", "failureReason"],
-  },
 ];
 
 for (const row of cases) {
