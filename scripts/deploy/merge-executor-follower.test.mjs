@@ -1,13 +1,32 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { renderMergeExecutorFollowerSystemdUnit } from './merge-executor-follower-templates.mjs';
 import { computeReleaseDigest } from './release-directory.mjs';
 import { follow } from './merge-executor-follower.mjs';
+
+// Production requires a trusted Node executable. The host toolchain may belong
+// to another account, so exercise the real checks under a private Node copy.
+if (process.env.ANNEAL_FOLLOWER_TEST_NODE !== process.execPath) {
+  test('follower suite under a test-owned Node executable', t => {
+    const root = mkdtempSync(join(tmpdir(), 'executor-follow-node-'));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const node = join(root, 'node');
+    copyFileSync(process.execPath, node);
+    chmodSync(node, 0o755);
+    const env = { ...process.env, ANNEAL_FOLLOWER_TEST_NODE: node };
+    delete env.NODE_TEST_CONTEXT;
+    const result = spawnSync(node, ['--test', new URL(import.meta.url).pathname], {
+      env, encoding: 'utf8', timeout: 120_000,
+    });
+    assert.ifError(result.error);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  });
+} else {
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 const commit = 'a'.repeat(40);
@@ -298,3 +317,5 @@ test('no-op reads only the manifest under the candidate', async t => {
     assert.deepEqual(reads, [join(f.candidate, 'release-manifest.json')]);
   } finally { mock.mock.restore(); syncBuiltinESMExports(); }
 });
+
+}
