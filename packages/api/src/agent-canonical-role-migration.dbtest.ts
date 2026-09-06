@@ -25,7 +25,7 @@ import { PrismaClient } from "@anneal/db";
 
 import { testDatabaseUrl } from "./testdb.js";
 
-const targetMigration = "20260905120000_staffing_profiles";
+const migrationUnderTest = "20260905120000_staffing_profiles";
 const dbDirectory = fileURLToPath(new URL("../../db", import.meta.url));
 
 const execute = (url: string, sql: string): void => {
@@ -58,7 +58,7 @@ const stageHistory = (label: string): { url: string; schema: string; staging: st
   cpSync(join(dbDirectory, "prisma"), stagedPrisma, { recursive: true });
   const stagedMigrations = join(stagedPrisma, "migrations");
   for (const migration of readdirSync(stagedMigrations, { withFileTypes: true })) {
-    if (migration.isDirectory() && migration.name >= targetMigration) {
+    if (migration.isDirectory() && migration.name >= migrationUnderTest) {
       rmSync(join(stagedMigrations, migration.name), { recursive: true, force: true });
     }
   }
@@ -68,8 +68,8 @@ const stageHistory = (label: string): { url: string; schema: string; staging: st
 
 const applyTarget = (staged: { url: string; stagedPrisma: string }): void => {
   cpSync(
-    join(dbDirectory, "prisma", "migrations", targetMigration),
-    join(staged.stagedPrisma, "migrations", targetMigration),
+    join(dbDirectory, "prisma", "migrations", migrationUnderTest),
+    join(staged.stagedPrisma, "migrations", migrationUnderTest),
     { recursive: true },
   );
   deploy(staged.url, join(staged.stagedPrisma, "schema.prisma"));

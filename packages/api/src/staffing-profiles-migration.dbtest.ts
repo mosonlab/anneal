@@ -10,7 +10,7 @@ import { PrismaClient } from "@anneal/db";
 
 import { testDatabaseUrl } from "./testdb.js";
 
-const targetMigration = "20260905120000_staffing_profiles";
+const migrationUnderTest = "20260905120000_staffing_profiles";
 const dbDirectory = fileURLToPath(new URL("../../db", import.meta.url));
 
 const execute = (url: string, sql: string): void => {
@@ -46,7 +46,7 @@ test("the staffing-profiles migration backfills one default profile per template
     cpSync(join(dbDirectory, "prisma"), stagedPrisma, { recursive: true });
     const stagedMigrations = join(stagedPrisma, "migrations");
     for (const migration of readdirSync(stagedMigrations, { withFileTypes: true })) {
-      if (migration.isDirectory() && migration.name >= targetMigration) {
+      if (migration.isDirectory() && migration.name >= migrationUnderTest) {
         rmSync(join(stagedMigrations, migration.name), { recursive: true, force: true });
       }
     }
@@ -91,7 +91,7 @@ test("the staffing-profiles migration backfills one default profile per template
     );
     const beforeTasks = await readTasks();
 
-    cpSync(join(dbDirectory, "prisma", "migrations", targetMigration), join(stagedMigrations, targetMigration), { recursive: true });
+    cpSync(join(dbDirectory, "prisma", "migrations", migrationUnderTest), join(stagedMigrations, migrationUnderTest), { recursive: true });
     deploy(url, join(stagedPrisma, "schema.prisma"));
 
     const profiles = await db.staffingProfile.findMany({
