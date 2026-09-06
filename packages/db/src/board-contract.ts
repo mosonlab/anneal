@@ -311,7 +311,8 @@ export type RunToolMetrics = {
   /** Summed duration of the calls that paired a start with a completion, so a
    *  lower bound whenever `unpairedCalls` is non-zero. */
   totalToolMs: number;
-  /** Starts with no completion. They count in `calls` with unknown duration. */
+  /** Calls the stored events left unpaired — a start with no completion, or a
+   *  completion with no start. They count in `calls` with unknown duration. */
   unpairedCalls: number;
   /** The five tool names with the most calls, most calls first. */
   byName: RunToolNameMetrics[];
