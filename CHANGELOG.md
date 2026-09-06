@@ -9,6 +9,9 @@ written.
 
 ## Unreleased
 
+- The retired `goal-5a0` authorization-marker harness and root
+  `test:dependency-gate` script are removed.
+
 ## v0.8.0 — Developer Preview 8
 
 The eighth preview is about who does the work, and where it runs. Staffing
