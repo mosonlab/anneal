@@ -1,4 +1,4 @@
-import { applyInboxDecisionTx, InboxSender, InboxStatus, Prisma, type PrismaClient } from "@anneal/db";
+import { applyInboxDecisionTx, recordMergeEvidenceRefusal, InboxSender, InboxStatus, Prisma, type PrismaClient } from "@anneal/db";
 
 export type FeishuEnvelope = {
   header?: { event_id?: string; event_type?: string };
@@ -97,6 +97,7 @@ export const processFeishuEvent = async (db: PrismaClient, envelope: FeishuEnvel
     if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
       return { duplicate: true, resumed: false };
     }
+    await recordMergeEvidenceRefusal(db, error);
     // The transaction above rolled back, taking the audit record with it.
     // Re-persist the raw event so unmatched inbound messages stay inspectable.
     await db.inboxExternalEvent.create({ data: {

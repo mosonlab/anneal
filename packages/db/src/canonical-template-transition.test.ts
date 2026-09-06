@@ -4,7 +4,6 @@ import test from "node:test";
 import { PR_TEMPLATE_NAME } from "./agent-contract.js";
 import {
   CANONICAL_SOURCE_PROMPT_GENERATIONS,
-  canonicalStepOrdinals,
   canonicalTemplateIdentity,
   LEGACY_TEMPLATE_GENERATIONS,
   legacyGenerationMatches,
@@ -194,29 +193,6 @@ test("legacy generation shapes match each step's optional flag", () => {
   );
 });
 
-test("every registered compound generation derives its repair Step ordinals", () => {
-  for (const generation of LEGACY_TEMPLATE_GENERATIONS["compound-engineer-workflow"]) {
-    const ordinals = canonicalStepOrdinals("compound-engineer-workflow", generation.marker);
-    assert.ok(ordinals, generation.marker);
-    assert.equal(ordinals.documentation, generation.shape.findIndex((step) => step.outputKind === "documentation") + 1);
-    assert.equal(
-      ordinals.regression,
-      generation.shape.findIndex((step) => step.outputKind.startsWith("regression-verification")) + 1,
-    );
-  }
-  assert.deepEqual(
-    canonicalStepOrdinals("compound-engineer-workflow", "pre-narrow-regression-lease"),
-    { spec: 1, plan: 2, "plan-review": 3, "revised-plan": 4, implementation: 5,
-      "sol-findings": 6, "blind-findings": 7, "fixed-implementation": 8,
-      documentation: 9, regression: 10, readiness: 11, integrator: 12 },
-  );
-  for (const marker of ["pre-blind-review-retirement", "pre-regression-step-split"] as const) {
-    const ordinals = canonicalStepOrdinals("compound-engineer-workflow", marker);
-    assert.equal(ordinals?.documentation, 9, marker);
-    assert.equal(ordinals?.regression, 10, marker);
-  }
-});
-
 test("a prompt generation is decided by step index and text, not by array order", () => {
   const forward = [{ stepIndex: 1, prompt: "one" }, { stepIndex: 2, prompt: "two" }];
   const reversed = [{ stepIndex: 2, prompt: "two" }, { stepIndex: 1, prompt: "one" }];
@@ -384,17 +360,6 @@ test("bound direct revalidation is a registered structural rollover", async () =
   assert.ok(current);
   const generation = generationOf("direct-engineer-workflow", "pre-revalidate-step");
   assert.equal(generation.shape.length, 7);
-  assert.deepEqual(canonicalStepOrdinals("direct-engineer-workflow", null), {
-    revalidation: 1,
-    implementation: 2,
-    "sol-findings": 3,
-    "blind-findings": 4,
-    "fixed-implementation": 5,
-    regression: 6,
-    readiness: 7,
-    integrator: 8,
-  });
-  assert.equal(generation.successorStepOrdinals?.implementation, 2);
   assert.equal(
     matchedLegacyGeneration("direct-engineer-workflow", shapeAsPersisted(generation.shape)),
     "pre-revalidate-step",
@@ -402,7 +367,7 @@ test("bound direct revalidation is a registered structural rollover", async () =
   assert.equal(matchedLegacyGeneration("direct-engineer-workflow", asPersisted(current)), null);
 });
 
-test("the pull-request workflow has a registered prompt-only generation and current ordinals", async () => {
+test("the pull-request workflow has a registered prompt-only generation", async () => {
   const sources = await loadAllTemplateStepSources();
   const current = sources.get(PR_TEMPLATE_NAME);
   assert.ok(current);
@@ -419,12 +384,6 @@ test("the pull-request workflow has a registered prompt-only generation and curr
   );
   assert.equal(templatePromptGenerationDigest(current), CANONICAL_SOURCE_PROMPT_GENERATIONS[PR_TEMPLATE_NAME]);
   assert.equal(matchedLegacyGeneration(PR_TEMPLATE_NAME, asPersisted(current)), null);
-  assert.deepEqual(canonicalStepOrdinals(PR_TEMPLATE_NAME, null), {
-    implementation: 1,
-    "sol-findings": 2,
-    "blind-findings": 3,
-    "fixed-implementation": 4,
-  });
   const reviewedGeneration = generationOf(PR_TEMPLATE_NAME, "pre-pr-head-tree-check");
   assert.equal(reviewedGeneration.promptDigest, "805b9e911be94c84e451cdbf4d1cdb93ab10031c031c6854947f56d306fb1906");
   assert.notEqual(reviewedGeneration.promptDigest, templatePromptGenerationDigest(current));
@@ -516,7 +475,7 @@ test("the Astra-low review-fix generation is kept on record and retired from mat
   // was the Agent bound at the fix step. Under a fingerprint that no longer
   // reads bindings it states the current graph, so it is flagged rather than
   // deleted: the generation was published, and rows already renamed under its
-  // marker still resolve their identity and Step ordinals through it.
+  // marker still resolve their identity through it.
   const sources = await loadAllTemplateStepSources();
   for (const templateName of Object.keys(LEGACY_TEMPLATE_GENERATIONS) as CanonicalTemplateRegistryName[]) {
     const current = sources.get(templateName);
@@ -526,7 +485,6 @@ test("the Astra-low review-fix generation is kept on record and retired from mat
     assert.equal(generation.marker, "pre-astra-low-review-fix");
     assert.equal(generation.retiredByBinding, true, templateName);
     assert.equal(generation.promptDigest, undefined, templateName);
-    assert.deepEqual(generation.successorStepOrdinals, canonicalStepOrdinals(templateName, null), templateName);
     const fixIndex = current.findIndex((step) => step.outputKind === "fixed-implementation");
     assert.equal(current[fixIndex]!.agentName, "senior-dev-astra-low", templateName);
 
@@ -543,11 +501,6 @@ test("the Astra-low review-fix generation is kept on record and retired from mat
     assert.deepEqual(
       canonicalTemplateIdentity(templateRolloverName(templateName, generation.marker, "template-row")),
       { canonicalName: templateName, generation: generation.marker },
-      templateName,
-    );
-    assert.deepEqual(
-      canonicalStepOrdinals(templateName, generation.marker),
-      generation.successorStepOrdinals,
       templateName,
     );
   }
@@ -658,7 +611,7 @@ test("a retired generation is identified without its prior-output whitelist", ()
 });
 
 
-test("model-neutral review names roll over exactly the deployed shapes and retain repair ordinals", async () => {
+test("model-neutral review names roll over exactly the deployed shapes and retain retired generation identity", async () => {
   const sources = await loadAllTemplateStepSources();
   for (const templateName of Object.keys(LEGACY_TEMPLATE_GENERATIONS) as CanonicalTemplateRegistryName[]) {
     const current = sources.get(templateName)!;
@@ -676,8 +629,6 @@ test("model-neutral review names roll over exactly the deployed shapes and retai
     });
     for (const outputKind of ["sol-findings", "blind-findings"] as const) {
       const ordinal = current.findIndex((step) => step.outputKind === outputKind) + 1;
-      assert.equal(canonicalStepOrdinals(templateName, null)?.[outputKind], ordinal);
-      assert.equal(canonicalStepOrdinals(templateName, generation.marker)?.[outputKind], ordinal);
       assert.equal(current[ordinal - 1]!.name, outputKind === "sol-findings" ? "Code review" : "Blind code review");
     }
     assert.equal(templatePromptGenerationDigest(outgoing), CANONICAL_SOURCE_PROMPT_GENERATIONS[templateName]);
