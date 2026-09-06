@@ -1871,3 +1871,16 @@ test("the isolation claim stays the one that is actually enforced", () => {
     /refusing to push into a mirror this check could not inspect/,
   );
 });
+
+test("the local-slot cleanup commands run on the dispatching machine", () => {
+  // The reaper never runs on the dispatching host, so a local-slot container is
+  // removed by hand there. The commands the runbook offers for that must run
+  // where the container is: an `ssh primary-worker` copied from the worker-side
+  // paragraph inspects and deletes containers on the wrong machine entirely.
+  const runbook = readFileSync(runbookPath, "utf8");
+  const section = runbook.slice(runbook.indexOf("A gate that ran in the dispatcher's"));
+  const block = section.slice(section.indexOf("```sh") + 5, section.indexOf("```", section.indexOf("```sh") + 5));
+  assert.match(block, /docker ps --filter name=agentos-merge-gate-/);
+  assert.match(block, /docker rm -f/);
+  assert.doesNotMatch(block, /ssh /, "the local-slot cleanup still runs on another host");
+});

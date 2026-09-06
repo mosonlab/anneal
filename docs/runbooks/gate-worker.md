@@ -602,8 +602,8 @@ runs on a worker — never sees it. On the dispatching machine, remove such a
 container by hand with the same two commands, without the `ssh`:
 
 ```sh
-ssh primary-worker 'docker ps --filter name=agentos-merge-gate- --format "{{.Names}}\t{{.RunningFor}}"'
-ssh primary-worker 'docker rm -f <name>'
+docker ps --filter name=agentos-merge-gate- --format "{{.Names}}\t{{.RunningFor}}"
+docker rm -f <name>
 ```
 
 **`GATE DISPATCH: NO SLOT` keeps recurring** — the configured slots are
