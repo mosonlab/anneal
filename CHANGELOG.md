@@ -9,6 +9,21 @@ written.
 
 ## Unreleased
 
+- Session events are now bounded end to end. A runner holds at most 32 MiB and
+  20 000 undelivered events per Run. When it fills, the oldest liveness events —
+  streaming deltas, raw provider frames, captured stderr, provider status and
+  tool output — are dropped and an `EVENTS_DROPPED` event records how many and
+  which sequence range were lost. Lifecycle, error and terminal events are never
+  dropped; if the queue is still full once nothing droppable is left, such an
+  event keeps its place, type and sequence number but loses its payload to a
+  `truncated` marker, and a queue of nothing but those markers holds past the
+  bound rather than losing the account of the Run.
+  A single event payload above 256 KiB is truncated to a `truncated` marker
+  carrying its original size.
+  `POST /runner/runs/:runId/events` enforces the same per-event cap and a
+  request-body cap, answering 413 with the offending event's index so the runner
+  drops that one event and resends the rest. Heartbeats now carry
+  `eventQueueBytes`.
 - Retired the `POST /files/mkdir` and `POST /files/move` routes and their
   underlying store operations.
 - Removed `POST /inbox/messages/:messageId/supersede`;

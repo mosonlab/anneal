@@ -51,6 +51,8 @@ const localRefusalStatus = {
   "pinned-base-commit": 409,
   "merge-evidence": 409,
   "merge-confirmation": 409,
+  "event-payload-too-large": 413,
+  "events-request-too-large": 413,
 } as const satisfies Record<string, RefusalStatus>;
 
 export type RefusalReason = WorkflowRefusalReason | keyof typeof localRefusalStatus;
