@@ -2429,7 +2429,6 @@ export const installLaunchdServices = ({
   })));
   verifyServicePlistDefinitions(rendered, inventory);
   const previousByPath = new Map(previous?.manifest.entries.map((entry) => [entry.path, entry]) ?? []);
-  const wrapperSource = SERVICE_WRAPPER_SOURCE;
   const generatedWrapperEntry = {
     path: wrapper,
     existed: existsSync(wrapper),
@@ -2438,7 +2437,7 @@ export const installLaunchdServices = ({
       ? join(root, SERVICE_INSTALL_ROOT, "backups", SERVICE_WRAPPER_FILE_NAME)
       : null,
     originalSha256: existsSync(wrapper) ? sha256(readFileSync(wrapper)) : null,
-    installedSha256: sha256(readFileSync(wrapperSource)),
+    installedSha256: sha256(readFileSync(SERVICE_WRAPPER_SOURCE)),
   };
   const previousWrapperEntry = previousByPath.get(wrapper);
   const entries = [previousWrapperEntry
@@ -2529,7 +2528,7 @@ export const installLaunchdServices = ({
   }
   const bootstrap = bootstrapCurrentRelease({ repositoryRoot: root });
   if (!previousWrapperEntry && existsSync(wrapper)
-      && readFileSync(wrapper, "utf8") !== readFileSync(wrapperSource, "utf8") && !replaceExisting) {
+      && readFileSync(wrapper, "utf8") !== readFileSync(SERVICE_WRAPPER_SOURCE, "utf8") && !replaceExisting) {
     throw new Error(`launchd-service-wrapper-conflict:${wrapper}`);
   }
   mkdirSync(join(root, SERVICE_INSTALL_ROOT, "backups"), { recursive: true, mode: 0o700 });
@@ -2599,8 +2598,8 @@ export const installLaunchdServices = ({
       writeFileSync(entry.backupPath, readFileSync(entry.path), { flag: "wx", mode: 0o600 });
     }
   }
-  if (!existsSync(wrapper) || fileDigest(wrapper) !== fileDigest(wrapperSource)) {
-    writeAtomic(wrapper, readFileSync(wrapperSource), 0o755);
+  if (!existsSync(wrapper) || fileDigest(wrapper) !== fileDigest(SERVICE_WRAPPER_SOURCE)) {
+    writeAtomic(wrapper, readFileSync(SERVICE_WRAPPER_SOURCE), 0o755);
   }
   for (const entry of entries.slice(1)) {
     if (!existsSync(entry.path) || sha256(readFileSync(entry.path)) !== entry.installedSha256) {
