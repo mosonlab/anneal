@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
@@ -10,6 +10,7 @@ import {
   parseArguments,
   runReset,
   runSetup,
+  runVerify,
   validateAuthority,
   verifyEvidence,
 } from "./templates-release-demo.mjs";
@@ -134,6 +135,70 @@ const completeEvidence = (mode = "rehearsal") => {
     capture: { runId: "oss-c0-demo-001", chainId: "chain-1", tasks },
   };
 };
+
+const assertSchemaValue = (value, schema, path = "$") => {
+  if (schema.const !== undefined) assert.deepEqual(value, schema.const, `${path} must equal its schema constant`);
+  if (schema.enum) assert.ok(schema.enum.some((candidate) => Object.is(candidate, value)), `${path} is outside its schema enum`);
+  if (schema.type) {
+    const valid = schema.type === "object"
+      ? value !== null && typeof value === "object" && !Array.isArray(value)
+      : schema.type === "array"
+        ? Array.isArray(value)
+        : schema.type === "string"
+          ? typeof value === "string"
+          : schema.type === "number"
+            ? typeof value === "number" && Number.isFinite(value)
+            : schema.type === "integer"
+              ? Number.isInteger(value)
+              : schema.type === "boolean"
+                ? typeof value === "boolean"
+                : true;
+    assert.ok(valid, `${path} must be a ${schema.type}`);
+  }
+  if (schema.type === "object") {
+    for (const key of schema.required ?? []) assert.ok(Object.hasOwn(value, key), `${path}.${key} is required`);
+    if (schema.additionalProperties === false) {
+      for (const key of Object.keys(value)) assert.ok(Object.hasOwn(schema.properties ?? {}, key), `${path}.${key} is not in the schema`);
+    }
+    for (const [key, childSchema] of Object.entries(schema.properties ?? {})) {
+      if (Object.hasOwn(value, key)) assertSchemaValue(value[key], childSchema, `${path}.${key}`);
+    }
+  }
+  if (schema.type === "array") {
+    assert.ok(value.length >= (schema.minItems ?? 0), `${path} has too few items`);
+    if (schema.maxItems !== undefined) assert.ok(value.length <= schema.maxItems, `${path} has too many items`);
+    for (const [index, childSchema] of (schema.prefixItems ?? []).entries()) {
+      assert.ok(index < value.length, `${path}[${index}] is required by prefixItems`);
+      assertSchemaValue(value[index], childSchema, `${path}[${index}]`);
+    }
+    if (schema.items === false) assert.equal(value.length, schema.prefixItems?.length ?? 0, `${path} has items outside prefixItems`);
+    else if (schema.items) {
+      for (let index = schema.prefixItems?.length ?? 0; index < value.length; index += 1) {
+        assertSchemaValue(value[index], schema.items, `${path}[${index}]`);
+      }
+    }
+  }
+  if (schema.type === "string") {
+    if (schema.minLength !== undefined) assert.ok(value.length >= schema.minLength, `${path} is too short`);
+    if (schema.pattern !== undefined) assert.match(value, new RegExp(schema.pattern, "u"), `${path} does not match its schema pattern`);
+  }
+};
+
+test("verification.json conforms to the published schema without a validator dependency", async () => {
+  const evidence = completeEvidence();
+  await withEvidence({ ...evidence.config, schema: "oss_c0_templates_demo_001" }, async (evidenceDir) => {
+    writeFileSync(join(evidenceDir, "setup.json"), `${JSON.stringify(evidence.setup)}\n`);
+    writeFileSync(join(evidenceDir, "instantiate.json"), `${JSON.stringify(evidence.instantiated)}\n`);
+    writeFileSync(join(evidenceDir, "capture.json"), `${JSON.stringify(evidence.capture)}\n`);
+
+    runVerify({ "run-id": evidence.config.runId, "evidence-dir": evidenceDir });
+    const verification = JSON.parse(readFileSync(join(evidenceDir, "verification.json"), "utf8"));
+    const schema = JSON.parse(readFileSync(new URL("../docs/demos/templates-release-evidence.schema.json", import.meta.url), "utf8"));
+
+    assert.equal(schema.$id, "https://github.com/mosonlab/anneal/docs/demos/templates-release-evidence.schema.json");
+    assertSchemaValue(verification, schema);
+  });
+});
 
 test("verification proves positions 1-12 and distinguishes rehearsal from public proof", () => {
   const rehearsal = completeEvidence();
