@@ -6,7 +6,7 @@
  * fencing and session tokens, credentials, and secrets are never selected, and
  * the column list below is the allowlist rather than a filter applied afterwards.
  *
- *   DATABASE_URL=...?schema=... npm run db:export-goal-lineage -- <output-path>
+ *   DATABASE_URL=...?schema=... npm run db:export-goal-lineage -w @anneal/db -- <output-path>
  *
  * Deterministic: every query is ordered by primary key, the JSON keys are
  * emitted in the order named here, and a repeated export of an unchanged
