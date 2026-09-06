@@ -5,7 +5,7 @@ import { act } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
-  CodexReadinessNotice, codexReady, RunnerRow, RunnersProvider, RunnerStatusDetails, runnerSummary, useRunners,
+  CodexReadinessNotice, codexReady, RunnerRow, RunnersProvider, RunnerStatusDetails, runnerSummary, useFreshnessClock, useRunners,
 } from "../components/runner-status";
 import { LocaleProvider } from "../lib/i18n";
 import type { RunnersResponse } from "../lib/types";
@@ -214,6 +214,51 @@ test("a mounted runner row ages to Unknown while hidden and stays Unknown when v
     await act(async () => dom.window.document.dispatchEvent(new dom.window.Event("visibilitychange")));
     assert.match(rowState(), /Unknown/);
   });
+});
+
+/**
+ * A timer is scheduled on the event loop's clock, which is not `Date.now()`, so
+ * it can wake a millisecond before the deadline it was given. The tick that
+ * wakes early reads the report as still fresh — and if that were the only tick
+ * the page had, the verdict would sit on screen past its limit with nothing left
+ * to correct it, which is the one thing this clock exists to prevent.
+ */
+test("a freshness tick that wakes before the deadline re-arms instead of passing the report as fresh", async () => {
+  const { dom, container } = installDom();
+  const checkedAt = new Date(now.getTime() - 30_000).toISOString();
+  let clock = now.getTime();
+  let handle = 0;
+  const timers = new Map<number, { at: number; run: () => void }>();
+  const originalDateNow = Date.now;
+  Object.defineProperty(Date, "now", { configurable: true, value: () => clock });
+  Object.defineProperty(dom.window, "setTimeout", { configurable: true, value: (run: () => void, delay: number) => {
+    handle += 1;
+    timers.set(handle, { at: clock + delay, run });
+    return handle;
+  } });
+  Object.defineProperty(dom.window, "clearTimeout", { configurable: true, value: (id: number) => timers.delete(id) });
+
+  let observed = 0;
+  const Probe = (): null => { observed = useFreshnessClock(checkedAt); return null; };
+  const root = (await reactDom()).createRoot(container);
+  try {
+    await act(async () => root.render(<Probe />));
+    // The first wake lands one millisecond short; every later one is punctual.
+    let early = 1;
+    for (let guard = 0; guard < 5 && timers.size > 0; guard += 1) {
+      const [id, timer] = [...timers.entries()][0]!;
+      timers.delete(id);
+      clock = timer.at - early;
+      early = 0;
+      await act(async () => timer.run());
+    }
+    assert.ok(observed - Date.parse(checkedAt) > 60_000, "the clock reached the far side of the deadline");
+    assert.equal(timers.size, 0, "and stops once the report has nothing left to age into");
+  } finally {
+    await act(async () => root.unmount());
+    Object.defineProperty(Date, "now", { configurable: true, value: originalDateNow });
+    dom.window.close();
+  }
 });
 
 /* ------------------------------------------ Codex, the one v0.1 readiness gate */

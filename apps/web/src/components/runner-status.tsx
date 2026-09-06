@@ -18,20 +18,31 @@ const RunnersContext = createContext<RunnersContextValue>(IDLE_CONTEXT);
  * A clock that ticks exactly when a report stops being fresh.
  *
  * Freshness is a property of *now*, not of the last render, so anything that
- * decides on it needs a reason to re-render at the boundary. This fires once at
+ * decides on it needs a reason to re-render at the boundary. This ticks at
  * `checkedAt + 60,001 ms` and again whenever the tab becomes visible, which is
  * the case that matters: `usePoll` does not poll a hidden tab, so a report can
  * quietly age past its limit while nothing is asking.
+ *
+ * The tick re-arms itself against the deadline rather than firing once. A timer
+ * is scheduled on the event loop's clock, which is not `Date.now()`, so it can
+ * run a millisecond before the deadline it was given; a single-shot tick that
+ * lands early reads the report as still fresh and leaves nothing behind to
+ * correct it, which is the whole failure this clock exists to prevent. Re-arming
+ * costs one extra timer in that case and stops as soon as the deadline is past.
  */
 export const useFreshnessClock = (checkedAt: string | undefined): number => {
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
-    const refresh = (): void => setNow(Date.now());
+    const checkedAtMs = checkedAt === undefined ? Number.NaN : Date.parse(checkedAt);
+    let timer = 0;
+    const refresh = (): void => {
+      setNow(Date.now());
+      window.clearTimeout(timer);
+      const remaining = Number.isFinite(checkedAtMs) ? checkedAtMs + 60_001 - Date.now() : 0;
+      if (remaining > 0) timer = window.setTimeout(refresh, remaining);
+    };
     refresh();
     document.addEventListener("visibilitychange", refresh);
-    const checkedAtMs = checkedAt === undefined ? Number.NaN : Date.parse(checkedAt);
-    const delay = Number.isFinite(checkedAtMs) ? Math.max(0, checkedAtMs + 60_001 - Date.now()) : 0;
-    const timer = window.setTimeout(refresh, delay);
     return () => {
       document.removeEventListener("visibilitychange", refresh);
       window.clearTimeout(timer);
