@@ -63,6 +63,7 @@ import {
   projectLatestAgentMessage,
   type LatestAgentMessageEvent,
 } from "../latest-agent-message.js";
+import { runMetrics, TOOL_METRIC_EVENT_TYPES, type RunMetricsToolEvent } from "../run-metrics.js";
 import { lockDoneTasks, partitionArchivable } from "../task-archive.js";
 import { editableBrief } from "../task-brief.js";
 import {
@@ -336,6 +337,35 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         take: LATEST_AGENT_MESSAGE_EVENT_LIMIT,
       });
     const latestSessionEvents: LatestAgentMessageEvent[] = sessionEvents.reverse();
+    // One tool-event read for the whole task, never one per run: a task with
+    // five runs must not cost five queries. MODEL_DELTA and PROVIDER_RAW
+    // payloads are the bulk of a session's events and are never loaded here.
+    const metricsSessionIds = task.runs.flatMap((run) => run.session === null ? [] : [run.session.id]);
+    // Project only names and outcome markers in PostgreSQL: provider tool
+    // output can be megabytes and must never enter the metrics input.
+    const toolEvents = metricsSessionIds.length === 0 ? [] : await db.$queryRaw<
+      Array<RunMetricsToolEvent & { id: string; sessionId: string }>
+    >(Prisma.sql`
+      SELECT "id", "sessionId", "type", "at", "toolCallId",
+        jsonb_build_object(
+          'type', CASE WHEN jsonb_typeof("payload"->'type') = 'string' THEN "payload"->'type' END,
+          'name', CASE WHEN jsonb_typeof("payload"->'name') = 'string' THEN "payload"->'name' END,
+          'toolName', CASE WHEN jsonb_typeof("payload"->'toolName') = 'string' THEN "payload"->'toolName' END,
+          'is_error', CASE WHEN jsonb_typeof("payload"->'is_error') = 'boolean' THEN "payload"->'is_error' END,
+          'isError', CASE WHEN jsonb_typeof("payload"->'isError') = 'boolean' THEN "payload"->'isError' END,
+          'exit_code', CASE WHEN jsonb_typeof("payload"->'exit_code') = 'number' THEN "payload"->'exit_code' END,
+          'error', CASE WHEN "payload"->'error' IS NOT NULL AND "payload"->'error' <> 'null'::jsonb THEN true END
+        ) AS "payload"
+      FROM "SessionEvent"
+      WHERE "sessionId" IN (${Prisma.join(metricsSessionIds)})
+        AND "type"::text IN (${Prisma.join([...TOOL_METRIC_EVENT_TYPES])})
+      ORDER BY "sessionId" ASC, "seq" ASC
+    `);
+    const toolEventsBySession = new Map<string, RunMetricsToolEvent[]>();
+    for (const event of toolEvents) {
+      const events = toolEventsBySession.get(event.sessionId);
+      if (events) events.push(event); else toolEventsBySession.set(event.sessionId, [event]);
+    }
     const admission = await readStepAdmission(db, task.id, { locked: false });
     if (!admission.task || !admission.verdict) {
       throw new Error(`Task ${task.id} disappeared while projecting operator move targets`);
@@ -363,6 +393,14 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
           : null,
         usageCost: serializeUsageCost(usageCosts[index] ?? null),
       },
+      // Derived at read time and never persisted: `null` inside it always means
+      // unknown, which is what keeps a missing timestamp out of an operator's
+      // arithmetic.
+      metrics: runMetrics({
+        run,
+        session: run.session,
+        toolEvents: run.session === null ? [] : toolEventsBySession.get(run.session.id) ?? [],
+      }),
       mergeOutcome: runOwnsMergeOutcome(task.stepOutput, run.id, latestRunId) ? mergeOutcome : null,
       mergeRecovery: recoveryRow
       && (run.id === recoveryRow.boundSourceRunId || run.id === recoveryRow.recoveryRunId)
