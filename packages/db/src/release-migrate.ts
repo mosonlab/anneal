@@ -543,6 +543,11 @@ const deploy = async (
   // migration command does not override an inherited value, so the subprocess
   // must be given the same target this function proved, not a similar one.
   childEnv["DATABASE_URL"] = plan.url;
+  // Prisma's advisory "update available" box goes to stderr on every CLI
+  // invocation these commands make, where it is indistinguishable from a real
+  // migration error in a deploy log. Added, never substituted: the child keeps
+  // everything else it was given.
+  childEnv["PRISMA_HIDE_UPDATE_MESSAGE"] = "1";
   if (mode === "fresh") {
     // The first-run declaration the Goal 5a0 preflight requires before it treats
     // an empty schema's data conditions as vacuous. It is set here and only here,
