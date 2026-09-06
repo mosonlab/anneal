@@ -802,6 +802,12 @@ const runReadinessDecision = async (
       return { leaseOutcome: heldLeaseOutcome(ownership, regression.id), value: "claim-lost" as const };
     }
 
+    // Taking the Lease is the answer other than contention that ends the
+    // episode, and it is recorded here rather than after the window closes:
+    // the settlement below may be the terminal transition, which clears the
+    // claim this write is fenced by.
+    await forgetContention(db, target, readiness.id, read.input.now, claim);
+
     // Regression evidence is durable before this short Lease window. Repeat
     // the remote decision after acquisition so a base move between the first
     // read and the Lease cannot authorize stale evidence.
@@ -851,7 +857,8 @@ const runReadinessDecision = async (
     }
     return;
   }
-  await forgetContention(db, target, readiness.id, read.input.now, claim);
+  // The remaining outcome is a Lease this tick took: the episode was already
+  // ended inside the window, above, while the claim was still ours.
   if (leased.value === "authorized") result.authorized += 1;
 };
 

@@ -671,7 +671,10 @@ test("a contended lease leaves readiness for a later tick instead of authorizing
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
   assert.equal(await db.run.count({ where: { taskId: seeded.integrator.id } }), 1);
   // Taking the lease closes the episode, so the next contention is measured
-  // from its own beginning rather than from this one.
+  // from its own beginning rather than from this one. The authorization is the
+  // terminal transition and clears the claim, so the close has to be written
+  // inside the Lease window; a close attempted afterwards would be refused and
+  // leave this episode open forever.
   const resolved = await db.taskActivity.findFirst({
     where: {
       taskId: seeded.readiness.id,
@@ -680,6 +683,11 @@ test("a contended lease leaves readiness for a later tick instead of authorizing
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
   });
   assert.equal((resolved!.metadata as Record<string, unknown>).state, "resolved");
+  // It closed this episode rather than opening and closing an unrelated one.
+  assert.equal(
+    (resolved!.metadata as Record<string, unknown>).firstContendedAt,
+    (contention[0]!.metadata as Record<string, unknown>).firstContendedAt,
+  );
 });
 
 const contentionMarkers = async (taskId: string) => await db.taskActivity.findMany({
