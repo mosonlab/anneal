@@ -28,7 +28,7 @@ const stripComments = (source: string): string => source
 const sourceFiles = async (): Promise<string[]> => {
   const entries = await readdir(sourceRoot);
   return entries
-    .filter((entry) => entry.endsWith(".ts") && !entry.endsWith(".test.ts") && entry !== "fake-pr-surface.ts")
+    .filter((entry) => entry.endsWith(".ts") && !entry.endsWith(".test.ts"))
     .map((entry) => join(sourceRoot, entry));
 };
 
@@ -137,4 +137,34 @@ test("the only mutating operations are the sanitized merge construction and the 
   assert.equal([...github.matchAll(/method: "PUT"/gu)].length, 0);
   assert.equal([...github.matchAll(/beforeOid/gu)].length >= 1, true);
   assert.equal([...github.matchAll(/^mutation|`mutation\(/gmu)].length, 3);
+});
+
+/**
+ * A closed set: every `MergeResponse` variant is produced somewhere in
+ * `github.ts`.
+ *
+ * The executor no longer merges through the pull-request merge API; it builds
+ * the merge commit and fast-forwards the target ref. That switch silently
+ * orphaned the variants only the old path could return, and the decision table
+ * went on branching on outcomes nothing could produce — branches asserted
+ * against a fake and never against production code. A variant with no producer
+ * is dead weight the decision table cannot be trusted to describe, so it is a
+ * failure here rather than a discovery later.
+ */
+test("every MergeResponse variant has a producer in github.ts", async () => {
+  const source = await readFile(join(sourceRoot, "github.ts"), "utf8");
+  const union = /export type MergeResponse =\n((?:\s*(?:\||\/|\*).*\n)*?)[^\n]*;\n/u.exec(source);
+  assert.ok(union, "MergeResponse union not found in github.ts");
+  const declaration = source.slice(union.index, union.index + union[0].length);
+  const variants = [...declaration.matchAll(/status: "([a-z-]+)"/gu)].map((match) => match[1]!);
+  assert.ok(variants.length > 0, "no MergeResponse variants parsed");
+
+  // Everything outside the declaration is where a producer must live.
+  const producers = source.slice(0, union.index) + source.slice(union.index + union[0].length);
+  for (const variant of variants) {
+    assert.ok(
+      producers.includes(`status: "${variant}"`),
+      `MergeResponse variant "${variant}" has no producer in github.ts`,
+    );
+  }
 });
