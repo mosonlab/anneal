@@ -3,7 +3,7 @@ import test from "node:test";
 import type { JSDOM } from "jsdom";
 import { act } from "react";
 
-import { BACKOFF_CEILING_MS, EVENT_PAGE_CEILING, nextIntervalMs, toEnvelope } from "../lib/use-event-stream";
+import { BACKOFF_CEILING_MS, EVENT_PAGE_CEILING, nextIntervalMs } from "../lib/use-event-stream";
 import type { SessionEvent } from "../lib/types";
 import { installDom, installFetchFunction, reactDom } from "./dom-harness";
 
@@ -20,23 +20,6 @@ test("nextIntervalMs holds 2.5s, then doubles per empty poll up to the ceiling",
   assert.equal(nextIntervalMs(5), 10_000);
   assert.equal(nextIntervalMs(6), BACKOFF_CEILING_MS);
   assert.equal(nextIntervalMs(20), BACKOFF_CEILING_MS);
-});
-
-test("toEnvelope passes an envelope through and filters a bare array by afterSeq", () => {
-  const envelope = { events: [row(1)], nextAfterSeq: 1, hasMore: true, total: 9 };
-  assert.equal(toEnvelope(envelope, null), envelope);
-
-  const all = Array.from({ length: 10 }, (_, index) => row(index + 1));
-  const wrapped = toEnvelope(all, null);
-  assert.equal(wrapped.events.length, 10);
-  assert.equal(wrapped.hasMore, false);
-  assert.equal(wrapped.total, 10);
-
-  // The old endpoint ignores afterSeq and returns everything; without this
-  // filter every 2.5s poll would re-append the whole history.
-  const filtered = toEnvelope(all, 7);
-  assert.deepEqual(filtered.events.map((event) => event.seq), [8, 9, 10]);
-  assert.equal(filtered.total, 10);
 });
 
 /* ------------------------------------------------------------- the hook */
@@ -128,7 +111,7 @@ const withHook = async (
 };
 
 const page = (events: SessionEvent[], hasMore: boolean, total: number) =>
-  ({ events, nextAfterSeq: events.at(-1)?.seq ?? null, hasMore, total });
+  ({ events, hasMore, total });
 
 test("the initial drain follows hasMore and carries afterSeq forward", async () => {
   const pages = [page([row(1), row(2)], true, 5), page([row(3), row(4)], true, 5), page([row(5)], false, 5)];
@@ -151,16 +134,6 @@ test("a live poll appends only what is new and asks from the highest seq held", 
     await advance(2_500);
     assert.deepEqual(latest().events.map((event) => event.seq), [1, 2]);
     assert.match(requests[1] ?? "", /afterSeq=1/);
-  });
-});
-
-test("an old-shape response returned twice does not duplicate the history", async () => {
-  const all = [row(1), row(2), row(3)];
-  await withHook(() => all, async ({ latest, advance }) => {
-    assert.equal(latest().events.length, 3);
-    await advance(2_500);
-    await advance(2_500);
-    assert.equal(latest().events.length, 3);
   });
 });
 
