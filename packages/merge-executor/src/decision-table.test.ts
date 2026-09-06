@@ -613,3 +613,86 @@ test("two lost responses stop rather than sending a third", async () => {
   assert.match(outcome.evidence, /"sends":2/u);
   assert.equal(fake.trace.filter((entry) => entry.call === "merge").length, 2);
 });
+
+/*
+ * The ref update is the merge, and its response can be lost like any other.
+ * A lost one is not a refusal: GitHub's pull-request projection lags the ref,
+ * so the read-back that settles it has to compare the ref against the commit
+ * this run built. Reclassifying from the pull request alone reported our own
+ * landed merge as base drift, recovered it automatically, and then stopped
+ * `changed-underneath-me` on the next authorization.
+ */
+
+const REF_UPDATE_LOST = {
+  status: "ref-update-uncertain" as const,
+  reason: "network: Post \"https://api.github.com/graphql\": EOF",
+  mergeCommitSha: MERGE_COMMIT,
+};
+
+test("a lost ref-update response whose ref reads back as our merge commit is a merge, not base drift", async () => {
+  // The ref has moved; the PR projection has not caught up, which is the exact
+  // window the old code reclassified inside.
+  const landedRefBeforePrProjection = mergedSnapshot({
+    state: "OPEN", merged: false, mergedAt: null, mergedByLogin: null, mergeCommit: null,
+  });
+  const fake = makeFake({
+    // The second element is the negative: what a blind resend would have landed.
+    merges: [REF_UPDATE_LOST, { status: "merged", sha: "d".repeat(40) }],
+    reads: [
+      { status: "ok", snapshot: cleanSnapshot() },
+      { status: "ok", snapshot: cleanSnapshot() },
+      { status: "ok", snapshot: landedRefBeforePrProjection },
+    ],
+  });
+
+  assert.deepEqual(await execute(fake.deps), { outcome: "merged", mergeCommitSha: MERGE_COMMIT });
+  assert.equal(fake.trace.filter((entry) => entry.call === "merge").length, 1);
+  assertNoPublication(fake.calls());
+});
+
+test("a lost ref-update response whose ref reads back as another commit stops base-drift, and sends nothing more", async () => {
+  const foreignCommit = "f".repeat(40);
+  const fake = makeFake({
+    merges: [REF_UPDATE_LOST, { status: "merged", sha: "d".repeat(40) }],
+    reads: [
+      { status: "ok", snapshot: cleanSnapshot() },
+      { status: "ok", snapshot: cleanSnapshot() },
+      { status: "ok", snapshot: cleanSnapshot({ repository: { baseRefOid: foreignCommit } }) },
+    ],
+  });
+
+  const outcome = stopped(await execute(fake.deps));
+  assert.equal(outcome.condition, "base-drift");
+  assert.equal(JSON.parse(outcome.evidence).observed, foreignCommit);
+  assert.equal(fake.trace.filter((entry) => entry.call === "merge").length, 1);
+});
+
+test("a lost ref-update response confirmed absent stops without a second write, and the stop names it", async () => {
+  const fake = makeFake({
+    merges: [REF_UPDATE_LOST, { status: "merged", sha: "d".repeat(40) }],
+    // The read-back finds the world exactly as it was authorized: the ref never
+    // moved, so the update did not land — and the uncertain path resolves by
+    // reading, never by sending again.
+    reads: [{ status: "ok", snapshot: cleanSnapshot() }],
+  });
+
+  const outcome = stopped(await execute(fake.deps));
+  assert.equal(outcome.condition, "api-error");
+  assert.match(outcome.evidence, /ref-update-uncertain/u);
+  assert.equal(fake.trace.filter((entry) => entry.call === "merge").length, 1);
+  assertNoPublication(fake.calls());
+});
+
+test("a deterministic GitHub rejection keeps its class: no read-back retry, and a named stop", async () => {
+  const refused = makeFake({ merge: { status: "ref-update-refused", reason: "UNKNOWN: beforeOid mismatch" } });
+  assert.equal(stopped(await execute(refused.deps)).condition, "api-error");
+  assert.equal(refused.trace.filter((entry) => entry.call === "merge").length, 1);
+
+  const unprocessable = makeFake({
+    merge: { status: "unprocessable", reason: "merge commit creation failed: HTTP 422 {\"message\":\"Invalid request\"}" },
+  });
+  const outcome = stopped(await execute(unprocessable.deps));
+  assert.equal(outcome.condition, "payload-mismatch");
+  assert.match(outcome.evidence, /HTTP 422/u);
+  assert.equal(unprocessable.trace.filter((entry) => entry.call === "merge").length, 1);
+});

@@ -80,7 +80,10 @@ const GUARDED_MERGE_SENDS = 2;
 /** What established that the merge is on the platform. */
 type MergeLanding =
   | { via: "response"; sha: string }
-  | { via: "read-back"; pullRequest: PullRequestSnapshot };
+  | { via: "read-back"; pullRequest: PullRequestSnapshot }
+  /** The ref update's response was lost, and the target ref reads back as the
+   *  commit this run built. The ref is the merge, so this is the merge. */
+  | { via: "ref"; sha: string };
 
 const stop = (condition: StopCondition, evidence: string): MergeOutcome =>
   ({ outcome: "stopped", condition, evidence });
@@ -471,10 +474,17 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
       );
       state.response = response;
       if (response.status === "merged") return { status: "applied", value: { via: "response", sha: response.sha } };
-      // `unknown` is the only lost class the transport produces: a 5xx, a
-      // timeout, an EOF, or a body that could not be parsed. Everything else
-      // is a deterministic no, and is still read back below.
+      // `unknown` is a lost outcome whose recovery may be a second send: a 5xx,
+      // a timeout or an EOF on the REST calls that build the merge commit, or
+      // an updateRefs response that proved nothing. The compare-and-swap is
+      // what makes that send safe.
       if (response.status === "unknown") return { status: "lost", reason: response.reason };
+      // Everything else is read back before anything is decided. That
+      // deliberately includes `ref-update-uncertain`, whose response was lost
+      // rather than refused: the read-back settles it by comparing the target
+      // ref against the commit we built, and reporting it here as `refused` is
+      // what buys that read-back without buying a second write for a merge that
+      // may already be on the branch.
       return { status: "refused", reason: response.status };
     },
     readBack: async () => {
@@ -487,9 +497,19 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
       // "Applied" here means the pull request is merged — not that *we* merged
       // it. Which of those it was is the replay determination's question, and
       // it is asked below with the full intent history.
-      return read.snapshot.pullRequest.merged || read.snapshot.pullRequest.state === "MERGED"
-        ? { status: "applied", value: { via: "read-back", pullRequest: read.snapshot.pullRequest } }
-        : { status: "absent" };
+      if (read.snapshot.pullRequest.merged || read.snapshot.pullRequest.state === "MERGED") {
+        return { status: "applied", value: { via: "read-back", pullRequest: read.snapshot.pullRequest } };
+      }
+      // The pull-request projection lags the ref: an atomic update that landed
+      // can be read back with the ref already moved and the PR still OPEN. So
+      // a lost ref update is settled against the ref itself, never against the
+      // PR alone — reclassifying from this snapshot without comparing the oid
+      // is what reports our own landed merge as base drift.
+      const sent = state.response;
+      if (sent?.status === "ref-update-uncertain" && read.snapshot.baseRefOid === sent.mergeCommitSha) {
+        return { status: "applied", value: { via: "ref", sha: sent.mergeCommitSha } };
+      }
+      return { status: "absent" };
     },
   });
 
@@ -501,6 +521,7 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
     const platform = response === null
       ? "no response was recorded"
       : response.status === "unknown" ? response.reason
+      : response.status === "ref-update-uncertain" ? `ref-update-uncertain: ${response.reason}`
       : response.status === "not-mergeable" ? "405 not mergeable"
       : response.status;
     if (landing.status === "indeterminate") {
@@ -533,6 +554,14 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
       sends: state.sends,
       note: "the classifying re-read found no disqualifying condition",
     }));
+  }
+
+  if (landing.value.via === "ref") {
+    // The read-back found the target ref holding the commit this run built from
+    // the authorized base and head — the same evidence the post-merge
+    // verification below accepts when the PR projection has not caught up. It
+    // has already been taken, so it is not taken again.
+    return { outcome: "merged", mergeCommitSha: landing.value.sha };
   }
 
   if (landing.value.via === "read-back") {
