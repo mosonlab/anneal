@@ -631,27 +631,171 @@ test("an unusable poll interval refuses before any mode work", async () => {
   assert.deepEqual(state.calls, []);
 });
 
-test("deploy preflight refuses a shared environment file without GITHUB_READ_TOKEN", () => {
-  const root = mkdtempSync(join(tmpdir(), "anneal-deploy-github-token-missing-"));
+const runDeployWithSharedEnvironment = ({ contents, environment: overrides = {}, prepare = () => {} }) => {
+  const root = mkdtempSync(join(tmpdir(), "anneal-deploy-environment-preflight-"));
+  mkdirSync(join(root, "shared"), { recursive: true });
+  writeFileSync(join(root, "shared/.env"), contents, { mode: 0o600 });
+  prepare(root);
+  const environment = {
+    ...process.env,
+    AGENTOS_REPOSITORY_ROOT: root,
+  };
+  for (const key of [
+    "AGENTOS_DEPLOY_ROLE",
+    "AGENTOS_RUNNER_ID_PREFIX",
+    "RUNNER_API_URL",
+    "OPERATOR_TOKEN",
+    "RUNNER_TOKEN",
+    "DATABASE_URL",
+    "FEISHU_DEFAULT_CHAT_ID",
+    "GITHUB_READ_TOKEN",
+  ]) delete environment[key];
+  Object.assign(environment, overrides);
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL("./quiet-window-deploy.mjs", import.meta.url)), "--dry-run"],
+    { cwd: REPOSITORY_ROOT, env: environment, encoding: "utf8" },
+  );
+  return { root, result };
+};
+
+test("runner deploy preflight requires OPERATOR_TOKEN", () => {
+  const { root, result } = runDeployWithSharedEnvironment({
+    contents: "RUNNER_TOKEN=runner-fixture\nRUNNER_API_URL=http://127.0.0.1:1\n",
+    environment: {
+      AGENTOS_DEPLOY_ROLE: "runner",
+      AGENTOS_RUNNER_ID_PREFIX: "runner-host-",
+    },
+  });
   try {
-    mkdirSync(join(root, "shared"), { recursive: true });
-    writeFileSync(join(root, "shared/.env"), "DATABASE_URL=postgresql://fixture\nFEISHU_DEFAULT_CHAT_ID=fixture\n", { mode: 0o600 });
-    const environment = {
-      ...process.env,
-      AGENTOS_REPOSITORY_ROOT: root,
-    };
-    delete environment.DATABASE_URL;
-    delete environment.FEISHU_DEFAULT_CHAT_ID;
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /STOP environment-unreadable detail=OPERATOR_TOKEN-missing/u);
+  } finally {
+    removeTree(root);
+  }
+});
+
+test("runner deploy preflight requires RUNNER_TOKEN", () => {
+  const { root, result } = runDeployWithSharedEnvironment({
+    contents: "OPERATOR_TOKEN=operator-fixture\nRUNNER_API_URL=http://127.0.0.1:1\n",
+    environment: { AGENTOS_DEPLOY_ROLE: "runner" },
+  });
+  try {
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /STOP environment-unreadable detail=RUNNER_TOKEN-missing/u);
+  } finally {
+    removeTree(root);
+  }
+});
+
+test("runner deploy preflight rejects a non-HTTP RUNNER_API_URL", () => {
+  const { root, result } = runDeployWithSharedEnvironment({
+    contents: "OPERATOR_TOKEN=operator-fixture\nRUNNER_TOKEN=runner-fixture\nRUNNER_API_URL=https://example.com\n",
+    environment: { AGENTOS_DEPLOY_ROLE: "runner" },
+  });
+  try {
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /STOP control-plane-api-url-invalid detail=scheme-not-http/u);
+  } finally {
+    removeTree(root);
+  }
+});
+
+for (const missingKey of ["DATABASE_URL", "FEISHU_DEFAULT_CHAT_ID"]) {
+  test(`runner deploy preflight requires ${missingKey}`, () => {
+    const contents = Object.entries({
+      OPERATOR_TOKEN: "operator-fixture",
+      RUNNER_TOKEN: "runner-fixture",
+      RUNNER_API_URL: "http://127.0.0.1:1",
+      DATABASE_URL: "postgresql://fixture",
+      FEISHU_DEFAULT_CHAT_ID: "fixture",
+    }).filter(([key]) => key !== missingKey).map(([key, value]) => `${key}=${value}`).join("\n");
+    const { root, result } = runDeployWithSharedEnvironment({
+      contents,
+      environment: { AGENTOS_DEPLOY_ROLE: "runner" },
+    });
+    try {
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 1);
+      assert.ok(result.stdout.includes(`STOP environment-unreadable detail=${missingKey}-missing`));
+    } finally {
+      removeTree(root);
+    }
+  });
+}
+
+test("runner deploy preflight accepts a shared environment without GITHUB_READ_TOKEN", () => {
+  const { root, result } = runDeployWithSharedEnvironment({
+    contents: [
+      "DATABASE_URL=postgresql://fixture",
+      "FEISHU_DEFAULT_CHAT_ID=fixture",
+      "OPERATOR_TOKEN=operator-fixture",
+      "RUNNER_TOKEN=runner-fixture",
+      "RUNNER_API_URL=http://127.0.0.1:1",
+      "",
+    ].join("\n"),
+    environment: {
+      AGENTOS_DEPLOY_ROLE: "runner",
+      AGENTOS_RUNNER_ID_PREFIX: "runner-host-",
+    },
+    prepare: (root) => {
+      const release = join(root, "releases", "fixture", "packages/api/dist");
+      mkdirSync(release, { recursive: true });
+      writeFileSync(join(release, "build-info.json"), `${JSON.stringify({
+        packageName: "@anneal/api",
+        commit: "a".repeat(40),
+        dirty: false,
+      })}\n`);
+      symlinkSync("releases/fixture", join(root, "current"), "dir");
+    },
+  });
+  try {
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /STOP control-plane-version-unreachable/u);
+    assert.doesNotMatch(result.stdout, /(?:GITHUB_READ_TOKEN|DATABASE_URL|FEISHU_DEFAULT_CHAT_ID)-missing/u);
+  } finally {
+    removeTree(root);
+  }
+});
+
+test("control-plane deploy preflight refuses a shared environment without DATABASE_URL", () => {
+  const { root, result } = runDeployWithSharedEnvironment({
+    contents: "FEISHU_DEFAULT_CHAT_ID=fixture\nGITHUB_READ_TOKEN=fixture\n",
+  });
+  try {
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /STOP environment-unreadable detail=DATABASE_URL-missing/u);
+  } finally {
+    removeTree(root);
+  }
+});
+
+test("control-plane deploy preflight refuses a shared environment without FEISHU_DEFAULT_CHAT_ID", () => {
+  const { root, result } = runDeployWithSharedEnvironment({
+    contents: "DATABASE_URL=postgresql://fixture\nGITHUB_READ_TOKEN=fixture\n",
+  });
+  try {
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 1);
+    assert.match(result.stdout, /STOP environment-unreadable detail=FEISHU_DEFAULT_CHAT_ID-missing/u);
+  } finally {
+    removeTree(root);
+  }
+});
+
+test("deploy preflight refuses a shared environment file without GITHUB_READ_TOKEN", () => {
+  const { root, result } = runDeployWithSharedEnvironment({
+    contents: "DATABASE_URL=postgresql://fixture\nFEISHU_DEFAULT_CHAT_ID=fixture\n",
     // An inherited value must not make a shared/.env missing the required key
     // look deployable.
-    environment.GITHUB_READ_TOKEN = "inherited-fixture-token";
-
-    const result = spawnSync(
-      process.execPath,
-      [fileURLToPath(new URL("./quiet-window-deploy.mjs", import.meta.url)), "--dry-run"],
-      { cwd: REPOSITORY_ROOT, env: environment, encoding: "utf8" },
-    );
-
+    environment: { GITHUB_READ_TOKEN: "inherited-fixture-token" },
+  });
+  try {
     assert.equal(result.error, undefined);
     assert.equal(result.status, 1);
     assert.match(result.stdout, /STOP environment-unreadable detail=GITHUB_READ_TOKEN-missing/u);
