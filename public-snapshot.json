@@ -124,6 +124,7 @@
     { "glob": "scripts/deploy/*.mjs", "purpose": "quiet-window auto-deploy implementation, launchd installer and regression harness" },
     { "glob": "scripts/deploy/*.plist.in", "purpose": "quiet-window auto-deploy launchd job definition template" },
     { "glob": "scripts/deploy/*.unit.in", "purpose": "quiet-window systemd service definition templates" },
+    { "glob": "scripts/deploy/agentos-merge-executor-follower.service.in", "purpose": "merge executor release follower systemd service definition template" },
     { "glob": "scripts/deploy/*.timer.in", "purpose": "quiet-window systemd timer definition template" },
     { "glob": "scripts/deploy/service-platform.sh", "purpose": "shared service-platform resolver for shell deployment tools" },
     { "glob": "scripts/deploy/service-inventory.sh", "purpose": "shell reader for the one resolved service inventory" },
