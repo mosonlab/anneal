@@ -74,6 +74,7 @@ export class DeploymentAttempt {
         },
       } : {}),
       ...(this.fact("rollbackPointerOutcome") ? { rollbackPointerOutcome: this.fact("rollbackPointerOutcome") } : {}),
+      ...(this.fact("supersededEscalation") ? { supersededEscalation: this.fact("supersededEscalation") } : {}),
       ...metadata,
     };
   }
