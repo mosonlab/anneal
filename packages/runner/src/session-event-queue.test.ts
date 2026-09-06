@@ -23,7 +23,7 @@ test("the byte bound drops the oldest chunk events and records one marker", () =
   const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 4_000 });
   for (let index = 0; index < 12; index += 1) queue.push(chunk(`${index}`.padEnd(500, "x")));
 
-  assert.ok(queue.bytes <= 4_000 + 400, `queue must stay at its bound, held ${queue.bytes}`);
+  assert.ok(queue.bytes <= 4_000, `queue must stay at its bound, held ${queue.bytes}`);
   const kept = queue.batch();
   const markers = kept.filter((event) => event.type === EVENTS_DROPPED_EVENT_TYPE);
   assert.equal(markers.length, 1, "one drop record covers the whole episode, not one per dropped event");
@@ -68,7 +68,7 @@ test("sustained tool output holds the bound while lifecycle and error events sur
   for (let index = 0; index < 500; index += 1) {
     queue.push({ source: "PI", type: index % 2 === 0 ? "TOOL_COMPLETED" : "TOOL_PROGRESS", payload: { out: "o".repeat(400) } });
     queue.push({ source: "PI", type: "PROVIDER_STATUS", payload: { note: "s".repeat(400) } });
-    assert.ok(queue.bytes <= 8_000 + 800, `tool traffic must not grow the queue, held ${queue.bytes}`);
+    assert.ok(queue.bytes <= 8_000, `tool traffic must not grow the queue, held ${queue.bytes}`);
   }
 
   assert.deepEqual(
@@ -189,9 +189,12 @@ test("a protected event under pressure loses its payload before it loses its pla
   assert.ok(queue.bytes <= 1_200, `the bound holds by truncation alone, held ${queue.bytes}`);
   const held = queue.batch();
   assert.deepEqual(held.map((event) => event.type), ["FINAL_OUTPUT", "ADAPTER_ERROR"]);
-  const marker = held[0]!.payload as { truncated?: boolean; originalBytes?: number };
+  const marker = held[0]!.payload as { truncated?: boolean; reason?: string; originalBytes?: number; limitBytes?: number; queueMaxBytes?: number };
   assert.equal(marker.truncated, true, "the loss of the detail is recorded in the event itself");
   assert.ok((marker.originalBytes ?? 0) > 2_000, "the marker carries the size it was cut from");
+  assert.equal(marker.reason, "queue-bound", "and names the pressure that cut it, not the per-event cap");
+  assert.equal(marker.queueMaxBytes, 1_200, "reporting the bound that was actually reached");
+  assert.equal(marker.limitBytes, undefined, "a cap of zero bytes would describe a cap that does not exist");
 });
 
 test("an event truncated at the per-event cap keeps its original size when pressure truncates it again", () => {
@@ -276,7 +279,7 @@ test("the count bound drops chunk events even when the queue is small in bytes",
   const queue = createSessionEventQueue({ nextSeq: 0, maxEvents: 5 });
   for (let index = 0; index < 20; index += 1) queue.push(chunk("."));
 
-  assert.ok(queue.length <= 6, `five events plus at most one drop record, held ${queue.length}`);
+  assert.ok(queue.length <= 5, `the drop record is one of the five, not a sixth, held ${queue.length}`);
   const record = queue.batch().find((event) => event.type === EVENTS_DROPPED_EVENT_TYPE);
   // Sixteen, not fifteen: the drop record occupies a slot of the count bound
   // like any other queued event.
@@ -377,4 +380,128 @@ test("the truncation cap the runner applies is the cap the API enforces", () => 
   const marker = truncateSessionEventPayload({ text: "b".repeat(SESSION_EVENT_PAYLOAD_MAX_BYTES * 2) });
   assert.ok(jsonByteLength(marker) <= SESSION_EVENT_PAYLOAD_MAX_BYTES);
   assert.equal(marker.limitBytes, SESSION_EVENT_PAYLOAD_MAX_BYTES);
+});
+
+test("the record of a drop is held inside the bounds like any other entry", () => {
+  const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 3_000, maxEvents: 5 });
+  for (let index = 0; index < 200; index += 1) {
+    queue.push(chunk("x".repeat(200)));
+    assert.ok(queue.length <= 5, `the count bound holds through the drop record too, held ${queue.length}`);
+    assert.ok(queue.bytes <= 3_000, `and so does the byte bound, held ${queue.bytes}`);
+  }
+
+  const held = queue.batch();
+  const record = held.find((event) => event.type === EVENTS_DROPPED_EVENT_TYPE);
+  assert.ok(record, "the drops are still recorded, inside the bound rather than beyond it");
+  const dropped = (record.payload as { droppedEvents: number }).droppedEvents;
+  assert.equal(dropped + held.length - 1, 200, "and account for every event that is no longer held");
+});
+
+test("the bound a batch in flight suspends holds again as soon as it settles", () => {
+  const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 3_000, maxEvents: 6 });
+  for (let index = 0; index < 6; index += 1) queue.push(chunk("a".repeat(200)));
+  const inFlight = queue.batch();
+  // Pressure while the request is in flight: the claimed entries are exempt,
+  // and the record of what it forced out is opened beside them.
+  for (let index = 0; index < 50; index += 1) queue.push(chunk("b".repeat(200)));
+  const record = queue.batch().find((event) => event.type === EVENTS_DROPPED_EVENT_TYPE);
+  assert.ok(record, "the drops of an in-flight episode are recorded");
+
+  queue.release(inFlight);
+  queue.push(chunk("c".repeat(200)));
+  assert.ok(queue.length <= 6, `the count bound is back once nothing is claimed, held ${queue.length}`);
+  assert.ok(queue.bytes <= 3_000, `and the byte bound with it, held ${queue.bytes}`);
+});
+
+test("a protected event whose provider identifier alone exceeds the bound is still reduced under it", () => {
+  const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 1_000, maxEvents: 50 });
+  queue.push({
+    source: "PI",
+    type: "TOOL_STARTED",
+    payload: { name: "read" },
+    toolCallId: "t".repeat(4_000),
+    providerEventId: "p".repeat(4_000),
+  });
+
+  assert.ok(queue.bytes <= 1_000, `an identifier no cap covers must not hold the queue over its bound, held ${queue.bytes}`);
+  assert.equal(queue.length, 1, "the event keeps its place; it is its detail that is given up");
+  const [event] = queue.batch();
+  assert.equal(event!.type, "TOOL_STARTED");
+  assert.equal(event!.seq, 0, "with the account of what the Run did intact");
+  assert.equal(event!.toolCallId, undefined, "the identifiers are detail and go with the payload");
+  assert.equal(event!.providerEventId, undefined);
+});
+
+test("coalescing keeps the account of an event the API refused", () => {
+  const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 900, maxEvents: 2, batchMaxEvents: 1_000 });
+  queue.push(lifecycle("FINAL_OUTPUT"));
+  assert.equal(queue.reject(0, "payload-too-large"), true);
+  // Protected traffic with nothing droppable left forces the rejection record
+  // itself into a merge.
+  for (let index = 0; index < 50; index += 1) {
+    queue.push({ source: "CLAUDE", type: "ADAPTER_ERROR", payload: { error: "e".repeat(200) } });
+  }
+
+  const held = queue.batch();
+  assert.equal(
+    held.filter((event) => event.type === EVENT_REJECTED_EVENT_TYPE).length,
+    0,
+    "the rejection record was merged like any other marker",
+  );
+  const merged = held.filter((event) => event.type === EVENTS_COALESCED_EVENT_TYPE)
+    .map((event) => event.payload as { rejectedEvents?: number; lastRejectedSeq?: number });
+  assert.equal(
+    merged.reduce((total, payload) => total + (payload.rejectedEvents ?? 0), 0),
+    1,
+    "the durable stream still records that the API forced an event out",
+  );
+  assert.ok(merged.some((payload) => payload.lastRejectedSeq === 0), "naming the event it refused");
+});
+
+test("rejecting a merged marker carries the account it stood for into what remains", () => {
+  const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 900, maxEvents: 2, batchMaxEvents: 1_000 });
+  for (let index = 0; index < 20; index += 1) queue.push(chunk("d".repeat(300)));
+  for (let index = 0; index < 50; index += 1) {
+    queue.push({ source: "CLAUDE", type: "ADAPTER_ERROR", payload: { error: "e".repeat(200) } });
+  }
+  const head = queue.batch()[0]!;
+  assert.equal(head.type, EVENTS_COALESCED_EVENT_TYPE, "an outage leaves a merged marker at the head");
+  const stood = head.payload as { coalescedEvents: number; droppedEvents: number };
+  assert.ok(stood.coalescedEvents > 1 && stood.droppedEvents > 0);
+
+  assert.equal(queue.reject(head.seq, "request-too-large"), true);
+  const remaining = queue.batch();
+  const account = remaining.map((event) => event.payload as { coalescedEvents?: number; droppedEvents?: number });
+  assert.ok(
+    account.reduce((total, payload) => total + (payload.coalescedEvents ?? 1), 0) >= stood.coalescedEvents,
+    "a refused marker does not take the events it stood for with it",
+  );
+  assert.ok(
+    account.reduce((total, payload) => total + (payload.droppedEvents ?? 0), 0) >= stood.droppedEvents,
+    "nor the drops it was the only record of",
+  );
+});
+
+test("push does not cost the length of the protected prefix ahead of the droppable tail", () => {
+  // The state this feature exists for: an outage piles protected entries up at
+  // the head while the provider keeps streaming into the tail. Finding the
+  // oldest droppable entry must not mean walking that prefix once per token.
+  const pushCost = (prefix: number): number => {
+    const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 1_024 * 1_024 * 1_024, maxEvents: prefix + 200 });
+    for (let index = 0; index < prefix; index += 1) {
+      queue.push({ source: "CLAUDE", type: "ADAPTER_ERROR", payload: { error: "e" } });
+    }
+    for (let index = 0; index < 200; index += 1) queue.push(chunk("x".repeat(50)));
+    const started = process.hrtime.bigint();
+    for (let index = 0; index < 20_000; index += 1) queue.push(chunk("x".repeat(50)));
+    return Number(process.hrtime.bigint() - started);
+  };
+
+  pushCost(100);
+  const shallow = pushCost(100);
+  const deep = pushCost(20_000);
+  assert.ok(
+    deep < shallow * 10,
+    `a 200x deeper protected prefix must not make the hot path 200x slower: ${shallow}ns shallow, ${deep}ns deep`,
+  );
 });

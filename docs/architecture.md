@@ -88,11 +88,12 @@ Local runner -----> ephemeral git workspace
   Run produces. Lifecycle, terminal and error events are never dropped, but they
   are not exempt from the bound either, because a provider can produce them
   without limit too: once nothing droppable is left, such an event keeps its
-  sequence number, type and time and loses only its payload to a `truncated`
-  marker, at about a hundred bytes each instead of the 256 KiB a payload may
-  carry, and once every entry not in flight is such a marker the two oldest
-  adjacent markers merge into one carrying their summed counts and the sequence
-  range they span. So both bounds hold under any traffic mix while what a
+  sequence number, type and time and loses its payload — and the provider
+  identifiers no cap covers — to a `queue-bound` `truncated` marker, at about a
+  hundred bytes each instead of the 256 KiB a payload may carry, and once every
+  entry not in flight is such a marker the two oldest adjacent markers merge
+  into one carrying their summed counts, the sequence range they span, and the
+  drops and API refusals they were the only record of. So both bounds hold under any traffic mix while what a
   protected event gives up is its detail, never its account. Every drop,
   truncation and merge is itself recorded as an event. The batch in flight is
   exempt from dropping and merging and is released by identity, so a provider

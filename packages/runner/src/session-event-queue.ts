@@ -26,8 +26,9 @@ import type { SessionEventPayload } from "./api.js";
  * A protected event is never shed, but it is not exempt from the bound either,
  * because a provider can produce protected events without limit too — one
  * `ADAPTER_ERROR` per unparsable line, a `TOOL_STARTED` per call. Once nothing
- * droppable is left, a protected event loses its payload to a `truncated`
- * marker, keeping its sequence number, type, source and time. That caps what
+ * droppable is left, a protected event loses its payload — and the provider
+ * identifiers no cap covers — to a `queue-bound` marker, keeping its sequence
+ * number, type, source and time. That caps what
  * one protected event costs but not how many of them there are, so once every
  * unclaimed entry is a marker the two oldest adjacent markers merge into one
  * carrying their summed counts and their spanning sequence range, repeating
@@ -142,6 +143,23 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
   let bytes = 0;
   /** The one unclaimed drop record, accumulated into rather than duplicated. */
   let dropRecord: Entry | null = null;
+  /**
+   * A lower bound on the position of the oldest droppable unclaimed entry.
+   *
+   * The bound is enforced on every `push`, so searching the whole queue for the
+   * next entry to drop would make the hot path cost the length of the queue —
+   * worst in exactly the state this feature exists for, where an outage has
+   * piled up protected entries ahead of the droppable tail. Dropping the entry
+   * found at `index` leaves the next droppable one at or after it, so the
+   * search resumes there. Every other mutation only lowers the hint, which is
+   * always safe: a hint that is too low costs a scan, never a missed entry.
+   */
+  let oldestDroppable = 0;
+
+  /** Keep the hint at or before `index`, the position a mutation disturbs. */
+  const lowerHint = (index: number): void => {
+    if (index < oldestDroppable) oldestDroppable = index;
+  };
 
   /**
    * Envelope plus payload rather than one pass over the whole event: `push` is
@@ -204,9 +222,9 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
       bytes += dropRecord.bytes;
       return;
     }
-    // Appending the record can put the queue a few hundred bytes back over the
-    // bound. That is deliberate: re-entering the drop loop to make room for the
-    // record of a drop cannot terminate usefully.
+    // Opened from inside the drop loop, so the entry and the few hundred bytes
+    // it costs are paid for by the same loop as everything else rather than
+    // appended to a queue that had just reached its bound.
     dropRecord = runnerEntry(EVENTS_DROPPED_EVENT_TYPE, {
       reason: "queue-bound",
       droppedEvents,
@@ -220,57 +238,82 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
   };
 
   /**
-   * Reduce a protected event to its `truncated` marker, in place.
+   * Reduce a protected event to its queue-pressure marker.
    *
    * The event keeps its sequence number, type, source and time, so the shape of
-   * what the Run did survives; what it loses is the detail, exactly as an
-   * oversized payload does at the per-event cap. An already-truncated payload
-   * keeps the original size it recorded rather than reporting the marker's own.
+   * what the Run did survives; what it loses is the detail. That includes
+   * `providerEventId` and `toolCallId`: they are detail like the payload, and
+   * nothing caps what a provider puts in them, so leaving them would leave an
+   * entry that degradation cannot bring under the byte bound at all.
+   *
+   * The marker names its own cause rather than reusing the per-event cap's
+   * shape, which would report a `limitBytes` of zero for a cap that was never
+   * reached. An already-truncated payload keeps the original size it recorded
+   * rather than reporting the cap marker's own.
    */
   const degrade = (entry: Entry): void => {
     entry.degraded = true;
     const current = entry.event.payload as { truncated?: unknown; originalBytes?: unknown };
-    const marker = truncateSessionEventPayload(entry.event.payload, 0);
-    const payload = current?.truncated === true && typeof current.originalBytes === "number"
-      ? { ...marker, originalBytes: current.originalBytes }
-      : marker;
-    const payloadBytes = jsonByteLength(payload);
-    const reduced = measure(entry.event, payloadBytes);
+    const payload = {
+      truncated: true,
+      reason: "queue-bound",
+      originalBytes: current?.truncated === true && typeof current.originalBytes === "number"
+        ? current.originalBytes
+        : jsonByteLength(entry.event.payload),
+      queueMaxBytes: maxBytes,
+    };
+    const reduced: SessionEventPayload = {
+      seq: entry.event.seq,
+      ...(entry.event.at !== undefined ? { at: entry.event.at } : {}),
+      source: entry.event.source,
+      type: entry.event.type,
+      payload,
+    };
+    const reducedBytes = measure(reduced, jsonByteLength(payload));
     // A payload smaller than the marker exists; replacing it would spend bytes
     // to save them. The entry is still marked degraded so the loop advances.
-    if (reduced >= entry.bytes) return;
-    entry.event.payload = payload;
-    bytes -= entry.bytes - reduced;
-    entry.bytes = reduced;
+    if (reducedBytes >= entry.bytes) return;
+    // Replaced rather than mutated, and only ever for an unclaimed entry: the
+    // event object a request is carrying is the identity `release` matches on.
+    entry.event = reduced;
+    bytes -= entry.bytes - reducedBytes;
+    entry.bytes = reducedBytes;
   };
 
-  /** What one entry accounts for, so merging two of them can sum it. */
+  /**
+   * What one entry accounts for, so merging two of them can sum it.
+   *
+   * Beyond the events it stands for, an entry may carry an account no other
+   * entry holds: the events a drop record says are already gone, and the events
+   * a rejection record says the API refused. Merging must carry both forward or
+   * the merge would erase the very losses the queue exists to report.
+   */
   const accountOf = (entry: Entry): {
     events: number;
     firstSeq: number;
     lastSeq: number;
     droppedEvents: number;
     droppedBytes: number;
+    rejectedEvents: number;
+    lastRejectedSeq: number;
   } => {
     const payload = entry.event.payload as Record<string, unknown>;
     const number = (value: unknown): number => (typeof value === "number" ? value : 0);
-    if (entry.event.type === EVENTS_COALESCED_EVENT_TYPE) {
-      return {
-        events: number(payload.coalescedEvents),
-        firstSeq: number(payload.firstSeq),
-        lastSeq: number(payload.lastSeq),
-        droppedEvents: number(payload.droppedEvents),
-        droppedBytes: number(payload.droppedBytes),
-      };
-    }
+    // An entry that already stands for a merged span says so, whether it is an
+    // `EVENTS_COALESCED` marker or the rejection record that replaced one.
+    const merged = number(payload.coalescedEvents);
+    const rejection = entry.event.type === EVENT_REJECTED_EVENT_TYPE;
     return {
-      events: 1,
-      firstSeq: entry.event.seq,
-      lastSeq: entry.event.seq,
-      // A drop record counts as one queue entry like any other, and carries the
-      // events it says were dropped, which are in no other entry.
-      droppedEvents: entry.event.type === EVENTS_DROPPED_EVENT_TYPE ? number(payload.droppedEvents) : 0,
-      droppedBytes: entry.event.type === EVENTS_DROPPED_EVENT_TYPE ? number(payload.droppedBytes) : 0,
+      events: merged > 0 ? merged : 1,
+      firstSeq: merged > 0 ? number(payload.firstSeq) : entry.event.seq,
+      lastSeq: merged > 0 ? number(payload.lastSeq) : entry.event.seq,
+      droppedEvents: entry.event.type === EVENTS_DROPPED_EVENT_TYPE || merged > 0 ? number(payload.droppedEvents) : 0,
+      droppedBytes: entry.event.type === EVENTS_DROPPED_EVENT_TYPE || merged > 0 ? number(payload.droppedBytes) : 0,
+      rejectedEvents: (rejection ? 1 : 0) + number(payload.rejectedEvents),
+      lastRejectedSeq: Math.max(
+        rejection ? number(payload.rejectedSeq) : 0,
+        number(payload.lastRejectedSeq),
+      ),
     };
   };
 
@@ -292,6 +335,7 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
       if (left.claimed || right.claimed || !left.degraded || !right.degraded) continue;
       const older = accountOf(left);
       const newer = accountOf(right);
+      const rejectedEvents = older.rejectedEvents + newer.rejectedEvents;
       const payload = {
         reason: "queue-bound",
         coalescedEvents: older.events + newer.events,
@@ -299,6 +343,11 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
         lastSeq: newer.lastSeq,
         droppedEvents: older.droppedEvents + newer.droppedEvents,
         droppedBytes: older.droppedBytes + newer.droppedBytes,
+        // Carried only when there is a rejection to carry, so the marker every
+        // pressured Run produces does not pay for the rare one.
+        ...(rejectedEvents > 0
+          ? { rejectedEvents, lastRejectedSeq: Math.max(older.lastRejectedSeq, newer.lastRejectedSeq) }
+          : {}),
         queueMaxBytes: maxBytes,
         queueMaxEvents: maxEvents,
       };
@@ -311,11 +360,25 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
       }, false, jsonByteLength(payload), true);
       forget(left);
       forget(right);
+      lowerHint(index);
       entries.splice(index, 2, merged);
       bytes += merged.bytes;
       return true;
     }
     return false;
+  };
+
+  /** The oldest entry the bound may drop, resuming from the hint; -1 when none. */
+  const findDroppable = (): number => {
+    for (let index = oldestDroppable; index < entries.length; index += 1) {
+      const entry = entries[index] as Entry;
+      if (entry.droppable && !entry.claimed) {
+        oldestDroppable = index;
+        return index;
+      }
+    }
+    oldestDroppable = entries.length;
+    return -1;
   };
 
   /**
@@ -324,17 +387,18 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
    * the two oldest adjacent markers. A protected event's account is never given
    * up. A claimed entry belongs to a request in flight and is not available
    * either: a queue whose entries are all claimed is the one state this returns
-   * from still over a bound, and it lasts only until that request settles. The
-   * drop record appended below is the other, deliberate, few hundred bytes of
-   * overshoot.
+   * from still over a bound, and it lasts only until that request settles.
+   *
+   * The record of a drop is opened inside the loop, so it competes for room
+   * with everything else instead of being appended to a queue that had just
+   * reached its bound. Each iteration therefore removes an entry, reduces one,
+   * or merges two, except the single iteration that trades a dropped event for
+   * the record of it — so the loop still terminates, and it terminates with the
+   * queue inside both bounds unless everything left in it is in flight.
    */
   const enforceBound = (): void => {
-    let droppedEvents = 0;
-    let droppedBytes = 0;
-    let firstSeq = 0;
-    let lastSeq = 0;
     while (bytes > maxBytes || entries.length > maxEvents) {
-      const index = entries.findIndex((entry) => entry.droppable && !entry.claimed);
+      const index = findDroppable();
       if (index === -1) {
         // Nothing droppable is left. The oldest protected event that still has
         // a payload gives it up for its marker; once none does, markers merge,
@@ -349,12 +413,8 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
       }
       const [removed] = entries.splice(index, 1) as [Entry];
       forget(removed);
-      droppedBytes += removed.bytes;
-      if (droppedEvents === 0) firstSeq = removed.event.seq;
-      lastSeq = removed.event.seq;
-      droppedEvents += 1;
+      recordDrop(1, removed.bytes, removed.event.seq, removed.event.seq);
     }
-    if (droppedEvents > 0) recordDrop(droppedEvents, droppedBytes, firstSeq, lastSeq);
   };
 
   return {
@@ -383,6 +443,8 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
       // At most one append is ever in flight, so forming a batch is also the
       // proof that the previous one has settled and may be dropped again.
       for (const entry of entries) entry.claimed = false;
+      // Unclaiming can expose a droppable entry anywhere in the queue.
+      oldestDroppable = 0;
       for (const entry of entries) {
         if (batch.length >= batchMaxEvents) break;
         if (batch.length > 0 && size + entry.bytes > batchMaxBytes) break;
@@ -402,6 +464,7 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
         if (!accepted.has(entry.event)) continue;
         entries.splice(index, 1);
         forget(entry);
+        lowerHint(index);
       }
     },
     reject: (seq_, reason) => {
@@ -409,6 +472,7 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
       if (index === -1) return false;
       const [removed] = entries.splice(index, 1) as [Entry];
       forget(removed);
+      lowerHint(index);
       // Never record the rejection of a record. An API that refuses everything
       // would otherwise trade each rejected marker for a fresh one and the
       // flush loop would never drain — the wedge this whole design exists to
@@ -416,12 +480,31 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
       if (removed.event.type === EVENT_REJECTED_EVENT_TYPE || removed.event.type === EVENTS_DROPPED_EVENT_TYPE) {
         return true;
       }
+      // A merged marker stands for events that are in no other entry, so the
+      // record of its rejection carries its account forward; refusing that
+      // record in turn is the terminal case ruled out just above.
+      const absorbed = accountOf(removed);
+      const carried = removed.event.type === EVENTS_COALESCED_EVENT_TYPE
+        ? {
+          coalescedEvents: absorbed.events,
+          firstSeq: absorbed.firstSeq,
+          lastSeq: absorbed.lastSeq,
+          droppedEvents: absorbed.droppedEvents,
+          droppedBytes: absorbed.droppedBytes,
+          ...(absorbed.rejectedEvents > 0
+            ? { rejectedEvents: absorbed.rejectedEvents, lastRejectedSeq: absorbed.lastRejectedSeq }
+            : {}),
+        }
+        : {};
       append(runnerEntry(EVENT_REJECTED_EVENT_TYPE, {
         reason,
         rejectedSeq: removed.event.seq,
         rejectedType: removed.event.type,
         rejectedBytes: removed.bytes,
+        ...carried,
       }));
+      // The record is one more entry against the same bound as any other.
+      enforceBound();
       return true;
     },
     reduceBatch: () => {

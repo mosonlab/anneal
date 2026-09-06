@@ -2324,17 +2324,25 @@ produces. Lifecycle, terminal and error events — including `TOOL_STARTED`,
 can be given up, and are never dropped. They are not exempt from the bound
 either, because a provider drives some of them too — one `ADAPTER_ERROR` per
 unparsable line, a `TOOL_STARTED` per call. A queue with nothing droppable left
-reduces the oldest of them to a `truncated` marker, keeping its sequence number,
-type and time, at about a hundred bytes an event instead of the 256 KiB cap a
-payload may reach. Once every entry not in flight is such a marker, the two
-oldest adjacent markers merge into one `EVENTS_COALESCED` event carrying their
-summed counts and the inclusive sequence range they span, repeating until both
-bounds hold again. So the queue holds its bounds under any traffic mix, and what
-a protected event gives up under pressure is its detail, never its account: each
-one is still counted, in aggregate, in a marker the control plane receives.
-The batch in flight is never dropped from, never merged, and never released by
+reduces the oldest of them to a `{ truncated: true, reason: "queue-bound",
+originalBytes, queueMaxBytes }` marker — distinct from the per-event cap's
+marker above, which names the cap it hit — keeping its sequence number, type and
+time, at about a hundred bytes an event instead of the 256 KiB cap a payload may
+reach. `providerEventId` and `toolCallId` go with the payload: they are detail
+too, and no cap covers what a provider puts in them. Once every entry not in
+flight is such a marker, the two oldest adjacent markers merge into one
+`EVENTS_COALESCED` event carrying their summed counts and the inclusive sequence
+range they span, plus the `droppedEvents` and `rejectedEvents` totals of any
+`EVENTS_DROPPED` or `EVENT_REJECTED` record absorbed, whose losses are in no
+other event. Merging repeats until both bounds hold again, and the record of a
+drop is opened inside that accounting rather than appended past it. So the
+queue holds its bounds under any traffic mix, and what a protected event gives
+up under pressure is its detail, never its account: each one is still counted,
+in aggregate, in a marker the control plane receives. The batch in flight is the
+one exemption — it is never dropped from, never merged, and never released by
 position, so a provider streaming during an append cannot cost an event that the
-request did not carry. Each heartbeat carries the
+request did not carry, and the bound it suspends holds again as soon as the
+request settles. Each heartbeat carries the
 current queue size as `eventQueueBytes`; the field is observability only and the
 API neither acts on it nor persists it.
 
