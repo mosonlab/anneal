@@ -4,10 +4,10 @@ import {
   MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
   Prisma,
-  RunStatus,
   TaskStatus,
 } from "@prisma/client";
 
+import { ACTIVE_RUN_STATUSES } from "./board-contract.js";
 import { readChainControl } from "./chain-control.js";
 import { heldPredicate } from "./chain-hold.js";
 import { compare, layerOf } from "./chain-order.js";
@@ -49,38 +49,7 @@ type ChainSuccessor = Prisma.TaskGetPayload<{ include: { runs: true; assigneeAge
 // ChainSuccessor.runs is always fetched filtered to ACTIVE_RUN_STATUSES: it exists
 // only to answer "is any run still alive?" for the guards below.
 
-/**
- * "This task already has a run that is alive." WAITING_INBOX belongs here: such
- * a run resumes the moment the operator answers, so a task holding one must not
- * gain a second run, be archived, or be parked in Backlog.
- *
- * This is the definition every guard added by batch 2.5 shares, and since the
- * 2026-08-18 repairs the operator retry route and the chain/follow-up successor
- * guards count against it across ALL of a task's runs — a latest-run-only read
- * misses an older WAITING_INBOX run hiding behind a newer terminal one.
- * `app.ts`'s `activeRunStatuses` remains a different concept (a lease).
- *
- * The answer is spelled as a `Record<RunStatus, boolean>` rather than a list so
- * that adding a RunStatus to the schema is a compile error here — the copies in
- * `packages/api/src/workspace-reclaim.ts` and `apps/web/src/lib/board.ts` are
- * derived from or checked against this one, and a list would let a new status
- * default silently to "terminal" in all three.
- */
-const RUN_STATUS_IS_ACTIVE: Readonly<Record<RunStatus, boolean>> = {
-  [RunStatus.QUEUED]: true,
-  [RunStatus.CLAIMED]: true,
-  [RunStatus.PROVISIONING]: true,
-  [RunStatus.RUNNING]: true,
-  [RunStatus.WAITING_INBOX]: true,
-  [RunStatus.SUCCEEDED]: false,
-  [RunStatus.FAILED]: false,
-  [RunStatus.TIMED_OUT]: false,
-  [RunStatus.CANCELLED]: false,
-  [RunStatus.LOST]: false,
-};
-
-export const ACTIVE_RUN_STATUSES: RunStatus[] = Object.values(RunStatus)
-  .filter((status) => RUN_STATUS_IS_ACTIVE[status]);
+export { ACTIVE_RUN_STATUSES } from "./board-contract.js";
 
 /**
  * "This task is a live reference to its assignee." Every status here is one the

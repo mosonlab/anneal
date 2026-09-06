@@ -34,6 +34,24 @@ export type TaskSource = PrismaTaskSource;
 export type AssigneeType = PrismaAssigneeType;
 export type ScheduleKind = PrismaScheduleKind;
 export type RunStatus = PrismaRunStatus;
+/** Runs that still own live work, including resumable Inbox waits. This is
+ * shared by server guards and the board; every persisted status needs an answer. */
+export const RUN_STATUS_IS_ACTIVE = {
+  QUEUED: true,
+  CLAIMED: true,
+  PROVISIONING: true,
+  RUNNING: true,
+  WAITING_INBOX: true,
+  SUCCEEDED: false,
+  FAILED: false,
+  TIMED_OUT: false,
+  CANCELLED: false,
+  LOST: false,
+} satisfies Record<RunStatus, boolean>;
+
+export const ACTIVE_RUN_STATUSES: RunStatus[] = (Object.keys(RUN_STATUS_IS_ACTIVE) as RunStatus[])
+  .filter((status) => RUN_STATUS_IS_ACTIVE[status]);
+
 export type RunnerKind = PrismaRunnerKind;
 export type CodexServiceTier = PrismaCodexServiceTier;
 export type SessionExecutionStatus = PrismaSessionExecutionStatus;

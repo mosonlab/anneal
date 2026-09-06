@@ -1,3 +1,4 @@
+import { RUN_STATUS_IS_ACTIVE } from "@anneal/db/board-contract";
 import { type ChainControlActionKind, chainControlAction } from "./chain-aggregate";
 import { formatDateTime, formatT } from "./format";
 import { cronProse } from "./schedule";
@@ -259,22 +260,7 @@ export const orderColumn = <T extends BoardTask | BoardEntry>(tasks: readonly T[
 
 /* ------------------------------------------------------------- run liveness */
 
-/** The statuses under which the control plane still owns a Run. The same five
- *  the server fences on (`packages/api/src/run-fence.ts`), suspended Inbox work
- *  included; everything else is terminal.
- *
- *  Written as a total `Record<RunStatus, boolean>` rather than a list: a list
- *  only checks that each literal is *a* RunStatus, so a new active status would
- *  be missed silently. Every status must be answered here, and the parity test
- *  in `src/tests/run-active-parity.test.ts` asserts the derived set still equals
- *  the server's `ACTIVE_RUN_STATUSES`. */
-const RUN_STATUS_IS_ACTIVE: Record<RunStatus, boolean> = {
-  QUEUED: true, CLAIMED: true, PROVISIONING: true, RUNNING: true, WAITING_INBOX: true,
-  SUCCEEDED: false, FAILED: false, TIMED_OUT: false, CANCELLED: false, LOST: false,
-};
-
-export const ACTIVE_RUN_STATUSES: RunStatus[] = (Object.keys(RUN_STATUS_IS_ACTIVE) as RunStatus[])
-  .filter((status) => RUN_STATUS_IS_ACTIVE[status]);
+export { ACTIVE_RUN_STATUSES } from "@anneal/db/board-contract";
 
 const isActiveRunStatus = (status: RunStatus): boolean => RUN_STATUS_IS_ACTIVE[status];
 
