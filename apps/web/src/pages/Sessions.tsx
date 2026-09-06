@@ -20,7 +20,7 @@ import {
   ALL_SESSION_FILTER, groupSessionsByDay, isLiveStatus,
   isSessionUnseen, markSessionOpened, readSessionSeenState, readSessionSelection,
   SESSION_DAY_PAGE_SIZE, SESSION_RANGE_PRESETS, SESSIONS_ROUTE, sessionAgentOptions, sessionDayLabelKind,
-  sessionListPath, sessionSelectionFilters, sessionsFilterHref,
+  sessionListPath, sessionSelectionFilters, sessionSelectionSearch, sessionsFilterHref,
   type SessionDayGroup, type SessionFilterOption, type SessionListSelection, type SessionRangePreset,
   type SessionSeenState,
 } from "../lib/session-list";
@@ -410,9 +410,11 @@ export const SessionFilterBar = ({ selection, agentOptions, searchText, onSearch
           </label>
         </>
       ) : null}
-      <Button type="button" variant="legacy" size="legacy" data-session-filter-clear onClick={onClear}>
-        {t("sessions.filter.clear")}
-      </Button>
+      {sessionSelectionSearch(selection).length === 0 ? null : (
+        <Button type="button" variant="legacy" size="legacy" data-session-filter-clear onClick={onClear}>
+          {t("sessions.filter.clear")}
+        </Button>
+      )}
     </div>
   );
 };
