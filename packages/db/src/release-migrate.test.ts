@@ -561,6 +561,19 @@ describe("releaseMigrate --fresh", () => {
     assert.equal(first.env["DATABASE_URL"], GATED_URL);
   });
 
+  it("hides Prisma's update banner in every command it composes", async () => {
+    // The banner is advisory and goes to stderr, where a deploy log cannot tell
+    // it from a migration failure. Added to the child environment, so whatever
+    // else the operator exported still reaches the command.
+    const host = fakeHost({ lock: true, processEnv: { PATH: "/usr/bin" } });
+    assert.equal(await releaseMigrate(["--fresh"], host), 0);
+    assert.equal(host.spawned.length, 3);
+    for (const entry of host.spawned) {
+      assert.equal(entry.env["PRISMA_HIDE_UPDATE_MESSAGE"], "1", entry.argv.join(" "));
+      assert.equal(entry.env["PATH"], "/usr/bin");
+    }
+  });
+
   it("declares the first run to the composed preflight, naming the schema it proved empty", async () => {
     const host = fakeHost({ lock: true });
     assert.equal(await releaseMigrate(["--fresh"], host), 0);
