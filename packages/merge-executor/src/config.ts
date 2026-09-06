@@ -14,6 +14,8 @@ export type ExecutorConfig = {
   runnerId: string;
   leaseSeconds: number;
   pollIntervalMs: number;
+  /** How long a contract-mismatched daemon waits before re-checking the claim. */
+  contractRecheckMs: number;
   apiTimeoutMs: number;
   githubRestUrl: string;
   githubGraphqlUrl: string;
@@ -80,6 +82,7 @@ export const loadExecutorConfig = (env: Record<string, string | undefined> = pro
     runnerId: required("MERGE_EXECUTOR_RUNNER_ID", env.MERGE_EXECUTOR_RUNNER_ID),
     leaseSeconds: positiveInteger("MERGE_EXECUTOR_LEASE_SECONDS", env.MERGE_EXECUTOR_LEASE_SECONDS, 120),
     pollIntervalMs: positiveInteger("MERGE_EXECUTOR_POLL_INTERVAL_MS", env.MERGE_EXECUTOR_POLL_INTERVAL_MS, 5_000),
+    contractRecheckMs: positiveInteger("MERGE_EXECUTOR_CONTRACT_RECHECK_MS", env.MERGE_EXECUTOR_CONTRACT_RECHECK_MS, 60_000),
     apiTimeoutMs: positiveInteger("MERGE_EXECUTOR_API_TIMEOUT_MS", env.MERGE_EXECUTOR_API_TIMEOUT_MS, 15_000),
     githubRestUrl: env.GITHUB_REST_URL?.trim() || "https://api.github.com",
     githubGraphqlUrl: env.GITHUB_GRAPHQL_URL?.trim() || "https://api.github.com/graphql",
