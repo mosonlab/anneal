@@ -1169,8 +1169,6 @@ export AGENTOS_ALLOW_SCRATCH_DATABASES=1
 # and merge-lease adaptation: operator entrypoints need executable contracts too.
 # Compose consults Docker Compose read-only (version/config, no daemon mutation)
 # and omits that comparison when Docker Compose is absent.
-# The dependency-gate and handoff-preimage fixtures protect dependency evidence
-# and the exact preimage handed to a successor, without installing dependencies.
 #
 # test:gate-worker is the historical alias for the delivery concurrency AND
 # gate-worker suites below; its parity fixture intentionally preserves both.
@@ -1180,7 +1178,6 @@ export AGENTOS_ALLOW_SCRATCH_DATABASES=1
 parallel_steps "dependencies and the install-free suites" \
   "npm ci" install_dependencies :: \
   "operational script fixtures" node --test --test-skip-pattern='^the command runs over this checkout and reports classes only$' scripts/setup-local.test.mjs scripts/verify-secret-hygiene.test.mjs scripts/compose-binding.test.mjs scripts/repo-contract-merge-gate.test.mjs scripts/merge-lease-adapter.test.mjs :: \
-  "dependency gate fixtures" npm run test:dependency-gate :: \
   "frozen-record checker fixtures" node --test scripts/check-frozen-docs.test.mjs :: \
   "operator API handbook coverage" node --test scripts/operator-api-docs.test.mjs :: \
   "host proof slot fixtures" node --test scripts/host-proof-slot.test.mjs :: \

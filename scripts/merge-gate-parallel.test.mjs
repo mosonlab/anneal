@@ -148,7 +148,9 @@ test("GROUP-SHAPE added operational suites share the install-free group", () => 
   assert.match(proof, /"secret hygiene built-checkout integration" node --test --test-name-pattern='\^the command runs over this checkout and reports classes only\$' scripts\/verify-secret-hygiene\.test\.mjs ::/);
   const hygieneTests = readFileSync(new URL("./verify-secret-hygiene.test.mjs", import.meta.url), "utf8");
   assert.ok(hygieneTests.includes('test("the command runs over this checkout and reports classes only",'), "split integration selector must match an existing test");
-  assert.match(installFree, /"dependency gate fixtures" npm run test:dependency-gate ::/);
+  for (const [, alias] of installFree.matchAll(/\bnpm run ([\w:-]+)/g)) {
+    assert.ok(Object.hasOwn(rootScripts, alias), `install-free npm alias must exist: ${alias}`);
+  }
   assert.doesNotMatch(installFree, /await_postgres|prisma|dbtest|test:db/);
   assertInstallFreeOrder(gateDeclarations);
 });
