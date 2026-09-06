@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
 import {
@@ -41,8 +42,9 @@ for (const [templateName, generations] of Object.entries(LEGACY_TEMPLATE_GENERAT
       const persistedName = templateRolloverName(templateName, generation.marker, "template-row");
       for (const step of generation.shape) {
         const { outputKind } = step;
+        assert.equal(stepGeneration({ outputKind, taskTemplateName: persistedName }), stepGeneration({ outputKind }));
+        assert.equal(stepGeneration({ outputKind, taskTemplate: { name: persistedName } }), stepGeneration({ outputKind }));
         assert.equal(stepRole({ outputKind, taskTemplateName: persistedName }), EXPECTED_ROLES[outputKind]);
-        assert.equal(stepGeneration({ outputKind, taskTemplateName: persistedName }), generation.marker);
       }
       const implementation = { outputKind: "implementation", taskTemplate: { name: persistedName } };
       assert.equal(isCompoundImplementationStep(implementation), templateName === "compound-engineer-workflow");
@@ -114,4 +116,14 @@ test("seed-era identities select implementation guards by canonical family", () 
       assert.equal(isDirectImplementationStep({ ...step, outputKind: "sol-findings" }), false);
     }
   }
+});
+
+test("step-role is a leaf module, so no sibling can close an import cycle through it", async () => {
+  // `stepGeneration` used to resolve a retired graph marker through
+  // `canonical-template-transition.js`, which imports `stepRole` back: an ESM
+  // cycle whose evaluation order decided whether either module saw the other's
+  // bindings. The branch is gone and the fix is structural — this module must
+  // stay importless, so a future edit cannot reintroduce the cycle silently.
+  const source = await readFile(new URL("./step-role.ts", import.meta.url), "utf8");
+  assert.deepEqual(source.match(/^(?:\s*import\b|\s*export\b[^;]*\bfrom\b)|\bimport\s*\(/gmu), null);
 });
