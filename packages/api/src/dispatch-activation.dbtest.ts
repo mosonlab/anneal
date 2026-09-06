@@ -251,6 +251,57 @@ test("run completion dispatches a bound successor through the production runner 
   assert.equal(await db.run.count({ where: { taskId: fixture.successor.id } }), 1);
 });
 
+for (const archiveFirst of [false, true]) {
+  test(`runner completion fans out independently with first successor ${archiveFirst ? "archived" : "active"}`, async () => {
+    const fixture = await seedBinding({ terminalStatus: TaskStatus.TODO });
+    // Sort the optionally parked successor first, proving its outcome does not
+    // short-circuit dispatch of the next binding.
+    const first = await db.task.update({
+      where: { id: fixture.successor.id },
+      data: { id: `a-${randomUUID()}`, ...(archiveFirst ? { archivedAt: new Date() } : {}) },
+    });
+    const second = await db.task.create({ data: {
+      id: `z-${randomUUID()}`,
+      projectId: fixture.project.id,
+      repoId: fixture.repo.id,
+      assigneeAgentId: fixture.agent.id,
+      name: "Second bound successor",
+      description: "independent dispatch",
+      chainId: `second-successor-${randomUUID()}`,
+      chainIndex: 0,
+      chainLayer: 0,
+      dispatchAfterTaskId: fixture.predecessor.id,
+    } });
+    const running = await seedRunningPredecessor(fixture);
+    const response = await createApp(db).request(`/runner/runs/${running.run.id}/complete`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify(completionBody(running.runnerId, running.fencingToken)),
+    });
+    assert.equal(response.status, 200, await response.text());
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: fixture.predecessor.id } })).status, TaskStatus.DONE);
+    for (const successor of [first, second]) {
+      const runs = await db.run.findMany({ where: { taskId: successor.id } });
+      const parked = archiveFirst && successor.id === first.id;
+      assert.equal(runs.length, parked ? 0 : 1);
+      if (!parked) assert.equal(runs[0]!.status, "QUEUED");
+    }
+    const dispatched = await db.taskActivity.findMany({
+      where: { taskId: fixture.predecessor.id, body: "Bound chain dispatched" },
+    });
+    assert.deepEqual(
+      dispatched.map((row) => bindingMetadata(row.metadata).successorTaskId).sort(),
+      (archiveFirst ? [second.id] : [first.id, second.id]).sort(),
+    );
+    if (archiveFirst) {
+      const activities = await db.taskActivity.findMany({ where: { taskId: first.id } });
+      assert.equal(activities.length, 1);
+      assert.match(activities[0]!.body, /parked in REVIEW/u);
+      assert.equal(bindingMetadata(activities[0]!.metadata).state, "parked");
+    }
+  });
+}
+
 // The two bound invariants break in different ways. The merge-execution
 // sentinel is still an identity, so renaming its Agent breaks it; §R14 made
 // the compound implementation root a *capability*, so what breaks it is the

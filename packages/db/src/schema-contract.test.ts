@@ -47,9 +47,13 @@ test("the final chain schema contract and source census have one successor autho
     { table: "Task", column: "chainLayer", nullable: true },
   ]);
   assert.equal(CHAIN_LAYER_IDENTITY_CHECK, "Task_chain_identity_all_or_none_check");
-  assert.match(schema, /dispatchAfterTaskId\s+String\?\s+@unique/u);
+  // The pointer is deliberately not unique: one predecessor accepts several
+  // bound successor chains, and the list side of the relation is the proof.
+  assert.match(schema, /dispatchAfterTaskId\s+String\?\s*$/mu);
   assert.match(schema, /dispatchAfter\s+Task\?\s+@relation\("TaskDispatchBinding"/u);
-  assert.match(schema, /dispatchedChainFirstTask\s+Task\?\s+@relation\("TaskDispatchBinding"/u);
+  assert.match(schema, /dispatchedChainFirstTasks\s+Task\[\]\s+@relation\("TaskDispatchBinding"/u);
+  assert.match(schema, /@@index\(\[dispatchAfterTaskId, projectId\]\)/u);
+  assert.doesNotMatch(schema, /@@unique\(\[dispatchAfterTaskId, projectId\]\)/u);
   assert.deepEqual(TASK_DISPATCH_BINDING_COLUMNS, [
     { table: "Task", column: "dispatchAfterTaskId", nullable: true },
   ]);
