@@ -413,6 +413,262 @@ test("GET /sessions is project-scoped, clamped, cursored, and reachable by the o
   });
 });
 
+/**
+ * The fixture the filter tests query: two steps of one instantiated chain, a
+ * standalone task, a session with no task at all, and a second chain's step.
+ */
+type SessionFixture = {
+  id: string;
+  runId: string;
+  projectId: string;
+  agentId: string;
+  taskId: string | null;
+  runner: string;
+  executionStatus: string;
+  requestedAt: Date;
+  failureReason: string | null;
+  task: {
+    id: string;
+    name: string;
+    chainId: string | null;
+    templateStep: { name: string } | null;
+    stepOutput: null;
+    runs: [];
+  } | null;
+  run: { id: string; branch: string | null } | null;
+};
+
+const sessionFixture = (
+  id: string,
+  at: string,
+  named: Partial<SessionFixture> & { taskName?: string; chainId?: string | null; stepName?: string | null; branch?: string | null },
+): SessionFixture => ({
+  id,
+  runId: `run-${id}`,
+  projectId: "p",
+  agentId: named.agentId ?? "agent-1",
+  taskId: named.taskName === undefined ? null : `task-${id}`,
+  runner: named.runner ?? "CLAUDE",
+  executionStatus: named.executionStatus ?? "RUNNING",
+  requestedAt: new Date(at),
+  failureReason: named.failureReason ?? null,
+  task: named.taskName === undefined ? null : {
+    id: `task-${id}`,
+    name: named.taskName,
+    chainId: named.chainId ?? null,
+    templateStep: named.stepName === undefined || named.stepName === null ? null : { name: named.stepName },
+    stepOutput: null,
+    runs: [],
+  },
+  run: { id: `run-${id}`, branch: named.branch ?? null },
+});
+
+const sessionFixtures: SessionFixture[] = [
+  sessionFixture("s1", "2026-08-20T00:00:00.000Z", {
+    taskName: "Chain Alpha: Implement the filters", chainId: "chain-alpha", stepName: "Implement the filters",
+    agentId: "agent-1", runner: "CLAUDE", executionStatus: "RUNNING", branch: "feat/alpha",
+  }),
+  sessionFixture("s2", "2026-08-19T00:00:00.000Z", {
+    taskName: "Chain Alpha: Review the filters", chainId: "chain-alpha", stepName: "Review the filters",
+    agentId: "agent-2", runner: "CODEX", executionStatus: "SUCCEEDED", branch: "feat/alpha",
+  }),
+  sessionFixture("s3", "2026-08-18T00:00:00.000Z", {
+    taskName: "Standalone cleanup", agentId: "agent-1", runner: "CODEX",
+    executionStatus: "FAILED", branch: "chore/sweep", failureReason: "gate timed out",
+  }),
+  sessionFixture("s4", "2026-08-17T00:00:00.000Z", {
+    agentId: "agent-3", runner: "PI", executionStatus: "CANCELLED",
+  }),
+  sessionFixture("s5", "2026-08-16T00:00:00.000Z", {
+    taskName: "Chain Beta: Ship it", chainId: "chain-beta", stepName: "Ship it",
+    agentId: "agent-2", runner: "CLAUDE", executionStatus: "TIMED_OUT", branch: "feat/beta",
+    failureReason: "lost the runner",
+  }),
+];
+
+/** The only `where` shapes `sessionListWhere` emits. This matcher models those
+ *  and refuses anything else, so a predicate the route cannot build fails here
+ *  instead of passing an assertion the fake never applied. */
+type EmittedWhere = {
+  projectId?: string;
+  requestedAt?: { lt?: Date; gte?: Date; lte?: Date };
+  executionStatus?: { in: string[] };
+  agentId?: string;
+  runner?: string;
+  taskId?: string;
+  task?: { chainId: string };
+  OR?: [
+    { task: { name: { contains: string } } },
+    { run: { branch: { contains: string } } },
+    { failureReason: { contains: string } },
+  ];
+};
+
+const modelledWhereKeys = ["projectId", "requestedAt", "executionStatus", "agentId", "runner", "taskId", "task", "OR"];
+
+const containsInsensitive = (value: string | null | undefined, needle: string): boolean =>
+  typeof value === "string" && value.toLowerCase().includes(needle.toLowerCase());
+
+const matchesEmittedWhere = (row: SessionFixture, where: EmittedWhere): boolean => {
+  for (const key of Object.keys(where)) {
+    assert.ok(modelledWhereKeys.includes(key), `the test matcher does not model where.${key}`);
+  }
+  if (where.projectId !== undefined && row.projectId !== where.projectId) return false;
+  if (where.requestedAt?.lt !== undefined && !(row.requestedAt < where.requestedAt.lt)) return false;
+  if (where.requestedAt?.gte !== undefined && !(row.requestedAt >= where.requestedAt.gte)) return false;
+  if (where.requestedAt?.lte !== undefined && !(row.requestedAt <= where.requestedAt.lte)) return false;
+  if (where.executionStatus !== undefined && !where.executionStatus.in.includes(row.executionStatus)) return false;
+  if (where.agentId !== undefined && row.agentId !== where.agentId) return false;
+  if (where.runner !== undefined && row.runner !== where.runner) return false;
+  if (where.taskId !== undefined && row.taskId !== where.taskId) return false;
+  if (where.task !== undefined && row.task?.chainId !== where.task.chainId) return false;
+  if (where.OR !== undefined) {
+    const [byName, byBranch, byReason] = where.OR;
+    const matched = containsInsensitive(row.task?.name, byName.task.name.contains)
+      || containsInsensitive(row.run?.branch, byBranch.run.branch.contains)
+      || containsInsensitive(row.failureReason, byReason.failureReason.contains);
+    if (!matched) return false;
+  }
+  return true;
+};
+
+type ListedSession = {
+  id: string;
+  task: { id: string; name: string; chainId: string | null; chainName: string | null } | null;
+};
+
+const listSessions = (recorded: Array<Record<string, unknown>>) => {
+  const app = createApp({
+    session: {
+      findMany: async (args: Record<string, unknown>) => {
+        recorded.push(args);
+        return sessionFixtures
+          .filter((row) => matchesEmittedWhere(row, args.where as EmittedWhere))
+          .sort((left, right) => right.requestedAt.getTime() - left.requestedAt.getTime())
+          .slice(0, args.take as number);
+      },
+    },
+  } as unknown as PrismaClient);
+  return async (query: string): Promise<ListedSession[]> => {
+    const response = await app.request(`/sessions${query}`, { headers: { Authorization: "Bearer operator-unit-token" } });
+    assert.equal(response.status, 200);
+    return await response.json() as ListedSession[];
+  };
+};
+
+const listedIds = async (list: (query: string) => Promise<ListedSession[]>, query: string): Promise<string[]> =>
+  (await list(query)).map((session) => session.id);
+
+test("GET /sessions narrows by each filter and by filters in combination", async () => {
+  await withTokens(async () => {
+    const list = listSessions([]);
+    const ids = (query: string) => listedIds(list, query);
+
+    assert.deepEqual(await ids("?projectId=p&status=live"), ["s1"]);
+    assert.deepEqual(await ids("?projectId=p&status=done"), ["s2"]);
+    assert.deepEqual(await ids("?projectId=p&status=failed"), ["s3", "s5"]);
+    assert.deepEqual(await ids("?projectId=p&status=cancelled"), ["s4"]);
+    assert.deepEqual(await ids("?projectId=p&agentId=agent-1"), ["s1", "s3"]);
+    assert.deepEqual(await ids("?projectId=p&runner=CODEX"), ["s2", "s3"]);
+    assert.deepEqual(await ids("?projectId=p&taskId=task-s3"), ["s3"]);
+    assert.deepEqual(await ids("?projectId=p&chainId=chain-alpha"), ["s1", "s2"]);
+    assert.deepEqual(await ids("?projectId=p&since=2026-08-18T00:00:00.000Z"), ["s1", "s2", "s3"]);
+    assert.deepEqual(await ids("?projectId=p&until=2026-08-17T00:00:00.000Z"), ["s4", "s5"]);
+
+    // Filters combine by AND, with each other and with the scope.
+    assert.deepEqual(await ids("?projectId=p&chainId=chain-alpha&runner=CODEX"), ["s2"]);
+    assert.deepEqual(await ids("?projectId=p&status=failed&agentId=agent-1"), ["s3"]);
+    assert.deepEqual(
+      await ids("?projectId=p&since=2026-08-16T00:00:00.000Z&until=2026-08-19T00:00:00.000Z&runner=CLAUDE"),
+      ["s5"],
+    );
+    assert.deepEqual(await ids("?projectId=other&status=live"), []);
+  });
+});
+
+test("GET /sessions still pages by cursor under a filter", async () => {
+  await withTokens(async () => {
+    const list = listSessions([]);
+    assert.deepEqual(await listedIds(list, "?projectId=p&agentId=agent-1&limit=1"), ["s1"]);
+    // The second page under the same filter carries only rows older than the cursor.
+    assert.deepEqual(
+      await listedIds(list, "?projectId=p&agentId=agent-1&before=2026-08-20T00:00:00.000Z"),
+      ["s3"],
+    );
+  });
+});
+
+test("GET /sessions q searches task name, run branch and failure reason, and never an id", async () => {
+  await withTokens(async () => {
+    const list = listSessions([]);
+    const ids = (query: string) => listedIds(list, query);
+
+    assert.deepEqual(await ids("?projectId=p&q=standalone"), ["s3"]);
+    assert.deepEqual(await ids("?projectId=p&q=sweep"), ["s3"]);
+    assert.deepEqual(await ids("?projectId=p&q=timed%20out"), ["s3"]);
+    // Case-insensitive on all three columns: the name and branch of the chain.
+    assert.deepEqual(await ids("?projectId=p&q=ALPHA"), ["s1", "s2"]);
+    assert.deepEqual(await ids("?projectId=p&q=LOST%20the%20runner"), ["s5"]);
+    // An id is addressed by taskId or chainId; q must never reach one.
+    assert.deepEqual(await ids("?projectId=p&q=task-s3"), []);
+    assert.deepEqual(await ids("?projectId=p&q=chain-alpha"), []);
+  });
+});
+
+test("GET /sessions refuses a present-but-unusable filter by name", async () => {
+  await withTokens(async () => {
+    const app = createApp({
+      session: { findMany: async () => { assert.fail("a refused request must not query"); } },
+    } as unknown as PrismaClient);
+    const get = (query: string) => app.request(`/sessions${query}`, { headers: { Authorization: "Bearer operator-unit-token" } });
+
+    const since = await get("?since=yesterday");
+    assert.equal(since.status, 400);
+    assert.equal((await since.json() as { code: string }).code, "session-filter-since-invalid");
+
+    const status = await get("?status=running");
+    assert.equal(status.status, 400);
+    assert.equal((await status.json() as { code: string }).code, "session-filter-status-invalid");
+
+    // An empty value meant something and lost it, so it refuses rather than widening.
+    const empty = await get("?agentId=");
+    assert.equal(empty.status, 400);
+    assert.equal((await empty.json() as { code: string }).code, "session-filter-agent-id-invalid");
+  });
+});
+
+test("GET /sessions without filters asks exactly the question it asked before them", async () => {
+  await withTokens(async () => {
+    const recorded: Array<Record<string, unknown>> = [];
+    const list = listSessions(recorded);
+    await list("?projectId=p");
+    await list("");
+    await list("?before=2026-08-19T00:00:00.000Z");
+    assert.deepEqual(recorded.map((call) => call.where), [
+      { projectId: "p" },
+      {},
+      { requestedAt: { lt: new Date("2026-08-19T00:00:00.000Z") } },
+    ]);
+  });
+});
+
+test("GET /sessions projects chain identity onto every row", async () => {
+  await withTokens(async () => {
+    const sessions = await listSessions([])("?projectId=p");
+    const byId = new Map(sessions.map((session) => [session.id, session.task]));
+    assert.deepEqual(byId.get("s1"), {
+      id: "task-s1", name: "Chain Alpha: Implement the filters", chainId: "chain-alpha", chainName: "Chain Alpha",
+    });
+    // A task outside a chain has an id but no name to derive.
+    assert.deepEqual(byId.get("s3"), {
+      id: "task-s3", name: "Standalone cleanup", chainId: null, chainName: null,
+    });
+    assert.equal(byId.get("s4"), null);
+    // The include's merge-outcome fields are the route's business, not the wire's.
+    assert.deepEqual(Object.keys(byId.get("s1") ?? {}).sort(), ["chainId", "chainName", "id", "name"]);
+  });
+});
+
 test("GET /sessions/:sessionId 404s cleanly and carries the repo remote URL", async () => {
   await withTokens(async () => {
     const calls: Array<Record<string, unknown>> = [];
@@ -424,6 +680,30 @@ test("GET /sessions/:sessionId 404s cleanly and carries the repo remote URL", as
     assert.deepEqual(await response.json(), { error: "Session not found" });
     const include = (calls[0] as { include: { run: { select: { repo: { select: Record<string, boolean> } } } } }).include;
     assert.equal(include.run.select.repo.select.remoteUrl, true);
+  });
+});
+
+test("GET /sessions/:sessionId derives a chain name only when one row proves it", async () => {
+  await withTokens(async () => {
+    const row = sessionFixture("s1", "2026-08-20T00:00:00.000Z", {
+      taskName: "Chain Alpha: Implement the filters", chainId: "chain-alpha", stepName: "Implement the filters",
+    });
+    const detail = async (task: SessionFixture["task"]) => {
+      const app = createApp({
+        session: { findUnique: async () => ({ ...row, task }) },
+      } as unknown as PrismaClient);
+      const response = await app.request("/sessions/s1", { headers: { Authorization: "Bearer operator-unit-token" } });
+      assert.equal(response.status, 200);
+      return (await response.json() as ListedSession).task;
+    };
+
+    // The persisted template-step suffix is the only proof a lone row carries.
+    assert.deepEqual(await detail(row.task), {
+      id: "task-s1", name: "Chain Alpha: Implement the filters", chainId: "chain-alpha", chainName: "Chain Alpha",
+    });
+    assert.deepEqual(await detail(row.task === null ? null : { ...row.task, templateStep: null }), {
+      id: "task-s1", name: "Chain Alpha: Implement the filters", chainId: "chain-alpha", chainName: null,
+    });
   });
 });
 
