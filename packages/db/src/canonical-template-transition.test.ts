@@ -472,7 +472,7 @@ test("the Astra-low review-fix generation is kept on record and retired from mat
   // was the Agent bound at the fix step. Under a fingerprint that no longer
   // reads bindings it states the current graph, so it is flagged rather than
   // deleted: the generation was published, and rows already renamed under its
-  // marker still resolve their identity and Step ordinals through it.
+  // marker still resolve their identity through it.
   const sources = await loadAllTemplateStepSources();
   for (const templateName of Object.keys(LEGACY_TEMPLATE_GENERATIONS) as CanonicalTemplateRegistryName[]) {
     const current = sources.get(templateName);
@@ -608,7 +608,7 @@ test("a retired generation is identified without its prior-output whitelist", ()
 });
 
 
-test("model-neutral review names roll over exactly the deployed shapes and retain repair ordinals", async () => {
+test("model-neutral review names roll over exactly the deployed shapes and retain retired generation identity", async () => {
   const sources = await loadAllTemplateStepSources();
   for (const templateName of Object.keys(LEGACY_TEMPLATE_GENERATIONS) as CanonicalTemplateRegistryName[]) {
     const current = sources.get(templateName)!;

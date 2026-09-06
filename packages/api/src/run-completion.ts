@@ -824,6 +824,7 @@ export const completeRun = async (
     const repairTemplateSteps = repairChain
       ? await tx.taskTemplateStep.findMany({
           where: { taskTemplateId: repairChain.templateId },
+          orderBy: { stepIndex: "asc" },
           select: { id: true, outputKind: true },
         })
       : [];

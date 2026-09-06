@@ -1023,6 +1023,27 @@ test("a repair on a seed-era template row reopens the Librarian Step", async () 
   }
 });
 
+test("repair selects the lowest-indexed Documentation role across versioned kinds", async () => {
+  const seeded = await exercise("review-fail", { withLibrarian: true });
+  assert.ok(seeded.librarian);
+  const step = await db.taskTemplateStep.create({ data: {
+    taskTemplateId: seeded.template.id, stepIndex: 7, layer: 7, name: "Earlier Documentation",
+    assigneeType: AssigneeType.AGENT, assigneeAgentId: seeded.librarian.assigneeAgentId,
+    prompt: "document", approvalGate: false, outputKind: "documentation-v2",
+  } });
+  const earlier = await db.task.create({ data: {
+    projectId: seeded.project.id, repoId: seeded.repo.id, templateId: seeded.template.id,
+    templateStepId: step.id, name: step.name, description: "document",
+    assigneeType: AssigneeType.AGENT, assigneeAgentId: seeded.librarian.assigneeAgentId,
+    status: TaskStatus.DONE, chainId: seeded.librarian.chainId, chainIndex: 7, chainLayer: 7, targetBranch: "main",
+  } });
+  const repair = await repairFor(seeded, "review-fix");
+  await completeRepair(seeded, repair.id, "Closed findings with two persisted Documentation roles.");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: earlier.id } })).status, TaskStatus.TODO);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.librarian.id } })).status, TaskStatus.DONE);
+  assert.equal(await db.run.count({ where: { taskId: earlier.id } }), 1);
+});
+
 test("a repair on a template with no Documentation Step says so rather than skipping in silence", async () => {
   const seeded = await exercise("review-fail");
   const repair = await repairFor(seeded, "review-fix");

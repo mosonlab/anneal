@@ -66,8 +66,8 @@ export type LegacyTemplateGeneration = Readonly<{
    * graph that replaced it, and would match every deployed row forever: the
    * installer matches retired generations before it checks the current graph,
    * so every sync would plan a rollover and refuse under any active Run. The
-   * entry stays because the generation was published and its ordinals still
-   * address rows renamed under its marker; only matching skips it.
+   * entry stays to identify rows renamed under its published marker; only
+   * structural matching skips it.
    */
   retiredByBinding?: boolean;
   /**

@@ -1,4 +1,4 @@
-import { Prisma, TaskStatus } from "@prisma/client";
+import { Prisma, type PrismaClient, TaskStatus } from "@prisma/client";
 
 import { requireGateAttestation } from "./gate-attestation.js";
 import {
@@ -21,7 +21,7 @@ type Tx = Prisma.TransactionClient;
  * rather than the gate silently closing onto an authorization nobody judged.
  */
 export class MergeEvidenceError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly refusalActivity?: { taskId: string; metadata: Prisma.InputJsonObject }) {
     super(message);
     this.name = "MergeEvidenceError";
   }
@@ -32,6 +32,16 @@ export const isMergeEvidenceError = (error: unknown): error is MergeEvidenceErro
 
 /** The named refusal for an attestation taken against another base. */
 export const GATE_ATTESTATION_BASE_MISMATCH = "gate-attestation-base-mismatch";
+
+/** Persist only after the caller's approval transaction has rolled back. */
+export const recordMergeEvidenceRefusal = async (db: PrismaClient, error: unknown): Promise<void> => {
+  if (!isMergeEvidenceError(error) || !error.refusalActivity) return;
+  await db.taskActivity.create({ data: {
+    ...error.refusalActivity,
+    actorType: "control-plane",
+    body: error.message,
+  } });
+};
 
 export type MergeAuthorizationResult = {
   activityId: string;
@@ -110,6 +120,14 @@ export const produceMergeAuthorization = async (
     throw new MergeEvidenceError(
       `${GATE_ATTESTATION_BASE_MISMATCH}: the gate signed ${payload.headSha} onto base `
       + `${attested.attestation.baseHeadSha}, but this authorization names base ${payload.baseSha}; approval refused`,
+      { taskId: gateTaskId, metadata: {
+        kind: GATE_ATTESTATION_BASE_MISMATCH,
+        headSha: payload.headSha,
+        attestedBaseSha: attested.attestation.baseHeadSha,
+        authorizationBaseSha: payload.baseSha,
+        channel: input.channel,
+        inboxMessageId: input.card.id,
+      } },
     );
   }
 

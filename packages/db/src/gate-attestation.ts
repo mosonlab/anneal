@@ -11,12 +11,12 @@
  *
  * The two channels run in different processes and different transactions; their
  * only shared ground is the database. So the proof line becomes a row, written
- * once at ingestion, and both channels require it.
+ * at ingestion, and both channels require it.
  *
  * `deriveGateAttestation` is pure and is the only place that decides whether an
  * output attests anything. Legacy `regression-verification` (v1) outputs carry
- * no proof line and are frozen, so they derive nothing and `requireGateAttestation`
- * leaves their chains alone.
+ * no proof line and derive nothing. Only registered pre-attestation generations
+ * with the frozen v1 Regression protocol receive the compatibility exemption.
  */
 
 import type { Prisma } from "@prisma/client";
@@ -59,8 +59,8 @@ export const deriveGateAttestation = (
 
 /**
  * Records the attestation an output carries. Idempotent on `(chainId, headSha)`:
- * a repair loop may re-persist the same passing verdict, and a Regression step
- * re-run at the same head attests the same fact.
+ * a repair loop may re-persist the same passing verdict. A new passing verdict
+ * at the same head refreshes its base and provenance for base-drift renewal.
  *
  * A chainless task cannot be merged by any channel, so it records nothing.
  */
@@ -87,7 +87,12 @@ export const recordGateAttestation = async (
       baseHeadSha: attestation.baseHeadSha,
       proof: attestation.proof,
     },
-    update: {},
+    update: {
+      baseHeadSha: attestation.baseHeadSha,
+      proof: attestation.proof,
+      taskId: input.taskId,
+      runId: input.runId,
+    },
   });
   return attestation;
 };
@@ -103,7 +108,13 @@ export type GateAttestationRequirement =
  * has to produce a row, because "no attestation found" must never be the same
  * answer as "this chain was never asked for one".
  */
-export const PRE_ATTESTATION_REGRESSION_GENERATIONS: readonly string[] = ["v1"];
+export const PRE_ATTESTATION_REGRESSION_GENERATIONS: readonly string[] = [
+  "v1",
+  "pre-narrow-regression-lease",
+  "pre-adjudication",
+  "pre-zero-gate",
+  "10", "9", "human-12", "regression-first-13", "human-6",
+];
 
 /**
  * Whether this chain may be authorized to merge `headSha`.
@@ -138,7 +149,8 @@ export const requireGateAttestation = async (
   const regressionStep = chainSteps
     .map((task) => task.templateStep)
     .find((step) => step !== null && stepRole(step) === "regression") ?? null;
-  if (regressionStep && PRE_ATTESTATION_REGRESSION_GENERATIONS.includes(stepGeneration(regressionStep))) {
+  if (regressionStep?.outputKind === "regression-verification"
+    && PRE_ATTESTATION_REGRESSION_GENERATIONS.includes(stepGeneration(regressionStep))) {
     return { satisfied: true, attestation: null };
   }
   return {

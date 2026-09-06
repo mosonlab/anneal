@@ -7,7 +7,8 @@
  * of the card body, which names a head but says nothing about whether any gate
  * ran against it — so before the attestation table a human approval could
  * authorize a merge at a commit the gate never signed. These tests pin that
- * shut, and pin the carve-out that keeps chains with no Regression node working.
+ * shut, and exempt only registered pre-attestation generations with the frozen
+ * v1 Regression protocol. Absent or unrecognised Regression Steps are refused.
  */
 
 import assert from "node:assert/strict";
@@ -20,11 +21,16 @@ import {
   PrismaClient,
   RunStatus,
   TaskStatus,
-  applyInboxDecisionTx,
+  applyInboxDecision,
+  templateRolloverName,
+  DIRECT_INTEGRATOR_TEMPLATE_NAME,
+  INTEGRATOR_TEMPLATE_NAME,
   gateQuestion,
   recordGateAttestation,
+  requestMergeEvidence,
 } from "@anneal/db";
 
+import { patchTask } from "./task-patch.js";
 import { persistSessionTaskOutput } from "./canonical-task-output.js";
 import { evidenceTick } from "./merge-evidence-worker.js";
 import { type PullRequestSnapshot } from "./github-read.js";
@@ -105,8 +111,19 @@ const filledCard = async (chain: Chain) => {
   return card;
 };
 
-const approve = (cardId: string, event: string) => db.$transaction(
-  (tx) => applyInboxDecisionTx(tx, { inboxMessageId: cardId, externalEventId: event, decision: "approve" }),
+const filledReadinessCard = async (chain: Chain, purpose: "gate" | "confirmation" = "gate") => {
+  assert.ok(chain.readinessTask);
+  const card = await db.$transaction((tx) => requestMergeEvidence(tx, {
+    gateTaskId: chain.readinessTask!.id, integratorTaskId: chain.integratorTask!.id,
+    sourceRunId: chain.gateRun.id, agentId: chain.agent.id, sessionId: chain.gateSession.id,
+    purpose, repository: "acme/widgets", prNumber: 123, dedupeKey: `${purpose}:${chain.chainId}`,
+  }, new Date()));
+  await evidenceTick(db, reader, new Date());
+  return { id: card.cardId };
+};
+
+const approve = (cardId: string, event: string) => applyInboxDecision(
+  db, { inboxMessageId: cardId, externalEventId: event, decision: "approve" },
 );
 
 const authorizations = async (taskId: string) => (await db.taskActivity.findMany({ where: { taskId } }))
@@ -221,3 +238,85 @@ test("a Regression Step on a generation later than the frozen one is not exempt"
   const card = await filledCard(chain);
   await assert.rejects(() => approve(card.id, "evt-v3"), /no merge gate attestation for head/u);
 });
+
+for (const templateName of [DIRECT_INTEGRATOR_TEMPLATE_NAME, INTEGRATOR_TEMPLATE_NAME]) {
+  for (const marker of ["pre-narrow-regression-lease", "pre-adjudication", ...(templateName === INTEGRATOR_TEMPLATE_NAME ? ["pre-zero-gate", "10", "9", "human-12", "regression-first-13"] : ["human-6"])]) {
+    test(`retired ${templateName}/${marker} authorizes its frozen v1 chain`, async () => {
+      const chain = await seedIntegratorChain(db, {
+        label: "attest-retired",
+        shape: templateName === DIRECT_INTEGRATOR_TEMPLATE_NAME ? "canonical-direct" : "canonical-compound-readiness",
+        gatedReadiness: true,
+      });
+      await db.taskTemplate.update({ where: { id: chain.template.id }, data: {
+        name: templateRolloverName(templateName, marker, chain.template.id),
+      } });
+      const card = await filledReadinessCard(chain);
+      await approve(card.id, `evt-${marker}`);
+      assert.equal((await authorizations(chain.readinessTask!.id)).length, 1);
+    });
+  }
+}
+
+for (const channel of ["inbox", "patch"] as const) {
+  for (const purpose of ["gate", "confirmation"] as const) {
+    test(`${channel} ${purpose} base refusal survives rollback and preserves the approval card`, async () => {
+      const chain = await seedIntegratorChain(db, {
+        label: `attest-${channel}-${purpose}`, shape: "canonical-compound-readiness", gatedReadiness: true,
+      });
+      const readiness = chain.readinessTask!;
+      await db.task.update({ where: { id: readiness.id }, data: { status: TaskStatus.REVIEW } });
+      const regression = await addRegressionStep(chain, V2);
+      await db.$transaction((tx) => recordGateAttestation(tx, {
+        chainId: chain.chainId, taskId: regression.task.id, runId: null,
+        kind: V2, body: passingBody(HEAD, OTHER_BASE),
+      }));
+      const card = await filledReadinessCard(chain, purpose);
+      await assert.rejects(
+        () => channel === "inbox" ? approve(card.id, `evt-${channel}-${purpose}`)
+          : patchTask(db, readiness.id, { status: TaskStatus.DONE }),
+        /gate-attestation-base-mismatch/u,
+      );
+      assert.equal((await authorizations(readiness.id)).length, 0);
+      assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: card.id } })).status, "OPEN");
+      assert.equal(await db.inboxDecision.count({ where: { inboxMessageId: card.id } }), 0);
+      const activity = await db.taskActivity.findFirstOrThrow({ where: {
+        taskId: readiness.id, metadata: { path: ["kind"], equals: "gate-attestation-base-mismatch" },
+      } });
+      assert.match(activity.body, /gate-attestation-base-mismatch/u);
+      assert.deepEqual(activity.metadata, {
+        kind: "gate-attestation-base-mismatch", headSha: HEAD, attestedBaseSha: OTHER_BASE,
+        authorizationBaseSha: BASE, channel, inboxMessageId: card.id,
+      });
+    });
+  }
+}
+
+test("a new attestation at the same head authorizes only the newly verified base", async () => {
+  const chain = await seedIntegratorChain(db, { label: "attest-renew-base" });
+  const regression = await addRegressionStep(chain, V2);
+  const record = (base: string) => db.$transaction((tx) => recordGateAttestation(tx, {
+    chainId: chain.chainId, taskId: regression.task.id, runId: null, kind: V2, body: passingBody(HEAD, base),
+  }));
+  await record(BASE);
+  const card = await filledCard(chain);
+  await record(OTHER_BASE);
+  await assert.rejects(() => approve(card.id, "evt-old-base"), /gate-attestation-base-mismatch/u);
+  assert.equal((await authorizations(chain.gateTask.id)).length, 0);
+  const stored = await db.inboxMessage.findUniqueOrThrow({ where: { id: card.id } });
+  await db.inboxMessage.update({ where: { id: card.id }, data: { body: stored.body.replaceAll(BASE, OTHER_BASE) } });
+  await approve(card.id, "evt-new-base");
+  assert.equal((await authorizations(chain.gateTask.id)).length, 1);
+});
+
+for (const kind of [V2, "regression-verification-v3", "regression-attestation"]) {
+  test(`a retired name does not exempt ${kind}`, async () => {
+    const chain = await seedIntegratorChain(db, { label: "attest-retired-kind" });
+    await db.taskTemplate.update({ where: { id: chain.template.id }, data: {
+      name: templateRolloverName(INTEGRATOR_TEMPLATE_NAME, "pre-adjudication", chain.template.id),
+    } });
+    await addRegressionStep(chain, kind);
+    const card = await filledCard(chain);
+    await assert.rejects(() => approve(card.id, "evt-retired-kind"), /no merge gate attestation for head/u);
+    assert.equal((await authorizations(chain.gateTask.id)).length, 0);
+  });
+}

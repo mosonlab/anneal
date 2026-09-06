@@ -103,6 +103,7 @@ export {
   MergeEvidenceError,
   isMergeEvidenceError,
   produceMergeAuthorization,
+  recordMergeEvidenceRefusal,
 } from "./merge-authorization.js";
 export {
   APPROVAL_GATE_FEEDBACK_METADATA_FIELD,
