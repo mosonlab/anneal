@@ -1,6 +1,11 @@
 node_modules/
 dist/
-.merge-gate.lock/
+# The merge gate's worktree lock, and the two names lib.sh's slot lock stages
+# and reclaims through. They are taken before the gate checks that the worktree
+# is clean, so an unignored one would fail every gate.
+/.merge-gate.slot
+/.staged..merge-gate.*
+/.reclaim..merge-gate.*
 .agentos-deploy/
 /releases/
 /shared/

@@ -221,9 +221,9 @@ always arrive together.
 | `0` | `MERGE GATE: PASS <oid>` | yes |
 | `1` | `MERGE GATE: FAIL (<step>)` | yes |
 | `2` | usage error | no gate ran |
-| `3` | `MERGE GATE: NOT AUTHORITATIVE` | yes |
+| `3` | `MERGE GATE: NOT AUTHORITATIVE` — the run was asked to leave state behind (`--keep-postgres`), or every step passed and the host then failed to finish tearing the run down (`cleanup: ...`) | yes |
 | `75` | `GATE DISPATCH: NO SLOT` — every slot stayed busy until the timeout | no gate ran |
-| `76` | `GATE NOT RUN: <reason>` — no configured worker produced a verdict, or a precondition failed: a mirror push failed, a slot lock could not be operated, origin was unreadable, the baseline is absent, the toolchain is incomplete, a step was stopped from outside before it could be judged, or `merge-gate.sh` died without printing a verdict | no gate ran |
+| `76` | `GATE NOT RUN: <reason>` — no configured worker produced a verdict, or a precondition failed: a mirror push failed, a slot lock could not be operated, origin was unreadable, the baseline is absent, the toolchain is incomplete, **the docker preflight found no `docker` or no reachable daemon**, a step was stopped from outside before it could be judged, or `merge-gate.sh` died without printing a verdict | no gate ran |
 | `130` / `143` | interrupted — `merge-gate.sh` prints `GATE NOT RUN: <reason>` and exits under the signal that stopped it | no gate ran |
 | `128+N` | the gate process died on signal N without a verdict; `137` is `SIGKILL`, which is almost always the OOM killer | no gate ran |
 | `255` | ssh transport failure from direct `remote-gate.sh`; the dispatcher consumes this and tries its fallback | no gate ran |
@@ -232,6 +232,18 @@ always arrive together.
 `75`, `76`, `128+N` and `255` are errands, not judgements: re-dispatch after
 fixing what the message names. An automation that treats them as FAIL blocks
 merges on network weather and, worse, teaches people to ignore FAILs.
+
+That line is drawn by who the failure is about, not by where it happened. A
+missing `--expect-head` match, a dirty worktree, a baseline that is not in the
+repository: those are about this commit and this invocation, so they are `1`.
+A host with no `docker` binary or no reachable daemon is about the machine, so
+it is `76` and the dispatcher takes the same commit to its next worker — the
+preflight reported `1` until 2026-09-06, and a dispatcher that read it as a
+judgement published `MERGE GATE: FAIL (docker preflight)` for a commit no gate
+had run a step against. A cleanup that fails after every step passed is the
+same kind of fact about the host, but the run did test the commit and cannot
+promise its container is gone, so it is `3`: not a FAIL, and not authority for
+a merge either.
 
 `75` and `76` are not interchangeable. `75` means at least one slot existed that
 could have been taken and stayed busy for the whole timeout — a queue, so
@@ -552,9 +564,12 @@ was not written by this script and is cleared by hand, again only once no gate
 is running; and a message about not being able to write a lock means the slot
 directory itself is read-only or full. Re-dispatch after clearing.
 
-**`docker: permission denied` / `the docker daemon is not reachable`** — the
-account is not in the `docker` group yet, or its session predates the change.
-Log out, log back in, re-run `provision.sh`.
+**`docker: permission denied` / `the docker daemon on this host is not
+reachable`** — the account is not in the `docker` group yet, or its session
+predates the change. Log out, log back in, re-run `provision.sh`. The gate
+reports this as `GATE NOT RUN:` and `76`, never as a FAIL: the daemon says
+nothing about the commit, so the dispatcher takes the same commit to its next
+worker rather than publishing a verdict no step formed.
 
 **A pull or an `npm ci` hangs** — a registry mirror has stopped serving. Check
 `/etc/docker/daemon.json` (`registry-mirrors`) and `~/.npmrc` (`registry`). The
