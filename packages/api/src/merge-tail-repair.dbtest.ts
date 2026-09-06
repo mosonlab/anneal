@@ -758,7 +758,7 @@ test("all five merge-tail repairs grant the sixth Regression run without changin
   const runs = await db.run.findMany({
     where: { taskId: seeded.regression.id },
     orderBy: { runNumber: "asc" },
-    select: { runNumber: true, status: true, maxRunsPerTask: true, budgetGrants: true },
+    select: { runNumber: true, status: true, maxRunsPerTask: true, budgetGrants: true, leaseLossRefunds: true },
   });
   assert.equal(runs.length, 6);
   assert.deepEqual(runs.at(-1), {
@@ -766,6 +766,7 @@ test("all five merge-tail repairs grant the sixth Regression run without changin
     status: "QUEUED",
     maxRunsPerTask: 10,
     budgetGrants: 5,
+    leaseLossRefunds: 0,
   });
   assert.equal(await db.taskActivity.count({
     where: {
@@ -963,6 +964,7 @@ test("all five Full Assurance repairs grant sixth Documentation and Regression r
     maxRunsPerTask: documentationRun.maxRunsPerTask,
     budgetGrants: documentationRun.budgetGrants,
   }, { status: "QUEUED", maxRunsPerTask: 10, budgetGrants: 5 });
+  assert.equal(documentationRun.leaseLossRefunds, 0);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.librarian.id } })).maxSessionsPerTask, 5);
 
   await completeDocumentation(seeded, heads[5]!);
@@ -974,6 +976,7 @@ test("all five Full Assurance repairs grant sixth Documentation and Regression r
     maxRunsPerTask: regressionRun.maxRunsPerTask,
     budgetGrants: regressionRun.budgetGrants,
   }, { status: "QUEUED", maxRunsPerTask: 10, budgetGrants: 5 });
+  assert.equal(regressionRun.leaseLossRefunds, 0);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).maxSessionsPerTask, 5);
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
 });

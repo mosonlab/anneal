@@ -388,7 +388,7 @@ const activateMergeTailTarget = async (
   const attempt = await attemptRunBirth(tx, (tx) => openRun(
     tx,
     taskId,
-    { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1 },
+    { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1, repairCompleted: true },
   ));
   if (attempt.outcome === "already-queued") {
     await tx.taskActivity.create({ data: {
