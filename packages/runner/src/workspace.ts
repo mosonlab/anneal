@@ -137,7 +137,17 @@ export type AgentScratch = {
 /** The immutable tool bundle shipped beside the compiled runner entrypoint. */
 export const runtimeToolsSourceRoot = fileURLToPath(new URL("../dist/runtime-tools", import.meta.url));
 
-const runtimeToolsMaterializationScript = String.raw`
+/** Generate from the trusted runtime inventory; tests can supply a synthetic layout. */
+export const runtimeToolsMaterializationScript = (toolPaths: readonly string[] = runtimeToolPaths): string => {
+  // Insert each ancestor before its children so exclusive mkdir needs no -p.
+  const toolDirs = new Set<string>();
+  for (const path of toolPaths) {
+    const parts = path.split("/");
+    for (let depth = 1; depth < parts.length; depth += 1) {
+      toolDirs.add(parts.slice(0, depth).join("/"));
+    }
+  }
+  return String.raw`
 set -eu
 
 source_root=$1
@@ -156,7 +166,8 @@ require_file() {
   [ -f "$1" ] && [ ! -L "$1" ] || fail "expected a regular file: $1"
 }
 
-tool_paths='${runtimeToolPaths.join("\n")}'
+tool_paths='${toolPaths.join("\n")}'
+tool_dirs='${[...toolDirs].join("\n")}'
 
 is_tool_path() {
   for tool_path in $tool_paths; do
@@ -165,22 +176,31 @@ is_tool_path() {
   return 1
 }
 
-check_destination_entries() {
-  for entry in "$tools_root"/* "$tools_root"/.[!.]* "$tools_root"/..?*; do
-    [ -e "$entry" ] || [ -L "$entry" ] || continue
-    relative_path=$(basename "$entry")
-    [ "$relative_path" = gate-worker ] || is_tool_path "$relative_path" \
-      || fail "unexpected materialized entry: $entry"
+is_tool_dir() {
+  for tool_dir in $tool_dirs; do
+    [ "$1" = "$tool_dir" ] && return 0
   done
-  for entry in "$tools_root/gate-worker"/* "$tools_root/gate-worker"/.[!.]* "$tools_root/gate-worker"/..?*; do
-    [ -e "$entry" ] || [ -L "$entry" ] || continue
-    relative_path=gate-worker/$(basename "$entry")
-    is_tool_path "$relative_path" || fail "unexpected materialized entry: $entry"
+  return 1
+}
+
+check_destination_entries() {
+  for directory in . $tool_dirs; do
+    for entry in "$tools_root/$directory"/* "$tools_root/$directory"/.[!.]* "$tools_root/$directory"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      relative_path=$(basename "$entry")
+      if [ "$directory" != . ]; then
+        relative_path=$directory/$relative_path
+      fi
+      is_tool_dir "$relative_path" || is_tool_path "$relative_path" \
+        || fail "unexpected materialized entry: $entry"
+    done
   done
 }
 
 require_directory "$source_root"
-require_directory "$source_root/gate-worker"
+for directory in $tool_dirs; do
+  require_directory "$source_root/$directory"
+done
 for relative_path in $tool_paths; do
   require_file "$source_root/$relative_path"
 done
@@ -197,7 +217,9 @@ trap cleanup EXIT HUP INT TERM
 
 mkdir -m 700 "$tools_root"
 created=1
-mkdir -m 700 "$tools_root/gate-worker"
+for directory in $tool_dirs; do
+  mkdir -m 700 "$tools_root/$directory"
+done
 
 for relative_path in $tool_paths; do
   cp "$source_root/$relative_path" "$tools_root/$relative_path"
@@ -206,7 +228,9 @@ for relative_path in $tool_paths; do
 done
 
 require_directory "$tools_root"
-require_directory "$tools_root/gate-worker"
+for directory in $tool_dirs; do
+  require_directory "$tools_root/$directory"
+done
 for relative_path in $tool_paths; do
   require_file "$tools_root/$relative_path"
 done
@@ -227,7 +251,9 @@ require_mode() {
     || fail "unexpected mode on $1: got $actual_mode, expected $2"
 }
 require_mode "$tools_root" 700
-require_mode "$tools_root/gate-worker" 700
+for directory in $tool_dirs; do
+  require_mode "$tools_root/$directory" 700
+done
 for relative_path in $tool_paths; do
   require_mode "$tools_root/$relative_path" 500
 done
@@ -235,6 +261,7 @@ done
 created=0
 trap - EXIT HUP INT TERM
 `;
+};
 
 export type RuntimeToolsMaterializationOptions = {
   /** Override only for tests that construct a release fixture. */
@@ -344,7 +371,7 @@ export const materializeRuntimeTools = async (
   const commandCwd = config.runAsPrefix.length > 0 ? await realpath(tmpdir()) : scratch.base;
   await workspaceCommands(config, commandCwd)(
     "/bin/sh",
-    ["-c", runtimeToolsMaterializationScript, "agentos-runtime-tools", sourceRoot, scratch.toolsDir],
+    ["-c", runtimeToolsMaterializationScript(), "agentos-runtime-tools", sourceRoot, scratch.toolsDir],
   );
 };
 
