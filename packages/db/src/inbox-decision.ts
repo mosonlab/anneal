@@ -13,7 +13,7 @@ import {
 
 import { activateChainSuccessor } from "./chain-activation.js";
 import { lockChainRows, lockTaskRow } from "./locks.js";
-import { produceMergeAuthorization } from "./merge-authorization.js";
+import { produceMergeAuthorization, recordMergeEvidenceRefusal } from "./merge-authorization.js";
 import { MERGE_INTEGRATOR_KIND } from "./merge-integrator.js";
 import { applyStopAnswer, parseStopQuestionKey, recoverRefreshRequestedConfirmationCard } from "./merge-integrator-db.js";
 import {
@@ -409,4 +409,7 @@ export const applyInboxDecision = async (
   // PostgreSQL re-checks the OPEN predicate after a concurrent row lock is
   // released, so the loser observes count=0 instead of a serialization error.
   { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
-);
+).catch(async (error: unknown) => {
+  await recordMergeEvidenceRefusal(db, error);
+  throw error;
+});
