@@ -4,38 +4,15 @@ import * as nodeFs from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/**
- * These are the only scripts that cross from the repository into an Anneal
- * Run.  Keep the source paths explicit: a broad copy would make an unrelated
- * gate-worker helper part of the runner's release contract by accident.
- */
-export const RUNTIME_TOOL_FILES = Object.freeze([
-  Object.freeze({ source: "packages/runner/runtime-tools/git-credential-runner.sh", destination: "git-credential-runner.sh" }),
-  Object.freeze({ source: "packages/runner/runtime-tools/regression-verification.sh", destination: "regression-verification.sh" }),
-  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/gate-dispatch.sh", destination: "gate-worker/gate-dispatch.sh" }),
-  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/lib.sh", destination: "gate-worker/lib.sh" }),
-  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/mirror-push.sh", destination: "gate-worker/mirror-push.sh" }),
-  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/remote-gate.sh", destination: "gate-worker/remote-gate.sh" }),
-  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/run-gate.sh", destination: "gate-worker/run-gate.sh" }),
-]);
+import { RUNTIME_TOOL_FILES, expectedDirectoryEntries } from "../../../scripts/deploy/runtime-tool-inventory.mjs";
 
-// Destination components declare the subdirectory layout (including gate-worker).
-// Both build and deployment compare this derived inventory with independent reads.
-export const expectedDirectoryEntries = () => {
-  const entries = new Map([["", new Set()]]);
-  for (const { destination } of RUNTIME_TOOL_FILES) {
-    const components = destination.split("/");
-    let directory = "";
-    for (const [index, name] of components.entries()) {
-      entries.get(directory).add(name);
-      if (index < components.length - 1) {
-        directory = directory ? `${directory}/${name}` : name;
-        if (!entries.has(directory)) entries.set(directory, new Set());
-      }
-    }
-  }
-  return entries;
-};
+/**
+ * The inventory itself is declared in `scripts/deploy/`, the one directory
+ * every release builder has always copied into an artifact, so the release
+ * verifier can read it without importing across into this package. This module
+ * re-exports it, keeping the build's import surface unchanged.
+ */
+export { RUNTIME_TOOL_FILES, expectedDirectoryEntries };
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultRepositoryRoot = resolve(scriptDirectory, "../../..");
