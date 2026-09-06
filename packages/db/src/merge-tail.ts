@@ -15,6 +15,7 @@ export const isRegressionVerificationOutputKind = (kind: string | null | undefin
 export const MERGE_READINESS_OUTPUT_KIND = "merge-authorization";
 export const MERGE_TAIL_KIND = {
   baseDriftRecovery: "mergeTail.baseDriftRecovery",
+  leaseContention: "mergeTail.leaseContention",
   leaseHandoff: "mergeTail.leaseHandoff",
   leaseHold: "mergeTail.leaseHold",
   leaseRelease: "mergeTail.leaseRelease",
