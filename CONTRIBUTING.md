@@ -43,6 +43,8 @@ repository-wide proof. Root `build`, `lint`, `typecheck`, `test`, `test:db`, and
 `GATE NOT RUN:` and **76**. Runs have no scratch PostgreSQL. Database tests are
 merge gate evidence: never attempt them inside a Run, including named files,
 or report their absence as a gap. `test:db -w @anneal/api` also exits **78**.
+A replay dbtest for a one-shot data migration is retired in the first release
+after the migration shipped.
 
 Run workspace verification shares a host proof-slot pool (default 3;
 `AGENTOS_HOST_PROOF_SLOTS` accepts 1–1024). Waits of at least 60 seconds are

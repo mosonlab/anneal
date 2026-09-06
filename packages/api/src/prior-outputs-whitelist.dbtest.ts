@@ -3,7 +3,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { DependencyProvisioning, enqueueTaskRun, FailureClass, PrismaClient, RunStatus, TaskStatus } from "@anneal/db";
+import { DependencyProvisioning, enqueueTaskRun, FailureClass, LEGACY_ALL_PRIOR_OUTPUTS, PrismaClient, RunStatus, TaskStatus } from "@anneal/db";
 import { buildPrompt } from "@anneal/runner/adapters";
 import type { ClaimedTask } from "@anneal/runner/api";
 
@@ -305,4 +305,38 @@ test("a missing declared prior output loudly refuses the claim", async () => {
   assert.equal(parkedTask.status, TaskStatus.BACKLOG);
   assert.match(activity.body, /prior output/i);
   assert.match(notice.body, /plan-review/u);
+});
+
+test("a legacy all-prior-outputs step claims every earlier output in chain order", async () => {
+  const { tasks } = await createFixture([
+    { outputKind: "legacy-spec", priorOutputKinds: [] },
+    { outputKind: "legacy-plan", priorOutputKinds: [] },
+    { outputKind: "legacy-target", priorOutputKinds: [LEGACY_ALL_PRIOR_OUTPUTS] },
+  ]);
+  // Insert in reverse order so insertion order cannot satisfy the chain-order proof.
+  for (const index of [1, 0]) {
+    const task = tasks[index]!;
+    const run = await db.$transaction((tx) => enqueueTaskRun(tx as never, task.id));
+    await db.run.update({ where: { id: run.id }, data: { status: RunStatus.SUCCEEDED, endedAt: new Date() } });
+    await db.task.update({ where: { id: task.id }, data: { status: TaskStatus.DONE } });
+    await db.taskStepOutput.create({ data: {
+      taskId: task.id,
+      runId: run.id,
+      kind: index === 0 ? "legacy-spec" : "legacy-plan",
+      body: index === 0 ? "legacy-spec-marker" : "legacy-plan-marker",
+    } });
+  }
+  const targetRun = await db.$transaction((tx) => enqueueTaskRun(tx as never, tasks[2]!.id));
+  const response = await claim();
+  const text = await response.text();
+  // No producer emits the sentinel kind: success also proves missing-kind refusal is bypassed.
+  assert.equal(response.status, 200, text);
+  const body = JSON.parse(text) as ClaimedTask;
+  assert.equal(body.run.id, targetRun.id);
+  assert.deepEqual(body.priorOutputs.map(({ kind, body: outputBody, task }) => ({
+    kind, body: outputBody, chainIndex: task.chainIndex,
+  })), [
+    { kind: "legacy-spec", body: "legacy-spec-marker", chainIndex: 1 },
+    { kind: "legacy-plan", body: "legacy-plan-marker", chainIndex: 2 },
+  ]);
 });
