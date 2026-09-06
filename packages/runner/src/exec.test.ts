@@ -33,8 +33,15 @@ const alive = (pid: number): boolean => {
   try { process.kill(pid, 0); return true; } catch { return false; }
 };
 
+/** Bounded so a descendant that is never reaped fails the test instead of
+ *  hanging the gate, but sized for the loaded gate worker rather than an idle
+ *  laptop: on 2026-09-06 the worker carried load1 20-55 and signal delivery,
+ *  reaping and the poll's own scheduling all queue behind that. The loop
+ *  returns the moment the pid is gone, so a green run never pays this. */
+const DESCENDANT_DEATH_BUDGET_MS = 30_000;
+
 const waitForDeath = async (pid: number): Promise<boolean> => {
-  for (let waited = 0; waited < 3_000; waited += 25) {
+  for (let waited = 0; waited < DESCENDANT_DEATH_BUDGET_MS; waited += 25) {
     if (!alive(pid)) return true;
     await new Promise<void>((resolve) => setTimeout(resolve, 25));
   }

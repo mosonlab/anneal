@@ -58,7 +58,12 @@ const blockedLockCount = async (): Promise<number> => {
 };
 
 const waitForBlockedLocks = async (minimum: number): Promise<void> => {
-  const deadline = Date.now() + 10_000;
+  // Patience, not a timing assumption: the wait returns as soon as the locks
+  // appear, so this budget only bounds the failure case. The same helper in
+  // chain-branch.dbtest.ts records why 5s was enough on a developer laptop and
+  // not on a loaded worker, where the first request through the app pays for
+  // pool warm-up before it reaches FOR UPDATE; this copy uses the same number.
+  const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     if (await blockedLockCount() >= minimum) return;
     await new Promise((resolve) => setTimeout(resolve, 10));

@@ -11,7 +11,12 @@ import {
 
 const wait = (milliseconds: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-const waitUntil = async (predicate: () => boolean, timeoutMs = 10_000): Promise<void> => {
+/** Patience, not a timing assumption: the loop returns the moment the condition
+ *  holds, so this budget only bounds the failure case — a worker that never
+ *  ticks still fails rather than hanging the suite. The size comes from the
+ *  loaded gate worker (load1 20-55 on 2026-09-06), where a real 250ms interval
+ *  and the sleeps inside a tick queue behind the host, not from an idle one. */
+const waitUntil = async (predicate: () => boolean, timeoutMs = 30_000): Promise<void> => {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() >= deadline) throw new Error(`condition was not met within ${timeoutMs}ms`);

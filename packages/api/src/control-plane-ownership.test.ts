@@ -479,9 +479,12 @@ const childDiagnostic = (tracked: TrackedChild): string => [
  */
 const CHILD_WAIT_BUDGET_MS = 60_000;
 
-/** A child being terminated has already started, so only signal delivery and
- *  its own cleanup remain. Escalation to SIGKILL keeps the shorter budget. */
-const CHILD_TERMINATION_BUDGET_MS = 15_000;
+/** A child being terminated has already started, so only signal delivery, its
+ *  own cleanup and reaping remain, which is why this is shorter than the wait
+ *  above rather than equal to it. Escalation to SIGKILL keeps the same budget.
+ *  It is still a loaded-host number: a graceful shutdown releases ownership and
+ *  its lock before it exits, and that work queues behind the same saturation. */
+const CHILD_TERMINATION_BUDGET_MS = 30_000;
 
 const isRunning = (child: ChildProcess): boolean => child.exitCode === null && child.signalCode === null;
 

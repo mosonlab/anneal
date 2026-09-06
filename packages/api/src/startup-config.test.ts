@@ -502,7 +502,13 @@ test("the real API entrypoint refuses a blank GitHub read token before opening a
     const timeout = setTimeout(() => {
       child.kill("SIGKILL");
       reject(new Error(`API entrypoint did not refuse startup: ${output.join("")}`));
-    }, 20_000);
+      // Bounded so an entrypoint that never refuses is reported as a failure
+      // rather than hanging the suite, and sized for the gate worker rather
+      // than an idle host: this is a full `node --import tsx` startup of the
+      // production entrypoint, and on the worker that saturated on 2026-09-06
+      // (load1 20-55) such a child was still short of its first line ten
+      // seconds in. The wait ends as soon as the child exits.
+    }, 60_000);
     child.once("error", (error) => {
       clearTimeout(timeout);
       reject(error);

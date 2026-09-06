@@ -10,7 +10,15 @@ const ownership = await acquireControlPlaneOwnership({
 
 let descendant: ReturnType<typeof spawn> | undefined;
 const keepAlive = setInterval(() => undefined, 1_000);
-const waitForExit = (child: ChildProcess, timeoutMs = 5_000): Promise<void> => {
+/** This probe is a test fixture that the gate runs, so its own cleanup carries
+ *  the same rule as the suite spawning it: bounded, so a descendant that never
+ *  dies is reported (the caller escalates to SIGKILL and then fails), but sized
+ *  for the loaded gate worker rather than an idle host — signal delivery and
+ *  reaping queue behind whatever else the worker is carrying. The wait ends the
+ *  moment the descendant exits, so a healthy run never pays this. */
+const DESCENDANT_EXIT_BUDGET_MS = 30_000;
+
+const waitForExit = (child: ChildProcess, timeoutMs = DESCENDANT_EXIT_BUDGET_MS): Promise<void> => {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {

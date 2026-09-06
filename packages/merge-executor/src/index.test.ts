@@ -165,15 +165,21 @@ test("shutdown interrupts a real pending contract recheck", async () => {
       return { kind: "contract-mismatch", executorVersion: 1, apiVersion: 2 };
     },
   });
+  // The property is that shutdown interrupts the recheck rather than waiting
+  // out contractRecheckMs, which is 60s above. This bound has to stay well
+  // under that to mean anything, and well over what a saturated event loop
+  // costs a setImmediate-driven abort: on the gate worker of 2026-09-06 (load1
+  // 20-55) sub-second wall clocks were what turned passing suites into FAILs.
+  const INTERRUPT_BUDGET_MS = 15_000;
   let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
       polling,
       new Promise<never>((_resolve, reject) => {
-        deadline = setTimeout(() => reject(new Error("shutdown did not interrupt the recheck")), 900);
+        deadline = setTimeout(() => reject(new Error("shutdown did not interrupt the recheck")), INTERRUPT_BUDGET_MS);
       }),
     ]);
-    assert.ok(performance.now() - started < 1_000);
+    assert.ok(performance.now() - started < INTERRUPT_BUDGET_MS);
   } finally {
     clearTimeout(deadline);
   }
@@ -425,7 +431,11 @@ test("a bounded non-settling key read cannot reach a GitHub surface, activity, o
     makeGitHub: (() => { surfaceCalls += 1; return {}; }) as never,
     executeDecision: (async () => { executeCalls += 1; return {}; }) as never,
   });
-  assert.ok(Date.now() - startedAt < 500);
+  // The bound under test is the 10ms githubAppAuthTimeoutMs above; this only
+  // proves the read was abandoned rather than waited on. It is a loaded-worker
+  // number: unwinding through three fetch doubles on a saturated host costs
+  // scheduler time the product is not responsible for.
+  assert.ok(Date.now() - startedAt < 30_000);
   assert.equal(surfaceCalls, 0);
   assert.equal(executeCalls, 0);
   assert.deepEqual(requests.map((request) => request.url), [
@@ -634,6 +644,12 @@ test("the daemon still starts when it is reached through a symlinked release dir
         cwd: scratch,
         env: { PATH: process.env.PATH ?? "" },
         encoding: "utf8",
+        // A refusal this child never prints would otherwise hang the suite for
+        // as long as the gate lets it run. Bounded so it fails instead, and
+        // sized for the loaded worker: this is a full `node --import tsx`
+        // startup, which on the saturated worker of 2026-09-06 was still short
+        // of its first line ten seconds in.
+        timeout: 120_000,
       },
     );
     assert.match(started.stderr, /merge-executor startup refused:/u, `stderr was ${JSON.stringify(started.stderr)}`);
