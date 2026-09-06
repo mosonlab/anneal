@@ -90,11 +90,7 @@ const supersedeLatchedCommit = async (startup, supersedable) => {
   startup.log(`SUPERSEDE escalation reason=${supersedable.reason} failed-commit=${supersedable.failedCommit} target=${targetCommit}`);
   return {
     targetCommit,
-    fact: Object.freeze({
-      failedCommit: supersedable.failedCommit,
-      reason: supersedable.reason,
-      escalatedAt: supersedable.escalatedAt,
-    }),
+    fact: supersedable,
   };
 };
 
@@ -219,7 +215,10 @@ export const executeUpgrade = async (host, attempt, deployRole = DEFAULT_DEPLOY_
       host.log?.(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}`);
     }
     const revisions = attempt.fact("revisions") ?? { from: "unknown", to: attempt.targetCommit };
-    const record = { outcome: "failure", reason: failure.reason, detail: failure.detail, ...revisions };
+    const record = {
+      outcome: "failure", reason: failure.reason, detail: failure.detail, ...revisions,
+      ...(activationAttempted && !activationOutcomeProven ? { activationOutcomeProven: false } : {}),
+    };
     if (shouldPersistFailure({ dryRun: false, reason: failure.reason, upgradeStarted })) {
       await host.escalate(record);
       try {

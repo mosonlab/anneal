@@ -58,6 +58,7 @@ import {
   canonicalSyncNoticeRecord,
   canonicalSyncRefusedLines,
   createDeployHost,
+  createDeployStartup,
   deployRootFromEnvironment,
   HOST_SCOPED_ESCALATION_REASONS,
   loadDeployBinaries,
@@ -593,6 +594,7 @@ test("a commit-scoped escalation admits a newer main commit and records the supe
     retryEscalation: null,
     supersededEscalation: SUPERSEDABLE,
   });
+  assert.equal(invocation.supersededEscalation, SUPERSEDABLE);
   assert.deepEqual(state.calls, [
     "load-environment",
     "load-binaries",
@@ -942,6 +944,7 @@ const escalationFixture = (t, record) => {
     options: {
       escalationPath,
       retryableReasons: RETRYABLE_ESCALATION_REASONS,
+      hostScopedReasons: HOST_SCOPED_ESCALATION_REASONS,
       retryCap: ESCALATION_RETRY_CAP,
       readRemoteMain: async () => assert.fail("retry admission must not read remote main"),
       retryEscalationNotification: async () => { retryNotifications += 1; },
@@ -2400,4 +2403,61 @@ test("canonical prompt sync uses the host command seam", async (t) => {
   await host.syncCanonicalPrompts(attempt);
   assert.equal(spawns.length, 1);
   assert.ok(spawns[0].args.includes("packages/db/prisma/sync-canonical-prompts.ts"));
+});
+
+for (const reason of ["deployment-ledger-write-failed", "operation-workspace-preparation-failed",
+  "previous-service-restore-failed", "previous-service-restore-timeout",
+  "service-wrapper-verification-failed", "service-control-denied", "service-control-failed:restart:api"]) {
+  test(`host failure ${reason} blocks a moved main`, async (t) => {
+    const marker = escalationFixture(t, { reason, detail: "ENOSPC", to: revisions.from });
+    let targetReads = 0;
+    assert.deepEqual(await checkExistingEscalation(marker.options), { active: true });
+    const startup = startupFixture({
+      checkEscalation: () => checkExistingEscalation(marker.options),
+      readRemoteMain: async () => { targetReads += 1; return revisions.to; },
+    });
+    assert.deepEqual(await decideInvocation(startup.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
+    assert.equal(targetReads, 0);
+  });
+}
+
+test("a superseding build failure re-latches B and refuses the next B invocation", async (t) => {
+  const marker = escalationFixture(t, { reason: "release-artifact-build-failed", to: revisions.from });
+  const startup = startupFixture({ checkEscalation: () => checkExistingEscalation({
+    ...marker.options, hostScopedReasons: HOST_SCOPED_ESCALATION_REASONS,
+  }) });
+  const invocation = await decideInvocation(startup.startup, "upgrade");
+  assert.equal(invocation.targetCommit, revisions.to);
+  const run = fixture({ builderOutput: "invalid receipt" });
+  run.attempt.establish({ supersededEscalation: invocation.supersededEscalation });
+  run.host.escalate = async (record) => {
+    run.state.escalated = record;
+    writeEscalationWithAttempts({ ...marker.options, record });
+  };
+  assert.equal((await executeUpgrade(run.host, run.attempt)).ok, false);
+  assert.equal(run.state.escalated.reason, "release-artifact-build-failed");
+  assert.equal(JSON.parse(readFileSync(marker.escalationPath, "utf8")).to, revisions.to);
+  assert.deepEqual(await decideInvocation(startup.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
+});
+
+test("failed recovery persists unproven activation and blocks newer main", async (t) => {
+  const run = fixture({ failure: "verify-services" });
+  run.host.restorePreviousServices = async () => { throw new DeployFailure("service-control-failed:restart:api"); };
+  await executeUpgrade(run.host, run.attempt);
+  assert.equal(run.state.escalated.activationOutcomeProven, false);
+  assert.equal(run.records.at(-1).state, "MANUAL_RECOVERY");
+  const marker = escalationFixture(t, run.state.escalated);
+  assert.deepEqual(await checkExistingEscalation({ ...marker.options, hostScopedReasons: HOST_SCOPED_ESCALATION_REASONS }), { active: true });
+});
+
+test("production startup wiring keeps backup failure host-scoped", async (t) => {
+  const marker = escalationFixture(t, { reason: "database-backup-failed", to: revisions.from });
+  const production = createDeployStartup({ escalationPath: marker.escalationPath, retryNotification: async () => {} });
+  let targetReads = 0;
+  const state = startupFixture({
+    checkEscalation: production.checkEscalation,
+    readRemoteMain: async () => { targetReads += 1; return revisions.to; },
+  });
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
+  assert.equal(targetReads, 0);
 });

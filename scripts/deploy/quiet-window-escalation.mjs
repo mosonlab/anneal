@@ -15,7 +15,7 @@ const OID = /^[0-9a-f]{40}$/u;
 /** The commit a marker latched against. `null` means the marker names no
  * usable target, which is never treated as commit-scoped: a failure whose
  * target is unknown could have come from anything on this host. */
-export const escalationTargetCommit = (record) => {
+const escalationTargetCommit = (record) => {
   const to = record?.to;
   return typeof to === "string" && OID.test(to) ? to : null;
 };
@@ -32,9 +32,11 @@ export const escalationTargetCommit = (record) => {
  * - `host-scoped`: the failure is a property of this host, or the marker does
  *   not name the commit it failed on. Every deploy stays blocked. */
 export const escalationScope = ({ record, retryableReasons, hostScopedReasons }) => {
+  if (!(hostScopedReasons instanceof Set)) throw new TypeError("hostScopedReasons-required");
   const reason = String(record?.reason ?? "unknown-failure");
+  if (record?.activationOutcomeProven === false) return "host-scoped";
   if (retryableReasons?.has(reason)) return "retryable-transient";
-  if (hostScopedReasons?.has(reason)) return "host-scoped";
+  if (hostScopedReasons.has(reason) || (hostScopedReasons.has("service-control-failed") && reason.startsWith("service-control-failed:"))) return "host-scoped";
   return escalationTargetCommit(record) === null ? "host-scoped" : "commit-scoped";
 };
 
@@ -51,10 +53,11 @@ export const checkExistingEscalation = async ({
   hostScopedReasons,
   retryCap = ESCALATION_RETRY_CAP,
 }) => {
+  if (!(hostScopedReasons instanceof Set)) throw new TypeError("hostScopedReasons-required");
   const marker = readEscalationRecord({ path: escalationPath });
   if (marker === null) return { active: false };
   const attempts = escalationAttempts(marker.record);
-  if (retryableReasons.has(marker.record.reason)
+  if (escalationScope({ record: marker.record, retryableReasons, hostScopedReasons }) === "retryable-transient"
     && attempts !== null
     && attempts < retryCap) {
     // A previous escalation may have been persisted while its Inbox delivery
@@ -83,16 +86,27 @@ export const checkExistingEscalation = async ({
     };
   }
   await retryEscalationNotification();
-  const scope = escalationScope({ record: marker.record, retryableReasons, hostScopedReasons });
+  let current;
+  try {
+    current = readEscalationRecord({ path: escalationPath });
+  } catch {
+    log(`STOP escalation-active path=${escalationPath}`);
+    return { active: true };
+  }
+  if (current === null || escalationIdentity(current.record) !== escalationIdentity(marker.record)) {
+    log(`STOP escalation-active path=${escalationPath}`);
+    return { active: true };
+  }
+  const scope = escalationScope({ record: current.record, retryableReasons, hostScopedReasons });
   if (scope === "commit-scoped") {
-    const failedCommit = escalationTargetCommit(marker.record);
+    const failedCommit = escalationTargetCommit(current.record);
     log(`STOP escalation-active scope=commit-scoped commit=${failedCommit} path=${escalationPath}`);
     return {
       active: true,
       supersedable: Object.freeze({
         failedCommit,
-        reason: String(marker.record.reason ?? "unknown-failure"),
-        escalatedAt: String(marker.record.escalatedAt ?? "unknown"),
+        reason: String(current.record.reason ?? "unknown-failure"),
+        escalatedAt: String(current.record.escalatedAt ?? "unknown"),
       }),
     };
   }

@@ -538,14 +538,22 @@ first and its recorded target commit `to` second:
 - **host-scoped** — a reason naming host state rather than the commit, or any
   marker whose `to` is missing or not a commit oid. It blocks every deploy.
   The set is `database-backup-failed`, `database-backup-timeout`,
-  `release-directory-assembly-failed`, `release-pointer-activation-failed`,
-  `build-swap-failed`, `release-pointer-rollback-failed`,
+  `release-directory-assembly-failed`, `deployment-ledger-write-failed`,
+  `operation-workspace-preparation-failed`, `release-pointer-activation-failed`,
+  `release-pointer-rollback-failed`,
   `release-pointer-rollback-unavailable`,
-  `previous-service-verification-failed`, `stale-deploy-owner-recovered`,
+  `previous-service-verification-failed`, `previous-service-restore-failed`,
+  `previous-service-restore-timeout`, `service-wrapper-verification-failed`,
+  `service-control-denied`, `service-control-failed:<verb>:<unit>`,
+  `stale-deploy-owner-recovered`,
   `deploy-interrupted`, `environment-unreadable`, `environment-invalid`,
   `workspace-layout-invalid`, `escalation-state-unreadable`,
   `escalation-state-changed`, and `unexpected-error` — defined next to the
   retryable allowlist in `scripts/deploy/quiet-window-deploy.mjs`.
+
+A marker carrying `activationOutcomeProven: false` is always host-scoped,
+regardless of reason or retry eligibility: activation or recovery did not prove
+the serving state. This fact also protects runner hosts without a migration.
 
 ### Supersession by a newer commit
 
@@ -559,7 +567,8 @@ SUPERSEDE escalation reason=<reason> failed-commit=<oid> target=<oid>
 The marker is never deleted by this logic: it stays on disk as history until an
 operator runs `--clear-escalation`. The supersession is an additive ledger
 fact instead — every event of the superseding deployment, and its `state.json`,
-carry
+carry it. Later attempts that bypass the same retained latch also record this
+provenance until the marker is replaced or explicitly cleared.
 
 ```json
 "superseded_escalation": {

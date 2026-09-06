@@ -129,16 +129,28 @@ export const HOST_SCOPED_ESCALATION_REASONS = new Set([
   // Assembling the release tree failed — a full disk or an unwritable releases
   // directory stops every release, not this one.
   "release-directory-assembly-failed",
+  // Ledger persistence failed on the host filesystem (including ENOSPC).
+  "deployment-ledger-write-failed",
+  // Copying the operation tree failed on the host filesystem.
+  "operation-workspace-preparation-failed",
   // The pointer swap did not finish: `current` may be half-activated and the
   // running revision is unproven until an operator looks.
   "release-pointer-activation-failed",
-  "build-swap-failed",
   // The rollback that should have restored the previous release did not
   // finish, so the host is left on an unknown revision.
   "release-pointer-rollback-failed",
   "release-pointer-rollback-unavailable",
   // The restored services could not be proven healthy after a rollback.
   "previous-service-verification-failed",
+  // Restarting the previous service failed or exceeded its deadline.
+  "previous-service-restore-failed",
+  "previous-service-restore-timeout",
+  // Installed service wrappers cannot establish the serving release.
+  "service-wrapper-verification-failed",
+  // The host refuses service control.
+  "service-control-denied",
+  // Matches service-control-failed:<verb>:<unit> from systemd recovery.
+  "service-control-failed",
   // A previous deploy process died holding the lock, or was interrupted after
   // its upgrade phases started: anything it touched is unproven.
   "stale-deploy-owner-recovered",
@@ -629,7 +641,10 @@ const persistAndNotifyFailure = async (failure, from, to) => {
   }
 };
 
-const createDeployStartup = () => ({
+export const createDeployStartup = ({
+  escalationPath = ESCALATION_PATH,
+  retryNotification = retryEscalationNotification,
+} = {}) => ({
   pollIntervalMs: POLL_MS,
   log,
   clearEscalation: () => clearEscalationOnOperatorRequest({ path: ESCALATION_PATH, log }),
@@ -637,8 +652,8 @@ const createDeployStartup = () => ({
   loadBinaries,
   acquireLock,
   checkEscalation: () => checkExistingEscalation({
-    escalationPath: ESCALATION_PATH,
-    retryEscalationNotification,
+    escalationPath,
+    retryEscalationNotification: retryNotification,
     log,
     retryableReasons: RETRYABLE_ESCALATION_REASONS,
     hostScopedReasons: HOST_SCOPED_ESCALATION_REASONS,

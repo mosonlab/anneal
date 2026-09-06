@@ -272,3 +272,28 @@ test("clearing reports whether it removed a marker", (t) => {
   assert.equal(existsSync(path), false);
   assert.equal(clearEscalationRecord({ path }), false);
 });
+
+for (const change of ["host", "absent", "unreadable"]) {
+  test(`latched marker revalidation refuses ${change} after notification`, async (t) => {
+    const state = fixture(t, { reason: "release-artifact-build-failed", to: failedCommit });
+    const result = await checkExistingEscalation({
+      ...state.options,
+      retryEscalationNotification: async () => {
+        if (change === "absent") unlinkSync(state.escalationPath);
+        else writeFileSync(state.escalationPath, change === "host"
+          ? JSON.stringify({ reason: "database-backup-failed", to: failedCommit }) : "{");
+      },
+    });
+    assert.deepEqual(result, { active: true });
+  });
+}
+
+test("classification requires the host reason policy", () => {
+  assert.throws(() => escalationScope({ record: { to: failedCommit }, retryableReasons }),
+    /hostScopedReasons/);
+});
+
+test("unproven activation overrides even a retryable reason", async (t) => {
+  const state = fixture(t, { ...retryableEscalation, to: failedCommit, activationOutcomeProven: false });
+  assert.deepEqual(await checkExistingEscalation(state.options), { active: true });
+});
