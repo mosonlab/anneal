@@ -26,8 +26,10 @@ import {
   integratorBindingValid,
   isIncidentCondition,
   isIntegratorStep,
+  isStopCondition,
   isTerminalDisposition,
   parseEvidence,
+  parseAuthorizationMetadata,
   parseMergeResult,
   parseStopAnswerMetadata,
   projectMergeOutcome,
@@ -40,6 +42,8 @@ import {
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
 const OTHER = "c".repeat(40);
+const TRAIN_HEAD = "d".repeat(40);
+const TRAIN_PREDECESSOR = "e".repeat(40);
 
 const evidence = (overrides: Partial<MergeEvidence> = {}): MergeEvidence => ({
   schemaVersion: MERGE_INTEGRATOR_SCHEMA_VERSION,
@@ -117,6 +121,61 @@ test("evidence equality is field-by-field and includes the nonce", () => {
   assert.ok(!evidenceEquals(evidence(), evidence({ nonce: "nonce-2" })));
   assert.ok(!evidenceEquals(evidence(), evidence({ headSha: OTHER })));
   assert.ok(!evidenceEquals(evidence(), evidence({ requiredChecks: [] })));
+});
+
+// --- the authorization metadata parser ----------------------------------
+
+const trainAuthorization = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+  publishHead: TRAIN_HEAD,
+  predecessorOid: TRAIN_PREDECESSOR,
+  ref: `refs/anneal/train/${TRAIN_HEAD}`,
+  position: 1,
+  trainTaskId: "train-task-1",
+  ...overrides,
+});
+
+const authorizationMetadataWithTrain = (train: Record<string, unknown> | undefined): Record<string, unknown> => ({
+  ...authorizationMetadata({
+    ...evidence(),
+    issuedAt: "2026-08-18T02:00:01.100Z",
+    decision: { channel: "mechanical", inboxDecisionId: "binding", inboxMessageId: "binding" },
+  }),
+  ...(train === undefined ? {} : { train }),
+});
+
+test("an authorization may carry a validated train publication descriptor", () => {
+  const parsed = parseAuthorizationMetadata(authorizationMetadataWithTrain(trainAuthorization({ position: 2 })));
+  assert.equal(parsed.status, "ok");
+  assert.ok(parsed.status === "ok");
+  assert.deepEqual(parsed.payload.train, {
+    publishHead: TRAIN_HEAD,
+    predecessorOid: TRAIN_PREDECESSOR,
+    ref: `refs/anneal/train/${TRAIN_HEAD}`,
+    position: 2,
+    trainTaskId: "train-task-1",
+  });
+
+  const ordinary = parseAuthorizationMetadata(authorizationMetadataWithTrain(undefined));
+  assert.equal(ordinary.status, "ok");
+  assert.ok(ordinary.status === "ok");
+  assert.equal(Object.hasOwn(ordinary.payload, "train"), false);
+});
+
+test("the authorization parser rejects malformed train publication descriptors", () => {
+  for (const [field, value] of [
+    ["publishHead", "short"],
+    ["predecessorOid", "short"],
+    ["ref", "refs/heads/main"],
+    ["position", 0],
+    ["position", -1],
+    ["position", 1.5],
+  ] as const) {
+    const parsed = parseAuthorizationMetadata(authorizationMetadataWithTrain(trainAuthorization({ [field]: value })));
+    assert.equal(parsed.status, "malformed", field);
+  }
+
+  assert.equal(parseAuthorizationMetadata(authorizationMetadataWithTrain(null as unknown as Record<string, unknown>)).status, "malformed");
+  assert.equal(parseAuthorizationMetadata(authorizationMetadataWithTrain(trainAuthorization({ trainTaskId: "" }))).status, "malformed");
 });
 
 // --- §D-P2 the selection validator ---------------------------------------
@@ -315,6 +374,14 @@ test("every stop condition offers at least one choice and every choice resolves 
   }
 });
 
+test("train publication failures are named resumable stop conditions", () => {
+  for (const condition of ["train-precondition-failed", "train-publish-rejected"] as const) {
+    assert.equal(isStopCondition(condition), true);
+    assert.deepEqual(STOP_CHOICES[condition], ["re-authorize", "abandon"]);
+    assert.equal(dispositionFor(condition, "re-authorize"), "refresh-requested");
+  }
+});
+
 test("target-unresolvable does not offer re-authorize, which could not change its inputs", () => {
   assert.ok(!STOP_CHOICES["target-unresolvable"].includes("re-authorize"));
   assert.equal(dispositionFor("target-unresolvable", "re-authorize"), null);
@@ -368,7 +435,7 @@ test("a stop-answer record parses only with a known condition, choice and dispos
 
 // --- the merge-result parser ---------------------------------------------
 
-test("every one of the sixteen conditions round-trips as a stopped outcome", () => {
+test("every stop condition round-trips as a stopped outcome", () => {
   for (const condition of STOP_CONDITIONS) {
     const body = serializeMergeResult({ outcome: "stopped", condition, evidence: "observed" });
     const parsed = parseMergeResult({ kind: "merge-result", body });
