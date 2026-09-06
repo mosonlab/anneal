@@ -32,8 +32,6 @@ export type MechanicalHeartbeat = {
   mechanicalCancellationPolicy: "refused" | null;
 };
 
-export type AgentOsClient = ReturnType<typeof makeAgentOsClient>;
-
 export class AgentOsResponseError extends Error {
   override readonly name = "AgentOsResponseError";
 
