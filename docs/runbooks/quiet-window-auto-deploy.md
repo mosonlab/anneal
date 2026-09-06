@@ -62,6 +62,12 @@ fails verification; the job points `current` back to `previous`, restarts the
 local runners, and succeeds in recovery only after they all report the
 previous release's commit.
 
+Every host with local runners in its inventory runs that registration check,
+including the control-plane VM, which reads its own loopback API at
+`http://127.0.0.1:${API_PORT}` (default port 3000) with the `OPERATOR_TOKEN`
+from the deployment's `.env`. A control-plane host with local runners and no
+`OPERATOR_TOKEN` fails preflight; the check is never skipped.
+
 ## Runtime layout
 
 ```text
@@ -407,15 +413,37 @@ units; macOS launchd services are labels.
    restart every configured Linux systemd `<label>.service` unit or macOS
    launchd label.
 10. Require all configured Linux systemd `<label>.service` units or macOS
-    launchd labels running. On the control plane, require `/health` success and
-    `/version` reporting the exact clean target commit. On a runner host,
-    require every local registration online, newer than its pre-restart
-    observation, and on that commit. Record `VERIFIED` and `SUCCEEDED`, then
-    write the success Inbox record.
+    launchd labels running. On the control plane, require both `/health`
+    success with `/version` reporting the exact clean target commit and every
+    local runner registration; the API probe never substitutes for the runner
+    check. On a runner host, require every local registration online, newer
+    than its pre-restart observation, and on that commit. Require the whole
+    criterion to hold continuously for the observation window (see below)
+    before recording `VERIFIED` and `SUCCEEDED`, then write the success Inbox
+    record.
 
 The sequence has no install, compile, source-checkout mutation, or
 multi-directory publication. The activation unit is the verified release
 directory selected by the pointer.
+
+### Post-restart observation window
+
+A deploy is green only when every part of the readiness criterion stays green.
+After the first all-green sample, verification keeps sampling every unit's
+`is-active`, the control-plane API probe, and the local runner registrations,
+once a second, for a minimum observation window of **20 seconds** by default.
+Set `AGENTOS_DEPLOY_OBSERVATION_WINDOW_MS` in the deployment environment to
+override it with an integer from 0 through 300000 (five minutes). Any sample that regresses inside the window fails the deploy with
+`observation-window-regressed-<reason>`, naming the failing unit or the
+unregistered runner id, and escalates through the normal escalation path; the
+deploy never self-heals. The overall verification timeout is the upper bound
+and equals the window plus thirty seconds (50 seconds at the default window).
+Raising the window raises the phase’s maximum duration by the same amount.
+
+The `VERIFIED` ledger entry records what the check actually proved:
+`service_verification.units_checked`, `service_verification.runners_registered`,
+`service_verification.observation_window_ms`, and
+`service_verification.observed_for_ms`.
 
 ### Step deadlines and barrier watchdog
 
@@ -482,8 +510,12 @@ diagnostic action.
 
 If restart or health verification fails after pointer activation, atomically
 point `current` back to `previous`, record the rollback outcome, and restart
-the prior release. Do not roll back database migrations, check out source, or
-fall back to a partial directory.
+the prior release. The rollback proves the same combined criterion: units
+running, wrapper binding and prior API identity intact, and every local runner
+re-registered on the previous commit, held for the same observation window. A
+runner that does not come back fails the rollback with
+`previous-service-verification-failed` naming that runner id. Do not roll back
+database migrations, check out source, or fall back to a partial directory.
 
 After success or a no-op, retention keeps the newest three immutable releases
 while protecting both pointer targets, the newest 14 database dumps, one dump
@@ -524,7 +556,75 @@ recovery, removes `.agentos-deploy/escalated.json`, and logs
 notification fails, the marker remains. Confirm the SELF-CLEAR entry and
 closed recovery notification before dismissing the original failure.
 
-For any non-allowlisted escalation or an eligible escalation at the cap,
+### Escalation classes
+
+Every marker falls into exactly one of three classes, decided by its recorded
+target commit `to` first and its `reason` second:
+
+- **retryable-transient** — a reason on the allowlist above, on a marker whose
+  `to` is a full commit oid or the literal `unknown` the deploy records when it
+  failed before determining a target. The retry cap and self-clear rules in
+  this section own it end to end; the commit main points at does not change its
+  answer, in either direction. A transient-looking reason on a marker with any
+  other `to` (missing, or a value that is neither) is host-scoped instead: it
+  spends no retry attempt and blocks every deploy.
+- **commit-scoped** — any other reason on a marker whose `to` is a full commit
+  oid: the failure was determined by that commit (its artifact build, its
+  migration, its verification). It blocks that commit and only that commit.
+- **host-scoped** — a reason naming host state rather than the commit, or any
+  marker whose `to` is missing or is neither a commit oid nor `unknown`,
+  whatever its reason. It blocks every deploy.
+  The set is `database-backup-failed`, `database-backup-timeout`,
+  `release-directory-assembly-failed`, `deployment-ledger-write-failed`,
+  `operation-workspace-preparation-failed`, `release-pointer-activation-failed`,
+  `release-pointer-rollback-failed`,
+  `release-pointer-rollback-unavailable`,
+  `previous-service-verification-failed`, `previous-service-restore-failed`,
+  `previous-service-restore-timeout`, `service-wrapper-verification-failed`,
+  `service-control-denied`, `service-control-failed:<verb>:<unit>`,
+  `stale-deploy-owner-recovered`,
+  `deploy-interrupted`, `environment-unreadable`, `environment-invalid`,
+  `workspace-layout-invalid`, `escalation-state-unreadable`,
+  `escalation-state-changed`, and `unexpected-error` — defined next to the
+  retryable allowlist in `scripts/deploy/quiet-window-deploy.mjs`.
+
+A marker carrying `activationOutcomeProven: false` is always host-scoped,
+regardless of reason or retry eligibility: activation or recovery did not prove
+the serving state. This fact also protects runner hosts without a migration.
+
+### Supersession by a newer commit
+
+When a commit-scoped marker is latched and `origin/main` has moved to a
+different commit, the tick reads the new target and proceeds with it, logging
+
+```text
+SUPERSEDE escalation reason=<reason> failed-commit=<oid> target=<oid>
+```
+
+The marker is never deleted by this logic: it stays on disk as history until an
+operator runs `--clear-escalation`. The supersession is an additive ledger
+fact instead — every event of the superseding deployment, and its `state.json`,
+carry it. Later attempts that bypass the same retained latch also record this
+provenance until the marker is replaced or explicitly cleared.
+
+```json
+"superseded_escalation": {
+  "failed_commit": "<the commit that latched>",
+  "reason": "<why it latched>",
+  "escalated_at": "<when it latched>"
+}
+```
+
+The commit that latched is never attempted again on its own: while `origin/main`
+still points at it the tick stops with
+`STOP escalation-active commit-unchanged commit=<oid>` and exit 2. If the new
+commit fails too, it latches against its own oid under the same rules. A target
+read that fails while a commit-scoped marker is latched also stops with
+`STOP escalation-active target-unreadable reason=<reason>`, leaving the marker
+untouched: an unreadable remote cannot prove main moved.
+
+For any host-scoped escalation, an eligible escalation at the cap, or a
+commit-scoped escalation whose commit is still the target,
 inspect the ledger, logs, pointer identities, service states, and Inbox record;
 repair the named cause, build and verify the artifact again, and rerun
 `--dry-run`.

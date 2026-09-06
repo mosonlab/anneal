@@ -4,10 +4,10 @@ import {
   MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
   Prisma,
-  RunStatus,
   TaskStatus,
 } from "@prisma/client";
 
+import { ACTIVE_RUN_STATUSES } from "./board-contract.js";
 import { readChainControl } from "./chain-control.js";
 import { heldPredicate } from "./chain-hold.js";
 import { compare, layerOf } from "./chain-order.js";
@@ -49,24 +49,7 @@ type ChainSuccessor = Prisma.TaskGetPayload<{ include: { runs: true; assigneeAge
 // ChainSuccessor.runs is always fetched filtered to ACTIVE_RUN_STATUSES: it exists
 // only to answer "is any run still alive?" for the guards below.
 
-/**
- * "This task already has a run that is alive." WAITING_INBOX belongs here: such
- * a run resumes the moment the operator answers, so a task holding one must not
- * gain a second run, be archived, or be parked in Backlog.
- *
- * This is the definition every guard added by batch 2.5 shares, and since the
- * 2026-08-18 repairs the operator retry route and the chain/follow-up successor
- * guards count against it across ALL of a task's runs — a latest-run-only read
- * misses an older WAITING_INBOX run hiding behind a newer terminal one.
- * `app.ts`'s `activeRunStatuses` remains a different concept (a lease).
- */
-export const ACTIVE_RUN_STATUSES: RunStatus[] = [
-  RunStatus.QUEUED,
-  RunStatus.CLAIMED,
-  RunStatus.PROVISIONING,
-  RunStatus.RUNNING,
-  RunStatus.WAITING_INBOX,
-];
+export { ACTIVE_RUN_STATUSES } from "./board-contract.js";
 
 /**
  * "This task is a live reference to its assignee." Every status here is one the
