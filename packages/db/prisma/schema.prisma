@@ -1072,6 +1072,15 @@ model Run {
   // Carried forward onto every run a task creates, so the newest row is the
   // running total.
   budgetGrants                  Int                    @default(0)
+  /// How many of this task's attempts were refunded because the platform lost
+  /// the Run rather than because the agent failed: lease loss declared by
+  /// reconciliation, a claim invalidated by a late salvage, a merge-tail
+  /// requeue. Carried forward onto every Run a task creates, so the newest row
+  /// is the running total, and bounded by `LEASE_LOSS_REFUND_CAP` at the one
+  /// place a refund raises a ceiling. Counted apart from `budgetGrants`
+  /// because it must not be raised by the refund it is bounding: the ceiling a
+  /// refund produces is exactly what a bound derived from it would grow with.
+  leaseLossRefunds              Int                    @default(0)
   spendCap                      Decimal?               @db.Decimal(12, 2)
   spendCapApplicable            Boolean                @default(false)
   failureClass                  FailureClass?

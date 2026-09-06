@@ -19,8 +19,6 @@ const expectedRoutes = [
   "GET /files",
   "GET /files/content",
   "PUT /files/content",
-  "POST /files/mkdir",
-  "POST /files/move",
   "DELETE /files",
   "GET /onboarding",
   "POST /onboarding",

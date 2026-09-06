@@ -116,6 +116,7 @@ export type BoardRow = {
     codexServiceTier: BoardContractLatestRun["codexServiceTier"];
     subagentModel?: string | null;
     budgetGrants: number;
+    leaseLossRefunds: number;
     /** Required, unlike `subagentModel`: this one reaches the board contract,
      *  where `BoardLatestRun.pullRequestUrl` is required. Optional here would
      *  let a select that forgets it type-check and project null, dropping the
@@ -532,6 +533,12 @@ export const boardCard = (
   const budgetGrants = row.runs.reduce<number | null>((highest, item) => (
     highest === null ? item.budgetGrants : Math.max(highest, item.budgetGrants)
   ), null);
+  // Read the same way as the grants beside it — carried forward, so the newest
+  // row is the running total and the highest is that total under any ordering.
+  // Shown apart from `budgetRemaining` on purpose: a task can have budget left
+  // and still be out of platform refunds, and the operator who is about to
+  // raise `maxSessionsPerTask` is the one who needs to see which it is.
+  const leaseLossRefunds = row.runs.reduce((highest, item) => Math.max(highest, item.leaseLossRefunds), 0);
   const startability = taskStartability({
     status: row.status,
     assigneeType: row.assigneeType,
@@ -585,6 +592,7 @@ export const boardCard = (
     mergeOutcome: latestRunMergeOutcome(row.runs, row.stepOutput),
     repairOf,
     budgetRemaining: startability.checklist.budgetRemaining,
+    leaseLossRefunds,
     chainAggregate: null,
   } satisfies BoardCard;
 };
@@ -866,6 +874,7 @@ const boardChainRows = async (
           codexServiceTier: true,
           subagentModel: true,
           budgetGrants: true,
+          leaseLossRefunds: true,
           pullRequestUrl: true,
           pushedBranch: true,
           baseSha: true,
@@ -912,7 +921,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
         orderBy: { runNumber: "desc" },
         select: {
           id: true, runNumber: true, status: true, model: true, subagentModel: true, budgetGrants: true,
-          codexServiceTier: true, pullRequestUrl: true, pushedBranch: true, baseSha: true,
+          leaseLossRefunds: true, codexServiceTier: true, pullRequestUrl: true, pushedBranch: true, baseSha: true,
           session: {
             select: {
               nativeChildUsed: true, costUsd: true, inputTokens: true, cachedInputTokens: true,
