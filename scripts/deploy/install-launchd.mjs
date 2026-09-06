@@ -68,7 +68,6 @@ const SYSTEMD_SERVICE_TEMPLATE = join(SCRIPT_DIR, "com.agentos.service.unit.in")
 const SYSTEMD_AUTO_DEPLOY_TEMPLATE = join(SCRIPT_DIR, "com.agentos.auto-deploy.unit.in");
 const SYSTEMD_AUTO_DEPLOY_TIMER_TEMPLATE = join(SCRIPT_DIR, "com.agentos.auto-deploy.timer.in");
 const SERVICE_WRAPPER_SOURCE = join(SCRIPT_DIR, "launchd-service-wrapper.mjs");
-const UNPREFIXED_SERVICE_WRAPPER_SOURCE = join(SCRIPT_DIR, "launchd-service-wrapper.unprefixed.mjs");
 const SERVICE_INSTALL_ROOT = ".agentos-deploy/launchd";
 const AUTO_DEPLOY_INSTALL_ROOT = ".agentos-deploy/launchd-auto-deploy";
 const SYSTEMD_UNIT_DIRECTORY = "/etc/systemd/system";
@@ -799,11 +798,6 @@ export const renderServicePlists = ({
 };
 
 const sha256 = (contents) => createHash("sha256").update(contents).digest("hex");
-
-const serviceWrapperSource = (runnerIdPrefix, deployRole = DEFAULT_DEPLOY_ROLE) => runnerIdPrefix === ""
-  && deployRole === DEFAULT_DEPLOY_ROLE
-  ? UNPREFIXED_SERVICE_WRAPPER_SOURCE
-  : SERVICE_WRAPPER_SOURCE;
 
 const writeAtomic = (destination, contents, mode, ownership = null, chown = chownSync) => {
   mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
@@ -1744,7 +1738,7 @@ const systemdStagePlan = ({
   // Stage the wrapper alongside units so a root stage can install the complete
   // manifest atomically. The target is intentionally outside /etc and remains
   // an explicit manifest entry, matching the LaunchAgent installer.
-  const wrapperContents = readFileSync(serviceWrapperSource(runnerIdPrefix, deployRole));
+  const wrapperContents = readFileSync(SERVICE_WRAPPER_SOURCE);
   const wrapperTargetExists = existsSync(wrapper);
   const wrapperStagedPath = stageSystemdDefinition({
     stagingRoot: stageRoot,
@@ -2435,7 +2429,7 @@ export const installLaunchdServices = ({
   })));
   verifyServicePlistDefinitions(rendered, inventory);
   const previousByPath = new Map(previous?.manifest.entries.map((entry) => [entry.path, entry]) ?? []);
-  const wrapperSource = serviceWrapperSource(runnerIdPrefix, deployRole);
+  const wrapperSource = SERVICE_WRAPPER_SOURCE;
   const generatedWrapperEntry = {
     path: wrapper,
     existed: existsSync(wrapper),
