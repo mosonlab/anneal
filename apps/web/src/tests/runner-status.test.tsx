@@ -261,6 +261,56 @@ test("a freshness tick that wakes before the deadline re-arms instead of passing
   }
 });
 
+/**
+ * The tick's stored time and its decision to re-arm must come from one reading
+ * of the clock. Reading `Date.now()` twice lets the deadline fall between the
+ * two: the state keeps the earlier reading, which is still fresh, while the
+ * later reading says the deadline is past and no replacement timer is needed —
+ * and the report then sits fresh forever with no tick left to age it.
+ */
+test("a tick that crosses the deadline between two clock readings still ages the report", async () => {
+  const { dom, container } = installDom();
+  const checkedAt = new Date(now.getTime() - 30_000).toISOString();
+  const deadline = Date.parse(checkedAt) + 60_001;
+  // Time genuinely passes between reads, so a tick that reads the clock twice
+  // can straddle the deadline.
+  let clock = now.getTime();
+  let handle = 0;
+  const timers = new Map<number, { at: number; run: () => void }>();
+  const originalDateNow = Date.now;
+  Object.defineProperty(Date, "now", { configurable: true, value: () => { const at = clock; clock += 1; return at; } });
+  Object.defineProperty(dom.window, "setTimeout", { configurable: true, value: (run: () => void, delay: number) => {
+    handle += 1;
+    timers.set(handle, { at: clock + delay, run });
+    return handle;
+  } });
+  Object.defineProperty(dom.window, "clearTimeout", { configurable: true, value: (id: number) => timers.delete(id) });
+
+  let observed = 0;
+  const Probe = (): null => { observed = useFreshnessClock(checkedAt); return null; };
+  const root = (await reactDom()).createRoot(container);
+  try {
+    await act(async () => root.render(<Probe />));
+    // The first wake lands on the last millisecond before the deadline, so a
+    // tick reading the clock twice sees `deadline - 1` and then `deadline`;
+    // every later wake is punctual.
+    let wakeAt: number | null = deadline - 1;
+    for (let guard = 0; guard < 5 && timers.size > 0; guard += 1) {
+      const [id, timer] = [...timers.entries()][0]!;
+      timers.delete(id);
+      clock = wakeAt ?? timer.at;
+      wakeAt = null;
+      await act(async () => timer.run());
+    }
+    assert.equal(timers.size, 0, "the clock stops once the report has nothing left to age into");
+    assert.ok(observed - Date.parse(checkedAt) > 60_000, `the rendered time is past the deadline (${observed - deadline} ms)`);
+  } finally {
+    await act(async () => root.unmount());
+    Object.defineProperty(Date, "now", { configurable: true, value: originalDateNow });
+    dom.window.close();
+  }
+});
+
 /* ------------------------------------------ Codex, the one v0.1 readiness gate */
 
 /**

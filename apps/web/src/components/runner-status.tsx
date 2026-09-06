@@ -28,7 +28,8 @@ const RunnersContext = createContext<RunnersContextValue>(IDLE_CONTEXT);
  * run a millisecond before the deadline it was given; a single-shot tick that
  * lands early reads the report as still fresh and leaves nothing behind to
  * correct it, which is the whole failure this clock exists to prevent. Re-arming
- * costs one extra timer in that case and stops as soon as the deadline is past.
+ * costs one extra timer in that case and stops as soon as the deadline is past,
+ * which it decides from the same reading of the clock it stored.
  */
 export const useFreshnessClock = (checkedAt: string | undefined): number => {
   const [now, setNow] = useState(Date.now);
@@ -36,9 +37,14 @@ export const useFreshnessClock = (checkedAt: string | undefined): number => {
     const checkedAtMs = checkedAt === undefined ? Number.NaN : Date.parse(checkedAt);
     let timer = 0;
     const refresh = (): void => {
-      setNow(Date.now());
+      // One reading of the clock answers both questions. Reading it twice lets
+      // the deadline fall between the two: state keeps the earlier, still-fresh
+      // reading while the later one says there is nothing left to schedule, and
+      // the report then stays fresh with no tick left to age it.
+      const at = Date.now();
+      setNow(at);
       window.clearTimeout(timer);
-      const remaining = Number.isFinite(checkedAtMs) ? checkedAtMs + 60_001 - Date.now() : 0;
+      const remaining = Number.isFinite(checkedAtMs) ? checkedAtMs + 60_001 - at : 0;
       if (remaining > 0) timer = window.setTimeout(refresh, remaining);
     };
     refresh();
