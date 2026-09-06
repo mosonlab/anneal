@@ -99,6 +99,17 @@ const safeBuildStamp = (value) => {
 
 const safeReasonCode = (value) => safeText(value, "unknown-failure");
 
+/** The escalation this deploy superseded: the commit that latched, why it
+ * latched, and when. Recorded, never acted on — the marker itself is retained
+ * for the operator. */
+const safeSupersededEscalation = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const failedCommit = safeText(value.failedCommit);
+  const reason = safeText(value.reason);
+  if (failedCommit === null || reason === null) return null;
+  return { failed_commit: failedCommit, reason, escalated_at: safeText(value.escalatedAt) };
+};
+
 const DEFAULT_FILESYSTEM = Object.freeze({
   closeSync,
   existsSync,
@@ -277,6 +288,7 @@ export const createDeploymentLedger = ({
     pointerOldTarget: null,
     pointerNewTarget: null,
     rollbackPointerOutcome: null,
+    supersededEscalation: null,
     reasonCode: null,
   };
 
@@ -303,6 +315,7 @@ export const createDeploymentLedger = ({
       pointerOldTarget: safePointerTarget(metadata.pointerOldTarget) ?? context.pointerOldTarget,
       pointerNewTarget: safePointerTarget(metadata.pointerNewTarget) ?? context.pointerNewTarget,
       rollbackPointerOutcome: safeRollbackPointerOutcome(metadata.rollbackPointerOutcome) ?? context.rollbackPointerOutcome,
+      supersededEscalation: safeSupersededEscalation(metadata.supersededEscalation) ?? context.supersededEscalation,
       reasonCode: state === "FAILED" || state === "MANUAL_RECOVERY"
         ? safeReasonCode(metadata.reasonCode)
         : null,
@@ -319,6 +332,7 @@ export const createDeploymentLedger = ({
       pointer_old_target: nextContext.pointerOldTarget,
       pointer_new_target: nextContext.pointerNewTarget,
       rollback_pointer_outcome: nextContext.rollbackPointerOutcome,
+      superseded_escalation: nextContext.supersededEscalation,
       reason_code: nextContext.reasonCode,
     };
     const event = { ...payload, phase: state, timestamp: recordedAt };
