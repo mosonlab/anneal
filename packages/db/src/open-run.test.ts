@@ -537,6 +537,7 @@ type PinnedRunRow = {
   runNumber: number;
   baseSha: string | null;
   basePublishedAt?: Date | null;
+  pushedBranch?: string | null;
   status?: RunStatus;
 };
 
@@ -547,11 +548,13 @@ const matchesPublishedBase = (
 ): boolean => {
   const clauses = where?.OR;
   if (!Array.isArray(clauses)) return true;
-  return clauses.some((clause: Record<string, any>) => (
-    clause.basePublishedAt?.not === null
-      ? (run.basePublishedAt ?? null) !== null
-      : (run.basePublishedAt ?? null) === null && (run.status ?? RunStatus.FAILED) === clause.status
-  ));
+  return clauses.some((clause: Record<string, any>) => {
+    if (clause.basePublishedAt?.not === null) return (run.basePublishedAt ?? null) !== null;
+    if ((run.basePublishedAt ?? null) !== null) return false;
+    return clause.pushedBranch?.not === null
+      ? (run.pushedBranch ?? null) !== null
+      : (run.status ?? RunStatus.FAILED) === clause.status;
+  });
 };
 
 /**
@@ -636,6 +639,7 @@ test("a pinned base follows the template Step when conditional tasks use dense c
       baseSha: { not: null },
       OR: [
         { basePublishedAt: { not: null } },
+        { basePublishedAt: null, pushedBranch: { not: null } },
         { basePublishedAt: null, status: RunStatus.SUCCEEDED },
       ],
     },
@@ -695,7 +699,7 @@ test("a base only a dead Run recorded never pins the range", async () => {
 });
 
 test("an unpublished base refuses and names the commit and the implementation Task", async () => {
-  const { tx } = pinningTx({ runs: [{ runNumber: 1, baseSha: recordedBase, status: RunStatus.FAILED }] });
+  const { tx, seen } = pinningTx({ runs: [{ runNumber: 1, baseSha: recordedBase, status: RunStatus.FAILED }] });
   await assert.rejects(
     () => pinnedImplementationRange(tx, reviewTask),
     (error: Error & { unpublishedBase?: { implementationTaskId: string; baseSha: string | null } }) => {
@@ -708,6 +712,24 @@ test("an unpublished base refuses and names the commit and the implementation Ta
       return true;
     },
   );
+  // The refusal costs the second read — the recorded base it names — and the
+  // published selection costs the first. Nothing else asks the Runs anything.
+  assert.equal(seen.runQueries.length, 2);
+  assert.deepEqual(seen.runQueries[0]?.where?.OR?.length, 3);
+  assert.deepEqual(seen.runQueries[1]?.where, { taskId: "implementation-task", baseSha: { not: null } });
+});
+
+test("a pre-marker Run that published its branch pins the range even though it failed", async () => {
+  // `resolveRunBranches`'s standing rule, applied here: a Run that pushed and
+  // then died in `gh` is recorded FAILED with the ref on the remote, so its
+  // base is fetchable and it still owns the specification commit.
+  const { tx } = pinningTx({
+    runs: [
+      { runNumber: 1, baseSha: recordedBase, status: RunStatus.FAILED, pushedBranch: "agentos/chain/c1" },
+      { runNumber: 2, baseSha: publishedBase, basePublishedAt: now, status: RunStatus.SUCCEEDED },
+    ],
+  });
+  assert.equal((await pinnedImplementationRange(tx, reviewTask))?.implementationBaseSha, recordedBase);
 });
 
 test("a Run written before the marker existed is read through its own outcome", async () => {

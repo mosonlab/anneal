@@ -383,13 +383,19 @@ export const basePublishedStamp = (
  * provisioned, before anything is pushed, so a Run that dies first leaves a
  * base that lives in a discarded workspace and nowhere else — pinning to it
  * strands every dependent step on the runner with `upload-pack: not our ref`.
- * Rows written before `basePublishedAt` existed carry no marker, so their own
- * outcome answers instead: a succeeded Run of a committing step pushed, a
- * failed one cannot be assumed to have.
+ * Rows written before `basePublishedAt` existed carry no marker, so the
+ * evidence this repository already trusts answers for them: `pushedBranch`,
+ * written from the ref actually handed to `git push` (see `resolveRunBranches`,
+ * which reads it and nothing else). A Run that pushed and then died in `gh` is
+ * recorded FAILED with the ref on the remote, so its outcome alone would strand
+ * the range past its own commits. A succeeded Run also qualifies: a committing
+ * step cannot succeed without publishing, and it is the only reading left for a
+ * pre-marker row whose ACK predates `pushedBranch` being written at all.
  */
-const publishedBase = {
+const publishedBaseFilter = {
   OR: [
     { basePublishedAt: { not: null } },
+    { basePublishedAt: null, pushedBranch: { not: null } },
     { basePublishedAt: null, status: RunStatus.SUCCEEDED },
   ],
 } satisfies Prisma.RunWhereInput;
@@ -405,7 +411,7 @@ const publishedBase = {
  */
 export const platformImplementationBaseSha = async (tx: Tx, taskId: string): Promise<string | null> => {
   const run = await tx.run.findFirst({
-    where: { taskId, baseSha: { not: null }, ...publishedBase },
+    where: { taskId, baseSha: { not: null }, ...publishedBaseFilter },
     orderBy: { runNumber: "asc" },
     select: { baseSha: true },
   });
@@ -413,9 +419,9 @@ export const platformImplementationBaseSha = async (tx: Tx, taskId: string): Pro
 };
 
 /** The earliest base the implementation Task's Runs recorded, published or
- *  not. This is what the output-persistence advisory compares an authored body
- *  against, and what names the offending commit when nothing is publishable —
- *  never what a range is pinned to. */
+ *  not. This names the offending commit when nothing is publishable, so a
+ *  refusal can say which commit no Run put on the remote — never what a range
+ *  is pinned to, and never what an authored body is checked against. */
 export const recordedImplementationBaseSha = async (tx: Tx, taskId: string): Promise<string | null> => {
   const run = await tx.run.findFirst({
     where: { taskId, baseSha: { not: null } },

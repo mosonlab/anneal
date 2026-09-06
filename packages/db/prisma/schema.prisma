@@ -1038,7 +1038,7 @@ model Run {
   /// commit that exists in a discarded workspace and nowhere else. Written
   /// beside every `pushedBranch` ACK and never restamped or cleared. Null on
   /// rows written before this column existed, which `platformImplementationBaseSha`
-  /// reads through the Run's outcome instead.
+  /// reads through the Run's own `pushedBranch`, or its outcome, instead.
   basePublishedAt               DateTime?
   headSha                       String?
   /// The first parent of the WIP salvage commit a failed Run pushed, written

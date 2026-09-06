@@ -271,7 +271,9 @@ test("a Run written before the marker existed is read through its own outcome", 
   );
 });
 
-test("the publication ACK is what marks a Run's base as reachable", async () => {
+/** A claimed and started implementation Run, provisioned at PUBLISHED_BASE and
+ *  not yet published — the row every publication writer is handed. */
+const startedImplementationRun = async () => {
   const { project, repo, agent, template, chainId } = await seedTemplateChain();
   const implementationTask = await db.task.create({ data: {
     projectId: project.id,
@@ -308,6 +310,27 @@ test("the publication ACK is what marks a Run's base as reachable", async () => 
   // Provisioning alone is not publication: the base exists only in a workspace
   // that a `cli-missing` death would discard.
   assert.equal((await db.run.findUniqueOrThrow({ where: { id: claimed.run.id } })).basePublishedAt, null);
+  return claimed;
+};
+
+const completeRun = async (
+  claimed: { run: { id: string }; fencingToken: string },
+  body: Record<string, unknown>,
+) => createApp(db).request(`/runner/runs/${claimed.run.id}/complete`, {
+  method: "POST",
+  headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+  body: JSON.stringify({
+    runnerId: "pinned-base-runner",
+    fencingToken: claimed.fencingToken,
+    exitCode: 0,
+    outcome: { case: "succeeded" },
+    cleanupStatus: "SUCCEEDED",
+    ...body,
+  }),
+});
+
+test("the publication ACK is what marks a Run's base as reachable", async () => {
+  const claimed = await startedImplementationRun();
 
   const published = await createApp(db).request(`/runner/runs/${claimed.run.id}/publication`, {
     method: "POST",
@@ -322,4 +345,24 @@ test("the publication ACK is what marks a Run's base as reachable", async () => 
   const acknowledged = await db.run.findUniqueOrThrow({ where: { id: claimed.run.id } });
   assert.ok(acknowledged.basePublishedAt, "the push ACK records that the base reached the remote");
   assert.equal(acknowledged.baseSha, PUBLISHED_BASE);
+});
+
+test("a completion that reports a push marks the base even when the ACK never arrived", async () => {
+  const claimed = await startedImplementationRun();
+
+  const completed = await completeRun(claimed, {
+    pushedBranch: claimed.run.branch ?? "agentos/chain/pinned-base",
+    pushStatus: "SUCCEEDED",
+  });
+  assert.equal(completed.status, 200);
+  const run = await db.run.findUniqueOrThrow({ where: { id: claimed.run.id } });
+  assert.ok(run.basePublishedAt, "the completion's own push report is publication evidence");
+  assert.equal(run.baseSha, PUBLISHED_BASE);
+});
+
+test("a completion that reports no push leaves the base unmarked", async () => {
+  const claimed = await startedImplementationRun();
+
+  assert.equal((await completeRun(claimed, {})).status, 200);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: claimed.run.id } })).basePublishedAt, null);
 });

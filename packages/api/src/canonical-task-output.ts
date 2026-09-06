@@ -7,7 +7,6 @@ import {
   canonicalReviewArtifactSchema as reviewArtifact,
   isRegressionVerificationOutputKind,
   Prisma,
-  recordedImplementationBaseSha,
   recordGateAttestation,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
   REGRESSION_VERIFICATION_SCHEMA_VERSION,
@@ -582,15 +581,20 @@ export const persistSessionTaskOutput = async (
   // the disagreement is recorded where an operator reads the task.
   if (step && isCanonicalAgentStep(step) && step.outputKind === "implementation") {
     const bodyBaseSha = implementationBodyBaseSha(input.body);
-    // The recorded base, not the pinned one: this Run has not pushed yet, so
-    // no base of this Task is published at output time. The advisory is about
-    // a body that disagrees with the platform's own record.
-    const platformBaseSha = await recordedImplementationBaseSha(tx, input.task.id);
-    if (!platformBaseSha) {
+    // This Run's own provisioning base, not the Task's earliest and not the
+    // pinned one. The body was authored in this Run's workspace, so its base is
+    // the only one it can be a typo of: a first Run that died unpublished keeps
+    // its base out of the pin (`platformImplementationBaseSha`), and comparing
+    // against it would report a mismatch on a correct body and miss the typo.
+    const runBaseSha = (await tx.run.findFirst({
+      where: { id: input.fence.runId },
+      select: { baseSha: true },
+    }))?.baseSha ?? null;
+    if (!runBaseSha) {
       await tx.taskActivity.create({ data: {
         taskId: input.task.id,
         actorType: "control-plane",
-        body: `Implementation task ${input.task.id} has no Run with a recorded baseSha; body baseSha ${bodyBaseSha ?? "absent"} is informational and downstream range pinning will refuse`,
+        body: `Implementation run ${input.fence.runId} of task ${input.task.id} recorded no baseSha; body baseSha ${bodyBaseSha ?? "absent"} is informational and the platform has no provisioning base of this Run to check it against`,
         metadata: {
           kind: "canonicalTaskOutput.implementationBaseShaMissing",
           schemaVersion: 1,
@@ -599,18 +603,18 @@ export const persistSessionTaskOutput = async (
           bodyBaseSha,
         },
       } });
-    } else if (bodyBaseSha && bodyBaseSha !== platformBaseSha) {
+    } else if (bodyBaseSha && bodyBaseSha !== runBaseSha) {
       await tx.taskActivity.create({ data: {
         taskId: input.task.id,
         actorType: "control-plane",
-        body: `Implementation output baseSha ${bodyBaseSha} differs from the platform-derived base ${platformBaseSha}; the reviewed range is pinned to ${platformBaseSha}`,
+        body: `Implementation output baseSha ${bodyBaseSha} differs from ${runBaseSha}, the base this Run's workspace was provisioned at; the field is informational and the reviewed range is pinned from the platform's own Run records`,
         metadata: {
           kind: "canonicalTaskOutput.implementationBaseShaMismatch",
           schemaVersion: 1,
           runId: input.fence.runId,
           outputKind: input.kind,
           bodyBaseSha,
-          platformBaseSha,
+          runBaseSha,
         },
       } });
     }
