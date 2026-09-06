@@ -2189,3 +2189,84 @@ test("auto-deploy plist launches through current with an explicit source remote 
   assert.match(rendered, /https:\/\/example\.invalid\/anneal\.git/u);
   assert.doesNotMatch(rendered, /__[A-Z_]+__/u);
 });
+
+/** The deploy resolves its binaries once, from the environment, before any
+ * phase spawns anything; a control-plane role also verifies its backup
+ * configuration. Neither is what these tests are about. */
+const withDeployBinaries = (t) => {
+  const previous = { ...process.env };
+  process.env.DEPLOY_PG_DUMP_MODE = "host";
+  process.env.DEPLOY_PG_DUMP_BINARY = process.execPath;
+  t.after(() => { process.env = previous; });
+};
+
+const spawnRecordingHost = (t, { transactionId }) => {
+  withDeployBinaries(t);
+  const spawns = [];
+  const migrationTails = [];
+  const environment = { ...process.env, PRISMA_HIDE_UPDATE_MESSAGE: "0", DEPLOY_TEST_SENTINEL: "preserved" };
+  const host = createDeployHost({
+    environment,
+    serviceControl: { platform: "darwin", restart: async () => {}, isRunning: async () => true, describe: async () => "" },
+    readMigrationTail: async () => {
+      const tail = `tail-${migrationTails.length}`;
+      migrationTails.push(tail);
+      return tail;
+    },
+    runCommand: async (program, args, options) => {
+      spawns.push({ args, env: options.env });
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  const attempt = openDeploymentAttempt({
+    deployRoot: "/fixture",
+    targetCommit: "d".repeat(40),
+    transactionId,
+  });
+  attempt.establish({
+    operationWorkspace: "/fixture/operation",
+    barrier: { retainUntilEscalationCleared: () => undefined },
+  });
+  return { host, spawns, attempt, migrationTails };
+};
+
+test("the guarded migration spawns Prisma with its update banner hidden", async (t) => {
+  const { host, spawns, attempt, migrationTails } = spawnRecordingHost(t, { transactionId: "prisma-banner-migration" });
+  const result = await host.guardedMigration(attempt);
+  assert.deepEqual(migrationTails, ["tail-0", "tail-1"]);
+  assert.deepEqual(result.migration, { migrationTailBefore: "tail-0", migrationTailAfter: "tail-1" });
+  assert.equal(spawns.length, 2);
+  const migration = spawns.find(({ args }) => args.includes("migrate") && args.includes("deploy"));
+  assert.ok(migration, "the guarded migration must spawn prisma migrate deploy");
+  assert.equal(migration.env.PRISMA_HIDE_UPDATE_MESSAGE, "1");
+  assert.equal(migration.env.DEPLOY_TEST_SENTINEL, "preserved");
+  assert.equal(migration.env.PATH, process.env.PATH);
+});
+
+test("client generation spawns Prisma with its update banner hidden", async (t) => {
+  const { host, spawns, attempt } = spawnRecordingHost(t, { transactionId: "prisma-banner-generate" });
+  await host.generatePrismaClient(attempt);
+  assert.equal(spawns.length, 1);
+  assert.ok(spawns[0].args.includes("generate"));
+  assert.equal(spawns[0].env.PRISMA_HIDE_UPDATE_MESSAGE, "1");
+  assert.equal(spawns[0].env.DEPLOY_TEST_SENTINEL, "preserved");
+  assert.equal(spawns[0].env.PATH, process.env.PATH);
+});
+
+test("release artifact build hides the Prisma banner in descendant commands", async (t) => {
+  const { host, spawns, attempt } = spawnRecordingHost(t, { transactionId: "prisma-banner-artifact" });
+  // The recording command returns no receipt, stopping before filesystem verification.
+  await assert.rejects(host.prepareReleaseArtifact(attempt), /builder-receipt-missing/u);
+  assert.equal(spawns.length, 1);
+  assert.ok(spawns[0].args[0].endsWith("build-release-artifact.mjs"));
+  assert.equal(spawns[0].env.PRISMA_HIDE_UPDATE_MESSAGE, "1");
+  assert.equal(spawns[0].env.DEPLOY_TEST_SENTINEL, "preserved");
+  assert.equal(spawns[0].env.PATH, process.env.PATH);
+});
+
+test("canonical prompt sync uses the host command seam", async (t) => {
+  const { host, spawns, attempt } = spawnRecordingHost(t, { transactionId: "command-seam-sync" });
+  await host.syncCanonicalPrompts(attempt);
+  assert.equal(spawns.length, 1);
+  assert.ok(spawns[0].args.includes("packages/db/prisma/sync-canonical-prompts.ts"));
+});
