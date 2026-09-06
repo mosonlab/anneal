@@ -10,8 +10,6 @@ export type Poll<T> = {
   data: T | null;
   error: ApiError | null;
   loading: boolean;
-  /** True when the endpoint itself is absent, so the page can degrade. */
-  missing: boolean;
   lastSuccessAt: string | null;
   reload: () => void;
 };
@@ -121,12 +119,11 @@ export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> =
       data: null,
       error: null,
       loading: path !== null,
-      missing: false,
       lastSuccessAt: null,
       reload,
     };
   }
-  return { data, error, loading, missing: error?.missingEndpoint ?? false, lastSuccessAt, reload };
+  return { data, error, loading, lastSuccessAt, reload };
 };
 
 /** Wraps a write call with pending/error state and a caller-supplied refresh. */
