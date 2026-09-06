@@ -27,7 +27,7 @@
     "test:compose-binding": "node --test scripts/compose-binding.test.mjs",
     "test:frozen-docs": "node --test scripts/check-frozen-docs.test.mjs",
     "test:operator-api-docs": "node --test scripts/operator-api-docs.test.mjs",
-    "test:gate-worker": "node --test scripts/gate-worker/gate-env.test.mjs scripts/gate-worker/gate-worker.test.mjs scripts/gate-worker/gate-dispatch.test.mjs",
+    "test:gate-worker": "node --test scripts/gate-worker/gate-env.test.mjs scripts/gate-worker/gate-worker.test.mjs scripts/gate-worker/gate-dispatch.test.mjs scripts/merge-lease.test.mjs scripts/merge-train.test.mjs",
     "test:run-scope-guard": "node --import tsx --test scripts/run-scope-guard.test.mjs",
     "test:host-proof-slot": "node --test scripts/host-proof-slot.test.mjs",
     "test:merge-train": "node --test scripts/merge-train.test.mjs",
