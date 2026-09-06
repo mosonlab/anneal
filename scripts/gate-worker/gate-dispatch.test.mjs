@@ -936,6 +936,53 @@ test("the remote path receives the exact candidate and frozen baseline", (t) => 
   assert.match(result.stderr, new RegExp(`remote args: .*${repo.head} --master ${repo.head}`));
 });
 
+// The dispatcher's slot count and the worker's worker-capacity are one number
+// stored twice, and drift between them is otherwise invisible: the surplus
+// dispatch waits on the worker's execution lock with nothing to show for it.
+// run-gate.sh states the worker's number in output remote-gate.sh already
+// transports back, so the dispatcher can compare the two without a second ssh.
+// What is under test is that the comparison stays a remark: the verdict, the
+// exit code and stdout are what they would have been either way.
+test("a primary worker whose capacity differs from the configured slots is called out", (t) => {
+  const repo = fixtureRepo(t, {
+    remoteGate: "printf 'run-gate: worker capacity 1, host share 2\\n'; printf 'MERGE GATE: PASS stub\\n'; exit 0",
+  });
+  // The default fixture environment configures a primary and a fallback, which
+  // is the two-slot primary; the worker above claims one.
+  const result = dispatch(t, repo, [repo.head]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  // stdout is the worker's own output, transported verbatim as before.
+  assert.equal(result.stdout.trim(), "run-gate: worker capacity 1, host share 2\nMERGE GATE: PASS stub");
+  assert.match(
+    result.stderr,
+    /warning — the primary worker reports worker-capacity 1 but this dispatcher configures 2 primary slot\(s\)/u,
+  );
+});
+
+test("a primary worker whose capacity matches the configured slots is not remarked on", (t) => {
+  const repo = fixtureRepo(t, {
+    remoteGate: "printf 'run-gate: worker capacity 1, host share 2\\n'; printf 'MERGE GATE: PASS stub\\n'; exit 0",
+  });
+  // --server is the one-slot form, so the worker's one is the same number.
+  const result = dispatch(t, repo, [repo.head, "--server", "primary"]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.stdout.trim(), "run-gate: worker capacity 1, host share 2\nMERGE GATE: PASS stub");
+  assert.doesNotMatch(result.stderr, /worker-capacity/u);
+});
+
+test("a primary worker that states no capacity is silence, not a complaint", (t) => {
+  // An older worker, or an attempt that never reached one. Neither is evidence
+  // of drift, and a warning about the missing line would be noise on every
+  // dispatch until the worker is upgraded.
+  const repo = fixtureRepo(t, {
+    remoteGate: "printf 'MERGE GATE: PASS stub\\n'; exit 0",
+  });
+  const result = dispatch(t, repo, [repo.head]);
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(result.stdout.trim(), "MERGE GATE: PASS stub");
+  assert.doesNotMatch(result.stderr, /worker-capacity/u);
+});
+
 test("origin HEAD discovery retries transient git failures before dispatch", (t) => {
   const repo = fixtureRepo(t, {});
   const shim = scratch(t);
