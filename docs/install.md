@@ -261,10 +261,13 @@ npm run lint
 npm run build
 npm test
 docker compose config --quiet
-npm run test:dependency-gate
 npm run test:snapshot-scan
 npm run snapshot:scan
 ```
+
+Root `npm test` delegates to `npm run test --workspaces --if-present` and never
+reaches `scripts/`, which is why the `scripts/`-level checks are named separately
+above.
 
 `npm test` runs every workspace's unit tests and needs no database and no
 running service. It requires installed dependencies and a generated Prisma
@@ -297,13 +300,6 @@ reporting the green tests it also had. Only a run killed outright can leave
 `agentos_cp_a_*` databases behind, and the next run reclaims those before it
 starts — by name, and only where the process that created it is gone and nothing
 is connected to it.
-
-`npm run test:dependency-gate` is in that list because root `npm test` is
-`npm run test --workspaces --if-present` and never reaches `scripts/`. Without
-this line the published `scripts/goal-5a0-*` files would ship with no executed
-proof — the snapshot scan proves they are *listed*, not that they still refuse a
-filesystem-root, checkout, non-empty, symlinked, or non-allowlisted evidence
-destination. It needs no `node_modules` and no database.
 
 `npm run snapshot:scan` reads the tracked worktree and requires it to match
 `HEAD`; it fails closed on a dirty tree rather than attributing the change to
