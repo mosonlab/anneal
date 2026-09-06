@@ -5,6 +5,7 @@ import {
   MergeRecoveryStatus,
   Prisma,
   TaskStatus,
+  recordReadinessRequeue,
   transitionMergeRecovery,
   writeMarker,
   type MergeRecoveryAttempt,
@@ -269,6 +270,16 @@ export const enterRepair = async (
         staleBaseSha: requeue.staleBaseSha,
         currentBaseSha: input.currentBaseSha,
       },
+    });
+    // The counter shares this transaction with the grant it counts, so a
+    // rolled-back settlement leaves neither behind.
+    await recordReadinessRequeue(tx, {
+      readinessTaskId: context.readinessTaskId,
+      regressionTaskId: context.regressionTaskId,
+      staleBaseSha: requeue.staleBaseSha,
+      currentBaseSha: input.currentBaseSha,
+      budgetGrant: 1,
+      reason: requeue.reason,
     });
   } else {
     await writeMarker(tx, context.integratorTaskId, "baseDriftRecovery", {

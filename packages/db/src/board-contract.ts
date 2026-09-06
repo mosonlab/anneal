@@ -142,6 +142,11 @@ export type CostsChain<DecimalValue = string> = {
     refreshConflict: number;
     reviewFix: number;
   };
+  /** Pre-authorization merge-readiness requeues across the chain, and the extra
+   *  Run attempts they granted. The grants fund paid Runs already counted in
+   *  `costUsd`; these two make that share attributable. */
+  readinessRequeues: number;
+  readinessGrants: number;
   /** Priced spend only, or null when every run is unpriced. Unpriced runs are
    * represented by costUnavailableRuns rather than fabricated as zero. */
   costUsd: DecimalValue | null;
@@ -522,6 +527,12 @@ export type BoardCard<DateTime = string> = {
   budgetRemaining: boolean;
   /** Carried once by one visible member of each Chain; null otherwise. */
   chainAggregate: ChainAggregate<DateTime> | null;
+  /** How many times merge readiness returned this Step's chain to Regression
+   *  because the base moved before authorization, and how many extra Run
+   *  attempts those requeues granted. Both are zero on every Step that is not
+   *  the chain's readiness Step, which never records a requeue. */
+  readinessRequeues: number;
+  readinessGrants: number;
 };
 
 /** The browser-facing name retained by the web app's existing consumers. */
