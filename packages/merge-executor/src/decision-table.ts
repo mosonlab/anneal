@@ -67,7 +67,7 @@ export type Deps = {
 };
 
 /**
- * The ceiling on merge PUTs in one run, counting the first.
+ * The ceiling on merge sends in one run, counting the first.
  *
  * Two, not more: the only thing a resend can recover from is a response that
  * was lost in transit and then positively confirmed not to have landed, and a
@@ -436,19 +436,20 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
   // the pull request still unmerged may license a second send.
   //
   // Both halves of the night of 2026-08-18 are this one call. PR #150 — the
-  // PUT reported EOF, the read-back said MERGED — is the read-back branch, and
-  // goes to the §5.1 replay determination exactly as it did before. PR #147 —
-  // the PUT reported EOF, the read-back said still OPEN — is the resend, which
-  // this executor could not do: it stopped `api-error` and an operator sent the
-  // second PUT by hand. Deleting that hand-sent PUT is what #139 is for.
+  // merge reported EOF, the read-back said MERGED — is the read-back branch,
+  // and goes to the §5.1 replay determination exactly as it did before. PR
+  // #147 — the merge reported EOF, the read-back said still OPEN — is the
+  // resend, which this executor could not do: it stopped `api-error` and an
+  // operator merged by hand. Deleting that hand-sent merge is what #139 is for.
   //
   // A resend is not a retry of a request. `refuseResend` re-runs the entire
   // authorization — supersession, base, head, state, draft, checks and the
   // synchronous-execution disarm — against the read-back that established the
-  // first send did not land, and refuses if anything moved at all. The
-  // expected-head compare-and-swap then makes the send itself incapable of
-  // landing a merge the authorization did not name, and makes a second PUT
-  // after a first one that *did* land answer 405 rather than merge twice.
+  // first send did not land, and refuses if anything moved at all. The merge
+  // commit is built from the authorized head and base, so the send itself
+  // cannot land a merge the authorization did not name, and the base ref's
+  // `beforeOid` compare-and-swap makes a second send after a first one that
+  // *did* land a refusal rather than a second merge.
   const state: {
     response: MergeResponse | null;
     readBack: RepositorySnapshot | null;
@@ -522,7 +523,6 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
       : response.status === "unknown" ? response.reason
       : response.status === "ref-update-uncertain" ? `ref-update-uncertain: ${response.reason}`
       : response.status === "ref-update-refused" ? `ref-update-refused: ${response.reason}`
-      : response.status === "not-mergeable" ? "405 not mergeable"
       : response.status;
     if (landing.status === "indeterminate") {
       // The one pairing that must never be resolved by sending again: the
@@ -530,18 +530,15 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
       // failed. The merge may or may not be on master; only a human may look.
       return stop("api-error", JSON.stringify({ platform, reclassify: landing.reason, sends: state.sends }));
     }
-    if (response?.status === "head-moved") {
-      return stop("head-drift", JSON.stringify({ platform: "409 on the expected-head compare-and-swap", authorized: authorization.headSha }));
-    }
     if (response?.status === "unprocessable") {
       return stop("payload-mismatch", JSON.stringify({ platform: response.reason }));
     }
     if (response?.status === "forbidden" || response?.status === "not-found") {
       return stop("api-error", JSON.stringify({ platform: response.reason }));
     }
-    // A 405, or a lost response whose resends were refused or spent. The
-    // read-back that proved nothing landed is the freshest view of the world
-    // there is, so it names the condition — no further re-read is taken.
+    // A refused ref update, or a lost response whose resends were refused or
+    // spent. The read-back that proved nothing landed is the freshest view of
+    // the world there is, so it names the condition — no further re-read is taken.
     const observed = state.readBack;
     if (observed) {
       const rearmed = synchronousExecution(observed);
