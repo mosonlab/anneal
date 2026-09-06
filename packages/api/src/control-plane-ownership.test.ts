@@ -709,6 +709,11 @@ test("RP-OWN-RECOVERY-CLEANUP readiness timeout removes the owner and unknown de
   }), true);
 
   await waitForLine(owner, /OWNERSHIP_PROBE_DESCENDANT_PID \d+/u);
+  // The one short budget in this file, and deliberately so: this child was
+  // spawned with readiness suppressed at the source, so the line can never
+  // arrive and the wait can only ever time out. Load cannot make it flake — it
+  // has already printed the descendant line above — and a longer budget would
+  // only make the suite slower for the same verdict.
   await assert.rejects(waitForLine(owner, /OWNERSHIP_PROBE_READY/u, 500), (error: unknown) => {
     assert.match(String(error), /Timed out after 500ms.*readiness-timeout owner probe/u);
     assert.match(String(error), /OWNERSHIP_PROBE_DESCENDANT_PID \d+/u);
