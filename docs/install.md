@@ -144,29 +144,6 @@ supported migration path. The exact implemented sequence and refusal conditions
 are in the release quickstart and migration guide. Packaging, notarization and
 auto-update are not in this release candidate.
 
-After applying the release migration that adds the session cache-creation
-column, run the one-shot historical usage backfill from the repository root:
-
-```sh
-npm run db:backfill-session-cache
-```
-
-The command reads retained `SessionEvent` terminal payloads, rewrites only
-sessions whose cache-creation value is still NULL, and prints stable totals for
-scanned, updated/known, failed and unknown sessions. The updated count is the
-number of rows known to have a split after the pass, so it does not change on a
-rerun. Unknown splits remain NULL and are reported as such. A malformed
-retained payload stops the scan and names its session; correct the data or
-restore it before rerunning. The operation is idempotent, so rerunning it is
-safe after an interrupted run.
-
-This migration command is not interchangeable with
-`npm run db:backfill-session-usage`. The latter is a tolerant repair command
-that recomputes every usage column from all retained events; it does not provide
-the cache migration's strict malformed-payload check or its cache-only write
-scope. Use `db:backfill-session-cache` to establish the new split, and use the
-general usage backfill only when repairing all derived usage columns.
-
 `npm run setup:local` writes `.env` once, at mode 0600, with distinct random
 operator and runner tokens, a session-cookie secret, a base64 32-byte encryption
 key, and one database password written identically into `POSTGRES_PASSWORD` and
