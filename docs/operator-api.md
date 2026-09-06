@@ -1212,7 +1212,8 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   Route-related refusal codes are `implementation_route_malformed`,
   `implementation_route_template_unsupported`,
   `implementation_route_conflicts_with_step_override`, and
-  `implementation_route_agent_renamed`.
+  `implementation_route_agent_renamed`; `step_override_agent_not_found` is
+  returned when the routed Agent name cannot be resolved in the project.
 - An `afterTaskId` binding is released only by `DELETE /tasks/:taskId/chain`
   on the bound chain; archiving the bound chain does not release it.
 

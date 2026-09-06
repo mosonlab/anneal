@@ -60,7 +60,9 @@ Local runner -----> ephemeral git workspace
 - Runner-authenticated run-state writes and the session event, activity, output,
   Inbox, and completion paths are checked against the Run's fencing generation;
   stale or expired generations are rejected, and the runner terminates the
-  provider process group.
+  provider process group. Files Root mutations instead require a lease-bound
+  per-run session token and matching Filesystem Grant; their requests carry no
+  client fencing field.
 - Child processes receive an explicit environment containing configured
   `PATH`/`HOME`, Run identity, session credentials, and granted secrets; the
   runner does not copy the host environment wholesale.
@@ -73,7 +75,9 @@ Local runner -----> ephemeral git workspace
 - Exactly one API control plane may own a canonical workspace root. Ownership is
   acquired from the protected, API-only `CONTROL_PLANE_STATE_DIR` before Prisma
   is imported or reconciliation begins. Runner daemons remain ordinary clients,
-  and any number of them may poll that one API.
+  and any number of them may poll that one API. Successful workspaces are
+  removed. A bounded number of failed workspaces may be retained for recovery
+  according to runner configuration.
 
-[`docs/release/security.md`](release/security.md) owns the complete security
+[`docs/release/security.md`](release/security.md) owns the release security
 boundaries and limitations.

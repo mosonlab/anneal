@@ -77,7 +77,7 @@ belongs in Full Assurance, not in assignee escalation.
 
 ## Implementation assignee routing
 
-The default implementation route is `senior-dev-luna-max`. A brief with
+The `default route` is `senior-dev-luna-max`. A brief with
 mechanical Acceptance stays on that default regardless of which directory it
 touches. Escalate on **hazard**, never on path. Write
 `Route: implementation=senior-dev-astra-medium - <hazard>` only when the
@@ -95,6 +95,9 @@ redesigned web page or UI surface. The review-fix step keeps its template
 assignee `senior-dev-astra-low` on every route; implementation routing does not
 move it.
 
+Routing assessments use `default route` or `hazard: <which>`, with the latter
+naming the hazard under the criteria above.
+
 A non-default implementation route is selected in a backlog card or direct
 instantiation description with a machine-readable line. Its grammar is exactly
 one of these line forms:
@@ -103,7 +106,8 @@ one of these line forms:
   `Route: implementation=<agent> - <reason>`
 
 The optional suffix uses the exact separator ` - `; `<agent>` is the Agent
-name, and `<reason>` is non-empty when the suffix is present. A `Route:`
+name, at most 80 characters with no leading or trailing whitespace, and
+`<reason>` is non-empty when the suffix is present. A `Route:`
 near-miss on the direct template is refused with
 `implementation_route_malformed`. A well-formed Route line on a template
 that does not consume implementation routes is refused with

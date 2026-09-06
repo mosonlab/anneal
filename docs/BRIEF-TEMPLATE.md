@@ -88,8 +88,8 @@ Implementation has five routes:
   It is the same senior-developer prompt on Claude Opus 5 medium; it is
   never a default, and the chain keeps its code review and blind code review
   steps unchanged.
-- **frontend-dev-opus-medium** for frontend implementation work (UI components, pages,
-  client-side behavior).
+- **frontend-dev-opus-medium** for the frontend scope defined in
+  [Implementation assignee routing](governance/task-routing-v1.md#implementation-assignee-routing).
 
 The [Implementation assignee routing](governance/task-routing-v1.md#implementation-assignee-routing)
 section owns the default, hazard escalation, exact `Route:` grammar, refusal

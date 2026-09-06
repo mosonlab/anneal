@@ -140,20 +140,13 @@ const assertSchemaValue = (value, schema, path = "$") => {
   if (schema.const !== undefined) assert.deepEqual(value, schema.const, `${path} must equal its schema constant`);
   if (schema.enum) assert.ok(schema.enum.some((candidate) => Object.is(candidate, value)), `${path} is outside its schema enum`);
   if (schema.type) {
-    const valid = schema.type === "object"
-      ? value !== null && typeof value === "object" && !Array.isArray(value)
-      : schema.type === "array"
-        ? Array.isArray(value)
-        : schema.type === "string"
-          ? typeof value === "string"
-          : schema.type === "number"
-            ? typeof value === "number" && Number.isFinite(value)
-            : schema.type === "integer"
-              ? Number.isInteger(value)
-              : schema.type === "boolean"
-                ? typeof value === "boolean"
-                : true;
-    assert.ok(valid, `${path} must be a ${schema.type}`);
+    const checks = {
+      object: () => value !== null && typeof value === "object" && !Array.isArray(value),
+      array: () => Array.isArray(value),
+      string: () => typeof value === "string",
+    };
+    assert.ok(typeof schema.type === "string" && Object.hasOwn(checks, schema.type), `${path} has unsupported schema type`);
+    assert.ok(checks[schema.type](), `${path} must be a ${schema.type}`);
   }
   if (schema.type === "object") {
     for (const key of schema.required ?? []) assert.ok(Object.hasOwn(value, key), `${path}.${key} is required`);
@@ -172,17 +165,18 @@ const assertSchemaValue = (value, schema, path = "$") => {
       assertSchemaValue(value[index], childSchema, `${path}[${index}]`);
     }
     if (schema.items === false) assert.equal(value.length, schema.prefixItems?.length ?? 0, `${path} has items outside prefixItems`);
-    else if (schema.items) {
-      for (let index = schema.prefixItems?.length ?? 0; index < value.length; index += 1) {
-        assertSchemaValue(value[index], schema.items, `${path}[${index}]`);
-      }
-    }
   }
   if (schema.type === "string") {
     if (schema.minLength !== undefined) assert.ok(value.length >= schema.minLength, `${path} is too short`);
     if (schema.pattern !== undefined) assert.match(value, new RegExp(schema.pattern, "u"), `${path} does not match its schema pattern`);
   }
 };
+
+test("schema validation refuses unsupported types", () => {
+  for (const type of ["null", ["string", "null"], "typo"]) {
+    assert.throws(() => assertSchemaValue(null, { type }), /unsupported schema type/);
+  }
+});
 
 test("verification.json conforms to the published schema without a validator dependency", async () => {
   const evidence = completeEvidence();
@@ -197,6 +191,11 @@ test("verification.json conforms to the published schema without a validator dep
 
     assert.equal(schema.$id, "https://github.com/mosonlab/anneal/docs/demos/templates-release-evidence.schema.json");
     assertSchemaValue(verification, schema);
+    const shortPositions = structuredClone(verification);
+    shortPositions.positions.length = 10;
+    assert.throws(() => assertSchemaValue(shortPositions, schema), /too few items/);
+    assert.throws(() => assertSchemaValue({ ...verification, evidenceDigest: "invalid" }, schema), /schema pattern/);
+    assert.throws(() => assertSchemaValue({ ...verification, unexpected: true }, schema), /not in the schema/);
   });
 });
 
