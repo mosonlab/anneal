@@ -28,6 +28,7 @@ import {
   MERGE_TAIL_REPAIR_BINDING_MISMATCH_KIND,
   handleRegressionCompletion,
 } from "./merge-tail-actions.js";
+import { type ReleaseMergeLease } from "./merge-lease.js";
 import { completeRun } from "./run-completion.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -1545,6 +1546,12 @@ const exerciseWithRecoveryBoundElsewhere = async (outcome: RegressionOutcome = "
  * `completeRepair` through the action rather than the route, because the value
  * under test is the classified refusal the route turns into a 409: over HTTP it
  * survives only as a status code.
+ *
+ * The repair task is an auxiliary Merge Lease holder, so its completion ends in
+ * a lease release. The releaser is the caller's here, as it is for every other
+ * `completeRun` test: the production adapter shells out to `merge-lease.sh`
+ * against origin, which no test checkout has, and the released chains are what
+ * this test can assert about the lease anyway.
  */
 const completeRepairThroughAction = async (
   seeded: Awaited<ReturnType<typeof seedRegression>>,
@@ -1569,6 +1576,10 @@ const completeRepairThroughAction = async (
   await db.taskStepOutput.create({ data: {
     taskId: repair.id, runId: run.id, kind: "result", body: output, commitSha: headSha,
   } });
+  const releasedChains: string[] = [];
+  const release: ReleaseMergeLease = async (target) => {
+    if (target) releasedChains.push(target.chainId);
+  };
   const result = await completeRun(db, {
     runId: run.id,
     body: {
@@ -1577,8 +1588,8 @@ const completeRepairThroughAction = async (
       pushStatus: PushStatus.SUCCEEDED, headSha, workspaceRetained: false,
     },
     claimantClass: "runner",
-  });
-  return { run, result };
+  }, release);
+  return { run, result, releasedChains };
 };
 
 test("a repair is refused at open when the chain's recovery names another Run", async () => {
@@ -1628,11 +1639,15 @@ test("a repair completion the platform cannot bind is rejected without a 500", a
   const recoveryRun = await seedOtherRegressionRun(seeded);
   const { recovery, readiness, integrator, sourceRun } = await seedRecoveryBoundTo(seeded, recoveryRun.id);
 
-  const { run, result } = await completeRepairThroughAction(
+  const { run, result, releasedChains } = await completeRepairThroughAction(
     seeded,
     repair.id,
     "Fixed the failing regression and reran the affected suite.",
   );
+  // A refused completion still gives the merge window on main back: the repair
+  // holds the Regression chain's Lease as an auxiliary, and a rejection that
+  // kept it would lock every other chain out.
+  assert.deepEqual(releasedChains, [seeded.regression.chainId]);
   // A classified refusal, not a thrown error and not a RunCompletion.
   assert.ok("message" in result, JSON.stringify(result));
   assert.equal(result.reason, "merge-tail-repair-unbound");
