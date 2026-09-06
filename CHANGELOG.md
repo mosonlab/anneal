@@ -17,7 +17,10 @@ written.
   `test:dependency-gate` script are removed.
 - Removed the completed one-shot database backfill and post-delivery audit
   CLIs and their root aliases; upgrades from pre-backfill versions are not
-  supported.
+  supported. The unused root `db:export-goal-lineage` and
+  `db:verify-goal-execution` aliases are also removed; both commands remain
+  available as `npm run db:export-goal-lineage -w @anneal/db -- <output-path>`
+  and `npm run db:verify-goal-execution -w @anneal/db`.
 
 ## v0.8.0 — Developer Preview 8
 
