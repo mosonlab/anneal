@@ -296,8 +296,8 @@ printf 'run-gate: worker capacity %s, host share %s\n' "$WORKER_CAPACITY" "$WORK
 # --- reclaim the databases of gates that died -------------------------------
 
 # merge-gate.sh starts one detached PostgreSQL container per run, with a tmpfs
-# data directory of up to 3 GiB, and deletes it in the EXIT trap in
-# scripts/gate-worker/verdict.sh. A trap does not run when the kernel kills the
+# data directory of up to 3 GiB, and deletes it in the EXIT trap the gate's own
+# verdict.sh installs. A trap does not run when the kernel kills the
 # process: an OOM kill, a SIGKILL or a power cut leaves the container running,
 # and `--rm` deletes a container that stops rather than stopping one. Nothing
 # else removed them, so they accumulated — two had been up for a fortnight when
