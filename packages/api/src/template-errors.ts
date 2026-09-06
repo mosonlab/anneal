@@ -6,7 +6,6 @@ import type { RefusalStatus } from "./refusal-status.js";
  * this table, so a code cannot exist without a status family.
  */
 export const templateInstantiationRefusalStatus = {
-  after_task_already_bound: 400,
   after_task_already_done: 400,
   after_task_archived: 400,
   after_task_not_chained: 400,
