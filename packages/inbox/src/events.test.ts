@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { Prisma, type PrismaClient } from "@anneal/db";
+import { MergeEvidenceError, Prisma, type PrismaClient } from "@anneal/db";
 
 import { eventIdentity, processFeishuEvent, type FeishuEnvelope } from "./events.js";
 
@@ -86,4 +86,22 @@ test("duplicate external event is acknowledged without a second resume", async (
   assert.equal((await processFeishuEvent(db, envelope)).resumed, true);
   assert.deepEqual(await processFeishuEvent(db, envelope), { duplicate: true, resumed: false });
   assert.equal(resumeWrites, 1);
+});
+
+test("Feishu retains the named base refusal after rollback alongside the raw event", async () => {
+  const refusal = { taskId: "readiness", metadata: {
+    kind: "gate-attestation-base-mismatch", attestedBaseSha: "old", authorizationBaseSha: "new",
+  } };
+  const error = new MergeEvidenceError("gate-attestation-base-mismatch: approval refused", refusal);
+  const events: string[] = [];
+  const db = {
+    $transaction: async () => { events.push("rollback"); throw error; },
+    taskActivity: { create: async ({ data }: { data: unknown }) => {
+      events.push("activity");
+      assert.deepEqual(data, { ...refusal, actorType: "control-plane", body: error.message });
+    } },
+    inboxExternalEvent: { create: async () => { events.push("raw-event"); } },
+  } as unknown as PrismaClient;
+  await assert.rejects(() => processFeishuEvent(db, envelope), (caught: unknown) => caught === error);
+  assert.deepEqual(events, ["rollback", "activity", "raw-event"]);
 });

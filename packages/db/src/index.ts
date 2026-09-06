@@ -104,10 +104,12 @@ export {
   agentArchiveBlocker,
 } from "./chain-activation.js";
 export {
+  GATE_ATTESTATION_BASE_MISMATCH,
   type MergeAuthorizationResult,
   MergeEvidenceError,
   isMergeEvidenceError,
   produceMergeAuthorization,
+  recordMergeEvidenceRefusal,
 } from "./merge-authorization.js";
 export {
   APPROVAL_GATE_FEEDBACK_METADATA_FIELD,

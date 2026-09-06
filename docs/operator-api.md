@@ -1889,6 +1889,12 @@ must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-fr
 
 ### PATCH `/tasks/:taskId`
 
+Approving merge evidence with a base different from the persisted gate
+attestation returns `409 Conflict` with `gate-attestation-base-mismatch`.
+The approval card stays open, no authorization is written, and a durable
+TaskActivity records both bases and the refusal on the readiness task. Inbox
+approval and evidence renewal preserve the same refusal evidence.
+
 - Required path parameter: `taskId`.
 - Required JSON: at least one task field, `status`, or `failureReason`.
   Patchable task fields are `name`, `description`, `workingDirectory`, `repoId`,
