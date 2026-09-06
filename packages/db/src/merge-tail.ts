@@ -422,6 +422,7 @@ const DEFENSE_EXACT = new Set([
   "scripts/merge-lease.sh",
   "packages/runner/runtime-tools/regression-verification.sh",
   "packages/runner/scripts/build-runtime-tools.mjs",
+  "scripts/deploy/runtime-tool-inventory.mjs",
   "packages/runner/src/workspace.ts",
   "packages/runner/src/adapters.ts",
   "packages/runner/src/adapters/runtime.ts",
