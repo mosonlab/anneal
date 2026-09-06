@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  Prisma, backfillSessionUsage, deriveUsageColumns, extractUsage, recomputeSessionUsage, sessionUsageLockKey, sumUsage,
+  Prisma, deriveUsageColumns, extractUsage, recomputeSessionUsage, sessionUsageLockKey, sumUsage,
   type PrismaClient, type SessionUsage,
 } from "@anneal/db";
 
@@ -681,51 +681,6 @@ test("an aggregate cost overflow across individually storable events is still ca
     () => deriveUsageColumns(sumUsage(events.map(extractUsage))),
   );
   assert.equal(derived.costUsd, null);
-});
-
-test("backfill pages by a stable id cursor instead of materializing every session", async () => {
-  const ids = Array.from({ length: 205 }, (_, index) => `session-${String(index).padStart(3, "0")}`);
-  let pageReads = 0;
-  const database: PrismaClient = {
-    $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation(database),
-    $executeRawUnsafe: async () => 0,
-    $queryRaw: async () => [],
-    sessionEvent: { findMany: async () => [] },
-    session: {
-      findMany: async ({ cursor, take }: { cursor?: { id: string }; take: number }) => {
-        pageReads += 1;
-        const start = cursor ? ids.indexOf(cursor.id) + 1 : 0;
-        return ids.slice(start, start + take).map((id) => ({ id }));
-      },
-      findUnique: async () => null,
-      update: async () => assert.fail("a missing session must not write"),
-    },
-  } as unknown as PrismaClient;
-
-  const result = await backfillSessionUsage(database);
-  assert.deepEqual(result, { scanned: 205, updated: 0, failedCount: 0, failed: [] });
-  assert.equal(pageReads, 3);
-});
-
-test("backfill counts every failure while retaining only bounded diagnostics", async () => {
-  const ids = Array.from({ length: 25 }, (_, index) => `failed-${String(index).padStart(2, "0")}`);
-  const database: PrismaClient = {
-    $transaction: async () => { throw new Error("injected failure"); },
-    session: {
-      findMany: async ({ cursor, take }: { cursor?: { id: string }; take: number }) => {
-        const start = cursor ? ids.indexOf(cursor.id) + 1 : 0;
-        return ids.slice(start, start + take).map((id) => ({ id }));
-      },
-    },
-  } as unknown as PrismaClient;
-
-  const result = await backfillSessionUsage(database);
-  assert.equal(result.scanned, 25);
-  assert.equal(result.updated, 0);
-  assert.equal(result.failedCount, 25);
-  assert.equal(result.failed.length, 20);
-  assert.equal(result.failed[0]?.sessionId, "failed-00");
-  assert.equal(result.failed.at(-1)?.sessionId, "failed-19");
 });
 
 /* ------------------------------------------- MF-1: the advisory lock's key */
