@@ -78,6 +78,7 @@ export const DEPLOY_RELEASE_EXTRA_ARTIFACT_PATHS = Object.freeze([
   "packages/build-info/package.json",
   "packages/api/build/Release/control_plane_directory.node",
   "packages/runner/assets",
+  "packages/runner/scripts/build-runtime-tools.mjs",
   "apps/web/vite.config.ts",
   "apps/web/src/lib/local-origin.ts",
   "agents/foundational.md",

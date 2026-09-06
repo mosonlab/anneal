@@ -14,7 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { buildRuntimeTools, RUNTIME_TOOL_FILES } from "./build-runtime-tools.mjs";
 
@@ -174,4 +174,26 @@ test("generated scripts retain their source modes while the tree remains regular
   for (const path of inventory(context.outputRoot)) {
     assert.equal(lstatSync(join(context.outputRoot, path)).isFile(), true);
   }
+});
+
+test("buildRuntimeTools derives new nested directories from manifest destinations", async (t) => {
+  const context = fixture(t);
+  const scriptPath = join(context.root, "build-runtime-tools.mjs");
+  const destination = "additional/nested/tool.sh";
+  const source = RUNTIME_TOOL_FILES[0].source;
+  const script = readFileSync(new URL("./build-runtime-tools.mjs", import.meta.url), "utf8");
+  writeFileSync(scriptPath, script.replace(
+    "export const RUNTIME_TOOL_FILES = Object.freeze([",
+    `export const RUNTIME_TOOL_FILES = Object.freeze([\n  Object.freeze(${JSON.stringify({ source, destination })}),`,
+  ));
+  const target = await import(pathToFileURL(scriptPath).href);
+  target.buildRuntimeTools(context);
+  assert.deepEqual(inventory(context.outputRoot), [
+    ...RUNTIME_TOOL_FILES.map(({ destination }) => destination),
+    destination,
+  ].sort());
+  assert.deepEqual(
+    readFileSync(join(context.outputRoot, destination)),
+    readFileSync(join(context.repositoryRoot, source)),
+  );
 });
