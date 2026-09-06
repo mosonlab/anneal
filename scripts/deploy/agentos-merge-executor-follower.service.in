@@ -1,0 +1,14 @@
+[Unit]
+Description=Anneal merge executor release follower
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=__NODE_PATH__ __FOLLOWER_PATH__ --config __CONFIG_PATH__
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
