@@ -10,6 +10,7 @@ import { compact, compactTokens, durationWithInboxWait, formatDate, formatDateTi
 import { POLL_MS, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { mergeBadge } from "../lib/merge-outcome";
+import { fatal } from "../lib/poll-state";
 import { Link, navigate, replace, useQuery } from "../lib/router";
 import { useProjectScope } from "../lib/project";
 import {
@@ -34,7 +35,7 @@ import {
   BACK_LINK, CODE_BLOCK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, DOT, DOT_TONE, HINT, MSG_CARD, MSG_HEAD, MSG_TIME,
   PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, ROW, STACK,
   STAT_PILL, STAT_PILLS,
-  AgentChip, Card, EmptyState, ErrorNotice, GapNotice, KeyValue, MarkdownClamp, Page, Pill, Segmented,
+  AgentChip, Card, EmptyState, ErrorNotice, KeyValue, MarkdownClamp, Page, Pill, Segmented,
   type AgentChipAgent, type PillTone,
 } from "../components/ui";
 import { ModelLabel } from "../components/model-picker";
@@ -578,8 +579,9 @@ export const SessionsPage = (): ReactNode => {
           onSelect={select}
           onClear={() => replace(SESSIONS_ROUTE)}
         />
-        {head.missing ? <GapNotice endpoint="GET /sessions" what={t("sessions.gap.what")} /> : null}
-        {head.error === null || head.missing ? null : <ErrorNotice message={`${head.error.status} ${head.error.code ?? ""} ${head.error.message}`} onRetry={head.reload} />}
+        {fatal(head.error, head.data)
+          ? <ErrorNotice message={`${head.error!.status} ${head.error!.code ?? ""} ${head.error!.message}`} onRetry={head.reload} />
+          : null}
         <Card flush>
           <div data-session-list>
             {dayGroups.map((group) => (
