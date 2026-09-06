@@ -142,7 +142,8 @@ const latestRun = async (taskId: string) =>
 
 test("three lease losses requeue with a growing delay and the fourth is refused by name", async () => {
   const seeded = await seedTask("lease-loss-sequence");
-  await seedRun(seeded, { runNumber: 1, status: RunStatus.QUEUED });
+  await db.task.update({ where: { id: seeded.task.id }, data: { maxSessionsPerTask: 1 } });
+  await seedRun(seeded, { runNumber: 1, status: RunStatus.QUEUED, maxRunsPerTask: 1 });
   const start = new Date("2026-09-06T06:00:00.000Z");
   const delays: number[] = [];
 
@@ -300,4 +301,40 @@ test("the board card carries the refund count beside the budget verdict", async 
   assert.equal(cards.length, 1);
   assert.equal(cards[0]?.leaseLossRefunds, 2);
   assert.equal(cards[0]?.budgetRemaining, true);
+});
+
+test("a fourth readiness base-drift requeue parks with the shared refund refusal", async () => {
+  const { requeueRegressionSettlement } = await import("./merge-readiness-worker.js");
+  const seeded = await seedTask("readiness-refund-sequence");
+  const readiness = await db.task.create({ data: {
+    projectId: seeded.project.id, name: "Readiness", description: "readiness",
+    assigneeAgentId: seeded.agent.id, repoId: seeded.repo.id,
+  } });
+  await seedRun(seeded, { runNumber: 1, status: RunStatus.SUCCEEDED });
+  // Exercise the settlement's transaction body; ownership is already acquired.
+  const claim = {
+    settle: async (
+      tx: import("@anneal/db").Prisma.TransactionClient,
+      input: { apply: (tx: import("@anneal/db").Prisma.TransactionClient) => Promise<{ value: unknown }> },
+    ) => ({ settled: true, claim: "released", value: (await input.apply(tx)).value }),
+  } as unknown as import("./readiness-claim.js").ReadinessClaimHandle;
+  for (const attempt of [1, 2, 3, 4]) {
+    const prior = await latestRun(seeded.task.id);
+    await db.run.update({ where: { id: prior.id }, data: { status: RunStatus.SUCCEEDED } });
+    await db.$transaction((tx) => requeueRegressionSettlement({
+      readinessTaskId: readiness.id, regressionTaskId: seeded.task.id,
+      staleBaseSha: `base-${attempt}`, currentBaseSha: `base-${attempt + 1}`,
+      reason: "base drift", now: new Date(), recovery: null,
+    }).body(tx, claim));
+    assert.equal(await db.run.count({ where: { taskId: seeded.task.id } }), Math.min(attempt + 1, 4));
+  }
+  for (const id of [seeded.task.id, readiness.id]) {
+    const parked = await db.task.findUniqueOrThrow({ where: { id } });
+    assert.equal(parked.status, TaskStatus.REVIEW);
+    assert.match(String(parked.failureReason), /Lease-loss refunds exhausted/);
+    assert.doesNotMatch(String(parked.failureReason), /readiness evaluation failed/);
+  }
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: seeded.task.id, metadata: { path: ["refusal"], equals: "lease-loss-refunds-exhausted" },
+  } }), 1);
 });

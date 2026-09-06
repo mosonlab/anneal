@@ -20,6 +20,7 @@ import {
   enqueueTaskRun,
   LEASE_LOSS_REFUND_CAP,
   leaseLossRefundAvailable,
+  leaseLossRefundDecision,
   openRun,
   pinnedImplementationRange,
   runBudgetCeiling,
@@ -99,7 +100,7 @@ const taskRow = (overrides: Record<string, unknown> = {}) => ({
 const intents = (): OpenRunIntent[] => [
   { kind: "enqueue", readyAt: now },
   { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1 },
-  { kind: "claim-invalidated", readyAt: now },
+  { kind: "claim-invalidated", sourceRunId: "run-3", readyAt: now },
   { kind: "merge-tail-repair", readyAt: now },
   { kind: "task-created", readyAt: now },
   { kind: "retry", readyAt: now },
@@ -442,12 +443,11 @@ test("every birth intent takes its publish head from one module and none is left
       targetBranch: "main",
     },
     {
-      // The replacement for an invalidated claim is an ordinary birth: the
-      // revoked claim never published, so it hands nothing on.
+      // The replacement is bound to the revoked claim and preserves its head.
       name: "claim-invalidated",
-      task: taskRow({ repoId: repo.id, repo }),
-      intent: { kind: "claim-invalidated", readyAt: now },
-      branch: runOwnedHead("task-1", 1),
+      task: withPrior(),
+      intent: { kind: "claim-invalidated", sourceRunId: "run-3", readyAt: now },
+      branch: priorHead,
       targetBranch: "main",
     },
     {
@@ -1018,7 +1018,7 @@ test("each OpenRunIntent creates through one seam with its named budget rule", a
     {
       // The revoked claim already carries the refund, so the replacement's
       // arithmetic is an ordinary enqueue's; only the refund count moves.
-      intent: { kind: "claim-invalidated", readyAt: now },
+      intent: { kind: "claim-invalidated", sourceRunId: "run-3", readyAt: now },
       task: taskRow({
         repoId: repo.id,
         repo,
@@ -1165,7 +1165,7 @@ test("the refund bound is a property of the task, not of the intent kind that re
   const refunding: OpenRunIntent[] = [
     { kind: "retry-after-lease-loss", readyAt: now, sourceRunId: "run-3", sourceMaxRunsPerTask: 5, sourceBudgetGrants: 1 },
     { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1 },
-    { kind: "claim-invalidated", readyAt: now },
+    { kind: "claim-invalidated", sourceRunId: "run-3", readyAt: now },
   ];
   for (const intent of refunding) {
     const task = taskRow({ repoId: repo.id, repo, runs: [spentPrior] });
@@ -1378,3 +1378,51 @@ for (const intent of reassignedRetryIntents) {
     assert.equal(creates[0]!.targetBranch, "main");
   });
 }
+
+test("terminal refund grants and replacement birth use the same source Run", async () => {
+  for (const refunds of [0, 1, 2, 3]) {
+    const source = priorRun({ leaseLossRefunds: refunds, maxRunsPerTask: 1 + refunds, budgetGrants: refunds });
+    const decision = leaseLossRefundDecision(source, source.id);
+    const task = taskRow({ repoId: "repo-1", repo: { id: "repo-1", defaultBranch: "main" }, runs: [source] });
+    const { tx, creates } = fakeTx(task);
+    const result = await openRun(tx, task.id, {
+      kind: "retry-after-lease-loss", sourceRunId: decision.sourceRunId, readyAt: now,
+      sourceMaxRunsPerTask: source.maxRunsPerTask, sourceBudgetGrants: source.budgetGrants,
+    });
+    assert.equal(result.ok, decision.refundAvailable);
+    if (result.ok) {
+      assert.equal(creates[0]?.maxRunsPerTask, decision.maxRunsPerTask);
+      assert.equal(creates[0]?.budgetGrants, decision.budgetGrants);
+    } else {
+      assert.equal(decision.maxRunsPerTask, source.maxRunsPerTask);
+      assert.equal(decision.budgetGrants, source.budgetGrants);
+    }
+    // Claim invalidation records the grant before birth reads the same row.
+    const revoked = { ...source, maxRunsPerTask: decision.maxRunsPerTask, budgetGrants: decision.budgetGrants };
+    const claimTask = taskRow({ ...task, maxSessionsPerTask: 1, runs: [revoked] });
+    const claimTx = fakeTx(claimTask);
+    const claimBirth = await openRun(claimTx.tx, claimTask.id, {
+      kind: "claim-invalidated", sourceRunId: decision.sourceRunId, readyAt: now,
+    });
+    assert.equal(claimBirth.ok, decision.refundAvailable);
+    if (claimBirth.ok) {
+      assert.equal(claimTx.creates[0]?.maxRunsPerTask, decision.maxRunsPerTask);
+      assert.equal(claimTx.creates[0]?.budgetGrants, decision.budgetGrants);
+      assert.equal(claimTx.creates[0]?.leaseLossRefunds, refunds + 1);
+    }
+  }
+  const task = taskRow({ repoId: "repo-1", repo: { id: "repo-1", defaultBranch: "main" }, runs: [priorRun()] });
+  const { tx, creates } = fakeTx(task);
+  const stale = await openRun(tx, task.id, { kind: "claim-invalidated", sourceRunId: "older-run", readyAt: now });
+  assert.equal(stale.ok, false);
+  if (!stale.ok) assert.equal(stale.refusal.code, "source-run-stale");
+  assert.equal(creates.length, 0);
+});
+
+test("a terminalized source cannot record a refund belonging to a newer Run", () => {
+  const source = priorRun({ leaseLossRefunds: 0 });
+  const decision = leaseLossRefundDecision(source, "newer-run");
+  assert.equal(decision.refundAvailable, false);
+  assert.equal(decision.maxRunsPerTask, source.maxRunsPerTask);
+  assert.equal(decision.budgetGrants, source.budgetGrants);
+});

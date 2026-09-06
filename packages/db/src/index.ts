@@ -80,6 +80,7 @@ export {
   isWorkflowRefusalError,
   LEASE_LOSS_REFUND_CAP,
   leaseLossRefundAvailable,
+  leaseLossRefundDecision,
   nativeImplementationSubagentRunConfig,
   openRun,
   pinnedImplementationRange,

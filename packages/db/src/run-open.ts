@@ -58,6 +58,22 @@ export const LEASE_LOSS_REFUND_CAP = 3;
 export const leaseLossRefundAvailable = (leaseLossRefunds: number | null | undefined): boolean =>
   Math.max(0, leaseLossRefunds ?? 0) < LEASE_LOSS_REFUND_CAP;
 
+/** The terminal grant and birth eligibility are one decision on an identified Run. */
+export const leaseLossRefundDecision = (source: {
+  id: string;
+  leaseLossRefunds?: number | null;
+  maxRunsPerTask: number;
+  budgetGrants: number;
+}, latestRunId: string | null) => {
+  const refundAvailable = source.id === latestRunId && leaseLossRefundAvailable(source.leaseLossRefunds);
+  return {
+    sourceRunId: source.id,
+    refundAvailable,
+    maxRunsPerTask: source.maxRunsPerTask + (refundAvailable ? 1 : 0),
+    budgetGrants: source.budgetGrants + (refundAvailable ? 1 : 0),
+  };
+};
+
 /**
  * The ceiling a task's next attempt is measured against.
  *
@@ -778,7 +794,7 @@ export type OpenRunIntent =
    *  Its budget arithmetic is an ordinary enqueue's — the revoked claim already
    *  carries the refund — but it is a platform-caused refund, so it is named
    *  rather than borrowing `enqueue` and escaping the bound below. */
-  | { kind: "claim-invalidated"; readyAt: Date }
+  | { kind: "claim-invalidated"; sourceRunId: string; readyAt: Date }
   /** The first Run of an automatic merge-tail repair card, which publishes onto
    *  the chain head it was created to repair rather than onto a ref of its own. */
   | { kind: "merge-tail-repair"; readyAt: Date }
@@ -1044,7 +1060,7 @@ export const openRun = async (
     || sourceRetryIntent(intent)) && !prior) {
     return openRunRefusal("prior-run-required", "conflict", `Task ${task.name} has no Run to continue`);
   }
-  if (sourceRetryIntent(intent) && prior?.id !== intent.sourceRunId) {
+  if ((sourceRetryIntent(intent) || intent.kind === "claim-invalidated") && prior?.id !== intent.sourceRunId) {
     return openRunRefusal("source-run-stale", "conflict", `Run ${intent.sourceRunId} is no longer the latest Run for task ${task.name}`);
   }
   if (intent.kind === "integrator-authorized" && (!task.templateStep || stepRole(task.templateStep) !== "integrator")) {
@@ -1060,7 +1076,7 @@ export const openRun = async (
   // ever reached.
   const priorRefunds = prior?.leaseLossRefunds ?? 0;
   const refunding = platformRefundIntent(intent);
-  if (refunding && !leaseLossRefundAvailable(priorRefunds)) {
+  if (refunding && prior && !leaseLossRefundDecision(prior, prior.id).refundAvailable) {
     return openRunRefusal(
       "lease-loss-refunds-exhausted",
       "conflict",

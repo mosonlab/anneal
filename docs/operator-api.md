@@ -2320,3 +2320,9 @@ neither spends one nor resets the count, and a later lease loss on the retried
 Run is refused the same way. A late-salvage claim invalidation at the bound
 behaves the same: the stale claim is still revoked, because its clone base is
 wrong, but nothing replaces it and the Task is parked with the same reason.
+
+Readiness requeues that exhaust this shared bound also park the Regression and
+readiness Tasks in `REVIEW`, with a TaskActivity on Regression carrying
+`metadata.refusal = "lease-loss-refunds-exhausted"`. A recovery readiness requeue
+also parks its integrator and marks the recovery `BLOCKED_DOWNSTREAM`. The
+refund reason is preserved even when the ordinary run budget is also exhausted.

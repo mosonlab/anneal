@@ -1,10 +1,9 @@
 import {
   executionModeFor,
   isRegressionVerificationOutputKind,
-  leaseLossRefundAvailable,
+  leaseLossRefundDecision,
   lockTaskRow,
   openRun,
-  runBudgetCeiling,
   RunStatus,
   TaskStatus,
   type PrismaClient,
@@ -272,12 +271,12 @@ export const reconcileDatabaseRuns = async (
       // here either: leaving the grant on the LOST row would hand the operator's
       // own retry the very attempt the bound just refused, and the operator's
       // way out is to raise `maxSessionsPerTask` deliberately.
-      const refundAvailable = leaseLossRefundAvailable(run.leaseLossRefunds);
-      const budgetCeiling = refundAvailable ? runBudgetCeiling(run.maxRunsPerTask, 1) : run.maxRunsPerTask;
-      // The same grant, recorded apart from the ceiling it produced, so the
-      // gates an operator reaches can still tell it from the configured budget
-      // after that budget changes. See `runBudgetCeiling`.
-      const budgetGrants = refundAvailable ? run.budgetGrants + 1 : run.budgetGrants;
+      // The candidate predates the Task lock. A newer Run must not leave this
+      // older row holding a grant that birth will reject as source-run-stale.
+      const latest = run.taskId ? await tx.run.findFirst({
+        where: { taskId: run.taskId }, orderBy: { runNumber: "desc" }, select: { id: true },
+      }) : null;
+      const { refundAvailable, maxRunsPerTask: budgetCeiling, budgetGrants } = leaseLossRefundDecision(run, latest?.id ?? null);
       const rejectionFailureReason = completionRejection?.parsed.status === "ok"
         ? `Mechanical completion rejected with HTTP ${completionRejection.parsed.rejection.status}: ${completionRejection.parsed.rejection.responseBody}`
         : completionRejection?.parsed.status === "malformed"
@@ -341,7 +340,7 @@ export const reconcileDatabaseRuns = async (
         });
         continue;
       }
-      if (run.runNumber < budgetCeiling) {
+      if (!refundAvailable || run.runNumber < budgetCeiling) {
         const opened = await openRun(tx, run.taskId, {
           kind: "retry-after-lease-loss",
           sourceRunId: run.id,

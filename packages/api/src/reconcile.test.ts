@@ -218,7 +218,7 @@ test("lease-loss retry refuses an archived Agent and parks the Task visibly", as
       },
       agent: { findUnique: async () => ({ id: "agent-1", name: "Archived", archivedAt: now }) },
       run: {
-        findFirst: async () => ({ cancelRequestId: null, cancelReason: null, cancelRequestedAt: null }),
+        findFirst: async () => ({ id: "lost-1", cancelRequestId: null, cancelReason: null, cancelRequestedAt: null }),
         updateMany: async ({ data }: { data: Record<string, unknown> }) => { lostUpdate = data; return { count: 1 }; },
         create: async ({ data }: { data: Record<string, unknown> }) => { queued = data; return { id: "retry-2", ...data }; },
       },
@@ -261,7 +261,7 @@ test("lease-loss retry refuses an archived Agent and parks the Task visibly", as
 
 // One mock for the whole bound: a Run whose lease has expired, a task whose
 // refund count is the only thing that varies between the cases below.
-const lostRunDatabase = (options: { leaseLossRefunds: number; maxSessionsPerTask?: number }) => {
+const lostRunDatabase = (options: { leaseLossRefunds: number; maxSessionsPerTask?: number; runNumber?: number }) => {
   const now = new Date("2026-09-06T06:00:00.000Z");
   const created: Record<string, unknown>[] = [];
   const lostUpdates: Record<string, unknown>[] = [];
@@ -271,11 +271,11 @@ const lostRunDatabase = (options: { leaseLossRefunds: number; maxSessionsPerTask
   const candidate = {
     id: "lost-1", heartbeatAt: new Date(now.getTime() - 20 * 60_000),
     leaseExpiresAt: new Date(now.getTime() - 10 * 60_000), projectId: "project-1",
-    taskId: "task-1", goalId: null, agentId: "agent-1", repoId: null, runNumber: 2,
+    taskId: "task-1", goalId: null, agentId: "agent-1", repoId: null, runNumber: options.runNumber ?? 2,
     runner: "CLAUDE", model: "model", targetBranch: "main", branch: "feature/x", promptHash: "hash",
     cancelRequestedAt: null, cancelRequestId: null, cancelReason: null,
     maxDurationMin: 120, stallTimeoutMin: 10,
-    maxRunsPerTask: 5 + options.leaseLossRefunds,
+    maxRunsPerTask: (options.maxSessionsPerTask ?? 5) + options.leaseLossRefunds,
     budgetGrants: options.leaseLossRefunds,
     leaseLossRefunds: options.leaseLossRefunds,
   };
@@ -294,7 +294,7 @@ const lostRunDatabase = (options: { leaseLossRefunds: number; maxSessionsPerTask
       },
       agent: { findUnique: async () => live },
       run: {
-        findFirst: async () => ({ cancelRequestId: null, cancelReason: null, cancelRequestedAt: null, headSha: null }),
+        findFirst: async () => ({ id: "lost-1", cancelRequestId: null, cancelReason: null, cancelRequestedAt: null, headSha: null }),
         updateMany: async ({ data }: { data: Record<string, unknown> }) => {
           lostUpdates.push(data);
           return { count: 1 };
@@ -365,4 +365,16 @@ test("the fourth lease loss is refused by name, parks the Task, and grants nothi
   // inherit the attempt this reconciliation just refused.
   assert.equal(lostUpdates.at(-1)?.budgetGrants, 3);
   assert.equal(lostUpdates.at(-1)?.maxRunsPerTask, 8);
+});
+
+test("refund exhaustion wins when the fourth lost run also reaches the ordinary ceiling", async () => {
+  const { database, now, created, activities, taskUpdates } = lostRunDatabase({
+    leaseLossRefunds: 3, maxSessionsPerTask: 1, runNumber: 4,
+  });
+  await reconcileDatabaseRuns(database, now);
+  assert.equal(created.length, 0);
+  assert.equal(taskUpdates.at(-1)?.status, TaskStatus.REVIEW);
+  assert.match(String(taskUpdates.at(-1)?.failureReason), /Lease-loss refunds exhausted/);
+  assert.equal(activities.filter((activity) =>
+    (activity.metadata as { refusal?: string } | undefined)?.refusal === "lease-loss-refunds-exhausted").length, 1);
 });
