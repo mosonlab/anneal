@@ -377,6 +377,42 @@ test("sessions are grouped by day, capped at five, and expandable in both locale
   }
 });
 
+test("a 404 from GET /sessions renders the standard error state", async () => {
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const fetchHarness = installFetchFunction(async (input) => {
+    const path = String(input);
+    if (path.includes("/projects")) {
+      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify([{ id: "p1", name: "Demo" }]) } as unknown as Response;
+    }
+    if (path.includes("/sessions")) {
+      return new Response(JSON.stringify({ error: "Session list is gone" }), {
+        status: 404,
+        headers: new Headers({ "Content-Type": "application/json" }),
+      });
+    }
+    throw new Error(`unexpected fetch: ${path}`);
+  });
+  const { ProjectProvider } = await import("../lib/project");
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<LocaleProvider initialLocale="en"><ProjectProvider><SessionsPage /></ProjectProvider></LocaleProvider>);
+    });
+    await fetchHarness.settle();
+
+    const body = container.textContent ?? "";
+    assert.match(body, /404 Session list is gone/u);
+    assert.match(body, /Retry/u);
+    assert.doesNotMatch(body, /The control plane has no .*GET \/sessions/u);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+    fetchHarness.dispose();
+  }
+});
+
 test("day expansion resets when the Project scope changes", async () => {
   const localIso = (offset: number, hour: number): string => {
     const now = new Date();
