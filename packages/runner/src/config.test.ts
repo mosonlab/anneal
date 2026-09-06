@@ -289,6 +289,32 @@ test("the runner accepts only a safe operator-selected gate destination", () => 
   }
 });
 
+test("the runner validates RUNNER_GATE_FALLBACK_SERVER with its primary", () => {
+  const previousPrimary = process.env.RUNNER_GATE_SERVER;
+  const previousFallback = process.env.RUNNER_GATE_FALLBACK_SERVER;
+  try {
+    process.env.RUNNER_GATE_SERVER = "gate-self";
+    delete process.env.RUNNER_GATE_FALLBACK_SERVER;
+    assert.equal(loadRunnerConfig().gateFallbackServer, undefined);
+    process.env.RUNNER_GATE_FALLBACK_SERVER = "agentos-gate";
+    assert.equal(loadRunnerConfig().gateFallbackServer, "agentos-gate");
+    for (const value of ["", "-oProxyCommand=bad", "gate;bad", "gate:22", "gate name"]) {
+      process.env.RUNNER_GATE_FALLBACK_SERVER = value;
+      assert.throws(loadRunnerConfig, /RUNNER_GATE_FALLBACK_SERVER must be a safe ssh destination/u);
+    }
+    process.env.RUNNER_GATE_FALLBACK_SERVER = "gate-self";
+    assert.throws(loadRunnerConfig, /RUNNER_GATE_FALLBACK_SERVER must differ from RUNNER_GATE_SERVER/u);
+    process.env.RUNNER_GATE_FALLBACK_SERVER = "agentos-gate";
+    delete process.env.RUNNER_GATE_SERVER;
+    assert.throws(loadRunnerConfig, /RUNNER_GATE_FALLBACK_SERVER requires RUNNER_GATE_SERVER/u);
+  } finally {
+    if (previousPrimary === undefined) delete process.env.RUNNER_GATE_SERVER;
+    else process.env.RUNNER_GATE_SERVER = previousPrimary;
+    if (previousFallback === undefined) delete process.env.RUNNER_GATE_FALLBACK_SERVER;
+    else process.env.RUNNER_GATE_FALLBACK_SERVER = previousFallback;
+  }
+});
+
 test("the runner accepts only a bounded positive local gate slot count", () => {
   const previous = process.env.RUNNER_GATE_LOCAL_SLOTS;
   try {

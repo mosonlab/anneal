@@ -154,10 +154,10 @@ different name.
 Direct and Full Assurance are self-hosted workflows, not facilities the
 Quickstart creates. Their operator supplies and configures every additional
 dependency: the Codex, Claude Code and Pi CLIs and model entitlement required by
-the selected roles; authenticated `gh` for GitHub pull-request creation; an
-SSH-reachable gate worker
-configured through `RUNNER_GATE_SERVER`; and a private GitHub App plus the
-isolated `@anneal/merge-executor` service for the mechanical merge. The public
+the selected roles; authenticated `gh` for GitHub pull-request creation;
+SSH-reachable gate workers configured for single-server or primary/fallback
+operation; and a private GitHub App plus the isolated `@anneal/merge-executor`
+service for the mechanical merge. The public
 [`gate-worker`](runbooks/gate-worker.md) and
 [`merge-executor`](runbooks/merge-executor.md) runbooks document those two
 services. Anneal bundles no host, credential, provider account or GitHub App,

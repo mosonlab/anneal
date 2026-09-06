@@ -688,7 +688,7 @@ for (const corruption of corruptions) test(`refuses ${corruption.name} cache ent
   }
 });
 
-test("an unrelated malformed retention entry refuses the pass after a valid hit", async () => {
+test("an unrelated malformed retention entry refuses the pass after a publication", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-retention-corruption-"));
   try {
     const configured = config(root);
@@ -711,6 +711,7 @@ test("an unrelated malformed retention entry refuses the pass after a valid hit"
     const unrelated = entryPath(root, firstKey);
     await makeWritable(unrelated);
     await writeFile(join(unrelated, "metadata.json"), "malformed unrelated retention entry\n");
+    await writeFile(join(secondWorkspace, "package-lock.json"), packageLock("2.0.1"));
     const events: DependencyCacheProgress[] = [];
     await assert.rejects(
       materializeWorkspaceDependencies(
@@ -719,9 +720,33 @@ test("an unrelated malformed retention entry refuses the pass after a valid hit"
       ),
       /(?:integrity|retention|malformed|unsafe)/iu,
     );
-    assert.equal(fake.installs(), 2, "retention corruption must not invoke npm after a valid hit");
-    assert.ok(!events.some(({ event }) => event === "hit"), "failed retention must not report a successful hit");
+    assert.equal(fake.installs(), 3, "the publication installs once; retention corruption adds no npm call");
+    assert.ok(!events.some(({ event }) => event === "publication"), "failed retention must not report a publication");
     assert.ok(events.some(({ event, key }) => event === "integrity-refusal" && key === firstKey.slice(0, 16)));
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("a cache hit restores without the retention walk, even past an unrelated corrupt entry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-hit-skips-retention-"));
+  try {
+    const { configured, fake, published } = await publishFixtureVersions(root, ["3.0.0", "3.0.1"]);
+    const [unrelated, current] = published;
+    assert.ok(unrelated && current);
+    const unrelatedEntry = entryPath(root, unrelated.key);
+    await makeWritable(unrelatedEntry);
+    await writeFile(join(unrelatedEntry, "metadata.json"), "malformed unrelated retention entry\n");
+    const events: DependencyCacheProgress[] = [];
+    const result = await materializeWorkspaceDependencies(
+      configured, current.workspace, fake.run(current.workspace),
+      { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
+    );
+    assert.deepEqual(result, { status: "restored", key: current.key });
+    assert.equal(fake.installs(), 2, "a hit must not invoke npm");
+    assert.ok(events.some(({ event }) => event === "hit"));
+    assert.ok(!events.some(({ phase }) => phase === "retention"), "a hit does not size the population");
+    assert.ok(!events.some(({ event }) => event === "integrity-refusal"), "a hit never inspects unrelated entries");
   } finally {
     await cleanupRoot(root);
   }
@@ -763,6 +788,7 @@ for (const malformed of malformedRetentionMetadata) {
       await chmod(metadataPath, 0o644);
       await writeFile(metadataPath, `${JSON.stringify(metadata)}\n`);
       await chmod(metadataPath, 0o444);
+      await writeFile(join(current.workspace, "package-lock.json"), packageLock("2.0.3"));
       const events: DependencyCacheProgress[] = [];
       await assert.rejects(
         materializeWorkspaceDependencies(
@@ -771,7 +797,7 @@ for (const malformed of malformedRetentionMetadata) {
         ),
         /metadata-malformed/u,
       );
-      assert.equal(fake.installs(), 2, "malformed unrelated metadata must not invoke npm");
+      assert.equal(fake.installs(), 3, "the publication installs once; malformed unrelated metadata adds no npm call");
       assert.deepEqual(
         events.find(({ event }) => event === "integrity-refusal"),
         { event: "integrity-refusal", key: unrelated.key.slice(0, 16), condition: "metadata-malformed" },
@@ -853,6 +879,7 @@ for (const corruption of unrelatedRetentionCorruptions) {
       const [unrelated, current] = published;
       assert.ok(unrelated && current);
       await corruption.corrupt(entryPath(root, unrelated.key));
+      await writeFile(join(current.workspace, "package-lock.json"), packageLock("2.0.3"));
       const events: DependencyCacheProgress[] = [];
       await assert.rejects(
         materializeWorkspaceDependencies(
@@ -861,7 +888,7 @@ for (const corruption of unrelatedRetentionCorruptions) {
         ),
         corruption.condition,
       );
-      assert.equal(fake.installs(), 2, "unrelated retention corruption must not invoke npm");
+      assert.equal(fake.installs(), 3, "the publication installs once; unrelated retention corruption adds no npm call");
       assert.ok(events.some(({ event, key, condition }) =>
         event === "integrity-refusal"
         && key === unrelated.key.slice(0, 16)
@@ -883,14 +910,23 @@ test("orphan publication stages and non-key usage files do not brick retention",
     const strayUsage = join(root, "cache/usage/stray-operator-file");
     await writeFile(strayUsage, "not a cache usage marker\n");
 
+    const hit = await materializeWorkspaceDependencies(
+      configured, current.workspace, fake.run(current.workspace),
+      { toolchain: TOOLCHAIN, report: () => undefined },
+    );
+    assert.equal(hit.status, "restored");
+    assert.equal(fake.installs(), 1);
+    assert.equal((await lstat(staging)).isDirectory(), true, "a hit leaves the population alone");
+
+    await writeFile(join(current.workspace, "package-lock.json"), packageLock("2.0.4"));
     const result = await materializeWorkspaceDependencies(
       configured, current.workspace, fake.run(current.workspace),
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
 
-    assert.equal(result.status, "restored");
-    assert.equal(fake.installs(), 1);
-    await assert.rejects(lstat(staging), /ENOENT/u, "an orphaned module-owned stage is reaped under retention lock");
+    assert.equal(result.status, "installed");
+    assert.equal(fake.installs(), 2);
+    await assert.rejects(lstat(staging), /ENOENT/u, "an orphaned module-owned stage is reaped under the publication's retention lock");
     assert.equal((await lstat(strayUsage)).isFile(), true, "unrecognised usage files are ignored, not mutated");
   } finally {
     await cleanupRoot(root);
@@ -920,6 +956,7 @@ test("an unsafe usage marker refuses retention instead of allowing an over-budge
     await rm(join(root, "cache/usage", firstKey));
     await mkdir(join(root, "marker-target"));
     await symlink(join(root, "marker-target"), join(root, "cache/usage", firstKey));
+    await writeFile(join(secondWorkspace, "package-lock.json"), packageLock("2.1.1"));
     const events: DependencyCacheProgress[] = [];
     await assert.rejects(
       materializeWorkspaceDependencies(
@@ -928,7 +965,7 @@ test("an unsafe usage marker refuses retention instead of allowing an over-budge
       ),
       /(?:integrity|usage|marker|unsafe)/iu,
     );
-    assert.equal(fake.installs(), 2, "an unsafe usage marker must not invoke npm");
+    assert.equal(fake.installs(), 3, "the publication installs once; an unsafe usage marker adds no npm call");
     assert.ok(events.some(({ event, key }) => event === "integrity-refusal" && key === firstKey.slice(0, 16)));
   } finally {
     await cleanupRoot(root);
@@ -1209,6 +1246,7 @@ test("a malformed unrelated size walk emits integrity refusal without invoking n
     await makeWritable(unrelatedEntry);
     await runCommand([], "mkfifo", [join(unrelatedEntry, "trees/node_modules/fake-package/special")], root, process.env);
     await makeImmutableFixture(unrelatedEntry);
+    await writeFile(join(current.workspace, "package-lock.json"), packageLock("7.0.2"));
     const events: DependencyCacheProgress[] = [];
     await assert.rejects(
       materializeWorkspaceDependencies(
@@ -1217,8 +1255,8 @@ test("a malformed unrelated size walk emits integrity refusal without invoking n
       ),
       /special-file/u,
     );
-    assert.equal(fake.installs(), 2, "retention size corruption must not invoke npm after a valid restore");
-    assert.ok(!events.some(({ event }) => event === "hit"), "a failed size walk cannot report a successful hit");
+    assert.equal(fake.installs(), 3, "the publication installs once; retention size corruption adds no npm call");
+    assert.ok(!events.some(({ event }) => event === "publication"), "a failed size walk cannot report a publication");
     assert.deepEqual(
       events.find(({ event }) => event === "integrity-refusal"),
       { event: "integrity-refusal", key: unrelated.key.slice(0, 16), condition: "special-file" },

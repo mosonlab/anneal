@@ -11,7 +11,7 @@ import {
 } from "./ui/dropdown-menu";
 import { Switch } from "./ui/switch";
 import { titleCase } from "../lib/format";
-import { useT, useTNodes } from "../lib/i18n";
+import { useT } from "../lib/i18n";
 import { modelChipLabel } from "../lib/models";
 import { cn } from "../lib/utils";
 import type { GoalStatus, InboxStatus, TaskStatus } from "../lib/types";
@@ -397,21 +397,7 @@ export const EmptyState = ({ children }: { children: ReactNode }): ReactNode =>
   <div className="px-[10px] py-[40px] text-center text-[12.5px] text-[color:var(--faint)]">{children}</div>;
 
 export const NOTICE = "flex gap-[10px] rounded-lg border border-border bg-card px-[14px] py-[11px] text-[12px] leading-[1.6] text-muted-foreground [&_code]:text-inherit [&_code]:opacity-90";
-const NOTICE_GAP = "border-[color:var(--status-amber-line)] bg-[color-mix(in_srgb,var(--status-amber-fg)_5%,transparent)] text-[color:var(--status-amber-fg)]";
 const NOTICE_ERROR = "border-[color:var(--destructive-line)] bg-[color:var(--destructive-bg)] text-[color:var(--destructive-fg)]";
-
-/** Rendered whenever the control plane has no endpoint for a v1 surface. The
- *  page still renders so the gap is visible instead of silently missing. */
-export const GapNotice = ({ endpoint, what }: { endpoint: string; what: string }): ReactNode => {
-  const tn = useTNodes();
-  // `endpoint` is a route, so it keeps its <code>; `what` is copy the caller
-  // already translated, so it interpolates as plain text.
-  return (
-    <div className={cn(NOTICE, NOTICE_GAP)}>
-      <span>{tn("notice.gap", { endpoint: <code>{endpoint}</code>, what })}</span>
-    </div>
-  );
-};
 
 /** `NOTICE` is a flex row, so the wrapper decides the layout: each element child
  *  and each contiguous text run of a bare fragment is its own flex item with a
@@ -438,7 +424,7 @@ export const ErrorNotice = ({ message, onRetry }: { message: ReactNode; onRetry?
 };
 
 /** The only surface in the app that can say something *succeeded*. Built from
- *  the same `NOTICE` base as `GapNotice`, with no tone override, so a neutral
+ *  the same `NOTICE` base as `ErrorNotice`, with no tone override, so a neutral
  *  result never borrows the amber or destructive palette. */
 export const InfoNotice = ({ message, onDismiss }: { message: ReactNode; onDismiss?: () => void }): ReactNode => {
   const t = useT();
