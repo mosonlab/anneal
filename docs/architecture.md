@@ -84,11 +84,16 @@ Local runner -----> ephemeral git workspace
   the runner grows until the host runs out of memory, sooner with several
   runners on it. Bounding means choosing what to lose: liveness detail
   (streaming deltas, raw provider frames, captured stderr) is dropped
-  oldest-first, lifecycle, tool, error and terminal events never are, and every
-  drop or truncation is itself recorded as an event. A 413 the API raises names
-  the one offending event, so the runner loses that event rather than wedging an
-  ordered queue that only advances on success. Both caps are declared once, in
-  `@anneal/db/session-event-limits`.
+  oldest-first along with tool output and provider status — the largest events a
+  Run produces — while lifecycle, terminal and error events never are, and every
+  drop or truncation is itself recorded as an event. The batch in flight is
+  exempt from dropping and is released by identity, so a provider streaming
+  during an append cannot cost an event the request never carried. A 413 the API
+  raises names the one offending event, so the runner loses that event rather
+  than wedging an ordered queue that only advances on success; a 413 that names
+  none makes the runner halve its batch budget and retry rather than resend a
+  body no peer will take. Both caps, and the cap on the one envelope field a
+  provider grows, are declared once in `@anneal/db/session-event-limits`.
 - Exactly one API control plane may own a canonical workspace root. Ownership is
   acquired from the protected, API-only `CONTROL_PLANE_STATE_DIR` before Prisma
   is imported or reconciliation begins. Runner daemons remain ordinary clients,

@@ -13,6 +13,7 @@ import {
 } from "@anneal/db";
 import {
   SESSION_EVENT_BATCH_MAX_EVENTS,
+  SESSION_EVENT_CONVERSATION_ID_MAX_CHARS,
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
   SESSION_EVENT_PAYLOAD_TOO_LARGE_CODE,
   sessionEventPayloadTooLarge,
@@ -110,7 +111,9 @@ const eventInput = z.object({
 export const eventsInput = z.object({
   runnerId: z.string().trim().min(1).max(120),
   fencingToken: fence,
-  providerConversationId: z.string().nullable().optional(),
+  // Bounded because the body cap above is sized as the batch cap plus a fixed
+  // envelope allowance, and this is the only envelope field a provider grows.
+  providerConversationId: z.string().max(SESSION_EVENT_CONVERSATION_ID_MAX_CHARS).nullable().optional(),
   events: z.array(eventInput).min(1).max(SESSION_EVENT_BATCH_MAX_EVENTS),
 });
 

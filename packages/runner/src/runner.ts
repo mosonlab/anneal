@@ -28,6 +28,7 @@ import {
 } from "./adapters.js";
 import {
   openControlPlane,
+  isEventsRequestTooLarge,
   oversizedEventIndex,
   retriableStartupError,
   type ClaimedTask,
@@ -319,16 +320,30 @@ export const executeClaim = async (
         try {
           await session.emit(batch, rememberProviderConversationId());
         } catch (error) {
-          // The one failure the queue can resolve itself: the API refused a
-          // single event of this batch by index. Every other failure — 5xx,
-          // network, lost authority — belongs to the caller's retry, with the
-          // queue's own bound protecting memory meanwhile.
+          // The two failures the queue can resolve itself. Every other one —
+          // 5xx, network, lost authority — belongs to the caller's retry, with
+          // the queue's own bound protecting memory meanwhile.
           const index = oversizedEventIndex(error);
-          const refused = index === null ? undefined : batch[index];
-          if (!refused || !pendingEvents.reject(refused.seq, "payload-too-large")) throw error;
-          continue;
+          if (index !== null) {
+            // The API refused a single event of this batch by index: lose it.
+            const refused = batch[index];
+            if (!refused || !pendingEvents.reject(refused.seq, "payload-too-large")) throw error;
+            continue;
+          }
+          if (isEventsRequestTooLarge(error)) {
+            // The refusal names no event, so send less rather than resend the
+            // same body. Once a batch is one event and is still refused, that
+            // event alone is impossible and the queue loses it.
+            if (pendingEvents.reduceBatch()) {
+              console.warn(`Run ${claim.run.id} events request refused as too large; retrying with a smaller batch`);
+              continue;
+            }
+            const refused = batch[0];
+            if (refused && pendingEvents.reject(refused.seq, "request-too-large")) continue;
+          }
+          throw error;
         }
-        pendingEvents.release(batch.length);
+        pendingEvents.release(batch);
       }
     })().finally(() => { eventFlushPromise = null; });
     return eventFlushPromise;

@@ -16,6 +16,7 @@ import {
 import {
   SESSION_EVENTS_REQUEST_MAX_BYTES,
   SESSION_EVENTS_REQUEST_TOO_LARGE_CODE,
+  SESSION_EVENT_CONVERSATION_ID_MAX_CHARS,
   SESSION_EVENT_PAYLOAD_MAX_BYTES,
   SESSION_EVENT_PAYLOAD_TOO_LARGE_CODE,
 } from "@anneal/db/session-event-limits";
@@ -973,6 +974,22 @@ test("a batch inside the payload cap reaches the append", async () => {
     }));
 
     assert.equal(response.status, 200);
+  });
+});
+
+test("the envelope allowance holds because the conversation identifier is capped", async () => {
+  await withTokens(async () => {
+    const response = await createApp({} as PrismaClient).fetch(eventsRequest({
+      runnerId: "runner-1",
+      fencingToken: "fence-1",
+      // The one envelope field a provider grows. Left unbounded it pushes a
+      // legal batch past the body cap, and that refusal names no event, so no
+      // smaller batch could fix it.
+      providerConversationId: "t".repeat(SESSION_EVENT_CONVERSATION_ID_MAX_CHARS + 1),
+      events: [{ seq: 0, source: "CLAUDE", type: "MODEL_DELTA", payload: { text: "x" } }],
+    }));
+
+    assert.equal(response.status, 400, "an identifier past the cap is malformed, not merely large");
   });
 });
 

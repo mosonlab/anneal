@@ -59,13 +59,100 @@ test("lifecycle and error events survive a queue held far over its byte bound", 
   );
 });
 
+test("sustained tool output holds the bound while lifecycle and error events survive", () => {
+  const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 8_000 });
+  queue.push(lifecycle("PROCESS_STARTED"));
+  queue.push(lifecycle("ADAPTER_ERROR"));
+  for (let index = 0; index < 500; index += 1) {
+    queue.push({ source: "PI", type: index % 2 === 0 ? "TOOL_COMPLETED" : "TOOL_PROGRESS", payload: { out: "o".repeat(400) } });
+    queue.push({ source: "PI", type: "PROVIDER_STATUS", payload: { note: "s".repeat(400) } });
+    assert.ok(queue.bytes <= 8_000 + 800, `tool traffic must not grow the queue, held ${queue.bytes}`);
+  }
+
+  assert.deepEqual(
+    queue.batch().filter((event) => event.source !== "PI" && event.type !== EVENTS_DROPPED_EVENT_TYPE)
+      .map((event) => event.type),
+    ["PROCESS_STARTED", "ADAPTER_ERROR"],
+    "the record of what the Run did outlives 200x its own weight in tool output",
+  );
+});
+
 test("a queue of only undroppable events exceeds the bound rather than losing the account of the Run", () => {
   const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 500 });
-  for (let index = 0; index < 10; index += 1) queue.push(lifecycle("TOOL_COMPLETED"));
+  for (let index = 0; index < 10; index += 1) queue.push(lifecycle("FINAL_OUTPUT"));
 
   assert.equal(queue.length, 10);
   assert.ok(queue.bytes > 500);
   assert.equal(queue.batch().filter((event) => event.type === EVENTS_DROPPED_EVENT_TYPE).length, 0);
+});
+
+test("a batch in flight is neither dropped by the bound nor released by count", () => {
+  const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 3_000 });
+  for (let index = 0; index < 4; index += 1) queue.push(chunk(`head-${index}`.padEnd(300, "x")));
+  const inFlight = queue.batch();
+  assert.equal(inFlight.length, 4);
+
+  // The provider keeps streaming while the append is in flight, past the bound.
+  for (let index = 0; index < 40; index += 1) queue.push(chunk(`tail-${index}`.padEnd(300, "y")));
+  const record = queue.batch().find((event) => event.type === EVENTS_DROPPED_EVENT_TYPE);
+  assert.ok(record, "the pressure that hit the tail is recorded");
+
+  // Reclaiming the queue for the next batch must not have disturbed the events
+  // the accepted request actually carried.
+  queue.release(inFlight);
+  const remaining = queue.batch();
+  assert.equal(
+    remaining.filter((event) => inFlight.includes(event)).length,
+    0,
+    "every accepted event is gone",
+  );
+  assert.ok(
+    remaining.every((event) => event.type === EVENTS_DROPPED_EVENT_TYPE || (event.payload as { text: string }).text.startsWith("tail-")),
+    "and nothing the request never carried went with them",
+  );
+  assert.deepEqual(
+    remaining.map((event) => event.seq),
+    [...remaining].sort((left, right) => left.seq - right.seq).map((event) => event.seq),
+    "order is untouched for what survives",
+  );
+});
+
+test("drops during an in-flight batch open a fresh record instead of editing the one being sent", () => {
+  const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 2_000 });
+  for (let index = 0; index < 12; index += 1) queue.push(chunk("a".repeat(300)));
+  const inFlight = queue.batch();
+  const sentRecord = inFlight.find((event) => event.type === EVENTS_DROPPED_EVENT_TYPE);
+  assert.ok(sentRecord, "the first pressure episode is in the batch being delivered");
+  const sentCount = (sentRecord.payload as { droppedEvents: number }).droppedEvents;
+
+  for (let index = 0; index < 12; index += 1) queue.push(chunk("b".repeat(300)));
+  assert.equal(
+    (sentRecord.payload as { droppedEvents: number }).droppedEvents,
+    sentCount,
+    "a record already serialized into a request is never edited afterwards",
+  );
+  queue.release(inFlight);
+  const records = queue.batch().filter((event) => event.type === EVENTS_DROPPED_EVENT_TYPE);
+  assert.equal(records.length, 1, "the later drops get their own record");
+  assert.ok((records[0]!.payload as { droppedEvents: number }).droppedEvents > 0);
+});
+
+test("a whole-request refusal is answered by halving the batch, down to one event", () => {
+  const queue = createSessionEventQueue({ nextSeq: 0, batchMaxEvents: 8, maxBytes: 1_000_000 });
+  for (let index = 0; index < 8; index += 1) queue.push(lifecycle(`STEP_${index}`));
+  assert.equal(queue.batch().length, 8);
+
+  assert.equal(queue.reduceBatch(), true);
+  assert.equal(queue.batch().length, 4);
+  assert.equal(queue.reduceBatch(), true);
+  assert.equal(queue.batch().length, 2);
+  assert.equal(queue.reduceBatch(), true);
+  assert.equal(queue.batch().length, 1);
+  // The floor is where shrinking stops being an answer and the caller must
+  // lose the one event no request can carry.
+  for (let index = 0; index < 40; index += 1) queue.reduceBatch();
+  assert.equal(queue.reduceBatch(), false);
+  assert.equal(queue.batch().length, 1);
 });
 
 test("the count bound drops chunk events even when the queue is small in bytes", () => {
@@ -114,7 +201,7 @@ test("batches are formed by bytes as well as by count", () => {
   const batch = queue.batch();
   assert.ok(batch.length >= 1 && batch.length <= 3, `a 2 KB batch holds a few 600-byte events, got ${batch.length}`);
   assert.ok(jsonByteLength(batch) <= 2_400, "the formed batch stays inside its byte budget");
-  queue.release(batch.length);
+  queue.release(batch);
   assert.equal(queue.batch()[0]!.seq, batch.length, "release advances the queue head in order");
 });
 
@@ -163,7 +250,7 @@ test("released events stop counting against the bound", () => {
   const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 4_000 });
   for (let index = 0; index < 4; index += 1) queue.push(chunk("w".repeat(400)));
   const before = queue.bytes;
-  queue.release(2);
+  queue.release(queue.batch().slice(0, 2));
 
   assert.ok(queue.bytes < before && queue.bytes > 0);
   assert.equal(queue.length, 2);

@@ -8,7 +8,10 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { type RunOutcome, type RunOutputEvidence, runOwnedHead } from "@anneal/db";
-import { SESSION_EVENT_PAYLOAD_TOO_LARGE_CODE } from "@anneal/db/session-event-limits";
+import {
+  SESSION_EVENT_PAYLOAD_TOO_LARGE_CODE,
+  SESSION_EVENTS_REQUEST_TOO_LARGE_CODE,
+} from "@anneal/db/session-event-limits";
 
 import {
   adapters, buildPrompt, RUNNER_KINDS, type AdapterEvent, type CliAdapter, type ExitEvidence, type RuntimeHandle,
@@ -2275,6 +2278,123 @@ test("a 413 naming one event of a batch drops that event, records it, and resend
     assert.ok(
       heartbeatQueueBytes.every((bytes) => typeof bytes === "number" && bytes >= 0),
       "every heartbeat carries the field, in every lease phase",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a 413 naming no event drains through smaller batches instead of resending the same body", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-request-too-large-"));
+  try {
+    const remote = await seedRemote(root);
+    const configured = {
+      ...config(join(root, "workspaces")),
+      home: root,
+      heartbeatIntervalMs: 20,
+      apiTimeoutMs: 100,
+      failedWorkspaceRetention: 0,
+      binaries: { CLAUDE: join(root, "unused-claude"), CODEX: join(root, "unused-codex"), PI: join(root, "unused-pi") },
+    };
+    const acceptedBatches: Array<Array<{ seq: number; type: string }>> = [];
+    let refusals = 0;
+    let resolveExit!: (evidence: Record<string, unknown>) => void;
+    const exit = new Promise<Record<string, unknown>>((resolve) => { resolveExit = resolve; });
+
+    setControlPlane(async (input: string | URL | Request, init?: RequestInit) => {
+      const path = String(input);
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, any>;
+      if (path.endsWith("/events")) {
+        const events = body.events as Array<{ seq: number; type: string }>;
+        // A proxy body limit below the API's own cap, or a peer carrying the
+        // previous cap through a rolling deployment: the refusal names no
+        // event, so only a smaller request can ever be accepted.
+        if (events.length > 2) {
+          refusals += 1;
+          return new Response(JSON.stringify({
+            error: "Session event request body exceeds the cap",
+            code: SESSION_EVENTS_REQUEST_TOO_LARGE_CODE,
+            limitBytes: 1024,
+          }), { status: 413, headers: { "content-type": "application/json" } });
+        }
+        acceptedBatches.push(events.map((event) => ({ seq: event.seq, type: event.type })));
+      }
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+
+    const adapter: CliAdapter = {
+      ...adapters.CLAUDE,
+      preflight: async () => ({ ok: true, cliVersion: "test", authMode: "test", capabilities: {} }),
+      start: async (spec, sink) => {
+        await commitFixtureChange(spec.workingDirectory);
+        const now = new Date();
+        for (const index of [0, 1, 2, 3, 4]) {
+          sink({ source: "CLAUDE", type: `EVENT_${index}`, payload: { text: `event-${index}` } });
+        }
+        return {
+          runner: "CLAUDE",
+          child: { exitCode: null, signalCode: null } as never,
+          pid: null,
+          startedAt: now,
+          lastProcessAliveAt: now,
+          lastProgressEventAt: now,
+          inFlightTool: null,
+          providerConversationId: null,
+          terminalEventSeen: true,
+          terminalSuccess: true,
+          terminationReason: null,
+          sawError: false,
+          providerError: null,
+          piTurnCompleted: false,
+          finalOutput: null,
+          stdout: "",
+          stderr: "",
+          exit,
+        } as never;
+      },
+      heartbeat: async (handle) => ({
+        processAlive: true,
+        lastProcessAliveAt: handle.lastProcessAliveAt,
+        lastProgressEventAt: handle.lastProgressEventAt,
+        inFlightTool: null,
+      }),
+      kill: async () => ({ signal: null, processAlive: false }),
+    };
+
+    const execution = executeClaim(configured, {
+      ...agentClaim,
+      runner: "CLAUDE",
+      repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
+      session: testSession(root),
+    }, { adapter });
+    resolveExit({
+      exitCode: 0,
+      signal: null,
+      terminalEventSeen: true,
+      terminalSuccess: true,
+      terminationReason: null,
+      finalOutput: null,
+      providerError: null,
+      stdout: "",
+      stderr: "",
+    });
+    await execution;
+
+    assert.ok(refusals > 0, "the first request must be refused for its size");
+    const delivered = acceptedBatches.flat();
+    assert.deepEqual(
+      delivered.filter((event) => /^EVENT_\d$/u.test(event.type)).map((event) => event.type),
+      ["EVENT_0", "EVENT_1", "EVENT_2", "EVENT_3", "EVENT_4"],
+      "no event is lost to a refusal that named none, and order is untouched",
+    );
+    assert.ok(
+      acceptedBatches.every((batch) => batch.length <= 2),
+      "the runner sends less rather than retrying a body the peer cannot accept",
+    );
+    assert.equal(
+      delivered.filter((event) => event.type === EVENT_REJECTED_EVENT_TYPE).length,
+      0,
+      "shrinking resolves it, so nothing is dropped",
     );
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -8,8 +8,9 @@
  * oversized event; the API enforces the same per-event cap and reads at most
  * `SESSION_EVENTS_REQUEST_MAX_BYTES` of body. A refusal the API does raise names
  * the offending event's index, because the runner only removes events from its
- * queue once they are accepted: a batch-wide 413 would wedge the queue head
- * forever, while a named one costs exactly the event that caused it.
+ * queue once they are accepted: a named 413 costs exactly the event that caused
+ * it, while an unnamed one leaves the runner nothing to lose and only the
+ * option of sending a smaller batch until it fits.
  */
 
 import { Buffer } from "node:buffer";
@@ -22,6 +23,17 @@ export const SESSION_EVENT_BATCH_MAX_EVENTS = 250;
 
 /** Largest serialized size of the events one append request may carry. */
 export const SESSION_EVENT_BATCH_MAX_BYTES = 1024 * 1024;
+
+/**
+ * Largest provider conversation identifier the events envelope may carry.
+ *
+ * Adapters copy this straight from provider output, so it is the one envelope
+ * field a provider can grow. Capping it is what makes the overhead allowance
+ * below an actual bound rather than an estimate: without it a long enough
+ * identifier pushes a legal batch over the body cap, and the request is refused
+ * for something no smaller batch can fix.
+ */
+export const SESSION_EVENT_CONVERSATION_ID_MAX_CHARS = 512;
 
 /**
  * Room above the batch cap for the request envelope: runner id, fencing token,
