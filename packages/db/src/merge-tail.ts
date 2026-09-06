@@ -1,4 +1,10 @@
-import { MergeRecoveryStatus, type MergeRecoveryAttempt, type Prisma } from "@prisma/client";
+import {
+  MergeRecoveryRefusalCode,
+  MergeRecoveryRetryClass,
+  MergeRecoveryStatus,
+  type MergeRecoveryAttempt,
+  type Prisma,
+} from "@prisma/client";
 
 import { stepRole } from "./step-role.js";
 
@@ -34,7 +40,73 @@ export const MERGE_TAIL_KIND = {
 export const MAX_MERGE_TAIL_REPAIR_ATTEMPTS = 2;
 
 export const MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES = 2;
-export const MAX_BASE_DRIFT_CLASSIFICATION_RETRIES = 30;
+
+/**
+ * The base-drift classification budget, and the three retry classes it is
+ * split across. Only a `validation` failure — a classification that ran
+ * against real facts and could not conclude — spends the count budget, and it
+ * exhausts only once those failures have also spanned
+ * `BASE_DRIFT_VALIDATION_MIN_ELAPSED_MS`, so one burst inside a single
+ * incident cannot end a recovery. Waiting for the chain's own active Run and a
+ * failed repository read spend no count at all: they are held on a doubling
+ * backoff and bounded only by their own elapsed-time ceilings, because neither
+ * is evidence about the candidate.
+ */
+export const MAX_BASE_DRIFT_VALIDATION_ATTEMPTS = 30;
+export const BASE_DRIFT_VALIDATION_MIN_ELAPSED_MS = 30 * 60_000;
+export const BASE_DRIFT_WAITING_CEILING_MS = 6 * 60 * 60_000;
+export const BASE_DRIFT_TRANSPORT_CEILING_MS = 30 * 60_000;
+/** The doubling backoff, from one worker tick to a minute. */
+export const BASE_DRIFT_RETRY_BACKOFF_START_MS = 2_000;
+export const BASE_DRIFT_RETRY_BACKOFF_CAP_MS = 60_000;
+
+export const MERGE_RECOVERY_RETRY_CLASS_ENUM: Record<
+  "waiting" | "transport" | "validation",
+  MergeRecoveryRetryClass
+> = {
+  waiting: MergeRecoveryRetryClass.WAITING,
+  transport: MergeRecoveryRetryClass.TRANSPORT,
+  validation: MergeRecoveryRetryClass.VALIDATION,
+};
+
+/** The refusal each class settles under when it crosses its own ceiling. */
+export const MERGE_RECOVERY_CLASS_REFUSAL_CODE: Record<
+  MergeRecoveryRetryClass,
+  MergeRecoveryRefusalCode
+> = {
+  [MergeRecoveryRetryClass.WAITING]: MergeRecoveryRefusalCode.WAITING_CEILING,
+  [MergeRecoveryRetryClass.TRANSPORT]: MergeRecoveryRefusalCode.TRANSPORT_CEILING,
+  [MergeRecoveryRetryClass.VALIDATION]: MergeRecoveryRefusalCode.VALIDATION_BUDGET,
+};
+
+const CLASS_OF_REFUSAL = new Map<MergeRecoveryRefusalCode, MergeRecoveryRetryClass>(
+  (Object.entries(MERGE_RECOVERY_CLASS_REFUSAL_CODE) as Array<
+    [MergeRecoveryRetryClass, MergeRecoveryRefusalCode]
+  >).map(([retryClass, code]) => [code, retryClass]),
+);
+
+/**
+ * The class a refusal exhausted, or null when the refusal is an ordinary
+ * ineligibility rather than a class ceiling. This is what makes `re-validate`
+ * offerable: only a ceiling has counters an operator can reset.
+ */
+export const mergeRecoveryCeilingClass = (
+  refusalCode: MergeRecoveryRefusalCode | null,
+): MergeRecoveryRetryClass | null => (refusalCode ? CLASS_OF_REFUSAL.get(refusalCode) ?? null : null);
+
+/** The per-class counter reset one `re-validate` performs, and nothing else. */
+export const mergeRecoveryClassReset = (
+  retryClass: MergeRecoveryRetryClass,
+): Prisma.MergeRecoveryAttemptUpdateManyMutationInput => {
+  switch (retryClass) {
+    case MergeRecoveryRetryClass.WAITING:
+      return { waitingAttempts: 0, waitingFirstAt: null };
+    case MergeRecoveryRetryClass.TRANSPORT:
+      return { transportAttempts: 0, transportFirstAt: null };
+    case MergeRecoveryRetryClass.VALIDATION:
+      return { validationAttempts: 0, validationFirstAt: null };
+  }
+};
 
 export type MergeRecoveryPhase =
   | "validation"

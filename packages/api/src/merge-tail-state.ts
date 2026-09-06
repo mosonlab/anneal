@@ -1,6 +1,7 @@
 import {
   closeIntegratorQuestions,
   enqueueTaskRun,
+  MERGE_RECOVERY_RETRY_CLASS_ENUM,
   MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
   Prisma,
@@ -11,6 +12,14 @@ import {
   type MergeRecoveryTransitionData,
   type RecoveryContext,
 } from "@anneal/db";
+
+import {
+  formatElapsed,
+  type RetryBudgetDecision,
+  type RetryClass,
+} from "./base-drift-recovery-decision.js";
+
+type RetryBudgetRetry = Extract<RetryBudgetDecision, { kind: "retry" }>;
 
 type DbTx = Prisma.TransactionClient;
 
@@ -391,6 +400,24 @@ export const reopenAfterHeadAdoption = async (
   return true;
 };
 
+/** The state name a settle records, and the family its stop notice dedupes on. */
+export const RECOVERY_CLASS_SETTLE_STATE = {
+  waiting: "waiting-ceiling",
+  transport: "transport-ceiling",
+  validation: "validation-budget",
+} as const satisfies Record<RetryClass, string>;
+
+export type RecoverySettleState =
+  | "ineligible"
+  | "exhausted"
+  | (typeof RECOVERY_CLASS_SETTLE_STATE)[RetryClass];
+
+/**
+ * A recovery's terminal settle. `revalidations` generations the stop notice
+ * and the operator question: after a `re-validate`, the same class can settle
+ * again, and reusing the first key would deduplicate that second ceiling into
+ * silence.
+ */
 export const exhaust = async (
   tx: DbTx,
   input: {
@@ -400,7 +427,8 @@ export const exhaust = async (
     reason: string;
     at: Date;
     attempt: number;
-    state: "ineligible" | "exhausted";
+    state: RecoverySettleState;
+    revalidations?: number;
     recoveryData: MergeRecoveryTransitionData;
     markerMetadata: Record<string, unknown>;
   },
@@ -412,7 +440,9 @@ export const exhaust = async (
   });
   const body = input.state === "ineligible"
     ? `Automatic pre-merge base-drift recovery refused: ${input.reason}`
-    : `Automatic pre-merge base-drift recovery exhausted at attempt ${String(input.attempt)}`;
+    : input.state === "exhausted"
+      ? `Automatic pre-merge base-drift recovery exhausted at attempt ${String(input.attempt)}`
+      : `Automatic pre-merge base-drift recovery settled on ${input.state}: ${input.reason}`;
   await tx.task.update({ where: { id: input.integratorTaskId }, data: {
     status: TaskStatus.REVIEW,
     failureReason: input.state === "ineligible"
@@ -430,7 +460,8 @@ export const exhaust = async (
       reason: input.reason,
     },
   });
-  const dedupeKey = `merge-base-drift-recovery:${input.state}:${input.sourceStopId}`;
+  const generation = input.revalidations ? `:r${String(input.revalidations)}` : "";
+  const dedupeKey = `merge-base-drift-recovery:${input.state}:${input.sourceStopId}${generation}`;
   await stopNotice(tx, {
     taskId: input.integratorTaskId,
     body: `Automatic pre-merge base-drift recovery ${input.state} for stop ${input.sourceStopId}: ${input.reason}. No regression run or re-authorization was created.`,
@@ -438,32 +469,76 @@ export const exhaust = async (
   });
 };
 
-export const recordValidationRetry = async (
+type RetryCounterFields = {
+  attempts: "waitingAttempts" | "transportAttempts" | "validationAttempts";
+  firstAt: "waitingFirstAt" | "transportFirstAt" | "validationFirstAt";
+};
+
+const RETRY_COUNTER_FIELDS: Record<RetryClass, RetryCounterFields> = {
+  waiting: { attempts: "waitingAttempts", firstAt: "waitingFirstAt" },
+  transport: { attempts: "transportAttempts", firstAt: "transportFirstAt" },
+  validation: { attempts: "validationAttempts", firstAt: "validationFirstAt" },
+};
+
+/**
+ * Records one deferred classification against its own class, holds the next
+ * tick until the backoff expires, and states the whole accounting in the
+ * recovery activity: which class, its counter, how long that class has been
+ * failing, and when the recovery is eligible again. A class transition is
+ * named explicitly, because "waiting turned into transport" is exactly what an
+ * operator reading a stalled recovery needs to see.
+ */
+export const recordRecoveryRetry = async (
   tx: DbTx,
   input: {
-    aggregateId: string;
+    attempt: MergeRecoveryAttempt;
     integratorTaskId: string;
     sourceStopId: string;
-    classificationAttempt: number;
-    maxAttempts: number;
-    reason: string;
+    decision: RetryBudgetRetry;
+    maxValidationAttempts: number;
   },
-): Promise<void> => {
-  await tx.mergeRecoveryAttempt.update({
-    where: { id: input.aggregateId },
-    data: { validationAttempts: input.classificationAttempt, failureReason: input.reason },
+): Promise<MergeRecoveryAttempt> => {
+  const { decision } = input;
+  const fields = RETRY_COUNTER_FIELDS[decision.retryClass];
+  const previousClass = input.attempt.lastRetryClass;
+  const nextClass = MERGE_RECOVERY_RETRY_CLASS_ENUM[decision.retryClass];
+  const updated = await tx.mergeRecoveryAttempt.update({
+    where: { id: input.attempt.id },
+    data: {
+      [fields.attempts]: decision.classAttempt,
+      [fields.firstAt]: decision.firstFailedAt,
+      nextEligibleAt: decision.nextEligibleAt,
+      lastRetryClass: nextClass,
+      failureReason: decision.reason,
+    },
   });
+  const budget = decision.retryClass === "validation"
+    ? `${String(decision.classAttempt)}/${String(input.maxValidationAttempts)}`
+    : String(decision.classAttempt);
+  const classChanged = previousClass !== null && previousClass !== nextClass;
   await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", {
     actorType: "control-plane",
-    body: `Automatic pre-merge base-drift classification deferred (${String(input.classificationAttempt)}/${String(input.maxAttempts)}): ${input.reason}`,
+    body: `Automatic pre-merge base-drift classification deferred as ${decision.retryClass}`
+      + ` (attempt ${budget}, ${formatElapsed(decision.elapsedMs)} in class,`
+      + ` next eligible ${decision.nextEligibleAt.toISOString()}): ${decision.reason}`,
     metadata: {
       state: "classification-retry",
       integratorTaskId: input.integratorTaskId,
       sourceStopId: input.sourceStopId,
-      classificationAttempt: input.classificationAttempt,
-      reason: input.reason,
+      retryClass: decision.retryClass,
+      previousRetryClass: previousClass,
+      classChanged,
+      classAttempt: decision.classAttempt,
+      classElapsedMs: decision.elapsedMs,
+      nextEligibleAt: decision.nextEligibleAt.toISOString(),
+      waitingAttempts: updated.waitingAttempts,
+      transportAttempts: updated.transportAttempts,
+      validationAttempts: updated.validationAttempts,
+      maxValidationAttempts: input.maxValidationAttempts,
+      reason: decision.reason,
     },
   });
+  return updated;
 };
 
 export const retireLegacyRefusal = async (

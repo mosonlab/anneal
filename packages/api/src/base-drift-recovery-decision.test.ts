@@ -7,10 +7,15 @@ import {
   classifyDurable,
   classifyFresh,
   classifyRetryBudget,
+  recoveryDeferred,
   type DurableCandidateFacts,
   type FreshRecoveryFacts,
   type RecoveryCandidate,
   type RecoveryPullRequestFacts,
+  type RetryBudgetDecision,
+  type RetryBudgetFacts,
+  type RetryBudgetPolicy,
+  type RetryClass,
 } from "./base-drift-recovery-decision.js";
 
 const HEAD = "a".repeat(40);
@@ -146,12 +151,9 @@ test("durable candidate facts decide every refusal without a database", () => {
   for (const refusal of cases) {
     const facts = durableFacts();
     refusal.change(facts);
-    assert.deepEqual(classifyCandidate(facts), {
-      kind: refusal.code === "chain-active" ? "retry" : "ineligible",
-      code: refusal.code,
-      reason: refusal.reason,
-      stopId: candidate.stopId,
-    });
+    assert.deepEqual(classifyCandidate(facts), refusal.code === "chain-active"
+      ? { kind: "retry", retryClass: "waiting", code: refusal.code, reason: refusal.reason, stopId: candidate.stopId }
+      : { kind: "ineligible", code: refusal.code, reason: refusal.reason, stopId: candidate.stopId });
   }
 });
 
@@ -160,7 +162,7 @@ test("durable candidate classification narrows skip and inspect outcomes", () =>
   missingTask.task = null;
   assert.deepEqual(classifyCandidate(missingTask), { kind: "skip" });
   const terminalAttempt = durableFacts();
-  terminalAttempt.existingAttempt = { status: "FAILED", reopenableLegacyRefusal: false };
+  terminalAttempt.existingAttempt = { status: "FAILED", reopenableLegacyRefusal: false, nextEligibleAt: null };
   assert.deepEqual(classifyCandidate(terminalAttempt), { kind: "skip" });
   assert.deepEqual(classifyCandidate(durableFacts()), { kind: "inspect", candidate });
 });
@@ -185,6 +187,7 @@ test("all fresh pull-request refusal paths decide without a database", () => {
 test("fresh classification narrows reader facts and snapshot outcomes", () => {
   assert.deepEqual(classifyFresh({ kind: "reader-failure", reason: "reader timeout" }), {
     kind: "retry",
+    retryClass: "transport",
     reason: "reader timeout",
   });
   assert.equal(freshDecision({ comparisonAvailable: false }).kind, "ineligible");
@@ -196,17 +199,125 @@ test("fresh classification narrows reader facts and snapshot outcomes", () => {
   assert.deepEqual(freshDecision(), { kind: "queue", candidate, currentBaseSha: CURRENT });
 });
 
-test("retry-budget classification narrows retry and ineligible outcomes", () => {
-  assert.deepEqual(classifyRetryBudget({
-    reason: "reader timeout",
-    validationAttempts: 0,
-    maxAttempts: 2,
-  }), { kind: "retry", reason: "reader timeout", classificationAttempt: 1 });
-  assert.equal(classifyRetryBudget({
-    reason: "reader timeout",
-    validationAttempts: 2,
-    maxAttempts: 2,
-  }).kind, "ineligible");
+const POLICY: RetryBudgetPolicy = {
+  maxValidationAttempts: 30,
+  validationMinElapsedMs: 30 * 60_000,
+  waitingCeilingMs: 6 * 60 * 60_000,
+  transportCeilingMs: 30 * 60_000,
+  backoffStartMs: 2_000,
+  backoffCapMs: 60_000,
+};
+
+const T0 = new Date("2026-09-01T00:00:00.000Z");
+const at = (milliseconds: number): Date => new Date(T0.getTime() + milliseconds);
+
+const budget = (
+  retryClass: RetryClass,
+  overrides: Partial<RetryBudgetFacts> = {},
+): RetryBudgetDecision => classifyRetryBudget({
+  reason: `${retryClass} failure`,
+  retryClass,
+  now: T0,
+  attempts: { waiting: 0, transport: 0, validation: 0 },
+  firstFailedAt: { waiting: null, transport: null, validation: null },
+  policy: POLICY,
+  ...overrides,
+});
+
+test("only validation failures spend the counted budget", () => {
+  // Forty consecutive waits and a hundred transport failures are not evidence
+  // about the candidate, so neither the count nor the other classes move.
+  const waiting = budget("waiting", {
+    attempts: { waiting: 40, transport: 0, validation: 0 },
+    firstFailedAt: { waiting: at(-5 * 60_000), transport: null, validation: null },
+  });
+  assert.equal(waiting.kind, "retry");
+  assert.equal(waiting.kind === "retry" ? waiting.classAttempt : 0, 41);
+  const transport = budget("transport", {
+    attempts: { waiting: 0, transport: 100, validation: 29 },
+    firstFailedAt: { waiting: null, transport: at(-60_000), validation: at(-60_000) },
+  });
+  assert.equal(transport.kind, "retry");
+  assert.equal(transport.kind === "retry" ? transport.retryClass : "waiting", "transport");
+});
+
+test("each retry class holds the next tick on a doubling backoff capped at a minute", () => {
+  const holds = [1, 2, 3, 4, 5, 6, 7, 40].map((attempt) => {
+    const decision = budget("waiting", {
+      attempts: { waiting: attempt - 1, transport: 0, validation: 0 },
+      firstFailedAt: { waiting: at(-60_000), transport: null, validation: null },
+    });
+    assert.equal(decision.kind, "retry");
+    return decision.kind === "retry" ? decision.nextEligibleAt.getTime() - T0.getTime() : -1;
+  });
+  assert.deepEqual(holds, [2_000, 4_000, 8_000, 16_000, 32_000, 60_000, 60_000, 60_000]);
+});
+
+test("waiting and transport end only by outlasting their own ceilings", () => {
+  const waitingHeld = budget("waiting", {
+    attempts: { waiting: 400, transport: 0, validation: 0 },
+    firstFailedAt: { waiting: at(-POLICY.waitingCeilingMs + 1_000), transport: null, validation: null },
+  });
+  assert.equal(waitingHeld.kind, "retry");
+  const waitingCeiling = budget("waiting", {
+    attempts: { waiting: 400, transport: 0, validation: 0 },
+    firstFailedAt: { waiting: at(-POLICY.waitingCeilingMs), transport: null, validation: null },
+  });
+  assert.equal(waitingCeiling.kind, "ineligible");
+  assert.equal(waitingCeiling.retryClass, "waiting");
+  assert.match(waitingCeiling.reason, /^waiting-ceiling reached: the chain stayed active for 6h00m \(limit 6h00m\)/u);
+
+  const transportHeld = budget("transport", {
+    attempts: { waiting: 0, transport: 3, validation: 0 },
+    firstFailedAt: { waiting: null, transport: at(-POLICY.transportCeilingMs + 1_000), validation: null },
+  });
+  assert.equal(transportHeld.kind, "retry");
+  const transportCeiling = budget("transport", {
+    attempts: { waiting: 0, transport: 3, validation: 0 },
+    firstFailedAt: { waiting: null, transport: at(-POLICY.transportCeilingMs), validation: null },
+  });
+  assert.equal(transportCeiling.kind, "ineligible");
+  assert.match(transportCeiling.reason, /^transport-ceiling reached: repository reads failed for 30m/u);
+});
+
+test("validation exhausts on the count and the elapsed time together, never on either alone", () => {
+  const burst = budget("validation", {
+    attempts: { waiting: 0, transport: 0, validation: 29 },
+    firstFailedAt: { waiting: null, transport: null, validation: at(-5 * 60_000) },
+  });
+  assert.equal(burst.kind, "retry", "thirty failures inside five minutes are one incident");
+  const slowButFew = budget("validation", {
+    attempts: { waiting: 0, transport: 0, validation: 3 },
+    firstFailedAt: { waiting: null, transport: null, validation: at(-31 * 60_000) },
+  });
+  assert.equal(slowButFew.kind, "retry", "four failures over half an hour are not a budget");
+  const exhausted = budget("validation", {
+    attempts: { waiting: 0, transport: 0, validation: 29 },
+    firstFailedAt: { waiting: null, transport: null, validation: at(-31 * 60_000) },
+  });
+  assert.equal(exhausted.kind, "ineligible");
+  assert.equal(exhausted.retryClass, "validation");
+  assert.match(exhausted.reason, /^validation-budget exhausted: 30 classification failures over 31m/u);
+});
+
+test("a class that has never failed measures its elapsed time from this tick", () => {
+  const first = budget("transport");
+  assert.equal(first.kind, "retry");
+  if (first.kind !== "retry") return;
+  assert.equal(first.firstFailedAt.getTime(), T0.getTime());
+  assert.equal(first.elapsedMs, 0);
+  assert.equal(first.classAttempt, 1);
+});
+
+test("a stored backoff defers a validating attempt and nothing else", () => {
+  const deferred = durableFacts();
+  deferred.existingAttempt = { status: "VALIDATING", reopenableLegacyRefusal: false, nextEligibleAt: at(1) };
+  assert.equal(recoveryDeferred(deferred, T0), true);
+  assert.equal(recoveryDeferred(deferred, at(1)), false, "eligibility is inclusive of its own instant");
+  const settled = durableFacts();
+  settled.existingAttempt = { status: "FAILED", reopenableLegacyRefusal: false, nextEligibleAt: at(60_000) };
+  assert.equal(recoveryDeferred(settled, T0), false);
+  assert.equal(recoveryDeferred(durableFacts(), T0), false);
 });
 
 test("durable classification narrows skip, retry, ineligible, exhausted, and queue outcomes", () => {
@@ -230,6 +341,7 @@ test("durable classification narrows skip, retry, ineligible, exhausted, and que
     expected: candidate,
     candidateDecision: {
       kind: "retry",
+      retryClass: "waiting",
       code: "chain-active",
       stopId: candidate.stopId,
       reason: "the chain has an active foreign run while recovery is being classified",
