@@ -1,5 +1,3 @@
-import { legacyGenerationMarkerForTemplateName } from "./canonical-template-transition.js";
-
 export type StepRole =
   | "spec"
   | "revalidation"
@@ -46,10 +44,11 @@ export const stepRole = (step: TemplateStepLike): StepRole | null => {
   return OUTPUT_KIND_ROLES[normalizedOutputKind] ?? null;
 };
 
-/** A retired graph marker takes precedence over an individual output protocol version. */
-export const stepGeneration = (step: TemplateStepLike): string => {
-  const templateName = step.taskTemplate?.name ?? step.taskTemplateName ?? null;
-  const retiredGeneration = templateName === null ? null : legacyGenerationMarkerForTemplateName(templateName);
-  if (retiredGeneration !== null) return retiredGeneration;
-  return step.outputKind.match(VERSION_SUFFIX)?.[1] ?? "v1";
-};
+/** A Step's output protocol generation is the `-vN` suffix on its output kind,
+ *  and nothing else. Template identity used to override it through a retired
+ *  graph marker, but a rollover preserves the output protocol unless outputKind
+ *  itself changes, so the only production caller (`canonicalOutputSchema`)
+ *  deliberately passed template identity in as absent. The `taskTemplate` fields
+ *  stay on `TemplateStepLike` for the role predicates that still read them. */
+export const stepGeneration = (step: TemplateStepLike): string =>
+  step.outputKind.match(VERSION_SUFFIX)?.[1] ?? "v1";

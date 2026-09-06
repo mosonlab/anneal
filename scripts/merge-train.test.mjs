@@ -7,8 +7,6 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 
-import "./merge-lease-adapter.test.mjs";
-
 import {
   acquireMergeTrainLease,
   coordinateMergeTrain,

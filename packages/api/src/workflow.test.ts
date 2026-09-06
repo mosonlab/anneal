@@ -582,7 +582,11 @@ test("chain advancement parks an archived successor without throwing or enqueuei
     $queryRaw: async () => [predecessor, next],
     task: {
       findUniqueOrThrow: async () => ({ ...predecessor, templateId: "template-1" }),
-      findMany: async () => [predecessor, next],
+      // Chain rows for this chain; the predecessor has no cross-chain binding,
+      // so the bound-successor query answers with nothing.
+      findMany: async ({ where }: { where?: { dispatchAfterTaskId?: string } } = {}) => (
+        where?.dispatchAfterTaskId === undefined ? [predecessor, next] : []
+      ),
       findUnique: async ({ where }: { where: { id?: string } }) => where.id === next.id ? next : null,
       findFirst: async () => null,
       updateMany: async () => ({ count: 1 }),
