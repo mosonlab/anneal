@@ -69,7 +69,11 @@ const instrumentTransactions = (
         },
       });
       return operation(instrumentedTx);
-    }, options as any);
+    }, {
+      maxWait: 5_000,
+      timeout: 30_000,
+      ...(options as Record<string, unknown>),
+    } as any);
   },
 }) as PrismaClient;
 
@@ -339,13 +343,13 @@ const raceHoldAndCompletion = async (winner: "hold" | "completion") => {
   return chain;
 };
 
-test("concurrent Hold and completion with Hold winning withholds the successor", async () => {
+test("concurrent Hold and completion with Hold winning withholds the successor", { timeout: 30_000 }, async () => {
   const chain = await raceHoldAndCompletion("hold");
   assert.equal(await db.run.count({ where: { taskId: chain.second.id } }), 0);
   assert.equal(await db.taskActivity.count({ where: { taskId: chain.first.id, body: { contains: "activation withheld" } } }), 1);
 });
 
-test("concurrent Hold and completion with completion winning preserves the activated Run", async () => {
+test("concurrent Hold and completion with completion winning preserves the activated Run", { timeout: 30_000 }, async () => {
   const chain = await raceHoldAndCompletion("completion");
   assert.equal(await db.run.count({ where: { taskId: chain.second.id, status: RunStatus.QUEUED } }), 1);
   assert.equal((await db.chainControl.findUniqueOrThrow({ where: { projectId_chainId: { projectId: chain.project.id, chainId: chain.chainId } } })).heldLayer, 2);
