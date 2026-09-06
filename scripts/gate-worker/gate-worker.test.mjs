@@ -1165,6 +1165,8 @@ test("every gate-worker script parses", () => {
   }
 });
 
+// test:gate-worker is historical: it includes delivery concurrency suites too.
+// Keep both halves in parity rather than narrowing the alias to its old name.
 test("the gate-worker npm alias and delivery gate step run the same suites", () => {
   const rootPackage = JSON.parse(readFileSync(join(here, "..", "..", "package.json"), "utf8"));
   const alias = rootPackage.scripts?.["test:gate-worker"];

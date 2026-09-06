@@ -51,11 +51,51 @@ const gateSource = readFileSync(new URL("./merge-gate.sh", import.meta.url), "ut
 const gateDeclarations = gateSource.replace(/\\\n/g, " ").split("\n")
   .filter((line) => /^(?:step|parallel_steps) /.test(line));
 const rootScripts = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts;
-const namedSuites = (declarations) => {
-  const commands = declarations.join("\n");
-  const aliases = [...commands.matchAll(/\bnpm run ([\w:-]+)/g)]
-    .map((match) => rootScripts[match[1]] ?? "");
-  return new Set([commands, ...aliases].join("\n").match(/scripts\/[\w/.-]+\.test\.mjs\b/g) ?? []);
+// Only the gate's current direct node --test commands and npm aliases count.
+// Keep selectors attached to their command rather than treating paths as proof.
+const testCommands = (declarations) => declarations.flatMap((declaration) =>
+  declaration.split(" :: ").flatMap((member) => {
+    const alias = /\bnpm run ([\w:-]+)/.exec(member);
+    const command = alias ? rootScripts[alias[1]] ?? "" : member;
+    const invocation = /\bnode (?:--import \S+ )?--test\s+(.+)/.exec(command);
+    if (!invocation) return [];
+    const args = invocation[1].match(/'[^']*'|"[^"]*"|[^\s]+/g) ?? [];
+    const selectors = [...invocation[1].matchAll(/--test-(skip|name)-pattern(?:=|\s+)(?:'([^']*)'|"([^"]*)"|([^\s]+))/g)]
+      .map((match) => ({ kind: match[1], pattern: match[2] ?? match[3] ?? match[4] }));
+    assert.equal((invocation[1].match(/--test-(?:skip|name)-pattern/g) ?? []).length,
+      selectors.length, "unparsed test selector");
+    return [{ suites: args.filter((arg) => /^scripts\/[\w/.-]+\.test\.mjs$/.test(arg)), selectors }];
+  }),
+);
+const namedSuites = (declarations) => new Set(testCommands(declarations).flatMap((command) => command.suites));
+const assertSelectorCoverage = (declarations) => {
+  const commands = testCommands(declarations);
+  for (const command of commands) {
+    if (command.selectors.length === 0) continue;
+    // Fail closed for new combinations until their coverage is explicitly proved.
+    assert.equal(command.selectors.length, 1, "combined test selectors need a coverage proof");
+    const selector = command.selectors[0];
+    const complements = commands.filter((other) => other !== command &&
+      other.selectors.length === 1 &&
+      other.selectors[0].kind !== selector.kind &&
+      other.selectors[0].pattern === selector.pattern);
+    assert.ok(complements.some((other) => other.suites.some((suite) => command.suites.includes(suite))),
+      `uncompensated test selector: ${selector.kind} ${selector.pattern}`);
+    // A skip command may also name suites with no matching test. For these,
+    // accept only an anchored literal whose test title is absent from the file.
+    for (const suite of command.suites) {
+      if (complements.some((other) => other.suites.includes(suite))) continue;
+      const literal = /^\^([\w ]+)\$$/.exec(selector.pattern)?.[1];
+      assert.ok(selector.kind === "skip" && literal &&
+        !readFileSync(new URL(`../${suite}`, import.meta.url), "utf8").includes(literal),
+      `uncompensated test selector for ${suite}`);
+    }
+  }
+};
+const assertInstallFreeOrder = (declarations) => {
+  const install = declarations.findIndex((line) => line.startsWith('parallel_steps "dependencies and the install-free suites" '));
+  const postgres = declarations.findIndex((line) => line.startsWith('step "throwaway PostgreSQL is accepting connections" '));
+  assert.ok(install >= 0 && postgres > install, "install-free group must precede PostgreSQL");
 };
 
 test("COVERAGE every scripts test is named by an executed gate step", () => {
@@ -63,12 +103,32 @@ test("COVERAGE every scripts test is named by an executed gate step", () => {
     .filter((path) => path.endsWith(".test.mjs"))
     .map((path) => `scripts/${path}`);
   assert.ok(suites.length > 0);
+  assertSelectorCoverage(gateDeclarations);
   const covered = namedSuites(gateDeclarations);
   assert.deepEqual(suites.filter((path) => !covered.has(path)).sort(), [], "scripts suites missing from gate steps");
 });
 
 test("COVERAGE unused aliases do not count as executed suites", () => {
   assert.deepEqual([...namedSuites(['step "unrelated" true'])], []);
+});
+
+test("COVERAGE removing the complementary hygiene step leaves an execution gap", () => {
+  const incomplete = gateDeclarations.map((line) => line.replace(
+    /"secret hygiene built-checkout integration" node --test .*? :: /, "",
+  ));
+  assert.throws(() => assertSelectorCoverage(incomplete), /uncompensated test selector/);
+});
+
+test("COVERAGE a suite mention outside node --test does not count", () => {
+  assert.deepEqual([...namedSuites(['step "mention" echo scripts/example.test.mjs'])], []);
+});
+
+test("GROUP-SHAPE rejects PostgreSQL before the install-free group", () => {
+  const reversed = [...gateDeclarations];
+  const install = reversed.findIndex((line) => line.startsWith('parallel_steps "dependencies and the install-free suites" '));
+  const postgres = reversed.findIndex((line) => line.startsWith('step "throwaway PostgreSQL is accepting connections" '));
+  [reversed[install], reversed[postgres]] = [reversed[postgres], reversed[install]];
+  assert.throws(() => assertInstallFreeOrder(reversed), /install-free group must precede PostgreSQL/);
 });
 
 test("GROUP-SHAPE added operational suites share the install-free group", () => {
@@ -90,7 +150,7 @@ test("GROUP-SHAPE added operational suites share the install-free group", () => 
   assert.ok(hygieneTests.includes('test("the command runs over this checkout and reports classes only",'), "split integration selector must match an existing test");
   assert.match(installFree, /"dependency gate fixtures" npm run test:dependency-gate ::/);
   assert.doesNotMatch(installFree, /await_postgres|prisma|dbtest|test:db/);
-  assert.ok(gateSource.indexOf('step "throwaway PostgreSQL is accepting connections"') > gateSource.indexOf(installFree.slice(0, 65)));
+  assertInstallFreeOrder(gateDeclarations);
 });
 
 // The two helpers host-sizing.sh is owed. `note` is the gate's log format, not
