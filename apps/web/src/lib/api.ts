@@ -52,11 +52,6 @@ export class ApiError extends Error {
     this.reason = reason;
   }
 
-  /** The endpoint is not implemented yet — pages degrade instead of erroring. */
-  get missingEndpoint(): boolean {
-    return this.status === 404 || this.status === 405 || this.status === 501;
-  }
-
   get unauthorized(): boolean {
     return this.status === 401 || this.status === 403;
   }
