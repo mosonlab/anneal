@@ -54,18 +54,19 @@
 # verdict, this script returns 76. An automation may read 1 as FAIL only because
 # nothing else here can produce it.
 #
-#   0  PASS                 75  every slot was busy for the whole timeout
+#   0  PASS                 75  every eligible slot stayed busy until timeout
 #   1  FAIL                 76  nothing ran: a precondition, the mirror push or
 #   2  usage error              a slot lock failed, so no verdict was formed
 #   3  NOT AUTHORITATIVE
 #
 # 75 and 76 are not FAILs and must never be read as one.
 #
-# 75 and 76 divide on one question: was there ever a slot that could have been
-# taken? 75 means yes and they stayed occupied — a queue, so re-dispatching later
-# is the answer. 76 means no: a lock could not be operated at all, and waiting
-# for that is waiting for nothing. A slot whose lock is broken is never counted
-# as busy.
+# At timeout, 76 means a tried lock was broken or a worker produced no verdict;
+# otherwise 75 means the eligible slots stayed busy. Fallback is not eligible
+# while a healthy primary is busy and its grace has not elapsed. A timeout
+# shorter than the grace can therefore return 75 without probing fallback;
+# use a longer timeout or shorter grace to allow fallback on a later dispatch.
+# A slot whose lock is broken is never counted as busy.
 set -uo pipefail
 
 # No EXIT_FAIL here on purpose: this script transports verdicts and forms none,
@@ -86,6 +87,7 @@ ALLOW_LOCAL="${AGENTOS_GATE_ALLOW_LOCAL:-0}"
 LOCAL_SLOT_COUNT="${AGENTOS_GATE_LOCAL_SLOTS-1}"
 POLL_SECONDS="${GATE_DISPATCH_POLL_SECONDS:-30}"
 TIMEOUT_MINUTES="${GATE_DISPATCH_TIMEOUT_MINUTES:-60}"
+FALLBACK_AFTER_MINUTES="${GATE_DISPATCH_FALLBACK_AFTER_MINUTES:-6}"
 if [ -n "${AGENTOS_RUNNER_HOME:-}" ]; then
   SLOT_ROOT="${AGENTOS_RUNNER_HOME}/.cache/gate-dispatch"
   SLOT_ROOT_SOURCE="AGENTOS_RUNNER_HOME"
@@ -180,6 +182,15 @@ else
 fi
 
 case "$TIMEOUT_MINUTES" in ''|*[!0-9]*) die "--timeout-minutes needs a number, got: $TIMEOUT_MINUTES" ;; esac
+case "$FALLBACK_AFTER_MINUTES" in ''|*[!0-9]*) die "GATE_DISPATCH_FALLBACK_AFTER_MINUTES needs a number, got: $FALLBACK_AFTER_MINUTES" ;; esac
+# Bound seconds to a signed 32-bit integer before doing shell arithmetic.
+# Strip leading zeros first so decimal padding cannot overflow or imply octal.
+FALLBACK_AFTER_MINUTES="$(printf '%s\n' "$FALLBACK_AFTER_MINUTES" | sed 's/^0*//')"
+FALLBACK_AFTER_MINUTES="${FALLBACK_AFTER_MINUTES:-0}"
+if [ "${#FALLBACK_AFTER_MINUTES}" -gt 8 ] \
+  || { [ "${#FALLBACK_AFTER_MINUTES}" -eq 8 ] && [ "$FALLBACK_AFTER_MINUTES" -gt 35791394 ]; }; then
+  die "GATE_DISPATCH_FALLBACK_AFTER_MINUTES needs a number no greater than 35791394, got: $FALLBACK_AFTER_MINUTES"
+fi
 case "$POLL_SECONDS" in ''|*[!0-9]*|0) die "GATE_DISPATCH_POLL_SECONDS needs a positive number, got: $POLL_SECONDS" ;; esac
 case "$LOCAL_SLOT_COUNT" in
   ''|*[!0-9]*) die "AGENTOS_GATE_LOCAL_SLOTS needs a positive number, got: $LOCAL_SLOT_COUNT" ;;
@@ -380,7 +391,8 @@ no_verdict() {
   exit "$GATE_EXIT_NO_VERDICT"
 }
 
-DEADLINE=$(( $(date +%s) + TIMEOUT_MINUTES * 60 ))
+WAIT_STARTED="$(date +%s)"
+DEADLINE=$(( WAIT_STARTED + TIMEOUT_MINUTES * 60 ))
 FIRST=1
 # Survives the rounds: once a slot's lock has been seen broken, a later 75 would
 # be a lie even if that round happened to find only busy slots.
@@ -389,6 +401,7 @@ UNAVAILABLE_EVER=""
 LOCAL_DISABLED=0
 PRIMARY_DISABLED=0
 FALLBACK_DISABLED=0
+FALLBACK_ANNOUNCED=0
 if [ -z "$PRIMARY_SERVER" ] && ! local_eligible; then
   no_verdict \
     "explicitly enabled local slot is ineligible (worktree not clean at ${OID:0:12})" \
@@ -399,6 +412,9 @@ while :; do
   # slots that could have been taken and were not; round_broken the ones whose
   # lock could not be operated. Waiting is only justified while round_busy > 0:
   # a busy slot frees when its gate ends, a broken one does not free at all.
+  primary_busy=0
+  fallback_held=0
+  primary_fully_busy=0
   round_busy=0
   round_broken=""
 
@@ -446,14 +462,30 @@ while :; do
           UNAVAILABLE_EVER="${UNAVAILABLE_EVER} primary"
           break
           ;;
-        1) round_busy=$(( round_busy + 1 )) ;;
+        1) round_busy=$(( round_busy + 1 )); primary_busy=$(( primary_busy + 1 )) ;;
         *) round_broken="${round_broken} ${primary_slot}" ;;
       esac
     done
   fi
 
-  outcome=0
+  if [ "$primary_busy" -eq "${#PRIMARY_SLOTS[@]}" ]; then
+    primary_fully_busy=1
+  fi
   if [ -n "$FALLBACK_SERVER" ] && [ "$FALLBACK_DISABLED" -eq 0 ]; then
+    waited_seconds=$(( $(date +%s) - WAIT_STARTED ))
+    if [ "$primary_fully_busy" -eq 1 ] \
+      && [ "$waited_seconds" -lt "$(( FALLBACK_AFTER_MINUTES * 60 ))" ]; then
+      fallback_held=1
+    fi
+  fi
+
+  outcome=0
+  if [ -n "$FALLBACK_SERVER" ] && [ "$FALLBACK_DISABLED" -eq 0 ] && [ "$fallback_held" -eq 0 ]; then
+    if [ "$primary_fully_busy" -eq 1 ] && [ "$FALLBACK_ANNOUNCED" -eq 0 ]; then
+      printf 'gate-dispatch: trying fallback capacity (fallback after %s min; waited %s min)\n' \
+        "$FALLBACK_AFTER_MINUTES" "$(( waited_seconds / 60 ))" >&2
+      FALLBACK_ANNOUNCED=1
+    fi
     try_slot remote-2 || outcome=$?
     case "$outcome" in
       0)
@@ -506,6 +538,7 @@ while :; do
     printf 'GATE DISPATCH: NO SLOT\n'
     exit "$EXIT_NO_SLOT"
   fi
+  log_wait="$FIRST"
   if [ "$FIRST" -eq 1 ]; then
     FIRST=0
     if [ "$ALLOW_LOCAL" -eq 1 ] && ! local_eligible; then
@@ -515,9 +548,15 @@ while :; do
       printf 'gate-dispatch: the locks of%s are unusable; waiting on the %s slot(s) that are merely busy\n' \
         "$round_broken" "$round_busy" >&2
     fi
-    printf 'gate-dispatch: %s slot(s) busy, polling every %ss until %s\n' \
+  fi
+  if [ "$log_wait" -eq 1 ]; then
+    fallback_wait=""
+    if [ "$fallback_held" -eq 1 ]; then
+      fallback_wait="; fallback after ${FALLBACK_AFTER_MINUTES} min; waited $(( waited_seconds / 60 )) min"
+    fi
+    printf 'gate-dispatch: %s slot(s) busy, polling every %ss until %s%s\n' \
       "$round_busy" "$POLL_SECONDS" \
-      "$(date -r "$DEADLINE" '+%H:%M:%S' 2>/dev/null || date -d "@${DEADLINE}" '+%H:%M:%S')" >&2
+      "$(date -r "$DEADLINE" '+%H:%M:%S' 2>/dev/null || date -d "@${DEADLINE}" '+%H:%M:%S')" "$fallback_wait" >&2
   fi
   sleep "$POLL_SECONDS"
 done
