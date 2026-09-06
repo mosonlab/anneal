@@ -303,9 +303,6 @@ export const stopStateFor = async (tx: Tx, taskId: string): Promise<StopState> =
   return { stop, dispositions };
 };
 
-export const inStopState = async (tx: Tx, taskId: string): Promise<boolean> =>
-  (await stopStateFor(tx, taskId)) !== null;
-
 export const stopStateRefusal = (state: NonNullable<StopState>): string =>
   `Merge integrator stopped on ${state.stop.condition}; answer the stop question before changing this task`;
 
@@ -468,8 +465,6 @@ export const settleIntegratorTerminal = async (
     body: input.activityBody,
   } });
 };
-
-export const INTEGRATOR_OUTPUT = INTEGRATOR_OUTPUT_KIND;
 
 // ---------------------------------------------------------------------------
 // §D-P7 — stop questions, follow-ups, and the answer transaction
@@ -1064,11 +1059,6 @@ export const integratorBindingRefusalFor = async (
       })
       : null;
   return integratorBindingRefusal(agentName, step);
-};
-
-export const assertIntegratorBinding = async (tx: Tx, subject: BindingSubject): Promise<void> => {
-  const refusal = await integratorBindingRefusalFor(tx, subject);
-  if (refusal) throw new IntegratorBindingError(refusal);
 };
 
 /**

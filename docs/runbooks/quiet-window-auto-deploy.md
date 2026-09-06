@@ -17,7 +17,9 @@ the default count). Linux and macOS use the same generated inventory. The
 macOS control-plane profile is maintainer-unverified; a macOS runner-only host
 uses launchd only for its configured runner labels. The release may contain
 the resident merge-executor runtime, but that service is outside this
-activation set. An Anneal Run workspace is never deployed.
+activation set; on Linux its root-owned runtime follows the release through
+`agentos-merge-executor-follower.timer`. An Anneal Run workspace is never
+deployed.
 
 ## Runner-only host
 
@@ -95,9 +97,15 @@ stage two is the explicit root-only exception described below. Require:
 
 - `current` and `previous` are relative symlinks to direct children of
   `releases/`;
-- `shared/.env` is mode 0600 and contains `DATABASE_URL`,
-  `FEISHU_DEFAULT_CHAT_ID`, and `GITHUB_READ_TOKEN` (the latter must be in the
-  file), plus the five absolute persistent paths beneath `shared/`:
+- `shared/.env` is mode 0600. Both roles require `DATABASE_URL` for
+  quiet-window queries and the deploy barrier, and `FEISHU_DEFAULT_CHAT_ID`
+  for deploy notifications; these two values may also be inherited from the
+  deploy job's environment. Control-plane additionally requires
+  `GITHUB_READ_TOKEN` in the file. Runner additionally requires `OPERATOR_TOKEN`
+  and `RUNNER_TOKEN` in the file, but does not require `GITHUB_READ_TOKEN`.
+  Optional `RUNNER_API_URL` may be set in the file or inherited and is validated
+  by `controlPlaneApiBaseUrl`. The file also contains the five absolute
+  persistent paths beneath `shared/`:
   `FILES_ROOT`, `RUNNER_WORKSPACE_ROOT`, `RUNNER_DEPENDENCY_CACHE_ROOT`,
   `RUNNER_REPO_MIRROR_ROOT`, and `CONTROL_PLANE_STATE_DIR`;
 - every configured service definition, whether a Linux systemd `<label>.service`

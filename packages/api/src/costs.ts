@@ -263,19 +263,26 @@ const runCost = (run: CostsRunRow): UsageCost | null => {
 const isTerminalRunStatus = (status: RunStatus): status is typeof terminalRunStatuses[number] =>
   terminalRunStatuses.includes(status as typeof terminalRunStatuses[number]);
 
-type CacheSplit = {
+export type CacheSplit = {
   inputTokens: number;
   cachedInputTokens: number;
   cacheCreationInputTokens: number;
   uncachedInputTokens: number;
 };
 
-/** A split is known only when all three pieces of the canonical input total
- * are present and internally consistent. A persisted NULL stays unknown. */
-const cacheSplit = (run: CostsRunRow): CacheSplit | null => {
-  const session = run.session;
-  if (session === null) return null;
-  const { inputTokens, cachedInputTokens, cacheCreationInputTokens } = session;
+/** The canonical input-token split rule, over the three persisted columns
+ * alone. A split is known only when all three pieces of the canonical input
+ * total are present and internally consistent — cached reads and cache writes
+ * are subsets of `inputTokens`. A persisted NULL stays unknown.
+ *
+ * Exported because the per-run diagnostics in `run-metrics.ts` report the same
+ * split to an operator; that reader must not re-derive this rule. */
+export const inputTokenSplit = (tokens: {
+  inputTokens: number | null;
+  cachedInputTokens: number | null;
+  cacheCreationInputTokens: number | null;
+}): CacheSplit | null => {
+  const { inputTokens, cachedInputTokens, cacheCreationInputTokens } = tokens;
   if (inputTokens === null || cachedInputTokens === null || cacheCreationInputTokens === null
     || inputTokens < 0 || cachedInputTokens < 0 || cacheCreationInputTokens < 0
     || cachedInputTokens + cacheCreationInputTokens > inputTokens) return null;
@@ -286,6 +293,9 @@ const cacheSplit = (run: CostsRunRow): CacheSplit | null => {
     uncachedInputTokens: inputTokens - cachedInputTokens - cacheCreationInputTokens,
   };
 };
+
+const cacheSplit = (run: CostsRunRow): CacheSplit | null =>
+  run.session === null ? null : inputTokenSplit(run.session);
 
 /** The efficiency view prices uncached input at the Run's own model, the same
  * model `runSessionUsageCost` charges the whole aggregate at. Codex reports no
