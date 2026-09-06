@@ -12,7 +12,7 @@ import { RUNTIME_TOOL_FILES, expectedDirectoryEntries } from "../../../scripts/d
  * verifier can read it without importing across into this package. This module
  * re-exports it, keeping the build's import surface unchanged.
  */
-export { RUNTIME_TOOL_FILES, expectedDirectoryEntries } from "../../../scripts/deploy/runtime-tool-inventory.mjs";
+export { RUNTIME_TOOL_FILES, expectedDirectoryEntries };
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultRepositoryRoot = resolve(scriptDirectory, "../../..");

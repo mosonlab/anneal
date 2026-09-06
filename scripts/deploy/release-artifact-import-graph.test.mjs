@@ -6,20 +6,26 @@ import { dirname, join, relative, resolve, sep } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import ts from "typescript";
+
 const deployRoot = dirname(fileURLToPath(import.meta.url));
 
-// Statement-anchored: a specifier only counts when `import` or `export` opens
-// the line, which keeps a mention inside a comment or a string out of the
-// graph. A clause may still span lines, so the pre-`from` run matches newlines.
-const IMPORT_PATTERNS = Object.freeze([
-  /^\s*import\s+(?:[^'";]*?\bfrom\s*)?["'](?<specifier>[^"']*)["']/gmu,
-  /^\s*export\s+[^'";]*?\bfrom\s*["'](?<specifier>[^"']*)["']/gmu,
-]);
+/**
+ * Module edges come from a real parse, not a pattern match. A hand-rolled
+ * regular expression misses valid spellings - `import{x}from"..."` with no
+ * spaces, a comment between the keyword and the specifier, a second
+ * declaration on one line - and a missed edge is an escape the check would
+ * pass. A parse error is a violation too, for the same fail-loud reason.
+ */
+const parseModule = (path, source) => ts.createSourceFile(path, source, ts.ScriptTarget.Latest, false, ts.ScriptKind.JS);
 
-const staticImportSpecifiers = (source) => {
+const staticImportSpecifiers = (sourceFile) => {
   const specifiers = [];
-  for (const pattern of IMPORT_PATTERNS) {
-    for (const match of source.matchAll(pattern)) specifiers.push(match.groups.specifier);
+  for (const statement of sourceFile.statements) {
+    const moduleSpecifier = ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement)
+      ? statement.moduleSpecifier
+      : undefined;
+    if (moduleSpecifier !== undefined && ts.isStringLiteral(moduleSpecifier)) specifiers.push(moduleSpecifier.text);
   }
   return specifiers;
 };
@@ -45,7 +51,13 @@ const escapingImport = ({ entryPath, root }) => {
     } catch (error) {
       return { importer, specifier: "", detail: `unreadable-${error?.code ?? "error"}` };
     }
-    for (const specifier of staticImportSpecifiers(source)) {
+    const sourceFile = parseModule(importer, source);
+    const parseDiagnostics = sourceFile.parseDiagnostics ?? [];
+    if (parseDiagnostics.length > 0) {
+      const detail = ts.flattenDiagnosticMessageText(parseDiagnostics[0].messageText, "; ");
+      return { importer, specifier: "", detail: `unparsable-${detail}` };
+    }
+    for (const specifier of staticImportSpecifiers(sourceFile)) {
       if (specifier.startsWith("node:") || isBuiltin(specifier)) continue;
       if (!specifier.startsWith(".")) {
         return { importer, specifier, detail: "not-a-relative-module" };
@@ -140,6 +152,93 @@ test("a graph of Node builtins and sibling modules has no violation", () => {
   });
   try {
     assert.equal(escapingImport({ entryPath: join(root, "release-artifact.mjs"), root }), null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// The spellings below are all valid ESM that a line-anchored pattern match
+// misses. Each one is the shape of the edge that broke deployment, so each one
+// must still be reported with its importer and specifier.
+test("an unspaced import declaration is reported", () => {
+  const root = fixture({
+    "release-artifact.mjs": 'import{helper}from"./helper.mjs";\nexport const verify = helper;\n',
+    "helper.mjs": 'import{RUNTIME_TOOL_FILES}from"../../packages/runner/scripts/build-runtime-tools.mjs";\n'
+      + "export const helper = () => RUNTIME_TOOL_FILES;\n",
+  });
+  try {
+    const violation = escapingImport({ entryPath: join(root, "release-artifact.mjs"), root });
+    assert.deepEqual(
+      { importer: violation?.importer, specifier: violation?.specifier, detail: violation?.detail },
+      {
+        importer: join(root, "helper.mjs"),
+        specifier: "../../packages/runner/scripts/build-runtime-tools.mjs",
+        detail: "outside-root",
+      },
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an unspaced export-from declaration is reported", () => {
+  const root = fixture({
+    "release-artifact.mjs": 'export{RUNTIME_TOOL_FILES}from"../../packages/runner/scripts/build-runtime-tools.mjs";\n',
+  });
+  try {
+    const violation = escapingImport({ entryPath: join(root, "release-artifact.mjs"), root });
+    assert.equal(violation?.specifier, "../../packages/runner/scripts/build-runtime-tools.mjs");
+    assert.equal(violation?.detail, "outside-root");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a comment between the keyword and the specifier does not hide the edge", () => {
+  const root = fixture({
+    "release-artifact.mjs": 'import/* legal separator */"../../outside.mjs";\nexport const verify = null;\n',
+  });
+  try {
+    const violation = escapingImport({ entryPath: join(root, "release-artifact.mjs"), root });
+    assert.equal(violation?.specifier, "../../outside.mjs");
+    assert.equal(violation?.detail, "outside-root");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a second declaration on the same line is walked too", () => {
+  const root = fixture({
+    "release-artifact.mjs": 'import "./inside.mjs"; import "../../outside.mjs";\nexport const verify = null;\n',
+    "inside.mjs": "export const inside = true;\n",
+  });
+  try {
+    const violation = escapingImport({ entryPath: join(root, "release-artifact.mjs"), root });
+    assert.equal(violation?.specifier, "../../outside.mjs");
+    assert.equal(violation?.detail, "outside-root");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a specifier mentioned in a comment or a string is not an edge", () => {
+  const root = fixture({
+    "release-artifact.mjs": '// import "../../packages/runner/scripts/build-runtime-tools.mjs";\n'
+      + 'export const note = \'import "../../outside.mjs";\';\n',
+  });
+  try {
+    assert.equal(escapingImport({ entryPath: join(root, "release-artifact.mjs"), root }), null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a module the parser cannot read is a violation rather than an empty graph", () => {
+  const root = fixture({ "release-artifact.mjs": 'import { helper } from "./helper.mjs"\n{{{\n' });
+  try {
+    const violation = escapingImport({ entryPath: join(root, "release-artifact.mjs"), root });
+    assert.equal(violation?.importer, join(root, "release-artifact.mjs"));
+    assert.match(violation?.detail ?? "", /^unparsable-/u);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
