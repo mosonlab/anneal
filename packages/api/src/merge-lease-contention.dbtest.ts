@@ -63,6 +63,9 @@ const alerts = async () => await db.inboxMessage.findMany({
   where: { dedupeKey: { startsWith: "merge-lease-contention:" } },
 });
 
+// Explicit in every case: the window is configurable, so a host that set
+// MERGE_LEASE_CONTENTION_ALERT_MINUTES must not change what these assert.
+const WINDOW_MS = contentionAlertAfterMs({ MERGE_LEASE_CONTENTION_ALERT_MINUTES: "30" });
 const started = new Date("2026-09-06T11:00:00.000Z");
 const minutesAfter = (minutes: number): Date => new Date(started.getTime() + minutes * 60_000);
 
@@ -73,7 +76,7 @@ test("the first contention writes the activity naming the holder and alerts nobo
     readinessTaskId: chain.readinessTaskId,
     holder,
     now: started,
-  });
+  }, WINDOW_MS);
 
   assert.equal(outcome, "opened");
   const markers = await contentionMarkers(chain.readinessTaskId);
@@ -97,7 +100,7 @@ test("contention short of the window repeats neither the activity nor an alert",
     readinessTaskId: chain.readinessTaskId,
     holder,
     now: started,
-  });
+  }, WINDOW_MS);
   for (const minutes of [1, 10, 29]) {
     assert.equal(
       await noteLeaseContention(db, {
@@ -105,7 +108,7 @@ test("contention short of the window repeats neither the activity nor an alert",
         readinessTaskId: chain.readinessTaskId,
         holder,
         now: minutesAfter(minutes),
-      }),
+      }, WINDOW_MS),
       "continuing",
       `${minutes} minutes in`,
     );
@@ -122,7 +125,7 @@ test("contention past the window alerts once, records one event, and steals noth
     readinessTaskId: chain.readinessTaskId,
     holder,
     now: started,
-  });
+  }, WINDOW_MS);
 
   assert.equal(
     await noteLeaseContention(db, {
@@ -130,7 +133,7 @@ test("contention past the window alerts once, records one event, and steals noth
       readinessTaskId: chain.readinessTaskId,
       holder,
       now: minutesAfter(31),
-    }),
+    }, WINDOW_MS),
     "alerted",
   );
 
@@ -156,7 +159,7 @@ test("contention past the window alerts once, records one event, and steals noth
         readinessTaskId: chain.readinessTaskId,
         holder,
         now: minutesAfter(minutes),
-      }),
+      }, WINDOW_MS),
       "continuing",
     );
   }
@@ -176,7 +179,7 @@ test("taking the lease ends the episode, and the next contention starts a new on
     readinessTaskId: chain.readinessTaskId,
     holder,
     now: started,
-  });
+  }, WINDOW_MS);
 
   assert.equal(
     await clearLeaseContention(db, {
@@ -202,7 +205,7 @@ test("taking the lease ends the episode, and the next contention starts a new on
       readinessTaskId: chain.readinessTaskId,
       holder,
       now: minutesAfter(40),
-    }),
+    }, WINDOW_MS),
     "opened",
   );
   // The new episode's window is measured from its own first contention, so the
@@ -213,7 +216,7 @@ test("taking the lease ends the episode, and the next contention starts a new on
       readinessTaskId: chain.readinessTaskId,
       holder,
       now: minutesAfter(50),
-    }),
+    }, WINDOW_MS),
     "continuing",
   );
   assert.deepEqual(await contentionEvents(chain.target.chainId), []);
@@ -249,13 +252,13 @@ test("the lease route answers with the live holder and the recorded contention",
     readinessTaskId: chain.readinessTaskId,
     holder,
     now: started,
-  });
+  }, WINDOW_MS);
   await noteLeaseContention(db, {
     target: chain.target,
     readinessTaskId: chain.readinessTaskId,
     holder,
     now: minutesAfter(31),
-  });
+  }, WINDOW_MS);
 
   const operatorToken = process.env.OPERATOR_TOKEN;
   process.env.OPERATOR_TOKEN = "operator-dbtest-token";
