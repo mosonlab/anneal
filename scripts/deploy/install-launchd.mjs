@@ -68,7 +68,6 @@ const SYSTEMD_SERVICE_TEMPLATE = join(SCRIPT_DIR, "com.agentos.service.unit.in")
 const SYSTEMD_AUTO_DEPLOY_TEMPLATE = join(SCRIPT_DIR, "com.agentos.auto-deploy.unit.in");
 const SYSTEMD_AUTO_DEPLOY_TIMER_TEMPLATE = join(SCRIPT_DIR, "com.agentos.auto-deploy.timer.in");
 const SERVICE_WRAPPER_SOURCE = join(SCRIPT_DIR, "launchd-service-wrapper.mjs");
-const UNPREFIXED_SERVICE_WRAPPER_SOURCE = join(SCRIPT_DIR, "launchd-service-wrapper.unprefixed.mjs");
 const SERVICE_INSTALL_ROOT = ".agentos-deploy/launchd";
 const AUTO_DEPLOY_INSTALL_ROOT = ".agentos-deploy/launchd-auto-deploy";
 const SYSTEMD_UNIT_DIRECTORY = "/etc/systemd/system";
@@ -799,11 +798,6 @@ export const renderServicePlists = ({
 };
 
 const sha256 = (contents) => createHash("sha256").update(contents).digest("hex");
-
-const serviceWrapperSource = (runnerIdPrefix, deployRole = DEFAULT_DEPLOY_ROLE) => runnerIdPrefix === ""
-  && deployRole === DEFAULT_DEPLOY_ROLE
-  ? UNPREFIXED_SERVICE_WRAPPER_SOURCE
-  : SERVICE_WRAPPER_SOURCE;
 
 const writeAtomic = (destination, contents, mode, ownership = null, chown = chownSync) => {
   mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
@@ -1744,7 +1738,7 @@ const systemdStagePlan = ({
   // Stage the wrapper alongside units so a root stage can install the complete
   // manifest atomically. The target is intentionally outside /etc and remains
   // an explicit manifest entry, matching the LaunchAgent installer.
-  const wrapperContents = readFileSync(serviceWrapperSource(runnerIdPrefix, deployRole));
+  const wrapperContents = readFileSync(SERVICE_WRAPPER_SOURCE);
   const wrapperTargetExists = existsSync(wrapper);
   const wrapperStagedPath = stageSystemdDefinition({
     stagingRoot: stageRoot,
@@ -2435,7 +2429,6 @@ export const installLaunchdServices = ({
   })));
   verifyServicePlistDefinitions(rendered, inventory);
   const previousByPath = new Map(previous?.manifest.entries.map((entry) => [entry.path, entry]) ?? []);
-  const wrapperSource = serviceWrapperSource(runnerIdPrefix, deployRole);
   const generatedWrapperEntry = {
     path: wrapper,
     existed: existsSync(wrapper),
@@ -2444,7 +2437,7 @@ export const installLaunchdServices = ({
       ? join(root, SERVICE_INSTALL_ROOT, "backups", SERVICE_WRAPPER_FILE_NAME)
       : null,
     originalSha256: existsSync(wrapper) ? sha256(readFileSync(wrapper)) : null,
-    installedSha256: sha256(readFileSync(wrapperSource)),
+    installedSha256: sha256(readFileSync(SERVICE_WRAPPER_SOURCE)),
   };
   const previousWrapperEntry = previousByPath.get(wrapper);
   const entries = [previousWrapperEntry
@@ -2535,7 +2528,7 @@ export const installLaunchdServices = ({
   }
   const bootstrap = bootstrapCurrentRelease({ repositoryRoot: root });
   if (!previousWrapperEntry && existsSync(wrapper)
-      && readFileSync(wrapper, "utf8") !== readFileSync(wrapperSource, "utf8") && !replaceExisting) {
+      && readFileSync(wrapper, "utf8") !== readFileSync(SERVICE_WRAPPER_SOURCE, "utf8") && !replaceExisting) {
     throw new Error(`launchd-service-wrapper-conflict:${wrapper}`);
   }
   mkdirSync(join(root, SERVICE_INSTALL_ROOT, "backups"), { recursive: true, mode: 0o700 });
@@ -2605,8 +2598,8 @@ export const installLaunchdServices = ({
       writeFileSync(entry.backupPath, readFileSync(entry.path), { flag: "wx", mode: 0o600 });
     }
   }
-  if (!existsSync(wrapper) || fileDigest(wrapper) !== fileDigest(wrapperSource)) {
-    writeAtomic(wrapper, readFileSync(wrapperSource), 0o755);
+  if (!existsSync(wrapper) || fileDigest(wrapper) !== fileDigest(SERVICE_WRAPPER_SOURCE)) {
+    writeAtomic(wrapper, readFileSync(SERVICE_WRAPPER_SOURCE), 0o755);
   }
   for (const entry of entries.slice(1)) {
     if (!existsSync(entry.path) || sha256(readFileSync(entry.path)) !== entry.installedSha256) {
