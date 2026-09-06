@@ -5,10 +5,10 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { pullRequestLabel } from "../lib/format";
-import { StartabilityChecklist, StepOutput, StrandedSalvageList, TaskPrompt, branchUrl } from "../pages/TaskDetail";
+import { durationMs, percent, pullRequestLabel, tokensPerSecond } from "../lib/format";
+import { RunDiagnostics, StartabilityChecklist, StepOutput, StrandedSalvageList, TaskPrompt, branchUrl } from "../pages/TaskDetail";
 import { partitionTaskPrompt } from "../lib/task-prompt";
-import type { TaskStartability, TaskStepOutput } from "../lib/types";
+import type { RunMetrics, TaskStartability, TaskStepOutput } from "../lib/types";
 import prompts from "./fixtures/tc-ux-v1-prompts.json";
 import provenance from "./fixtures/tc-ux-v1-prompts.provenance.json";
 
@@ -170,6 +170,111 @@ test("a long step output clamps and offers Show more; a short one does neither",
   const short = renderToStaticMarkup(<StepOutput output={output("one line")} />);
   assert.doesNotMatch(short, /max-h-\[420px\]/);
   assert.doesNotMatch(short, /Show more/);
+});
+
+/* ---------------------------------------------------------- run diagnostics */
+
+const unknownMetrics: RunMetrics = {
+  phases: { queuedMs: null, provisioningMs: null, executingMs: null, inboxWaitMs: null, cleanupMs: null },
+  tokens: { input: null, cachedRead: null, cacheWrite: null, uncachedInput: null, output: null, cacheHitRatio: null },
+  tools: { calls: 0, failed: 0, unclassified: 0, totalToolMs: 0, unpairedCalls: 0, byName: [] },
+  modelActiveMs: null,
+  modelActiveIsUpperBound: false,
+  outputTokensPerSecond: null,
+  termination: { reason: null, exitCode: null, signal: null },
+};
+
+const measuredMetrics: RunMetrics = {
+  phases: { queuedMs: 12_000, provisioningMs: 3_000, executingMs: 600_000, inboxWaitMs: 30_000, cleanupMs: 250 },
+  tokens: { input: 120_000, cachedRead: 90_000, cacheWrite: 5_000, uncachedInput: 25_000, output: 8_000, cacheHitRatio: 0.75 },
+  tools: { calls: 42, failed: 3, unclassified: 1, totalToolMs: 9_000, unpairedCalls: 2, byName: [{ name: "Bash", calls: 20, failed: 1 }] },
+  modelActiveMs: 400_000,
+  modelActiveIsUpperBound: true,
+  outputTokensPerSecond: 20,
+  termination: { reason: "completed", exitCode: 0, signal: null },
+};
+
+test("an unmeasured diagnostic renders the unknown marker, never a zero reading", () => {
+  const markup = renderToStaticMarkup(<RunDiagnostics metrics={unknownMetrics} />);
+  // Five phases, five token figures, the rate, the model-active time and three
+  // termination fields: every one of them unknown.
+  assert.equal((markup.match(/—/gu) ?? []).length, 15);
+  for (const zero of [/0%/u, /0ms/u, /\b0s\b/u, /0 tok\/s/u]) assert.doesNotMatch(markup, zero);
+  // A measured `0` is still a measurement: the three tool counters keep it.
+  assert.equal((markup.match(/<span>0<\/span>/gu) ?? []).length, 3);
+  // The phase bar draws no segment at all when nothing was measured.
+  assert.match(markup, /data-run-phase-bar=""><\/div>/u);
+});
+
+test("measured diagnostics render their phases, tokens, tools and termination", () => {
+  const markup = renderToStaticMarkup(<RunDiagnostics metrics={measuredMetrics} />);
+  for (const shown of [
+    /Queued<\/span><span>12s/u, /Provisioning<\/span><span>3s/u, /Executing<\/span><span>10m 0s/u,
+    /Inbox wait<\/span><span>30s/u, /Cleanup<\/span><span>250ms/u,
+    /Input<\/span><span>120K/u, /Cached read<\/span><span>90K/u, /Cache write<\/span><span>5K/u,
+    /Output<\/span><span>8K/u, /Cache hit<\/span><span>75%/u,
+    /Calls<\/span><span>42/u, /Failed<\/span><span>3/u, /Unclassified<\/span><span>1/u,
+    /Bash<\/span><span>20 calls · 1 failed/u,
+    /Reason<\/span><span>completed/u, /Exit code<\/span><span>0<\/span>/u, /Signal<\/span><span>—/u,
+  ]) assert.match(markup, shown);
+  // Widths are proportional to the measured phases: 12s of a 645.25s bar.
+  assert.match(markup, /width:1\.8[0-9]*%/u);
+});
+
+test("the output rate is labelled a session average and marked when it is an upper bound", () => {
+  const markup = renderToStaticMarkup(<RunDiagnostics metrics={measuredMetrics} />);
+  assert.match(markup, /Effective output rate/u);
+  assert.match(markup, /A session average over model-active time, not a provider peak rate\./u);
+  // `modelActiveIsUpperBound` makes the rate and the time it divides ceilings.
+  assert.match(markup, /≤ 20 tok\/s \(upper bound\)/u);
+  assert.match(markup, /≤ 6m 40s \(upper bound\)/u);
+
+  const measured = { ...measuredMetrics, modelActiveIsUpperBound: false };
+  const plain = renderToStaticMarkup(<RunDiagnostics metrics={measured} />);
+  assert.doesNotMatch(plain, /upper bound/u);
+  assert.match(plain, /20 tok\/s/u);
+});
+
+test("a run with no diagnostics says so rather than rendering a block of zeroes", () => {
+  for (const metrics of [null, undefined]) {
+    const markup = renderToStaticMarkup(<RunDiagnostics metrics={metrics} />);
+    assert.match(markup, /No diagnostics recorded for this run\./u);
+    assert.doesNotMatch(markup, /0%/u);
+  }
+});
+
+test("the diagnostics formatters keep a measured zero and refuse to invent one", () => {
+  assert.equal(percent(0.75), "75%");
+  assert.equal(percent(0.8125), "81.3%");
+  // A measured zero is a reading; an unmeasured ratio is not, and `null` is the
+  // caller's signal to drop the clause rather than to print `0%`.
+  assert.equal(percent(0), "0%");
+  assert.equal(percent(null), null);
+  assert.equal(percent(undefined), null);
+
+  // A sub-second span keeps its millisecond unit rather than rounding to `0s`.
+  assert.equal(durationMs(250), "250ms");
+  assert.equal(durationMs(0), "0ms");
+  assert.equal(durationMs(12_000), "12s");
+  assert.equal(durationMs(600_000), "10m 0s");
+  assert.equal(durationMs(null), "—");
+
+  assert.equal(tokensPerSecond(20), "20 tok/s");
+  assert.equal(tokensPerSecond(19.94), "19.9 tok/s");
+  assert.equal(tokensPerSecond(null), "—");
+});
+
+test("the newest run's cache hit reaches the tokens stat pill", () => {
+  assert.match(source, /const newestCacheHit = percent\(newest\?\.metrics\?\.tokens\.cacheHitRatio\)/u);
+  assert.match(source, /newestCacheHit === null\s*\?\s*t\("taskDetail\.stats\.tokens"/u);
+  assert.match(source, /t\("taskDetail\.stats\.tokensWithCacheHit", \{ n: compactTokens\(totalTokens\), ratio: newestCacheHit \}\)/u);
+});
+
+test("termination is stated once, in the diagnostics block rather than twice", () => {
+  assert.doesNotMatch(source, /taskDetail\.run\.termination/u);
+  assert.doesNotMatch(source, /run\.terminationReason/u);
+  const row = source.slice(source.indexOf("const RunRow"), source.indexOf("const Activity"));
+  assert.match(row.slice(row.indexOf("{expanded ?")), /<RunDiagnostics metrics=\{run\.metrics\} \/>/u);
 });
 
 /* ------------------------------------------------------------ static guards */
