@@ -31,7 +31,7 @@ canonical prompts. The install manifest records the role; stage two refuses a
 manifest whose recorded role differs from the configured role.
 
 A runner host installs only the configured runner services: Linux systemd
-`<label>.service` units and macOS launchd `com.agentos.runner` labels,
+`<label>.service` units or macOS launchd `com.agentos.runner` labels,
 controlled by `AGENTOS_RUNNER_COUNT` and `AGENTOS_RUNNER_ID_PREFIX`. Its prefix
 is required, host-specific, and disjoint from the control-plane host's runner
 IDs; an empty or invalid prefix fails preflight. It never installs, restarts,
@@ -146,8 +146,8 @@ are named failures; the activator has no fallback for them.
 
 ## Read-only verification
 
-For Linux systemd or macOS launchd control-plane container backup mode, define
-the backup contract without printing secrets:
+For control-plane container backup mode, define the backup contract without
+printing secrets:
 
 ```sh
 DEPLOY_DOCKER_BINARY="$(command -v docker)"
@@ -253,10 +253,10 @@ timer only, so installation cannot trigger an immediate deployment.
 ### Runner count, accounts, and logs
 
 `AGENTOS_RUNNER_COUNT` defaults to 10 and accepts integers 1 through 64. In
-control-plane inventory order, Linux systemd units are API, Inbox, runner 1 as
-`com.agentos.runner`, runners 2 through the configured count, then web; the
-macOS launchd inventory uses the corresponding labels. A runner-only inventory
-contains only the runner labels.
+control-plane inventory order, the labels are API, Inbox, runner 1 as
+`com.agentos.runner`, runners 2 through the configured count, then web; Linux
+systemd installs each as `<label>.service` and macOS launchd uses the label
+directly. A runner-only inventory contains only the runner labels.
 
 The os-isolation account pool uses `ACCOUNT_COUNT` (default 8) and maps runner
 `i` to account `((i - 1) % ACCOUNT_COUNT) + 1`. Each account has its own mode-700
@@ -288,7 +288,8 @@ sudo -n /bin/systemctl show -p ExecStart --value <label>.service
 
 `is-active` must return `active`; `ExecStart` must contain both the stable
 wrapper path and the label. HTTP readiness, release identity, and the deploy
-barrier checks are the same as on macOS. If activation verification fails,
+barrier checks are the same as on macOS
+([Install service wrappers](#install-service-wrappers) below). If activation verification fails,
 atomically point `current` to `previous`, then repeat restart, active, and
 wrapper-boundary checks for the prior release. The auto-deploy oneshot is not
 restarted; its timer remains the scheduler.
@@ -314,7 +315,7 @@ state.
 ## Install service wrappers
 
 This section applies to the macOS launchd profile; the Linux systemd procedure
-is in `## Linux systemd` above.
+is in [Linux systemd](#linux-systemd) above.
 
 The wrapper migration must finish before pointer activation. On macOS, plan
 then apply the complete generated service inventory:
@@ -335,7 +336,7 @@ and `/version` to report the exact current commit.
 ## Install auto-deploy
 
 This section applies to the macOS launchd profile; the Linux systemd procedure
-is in `## Linux systemd` above.
+is in [Linux systemd](#linux-systemd) above.
 
 If an existing macOS definition has a different log path, explicitly unload
 and remove it before installing the new definition. Plan, then apply:
@@ -413,8 +414,7 @@ directory selected by the pointer.
 Each command-backed phase has its own deadline: artifact build, migration
 preflight, migration, Prisma Client generation, prompt sync, backup, and
 service control are budgeted independently. A deadline sends `SIGTERM`, then
-`SIGKILL` if needed, and becomes a `DeployFailure`. For service control, the
-Linux systemd unit form comes first and the macOS launchd label form second.
+`SIGKILL` if needed, and becomes a `DeployFailure`.
 
 The deploy barrier has an independent watchdog beginning at acquisition. It
 covers hangs outside a child command; expiry is logged, written to
@@ -435,7 +435,8 @@ half-applied schema.
 
 After repairing the cause, run the existing `--clear-escalation` operation.
 The held process observes the cleared marker, releases its barrier, and exits
-non-zero. Wait for that old process to exit normally; only then kick the
+non-zero. Wait for that old process to exit normally. On Linux systemd, leave
+scheduling to the timer described above; on macOS launchd, only then kick the
 scheduled job with the retry command below.
 
 This hold instruction is for the macOS launchd profile. While the log says
@@ -527,9 +528,9 @@ holding `current/` and `.agentos-deploy/`. The marker is resolved from
 `NO-ESCALATION-TO-CLEAR path=...`. Check the printed path before assuming the
 escalation is gone.
 
-The first command below clears the marker for either profile. On macOS launchd,
-then kick the auto-deploy label; on Linux systemd, leave scheduling to the timer
-described above:
+The first command below clears the marker for either profile. On Linux systemd,
+leave scheduling to the timer described above; on macOS launchd, then kick the
+auto-deploy label:
 
 ```sh
 AGENTOS_REPOSITORY_ROOT="$PWD" \
