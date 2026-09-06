@@ -215,9 +215,24 @@ await pollClaims({
     const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
       running.on("exit", (code, signal) => resolve({ code, signal }));
     });
+    // Readiness is scaffolding, not the proof: it only says the child has
+    // reached the parked state, and everything asserted below happens after it.
+    // Its budget therefore has to bound a genuine hang, not a slow machine.
+    // Spawning this child costs ~150ms on an idle host and ~230ms at 3x CPU
+    // oversubscription, but the merge gate runs the unit lanes alongside the
+    // database wave and its in-RAM PostgreSQL, where the cost is paid in memory
+    // pressure rather than processor time; 10s lost that race on a gate worker
+    // with an empty child stderr, i.e. a child that was still starting. A
+    // minute is two orders of magnitude over the measured cost and still fails
+    // a child that never parks.
+    const readinessBudgetMs = 60_000;
+    const spawnedAt = performance.now();
+    let stdout = "";
     await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error(`child readiness timed out: ${stderr}`)), 10_000);
-      let stdout = "";
+      const timeout = setTimeout(() => reject(new Error(
+        `child readiness timed out after ${Math.round(performance.now() - spawnedAt)}ms;`
+        + ` stdout was ${JSON.stringify(stdout)} and stderr was ${JSON.stringify(stderr)}`,
+      )), readinessBudgetMs);
       running.stdout!.setEncoding("utf8");
       running.stdout!.on("data", (chunk: string) => {
         stdout += chunk;
