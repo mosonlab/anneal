@@ -9,6 +9,8 @@ import {
   projectMergeOutcome,
   runOwnsMergeOutcome,
   runSessionUsageCost,
+  spendCapUsage,
+  type SpendCapUsage,
   sumUsageCosts,
   TaskStatus,
   type AssigneeType,
@@ -29,6 +31,7 @@ import type {
   ChainAggregate as BoardContractChainAggregate,
   RepairBinding as BoardContractRepairBinding,
   RunStatus as BoardRunStatus,
+  SpendCapUsageProjection,
   StrandedSalvageBranch as BoardContractStrandedSalvageBranch,
   TaskList as TaskListContract,
   UsageCost as BoardUsageCost,
@@ -87,6 +90,7 @@ export type BoardRow = {
   repoId: string | null;
   archivedAt: Date | null;
   maxSessionsPerTask: number;
+  spendCap: Prisma.Decimal | null;
   failureReason: string | null;
   scheduleKind: ScheduleKind;
   runAt: Date | null;
@@ -156,6 +160,14 @@ export type SerializedUsageCost = BoardUsageCost;
 
 export const serializeUsageCost = (cost: UsageCost | null): SerializedUsageCost | null =>
   cost === null ? null : { ...cost, costUsd: decimal(cost.costUsd) };
+
+export const serializeSpendCapUsage = (
+  usage: SpendCapUsage | null,
+): SpendCapUsageProjection | null => usage === null ? null : {
+  capUsd: String(usage.capUsd),
+  spentUsd: String(usage.spentUsd),
+  exhausted: usage.exhausted,
+};
 
 type StrandedSalvageRun = Pick<BoardRow["runs"][number], "runNumber" | "status" | "pushedBranch" | "baseSha">;
 
@@ -587,6 +599,9 @@ export const boardCard = (
     latestRun: latestRunProjection(row.runs),
     strandedSalvageBranches: strandedSalvageBranchesFromRuns(row.runs),
     taskCost: serializeUsageCost(taskCost),
+    // The cap and its accumulated spend travel together: a limit without the
+    // number it is measured against is what the board used to show.
+    spendCapUsage: serializeSpendCapUsage(spendCapUsage(row.spendCap ?? null, row.runs)),
     // Bound to the run the card actually shows: a stop recorded by run 1 is not
     // run 2's outcome, and the card's only run line is the newest run's.
     mergeOutcome: latestRunMergeOutcome(row.runs, row.stepOutput),
@@ -904,7 +919,8 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     orderBy: taskOrderBy,
     select: {
       id: true, projectId: true, name: true, status: true, assigneeType: true,
-      assigneeAgentId: true, repoId: true, archivedAt: true, maxSessionsPerTask: true, failureReason: true,
+      assigneeAgentId: true, repoId: true, archivedAt: true, maxSessionsPerTask: true, spendCap: true,
+      failureReason: true,
       scheduleKind: true, runAt: true, cron: true, timezone: true, approvalGate: true,
       templateId: true, source: true, chainId: true, chainIndex: true, chainLayer: true, createdAt: true, updatedAt: true,
       dispatchAfterTaskId: true,

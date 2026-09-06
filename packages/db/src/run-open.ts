@@ -7,6 +7,7 @@ import {
   type Run,
   RunnerKind,
   RunnerPreference,
+  TaskStatus,
 } from "@prisma/client";
 
 import { catalogRunnerForModel, DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
@@ -26,6 +27,7 @@ import {
   stopStateFor,
 } from "./merge-integrator-db.js";
 import { runnerFor } from "./model-routing.js";
+import { spendCapExhausted, taskSpendUsd } from "./spend-cap.js";
 import { runOwnedHead } from "./run-head.js";
 import { stepRole } from "./step-role.js";
 
@@ -868,6 +870,7 @@ export type OpenRunRefusal =
   | OpenRunRefusalShape<"task-not-integrator", "invalid-request">
   | OpenRunRefusalShape<"run-budget-exhausted", "conflict">
   | OpenRunRefusalShape<"lease-loss-refunds-exhausted", "conflict">
+  | OpenRunRefusalShape<"spend-cap-exhausted", "conflict">
   | OpenRunRefusalShape<"chain-held", "chain-held">;
 
 /**
@@ -891,6 +894,7 @@ const dispositionByCode = {
   "task-not-integrator": "fault",
   "run-budget-exhausted": "fault",
   "lease-loss-refunds-exhausted": "fault",
+  "spend-cap-exhausted": "fault",
   "chain-held": "held",
 } as const satisfies Record<OpenRunRefusal["code"], OpenRunDisposition>;
 
@@ -1139,6 +1143,66 @@ export const openRun = async (
         message,
         { chainId: task.chainId, taskLayer, heldLayer: control.heldLayer },
         { taskId: task.id, chainId: task.chainId, taskLayer, heldLayer: control.heldLayer },
+      );
+    }
+  }
+
+  // Money, not attempts. `maxSessionsPerTask`, `budgetGrants` and the
+  // lease-loss refund bound all count attempts, so a task whose attempts each
+  // cost more than its operator expected could spend past `Task.spendCap`
+  // without a single decision point reading it. It is read here, after the
+  // hold check — a held chain is queueing nothing and must not be parked in
+  // REVIEW — so every replacement intent crosses it exactly once.
+  //
+  // `spend-cap-exhausted` is the one refusal that writes its own consequence.
+  // Its callers' `fault` handling differs (some park the task, some quarantine
+  // a schedule, some only record), and a spend limit that can be crossed
+  // silently by arriving through the wrong caller is the defect this closes.
+  const spendCap = task.spendCap ?? null;
+  if (spendCap !== null) {
+    const costedRuns = await tx.run.findMany({
+      where: { taskId: task.id },
+      select: {
+        model: true,
+        session: {
+          select: {
+            costUsd: true,
+            inputTokens: true,
+            cachedInputTokens: true,
+            cacheCreationInputTokens: true,
+            outputTokens: true,
+            nativeChildUsed: true,
+          },
+        },
+      },
+    });
+    const spentUsd = taskSpendUsd(costedRuns);
+    if (spendCapExhausted(spendCap, spentUsd)) {
+      const cap = spendCap.toString();
+      const spent = spentUsd.toString();
+      const message = `Spend cap $${spendCap.toFixed(2)} reached:`
+        + ` $${spentUsd.toFixed(2)} spent across ${costedRuns.length}`
+        + ` run${costedRuns.length === 1 ? "" : "s"}; raise or clear spendCap to continue`;
+      await tx.task.update({
+        where: { id: task.id },
+        data: { status: TaskStatus.REVIEW, failureReason: message },
+      });
+      await tx.taskActivity.create({
+        data: {
+          taskId: task.id,
+          actorType: "control-plane",
+          body: `Run birth refused: ${message}`,
+          // Named, not merely prose, for the same reason as the lease-loss
+          // refusal: this is what an operator filters the REVIEW by.
+          metadata: { refusal: "spend-cap-exhausted", spendCapUsd: cap, spentUsd: spent },
+        },
+      });
+      return openRunRefusal(
+        "spend-cap-exhausted",
+        "conflict",
+        message,
+        { spendCapUsd: cap, spentUsd: spent, runs: costedRuns.length },
+        { taskId: task.id, taskName: task.name },
       );
     }
   }

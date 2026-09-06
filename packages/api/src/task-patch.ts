@@ -96,7 +96,12 @@ export const taskInput = z.object({
 // `failureReason` is patchable but not creatable: a task is never born with a
 // failure, and an operator whose task carries a stale one needs a way to clear
 // it — an explicit null — without inventing a run.
+// `spendCap` is patchable but not creatable, like `failureReason`: a task is
+// born with the cap its project or template gave it, and the operator action
+// this route exists for is raising or clearing a cap that has already refused
+// an attempt. Null clears it.
 export const taskPatch = z.object(taskFields).partial().extend({
+  spendCap: z.number().nonnegative().nullable().optional(),
   status: z.nativeEnum(TaskStatus).optional(),
   failureReason: failureReasonText(FAILURE_REASON_LIMIT).nullable().optional(),
 }).refine((value) => Object.keys(value).length > 0);
@@ -115,12 +120,19 @@ export type TaskPatchResult = { task: Task } | TaskPatchRefusal;
  * task.
  */
 export const fieldEditActivity = (
-  locked: { maxSessionsPerTask: number },
+  locked: { maxSessionsPerTask: number; spendCap?: Prisma.Decimal | null },
   body: TaskPatchInput,
 ): TaskActivityInput | null => {
+  const cap = (value: Prisma.Decimal | number | null | undefined): string =>
+    value === null || value === undefined ? "none" : `$${value.toString()}`;
   const notes = [
     body.maxSessionsPerTask !== undefined && body.maxSessionsPerTask !== locked.maxSessionsPerTask
       ? `Run budget: ${locked.maxSessionsPerTask} → ${body.maxSessionsPerTask}`
+      : null,
+    // A cap edit is the operator answer to `spend-cap-exhausted`, so it leaves
+    // the same trail the Run budget does.
+    body.spendCap !== undefined && cap(body.spendCap) !== cap(locked.spendCap)
+      ? `Spend cap: ${cap(locked.spendCap)} → ${cap(body.spendCap)}`
       : null,
     body.description !== undefined ? "Prompt edited" : null,
   ].filter((note): note is string => note !== null);

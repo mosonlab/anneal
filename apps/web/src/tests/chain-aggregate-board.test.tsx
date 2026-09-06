@@ -19,7 +19,7 @@ const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   assigneeType: "AGENT", createdAt: "2026-08-28T00:00:00.000Z", updatedAt: "2026-08-28T01:00:00.000Z",
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null, approvalGate: false, templateId: null,
   source: "MANUAL", chainId: null, chainIndex: null, chainName: null, assigneeAgent: null,
-  chainProgress: null, latestRun: null, strandedSalvageBranches: [], taskCost: null, budgetRemaining: true, leaseLossRefunds: 0, blockedOn: null, mergeOutcome: null,
+  chainProgress: null, latestRun: null, strandedSalvageBranches: [], taskCost: null, spendCapUsage: null, budgetRemaining: true, leaseLossRefunds: 0, blockedOn: null, mergeOutcome: null,
   repairOf: null, chainAggregate: null, ...overrides,
 });
 

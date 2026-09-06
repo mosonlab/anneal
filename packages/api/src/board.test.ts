@@ -36,6 +36,7 @@ const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   repoId: null,
   archivedAt: null,
   maxSessionsPerTask: 5,
+  spendCap: null,
   failureReason: null,
   scheduleKind: "NOW" as BoardRow["scheduleKind"],
   runAt: null,
@@ -213,7 +214,7 @@ test("the board projection carries every field the board consumes and nothing el
   // deliberate act with a payload cost, so it has to be added here too.
   assert.deepEqual(Object.keys(boardCard(row(), null, moveContext)).sort(), [
     "approvalGate", "assigneeAgent", "assigneeType", "blockedOn", "budgetRemaining", "chainAggregate", "chainId", "chainIndex", "chainName", "chainProgress", "createdAt", "cron",
-    "displayName", "failureReason", "id", "latestRun", "leaseLossRefunds", "mergeOutcome", "moveTargets", "name", "repairOf", "runAt", "scheduleKind", "source", "status",
+    "displayName", "failureReason", "id", "latestRun", "leaseLossRefunds", "mergeOutcome", "moveTargets", "name", "repairOf", "runAt", "scheduleKind", "source", "spendCapUsage", "status",
     "strandedSalvageBranches", "taskCost", "templateId", "timezone", "updatedAt",
   ]);
 });
@@ -628,6 +629,7 @@ test("blockedOn is projected from the resolved predecessor without storing its s
     latestRun: null,
     strandedSalvageBranches: [],
     taskCost: null,
+    spendCapUsage: null,
     mergeOutcome: null,
     repairOf: null,
     budgetRemaining: true,
@@ -729,6 +731,23 @@ test("task cost sums every run including failures and marks an estimated summand
   assert.deepEqual(card.latestRun, { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null });
   assert.equal(card.taskCost?.costUsd, "1.45");
   assert.equal(card.taskCost?.estimated, true);
+});
+
+test("a capped task carries its cap beside what its runs have spent against it", () => {
+  const runs = [
+    { id: "r2", runNumber: 2, status: "SUCCEEDED" as const, model: "claude-opus-5", codexServiceTier: "DEFAULT" as const, budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, session: session({ costUsd: new Prisma.Decimal("1.00") }) },
+    { id: "r1", runNumber: 1, status: "FAILED" as const, model: "claude-opus-5", codexServiceTier: "DEFAULT" as const, budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, session: session({ costUsd: new Prisma.Decimal("0.50") }) },
+  ];
+
+  const capped = boardCard(row({ spendCap: new Prisma.Decimal("1.00"), runs }), null, moveContext);
+  assert.deepEqual(capped.spendCapUsage, { capUsd: "1", spentUsd: "1.5", exhausted: true });
+  assert.match(JSON.stringify(capped), /"spentUsd":"1\.5"/u);
+
+  const roomLeft = boardCard(row({ spendCap: new Prisma.Decimal("2.00"), runs }), null, moveContext);
+  assert.deepEqual(roomLeft.spendCapUsage, { capUsd: "2", spentUsd: "1.5", exhausted: false });
+
+  // No cap, nothing to show: the board never displays a limit that is absent.
+  assert.equal(boardCard(row({ runs }), null, moveContext).spendCapUsage, null);
 });
 
 test("board cost preserves its estimate when cache creation is split from cached input", () => {

@@ -91,6 +91,16 @@ export type UsageCost = {
   outputTokens: number | null;
 };
 
+/** A task's spend cap and what its Runs have already spent against it, both
+ *  serialized Decimals. Null on a task with no cap: the board shows a limit
+ *  only where one exists and is enforced. See `spend-cap.ts` for the basis. */
+export type SpendCapUsageProjection = {
+  capUsd: string;
+  spentUsd: string;
+  /** True once the cap refuses further attempts (`spent >= cap`). */
+  exhausted: boolean;
+};
+
 /** A local calendar day in the costs window and its spend by agent. */
 export type CostsDailyBucket<DecimalValue = string> = {
   date: string;
@@ -535,6 +545,10 @@ export type BoardCard<DateTime = string> = {
   latestRun: BoardLatestRun<DateTime> | null;
   strandedSalvageBranches: StrandedSalvageBranch[];
   taskCost: UsageCost | null;
+  /** The enforced spend limit beside what has been charged against it. The
+   *  card used to carry neither, while `Task.spendCap` was displayed elsewhere
+   *  and enforced nowhere. */
+  spendCapUsage: SpendCapUsageProjection | null;
   mergeOutcome: MergeOutcome | null;
   repairOf: RepairBinding | null;
   /** The server's own budget verdict, so the board's retry affordance and the
