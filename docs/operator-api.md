@@ -1207,17 +1207,13 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   template. If both supplied keys address missing slots, the specification
   refusal is reported first. No task is created for either refusal. Unknown
   fields inside `gates` are rejected by the strict request schema.
-- A machine-readable `Route: implementation=<agent>` line (optionally followed
-  by ` - <reason>`) in `description` is consumed only by
-  `direct-engineer-workflow`. Any other
-  template returns `400 Bad Request` with code
-  `implementation_route_template_unsupported` instead of silently using its
-  configured assignee; remove the line or use `stepOverrides` to assign that
-  template. On `direct-engineer-workflow`, a route-shaped line that does not
-  match the grammar returns `implementation_route_malformed`. Other templates
-  do not parse malformed Route-looking prose. The Route line conflicts with an
-  explicit `stepOverrides` assignee for the implementation step, never with the
-  selected staffing profile, which it simply outranks for that step.
+- Implementation route grammar, escalation, and `stepOverrides` interaction
+  are owned by [Implementation assignee routing](governance/task-routing-v1.md#implementation-assignee-routing).
+  Route-related refusal codes are `implementation_route_malformed`,
+  `implementation_route_template_unsupported`,
+  `implementation_route_conflicts_with_step_override`, and
+  `implementation_route_agent_renamed`; `step_override_agent_not_found` is
+  returned when the routed Agent name cannot be resolved in the project.
 - An `afterTaskId` binding is released only by `DELETE /tasks/:taskId/chain`
   on the bound chain; archiving the bound chain does not release it.
 
