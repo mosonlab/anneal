@@ -340,7 +340,8 @@ verified `current` release and adopts it into the executor runtime. The
 follower is outside the quiet-window service inventory and never reads or
 executes the control-plane checkout. Install one trusted copy of the follower
 under the executor root; the copy remains stable while release directories
-change:
+change. Complete the initial root-owned adoption first: the follower requires
+an existing `current -> releases/<40-character-commit>` as its rollback target:
 
 ```sh
 sudo install -d -o root -g root -m 0755 /opt/agentos/merge-executor/bin
@@ -380,7 +381,7 @@ The renderer writes only the two service definitions; it does not install or
 run the follower:
 
 ```sh
-sudo node scripts/deploy/merge-executor-follower-templates.mjs \
+sudo <absolute-node> scripts/deploy/merge-executor-follower-templates.mjs \
   --node-path <absolute-node> \
   --follower-path /opt/agentos/merge-executor/bin/merge-executor-follower.mjs \
   --config-path /etc/agentos/merge-executor-follower.json \
@@ -410,11 +411,17 @@ sudo systemctl show agentos-merge-executor-follower.service \
 sudo journalctl --unit agentos-merge-executor-follower.service --no-pager -n 50
 ```
 
-After the first run, check that the executor's `current` points to the
+Require `Result=success` and `ExecMainStatus=0`. After the first run, check that
+the executor's `current` points to the
 control-plane commit and that the adopted release is root-owned without group
 or world write permission. A mid-deploy control-plane pointer or a failed
 manifest check leaves the executor untouched; the next timer tick retries.
-The follower never modifies the executor environment file or its service unit.
+The follower checks that the executor stays active with the same main PID for
+30 seconds and that its journal contains no completion-contract mismatch. A
+failed check restores the previous pointer and restarts it; the candidate stays
+for diagnosis. Success retains the current release and two rollback releases,
+always preserving the one just replaced. The follower never modifies the
+executor environment file or its service unit.
 
 ### Why no passwordless sudo or generic root helper is installed
 
@@ -519,7 +526,9 @@ a personal token as recovery.
 
 ## Code upgrades and rollback
 
-Treat each upgrade as a new root-owned runtime adoption:
+On Linux with the follower installed, adoption is automatic after the control
+plane deploys. Darwin stays manual. The following manual adoption procedure
+remains available for installation and recovery:
 
 1. stop the executor and leave the API running fail closed;
 2. fetch and check out the intended tag or commit in an unprivileged clean
@@ -541,6 +550,8 @@ auto-deploy stage itself does not adopt that build into the root-owned
 executor's `current` pointer. The follower adopts that release on its next
 timer tick and restarts the executor. It does not modify the executor
 environment file or unit. The manual procedure above remains the rollback
-path: stop the follower timer before repointing `current`, restart the
-executor, verify it, and re-enable the timer afterward. The Darwin profile
+path: stop the follower timer and wait for any active follower service to
+finish before repointing `current`, then restart and verify the executor. Keep
+the timer stopped while holding a manual rollback; re-enable it only when the
+control-plane release is the one the executor should adopt. The Darwin profile
 stays manual and has no follower timer.
