@@ -6,7 +6,7 @@ import {
   templateRolloverName,
   matchedLegacyGeneration,
   sourcePromptGenerationDrift,
-  templateRolloverBlockerCount,
+  templateRolloverBlockers,
   type PersistedTransitionStep,
 } from "./canonical-template-transition.js";
 import { planStaffingProfileCarry } from "./staffing-profile-carry.js";
@@ -225,6 +225,8 @@ export const applyCanonicalInstallation = async (
       const tasks = await tx.task.findMany({
         where: { templateId: action.rowId, archivedAt: null, status: { not: TaskStatus.DONE } },
         select: {
+          id: true,
+          name: true,
           chainId: true,
           _count: { select: { runs: { where: { status: { in: [
             RunStatus.QUEUED,
@@ -235,12 +237,17 @@ export const applyCanonicalInstallation = async (
           ] } } } } },
         },
       });
-      const blockers = templateRolloverBlockerCount(tasks.map((task) => ({
+      const blockers = templateRolloverBlockers(tasks.map((task) => ({
+        id: task.id,
+        name: task.name,
         chainId: task.chainId,
         activeRunCount: task._count.runs,
       })));
-      if (blockers > 0) {
-        throw scopedError(action.projectId, `Template ${action.templateName} (${action.rowId}) still has ${blockers} tasks with active Runs or no chain identity; canonical rollover requires active Runs to settle first`);
+      if (blockers.length > 0) {
+        // The operator's next action is to settle or archive specific tasks, so
+        // the refusal names them. A bare count left them grepping the project.
+        const named = blockers.map((task) => `${task.id} (${task.name})`).join(", ");
+        throw scopedError(action.projectId, `Template ${action.templateName} (${action.rowId}) still has ${blockers.length} tasks with active Runs or no chain identity: ${named}; canonical rollover requires active Runs to settle first`);
       }
       const row = await tx.taskTemplate.findUnique({ where: { id: action.rowId } });
       if (!row) {
