@@ -116,11 +116,13 @@ test("the daemon's reachable module graph contains no adapter, workspace, delive
   }
 });
 
-test("the only mutating operations are the sanitized merge construction and the two disarms", async () => {
+test("the only mutating operations are the sanitized merge construction, train publication and disarms", async () => {
   assert.deepEqual([...MUTATING_OPERATIONS], [
     "createSanitizedTree",
     "createMergeCommit",
     "updateBaseRef",
+    "publishTrain",
+    "deleteTrainRef",
     "disablePullRequestAutoMerge",
     "dequeuePullRequest",
   ]);
