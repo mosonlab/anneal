@@ -47,6 +47,11 @@ after(async () => {
 
 const createClient = () => new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
 
+const PAUSED_TX_MAX_WAIT_MS = 5_000;
+const PAUSED_TX_TIMEOUT_MS = 30_000;
+// Allow setup and teardown time beyond transaction acquisition and execution.
+const PAUSE_TEST_TIMEOUT_MS = (PAUSED_TX_MAX_WAIT_MS + PAUSED_TX_TIMEOUT_MS) * 2;
+
 /** Pause a transaction immediately after its Chain row lock resolves. */
 const instrumentTransactions = (
   client: PrismaClient,
@@ -70,8 +75,8 @@ const instrumentTransactions = (
       });
       return operation(instrumentedTx);
     }, {
-      maxWait: 5_000,
-      timeout: 30_000,
+      maxWait: PAUSED_TX_MAX_WAIT_MS,
+      timeout: PAUSED_TX_TIMEOUT_MS,
       ...(options as Record<string, unknown>),
     } as any);
   },
@@ -343,13 +348,13 @@ const raceHoldAndCompletion = async (winner: "hold" | "completion") => {
   return chain;
 };
 
-test("concurrent Hold and completion with Hold winning withholds the successor", { timeout: 30_000 }, async () => {
+test("concurrent Hold and completion with Hold winning withholds the successor", { timeout: PAUSE_TEST_TIMEOUT_MS }, async () => {
   const chain = await raceHoldAndCompletion("hold");
   assert.equal(await db.run.count({ where: { taskId: chain.second.id } }), 0);
   assert.equal(await db.taskActivity.count({ where: { taskId: chain.first.id, body: { contains: "activation withheld" } } }), 1);
 });
 
-test("concurrent Hold and completion with completion winning preserves the activated Run", { timeout: 30_000 }, async () => {
+test("concurrent Hold and completion with completion winning preserves the activated Run", { timeout: PAUSE_TEST_TIMEOUT_MS }, async () => {
   const chain = await raceHoldAndCompletion("completion");
   assert.equal(await db.run.count({ where: { taskId: chain.second.id, status: RunStatus.QUEUED } }), 1);
   assert.equal((await db.chainControl.findUniqueOrThrow({ where: { projectId_chainId: { projectId: chain.project.id, chainId: chain.chainId } } })).heldLayer, 2);
