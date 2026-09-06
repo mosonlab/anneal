@@ -1,0 +1,11 @@
+[Unit]
+Description=Anneal merge executor release follower schedule
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=300
+Unit=agentos-merge-executor-follower.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

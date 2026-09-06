@@ -17,7 +17,9 @@ the default count). Linux and macOS use the same generated inventory. The
 macOS control-plane profile is maintainer-unverified; a macOS runner-only host
 uses launchd only for its configured runner labels. The release may contain
 the resident merge-executor runtime, but that service is outside this
-activation set. An Anneal Run workspace is never deployed.
+activation set; on Linux its root-owned runtime follows the release through
+`agentos-merge-executor-follower.timer`. An Anneal Run workspace is never
+deployed.
 
 ## Runner-only host
 
