@@ -1165,8 +1165,12 @@ export AGENTOS_ALLOW_SCRATCH_DATABASES=1
 # whose failure reporting is invisible on every run that passes; and the build
 # layering, where a layer ordered too early compiles a workspace against a
 # sibling's stale dist/ and passes.
+# The secret-hygiene CLI integration reads the real web bundle, so only that
+# test waits for the build in the proof group below; its fixtures run here.
 parallel_steps "dependencies and the install-free suites" \
   "npm ci" install_dependencies :: \
+  "operational script fixtures" node --test --test-skip-pattern='^the command runs over this checkout and reports classes only$' scripts/setup-local.test.mjs scripts/verify-secret-hygiene.test.mjs scripts/compose-binding.test.mjs scripts/repo-contract-merge-gate.test.mjs scripts/merge-lease-adapter.test.mjs :: \
+  "dependency gate fixtures" npm run test:dependency-gate :: \
   "frozen-record checker fixtures" node --test scripts/check-frozen-docs.test.mjs :: \
   "operator API handbook coverage" node --test scripts/operator-api-docs.test.mjs :: \
   "host proof slot fixtures" node --test scripts/host-proof-slot.test.mjs :: \
@@ -1224,6 +1228,7 @@ parallel_steps "static analysis, build, and the suites that need no build output
 # the database wave is mostly waiting on PostgreSQL. Overlapping them spends one
 # wave's idle on the other's work.
 parallel_steps "the proof waves" \
+  "secret hygiene built-checkout integration" node --test --test-name-pattern='^the command runs over this checkout and reports classes only$' scripts/verify-secret-hygiene.test.mjs :: \
   "database tests (db + api)" run_database_tests :: \
   "unit tests (all workspaces)" parallel_unit_tests
 

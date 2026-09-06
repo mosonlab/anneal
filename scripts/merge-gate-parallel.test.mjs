@@ -21,7 +21,7 @@
 // file the gate sources needs neither.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import nodeTest from "node:test";
@@ -44,6 +44,54 @@ const hostSizingPath = fileURLToPath(new URL("./gate-worker/host-sizing.sh", imp
 const verdictPath = fileURLToPath(new URL("./gate-worker/verdict.sh", import.meta.url));
 
 const test = (name, body) => nodeTest(name, { concurrency: true }, body);
+
+// Read declarations only: a path in a comment or an unused npm alias does not
+// mean the gate executes it. Line continuations make each group one declaration.
+const gateSource = readFileSync(new URL("./merge-gate.sh", import.meta.url), "utf8");
+const gateDeclarations = gateSource.replace(/\\\n/g, " ").split("\n")
+  .filter((line) => /^(?:step|parallel_steps) /.test(line));
+const rootScripts = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts;
+const namedSuites = (declarations) => {
+  const commands = declarations.join("\n");
+  const aliases = [...commands.matchAll(/\bnpm run ([\w:-]+)/g)]
+    .map((match) => rootScripts[match[1]] ?? "");
+  return new Set([commands, ...aliases].join("\n").match(/scripts\/[\w/.-]+\.test\.mjs\b/g) ?? []);
+};
+
+test("COVERAGE every scripts test is named by an executed gate step", () => {
+  const suites = readdirSync(new URL("./", import.meta.url), { recursive: true })
+    .filter((path) => path.endsWith(".test.mjs"))
+    .map((path) => `scripts/${path}`);
+  assert.ok(suites.length > 0);
+  const covered = namedSuites(gateDeclarations);
+  assert.deepEqual(suites.filter((path) => !covered.has(path)).sort(), [], "scripts suites missing from gate steps");
+});
+
+test("COVERAGE unused aliases do not count as executed suites", () => {
+  assert.deepEqual([...namedSuites(['step "unrelated" true'])], []);
+});
+
+test("GROUP-SHAPE added operational suites share the install-free group", () => {
+  const groups = gateDeclarations.filter((line) => line.startsWith("parallel_steps "));
+  const installFree = groups.find((line) => line.startsWith('parallel_steps "dependencies and the install-free suites" '));
+  assert.ok(installFree, "install-free group must exist");
+  assert.match(installFree, /"npm ci" install_dependencies ::/);
+  const expected = ["setup-local", "verify-secret-hygiene", "compose-binding", "repo-contract-merge-gate", "merge-lease-adapter"];
+  for (const name of expected) {
+    const path = `scripts/${name}.test.mjs`;
+    assert.ok(namedSuites([installFree]).has(path), `${path} must run alongside dependency installation`);
+    assert.equal(groups.filter((group) => namedSuites([group]).has(path)).length, name === "verify-secret-hygiene" ? 2 : 1);
+  }
+  assert.match(installFree, /"operational script fixtures" node --test --test-skip-pattern='\^the command runs over this checkout and reports classes only\$' scripts\/setup-local\.test\.mjs scripts\/verify-secret-hygiene\.test\.mjs scripts\/compose-binding\.test\.mjs scripts\/repo-contract-merge-gate\.test\.mjs scripts\/merge-lease-adapter\.test\.mjs ::/);
+  const proof = groups.find((line) => line.startsWith('parallel_steps "the proof waves" '));
+  assert.ok(proof);
+  assert.match(proof, /"secret hygiene built-checkout integration" node --test --test-name-pattern='\^the command runs over this checkout and reports classes only\$' scripts\/verify-secret-hygiene\.test\.mjs ::/);
+  const hygieneTests = readFileSync(new URL("./verify-secret-hygiene.test.mjs", import.meta.url), "utf8");
+  assert.ok(hygieneTests.includes('test("the command runs over this checkout and reports classes only",'), "split integration selector must match an existing test");
+  assert.match(installFree, /"dependency gate fixtures" npm run test:dependency-gate ::/);
+  assert.doesNotMatch(installFree, /await_postgres|prisma|dbtest|test:db/);
+  assert.ok(gateSource.indexOf('step "throwaway PostgreSQL is accepting connections"') > gateSource.indexOf(installFree.slice(0, 65)));
+});
 
 // The two helpers host-sizing.sh is owed. `note` is the gate's log format, not
 // the sizing's, so the fixture supplies a silent one and reads the derived
