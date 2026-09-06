@@ -482,6 +482,15 @@ or stale row or authentication failure is also unhealthy. Check `/runners`
 regularly and alert on staleness; service-manager liveness alone does not prove
 the API recognizes the principal.
 
+A completion-contract mismatch between this executor and the API is not a
+crash. The daemon logs `mechanical completion contract mismatch` once, naming
+both versions, stays alive, and claims nothing further until the versions agree
+again; it re-checks every `MERGE_EXECUTOR_CONTRACT_RECHECK_MS` (default 60000)
+and logs `contract mismatch cleared` when a deploy or rollback on either side
+resolves it. So the healthy signature of an incompatible executor is exactly
+one journal line and a unit that is still active — a repeating mismatch line or
+a restarting unit is the failure, not the mismatch itself.
+
 `/runners` does not expose the executor adapter or CLI identity. After a claim
 has started, inspect that mechanical Run record and require its `adapterVersion`
 and `cliVersion` fields to both equal `merge-executor-v1`. Keep this Run-record
