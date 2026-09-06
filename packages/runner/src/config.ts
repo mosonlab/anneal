@@ -50,6 +50,8 @@ export type RunnerConfig = {
   gitIdentity: GitIdentity | null;
   /** Optional operator-selected gate worker exposed to agent sessions. */
   gateServer?: string;
+  /** Optional second gate worker; requires a distinct primary gateServer. */
+  gateFallbackServer?: string;
   /** Optional local gate capacity exposed to agent sessions. */
   gateLocalSlots?: number;
   /** Proxy variables captured once, when the daemon starts. */
@@ -143,6 +145,13 @@ export const loadRunnerConfig = ({ cpuCount = cpus().length }: { cpuCount?: numb
   const workspaceRoot = process.env.RUNNER_WORKSPACE_ROOT ?? join(homedir(), ".agentos", "runs");
   const home = process.env.RUNNER_HOME ?? process.env.HOME ?? "/var/empty";
   const gateServer = optionalSshDestination("RUNNER_GATE_SERVER", process.env.RUNNER_GATE_SERVER);
+  const gateFallbackServer = optionalSshDestination("RUNNER_GATE_FALLBACK_SERVER", process.env.RUNNER_GATE_FALLBACK_SERVER);
+  if (gateFallbackServer && !gateServer) {
+    throw new Error("RUNNER_GATE_FALLBACK_SERVER requires RUNNER_GATE_SERVER");
+  }
+  if (gateFallbackServer && gateFallbackServer === gateServer) {
+    throw new Error("RUNNER_GATE_FALLBACK_SERVER must differ from RUNNER_GATE_SERVER");
+  }
   const gateLocalSlots = process.env.RUNNER_GATE_LOCAL_SLOTS === undefined
     ? undefined
     : positiveIntegerAtMost("RUNNER_GATE_LOCAL_SLOTS", process.env.RUNNER_GATE_LOCAL_SLOTS, MAX_GATE_LOCAL_SLOTS);
@@ -173,6 +182,7 @@ export const loadRunnerConfig = ({ cpuCount = cpus().length }: { cpuCount?: numb
     home,
     gitIdentity: gitName === undefined ? null : { name: gitName, email: gitEmail! },
     ...(gateServer ? { gateServer } : {}),
+    ...(gateFallbackServer ? { gateFallbackServer } : {}),
     ...(gateLocalSlots !== undefined ? { gateLocalSlots } : {}),
     proxyEnvironment: runnerProxyEnvironment(),
     sessionConfigBaselineRoot: process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT ?? defaultSessionConfigBaselineRoot(),

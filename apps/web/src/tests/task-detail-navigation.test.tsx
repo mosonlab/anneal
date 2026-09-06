@@ -389,19 +389,19 @@ test("task-id switches expose a clean loading shell and destination-scoped actio
     assert.equal(mutations.some((item) => item.url.includes("/tasks/a")), false);
 
     const heldOutput = {
-      data: output("b", "same-resource artifact"), error: null, loading: false, missing: false,
+      data: output("b", "same-resource artifact"), error: null, loading: false,
       lastSuccessAt: now, reload: () => undefined,
     };
     act(() => replaceSubject?.(<TaskOutput poll={heldOutput} />));
     assert.match(container.textContent ?? "", /same-resource artifact/);
     act(() => replaceSubject?.(<TaskOutput poll={{
-      ...heldOutput, error: new ApiError(404, "/tasks/b/output", "Output not found"), missing: true,
+      ...heldOutput, error: new ApiError(404, "/tasks/b/output", "Output not found"),
     }} />));
     assert.match(container.textContent ?? "", /No output recorded/);
     assert.doesNotMatch(container.textContent ?? "", /same-resource artifact|Output not found/);
     for (const status of [405, 501]) {
       act(() => replaceSubject?.(<TaskOutput poll={{
-        ...heldOutput, data: null, error: new ApiError(status, "/tasks/b/output", `HTTP ${status}`), missing: true,
+        ...heldOutput, data: null, error: new ApiError(status, "/tasks/b/output", `HTTP ${status}`),
       }} />));
       assert.match(container.textContent ?? "", new RegExp(`HTTP ${status}`));
       assert.doesNotMatch(container.textContent ?? "", /No output recorded/);

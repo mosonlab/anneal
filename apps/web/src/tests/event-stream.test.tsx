@@ -3,7 +3,7 @@ import test from "node:test";
 import type { JSDOM } from "jsdom";
 import { act } from "react";
 
-import { BACKOFF_CEILING_MS, EVENT_PAGE_CEILING, nextIntervalMs, toEnvelope } from "../lib/use-event-stream";
+import { BACKOFF_CEILING_MS, EVENT_PAGE_CEILING, nextIntervalMs, parseEventPage } from "../lib/use-event-stream";
 import type { SessionEvent } from "../lib/types";
 import { installDom, installFetchFunction, reactDom } from "./dom-harness";
 
@@ -12,7 +12,7 @@ const row = (seq: number): SessionEvent => ({
   source: "CLAUDE", type: "PROVIDER_RAW", toolCallId: null, payload: {},
 });
 
-/* ------------------------------------------------------------ pure halves */
+/* ------------------------------------------------------------ pure helpers */
 
 test("nextIntervalMs holds 2.5s, then doubles per empty poll up to the ceiling", () => {
   for (const empty of [0, 1, 2, 3]) assert.equal(nextIntervalMs(empty), 2_500, String(empty));
@@ -22,22 +22,29 @@ test("nextIntervalMs holds 2.5s, then doubles per empty poll up to the ceiling",
   assert.equal(nextIntervalMs(20), BACKOFF_CEILING_MS);
 });
 
-test("toEnvelope passes an envelope through and filters a bare array by afterSeq", () => {
-  const envelope = { events: [row(1)], nextAfterSeq: 1, hasMore: true, total: 9 };
-  assert.equal(toEnvelope(envelope, null), envelope);
+const invalidPages: [string, unknown][] = [
+  ["retired bare array", [row(1)]],
+  ["null", null],
+  ["missing events", { hasMore: false, total: 1 }],
+  ["wrong events", { events: {}, hasMore: false, total: 1 }],
+  ["missing hasMore", { events: [row(1)], total: 1 }],
+  ["wrong hasMore", { events: [row(1)], hasMore: "false", total: 1 }],
+  ["missing total", { events: [row(1)], hasMore: false }],
+  ["wrong total", { events: [row(1)], hasMore: false, total: "1" }],
+  ["negative total", { events: [row(1)], hasMore: false, total: -1 }],
+  ["fractional total", { events: [row(1)], hasMore: false, total: 1.5 }],
+];
 
-  const all = Array.from({ length: 10 }, (_, index) => row(index + 1));
-  const wrapped = toEnvelope(all, null);
-  assert.equal(wrapped.events.length, 10);
-  assert.equal(wrapped.hasMore, false);
-  assert.equal(wrapped.total, 10);
-
-  // The old endpoint ignores afterSeq and returns everything; without this
-  // filter every 2.5s poll would re-append the whole history.
-  const filtered = toEnvelope(all, 7);
-  assert.deepEqual(filtered.events.map((event) => event.seq), [8, 9, 10]);
-  assert.equal(filtered.total, 10);
+test("parseEventPage keeps the envelope fields and ignores extra wire fields", () => {
+  const envelope = { events: [row(1)], hasMore: false, total: 1 };
+  assert.deepEqual(parseEventPage({ ...envelope, extraWireField: 1 }), envelope);
 });
+
+for (const [label, payload] of invalidPages) {
+  test(`parseEventPage rejects ${label}`, () => {
+    assert.throws(() => parseEventPage(payload), /^Error: Invalid session event page response$/);
+  });
+}
 
 /* ------------------------------------------------------------- the hook */
 
@@ -128,7 +135,24 @@ const withHook = async (
 };
 
 const page = (events: SessionEvent[], hasMore: boolean, total: number) =>
-  ({ events, nextAfterSeq: events.at(-1)?.seq ?? null, hasMore, total });
+  ({ events, hasMore, total });
+
+for (const [label, payload] of invalidPages) {
+  test(`the hook surfaces ${label} without absorbing events`, async () => {
+    await withHook(() => payload, async ({ latest, advance }) => {
+      const assertRejected = () => {
+        assert.deepEqual(latest().events, []);
+        assert.equal(latest().total, 0);
+        const error = latest().error;
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /Invalid session event page response/);
+      };
+      assertRejected();
+      await advance(2_500);
+      assertRejected();
+    });
+  });
+}
 
 test("the initial drain follows hasMore and carries afterSeq forward", async () => {
   const pages = [page([row(1), row(2)], true, 5), page([row(3), row(4)], true, 5), page([row(5)], false, 5)];
@@ -151,16 +175,6 @@ test("a live poll appends only what is new and asks from the highest seq held", 
     await advance(2_500);
     assert.deepEqual(latest().events.map((event) => event.seq), [1, 2]);
     assert.match(requests[1] ?? "", /afterSeq=1/);
-  });
-});
-
-test("an old-shape response returned twice does not duplicate the history", async () => {
-  const all = [row(1), row(2), row(3)];
-  await withHook(() => all, async ({ latest, advance }) => {
-    assert.equal(latest().events.length, 3);
-    await advance(2_500);
-    await advance(2_500);
-    assert.equal(latest().events.length, 3);
   });
 });
 
