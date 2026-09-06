@@ -259,6 +259,87 @@ export type Session<DateTime = string, DecimalValue = string> = {
   } | null;
 };
 
+/* Per-run diagnostics derived at read time from the Run row, its Session row
+ * and that session's tool events. Nothing here is persisted, and `null` always
+ * means "unknown": it is never rendered as zero. */
+
+/** Millisecond wall-clock split of a run. Each value is null when either
+ *  bounding timestamp is missing. `executingMs` is measured to now while the
+ *  run is still executing. */
+export type RunPhaseMetrics = {
+  /** Run.readyAt to Session.provisionedAt. */
+  queuedMs: number | null;
+  /** Session.provisionedAt to Session.startedAt. */
+  provisioningMs: number | null;
+  /** Session.startedAt to Session.endedAt, or to now while the run is live. */
+  executingMs: number | null;
+  /** Time the session spent waiting on Inbox replies. The stored data marks
+   *  that a wait happened without bounding it, so this is 0 only when the
+   *  session demonstrably never waited, and null whenever a wait is known to
+   *  be included in `executingMs` but cannot be measured. */
+  inboxWaitMs: number | null;
+  /** Session.cleanupStartedAt to Session.cleanupEndedAt. */
+  cleanupMs: number | null;
+};
+
+/** The canonical input-token split, where `input` already includes both cache
+ *  subsets. `uncachedInput` and `cacheHitRatio` are null when the split is
+ *  internally inconsistent or any component is unknown. */
+export type RunTokenMetrics = {
+  input: number | null;
+  cachedRead: number | null;
+  cacheWrite: number | null;
+  uncachedInput: number | null;
+  output: number | null;
+  /** cachedRead / input, in [0, 1]. */
+  cacheHitRatio: number | null;
+};
+
+export type RunToolNameMetrics = {
+  name: string;
+  calls: number;
+  failed: number;
+};
+
+/** Tool behaviour paired by toolCallId. A completion whose payload cannot be
+ *  read as success or failure counts in `unclassified` rather than as a
+ *  success. */
+export type RunToolMetrics = {
+  calls: number;
+  failed: number;
+  unclassified: number;
+  /** Summed duration of the calls that paired a start with a completion, so a
+   *  lower bound whenever `unpairedCalls` is non-zero. */
+  totalToolMs: number;
+  /** Starts with no completion. They count in `calls` with unknown duration. */
+  unpairedCalls: number;
+  /** The five tool names with the most calls, most calls first. */
+  byName: RunToolNameMetrics[];
+};
+
+export type RunTerminationMetrics = {
+  reason: string | null;
+  exitCode: number | null;
+  signal: string | null;
+};
+
+export type RunMetrics = {
+  phases: RunPhaseMetrics;
+  tokens: RunTokenMetrics;
+  tools: RunToolMetrics;
+  /** executingMs minus tool time and Inbox wait, clamped at 0. Null when
+   *  `executingMs` is unknown. */
+  modelActiveMs: number | null;
+  /** True when an unknown subtrahend was treated as 0, so `modelActiveMs` and
+   *  every rate derived from it are upper bounds rather than measurements. */
+  modelActiveIsUpperBound: boolean;
+  /** output / (modelActiveMs / 1000): an effective session-average rate over
+   *  model-active time, never a provider peak rate. Null when `output` is
+   *  unknown or `modelActiveMs` is unknown or 0. */
+  outputTokensPerSecond: number | null;
+  termination: RunTerminationMetrics;
+};
+
 /** A serialized Run as embedded by Task detail responses. */
 export type Run<DateTime = string, DecimalValue = string> = {
   id: string;
@@ -305,6 +386,9 @@ export type Run<DateTime = string, DecimalValue = string> = {
    *  run but the mechanical executor's. */
   mergeOutcome?: MergeOutcome | null;
   mergeRecovery?: MergeRecovery<DateTime> | null;
+  /** Read-time diagnostics. Task detail attaches it to every run; other run
+   *  projections omit it. */
+  metrics?: RunMetrics | null;
 };
 
 export type ChainProgress = {
