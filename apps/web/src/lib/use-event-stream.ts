@@ -32,10 +32,9 @@ export const nextIntervalMs = (emptyPolls: number): number => {
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-/** The event route has one supported response shape. Parse it at the network
- * boundary so a changed or malformed response fails loudly rather than being
- * rendered as an incomplete transcript. */
-const parseEventPage = (body: unknown): EventPage => {
+/** Validate the event route envelope at the network boundary. Row contents
+ * retain the API contract; rendering tolerance lives in session-stream.ts. */
+export const parseEventPage = (body: unknown): EventPage => {
   if (!isRecord(body)
     || !Array.isArray(body.events)
     || typeof body.hasMore !== "boolean"
