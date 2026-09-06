@@ -1,24 +1,31 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import {
+  hasSessionListFilters, SESSION_RUNNER_FILTERS, SESSION_STATUS_FILTERS,
+  type SessionStatusFilter,
+} from "@anneal/db/session-filter-contract";
+
 import { api } from "../lib/api";
 import { compact, compactTokens, durationWithInboxWait, formatDate, formatDateTime, formatT, money, repoWebUrl, timeAgo } from "../lib/format";
 import { POLL_MS, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { mergeBadge } from "../lib/merge-outcome";
-import { Link, navigate } from "../lib/router";
+import { Link, navigate, replace, useQuery } from "../lib/router";
 import { useProjectScope } from "../lib/project";
 import {
   clampLines, projectStream, RESUME_MARKER_TEXT, TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES,
   type StreamNode, type ToolCall,
 } from "../lib/session-stream";
 import {
-  ALL_SESSION_FILTER, filterAndGroupSessions, isLiveStatus,
-  isSessionUnseen, markSessionOpened, readSessionSeenState,
-  SESSION_DAY_PAGE_SIZE, SESSION_STATUS_FILTERS, sessionAgentOptions, sessionDayLabelKind,
-  type SessionDayGroup, type SessionSeenState, type SessionStatusFilter,
+  ALL_SESSION_FILTER, groupSessionsByDay, isLiveStatus,
+  isSessionUnseen, markSessionOpened, readSessionSeenState, readSessionSelection,
+  SESSION_DAY_PAGE_SIZE, SESSION_RANGE_PRESETS, SESSIONS_ROUTE, sessionAgentOptions, sessionDayLabelKind,
+  sessionListPath, sessionSelectionFilters, sessionsFilterHref,
+  type SessionDayGroup, type SessionFilterOption, type SessionListSelection, type SessionRangePreset,
+  type SessionSeenState,
 } from "../lib/session-list";
 import { useEventStream } from "../lib/use-event-stream";
-import type { MergeOutcome, RunnerKind, Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
+import type { Agent, MergeOutcome, RunnerKind, Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
 import {
   IconArrowLeft, IconChevron, IconRefresh, IconToolDefault, IconToolEdit, IconToolRead, IconToolRun, IconToolSearch,
   IconToolWeb,
@@ -33,6 +40,7 @@ import {
 import { ModelLabel } from "../components/model-picker";
 import { Button } from "../components/ui/button";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "../components/ui/hover-card";
+import { Input } from "../components/ui/input";
 import { Select } from "../components/ui/select";
 import { cn } from "../lib/utils";
 
@@ -140,6 +148,24 @@ const sessionDotTone = (tone: PillTone): string | undefined => {
   return undefined;
 };
 
+/** The row's chain, as the filter that finds the rest of it. A chained task
+ *  whose name the server could not derive still links: the id is what narrows
+ *  the list, and the word Chain says what the link does. */
+export const SessionChainLink = ({ task }: { task: Session["task"] }): ReactNode => {
+  const t = useT();
+  const chainId = task?.chainId ?? null;
+  if (chainId === null) return null;
+  return (
+    <Link
+      to={sessionsFilterHref({ chainId })}
+      className="max-w-[220px] overflow-hidden text-ellipsis whitespace-nowrap rounded-sm hover:underline"
+      title={t("sessions.row.chainFilter")}
+    >
+      <span data-session-chain={chainId}>{task?.chainName ?? t("sessions.row.chain")}</span>
+    </Link>
+  );
+};
+
 const SessionHoverCard = ({ session, unseen }: { session: Session; unseen: boolean }): ReactNode => {
   const t = useT();
   return (
@@ -156,11 +182,12 @@ const SessionHoverCard = ({ session, unseen }: { session: Session; unseen: boole
                 ? <Link to={`/goals/${session.goal.id}`}>{session.goal.title}</Link>
                 : session.id}
           </div>
-          <div className="mt-[3px] flex text-[11.5px] text-muted-foreground">
+          <div className="mt-[3px] flex items-center gap-[8px] text-[11.5px] text-muted-foreground">
             {/* The chip carries the model this session actually executed, which
                 the row's own Run snapshot already holds. The roster's current
                 configuration is a different fact and belongs on the Agent. */}
             <AgentChip agent={sessionChipAgent(session)} name={session.agentId} />
+            <SessionChainLink task={session.task} />
           </div>
         </div>
       </HoverCardTrigger>
@@ -257,12 +284,158 @@ const SessionDayGroupView = ({
   );
 };
 
+/** Long enough that typing a word costs one request rather than five, short
+ *  enough that the list answers while the operator is still looking at the box. */
+export const SESSION_SEARCH_DEBOUNCE_MS = 300;
+
+/** The roster only changes when an operator edits it, so it is read rarely and
+ *  reused as the Agent filter's stable vocabulary. */
+const ROSTER_POLL_MS = 300_000;
+
+const FILTER_FIELD = "flex items-center gap-[6px] text-[12px] text-secondary-foreground";
+
+export const SessionFilterBar = ({ selection, agentOptions, searchText, onSearchText, onSelect, onClear }: {
+  selection: SessionListSelection;
+  agentOptions: SessionFilterOption[];
+  searchText: string;
+  onSearchText: (value: string) => void;
+  onSelect: (patch: Partial<SessionListSelection>) => void;
+  onClear: () => void;
+}): ReactNode => {
+  const t = useT();
+  const statusLabels: Record<SessionStatusFilter, string> = {
+    live: t("sessions.filter.live"),
+    done: t("sessions.filter.done"),
+    failed: t("sessions.filter.failed"),
+    cancelled: t("sessions.filter.cancelled"),
+  };
+  const rangeLabels: Record<SessionRangePreset, string> = {
+    all: t("sessions.range.all"),
+    today: t("sessions.range.today"),
+    "7d": t("sessions.range.days7"),
+    "30d": t("sessions.range.days30"),
+    custom: t("sessions.range.custom"),
+  };
+  return (
+    <div data-session-filters className="flex flex-wrap items-center gap-[10px]">
+      <label className={FILTER_FIELD}>
+        <span>{t("sessions.filter.search")}</span>
+        <Input
+          type="search"
+          aria-label={t("sessions.filter.search")}
+          data-session-filter-search
+          className="w-[190px]"
+          placeholder={t("sessions.filter.searchPlaceholder")}
+          value={searchText}
+          onChange={(event) => onSearchText(event.target.value)}
+        />
+      </label>
+      <label className={FILTER_FIELD}>
+        <span>{t("sessions.filter.agent")}</span>
+        <Select
+          aria-label={t("sessions.filter.agent")}
+          data-session-filter-agent
+          className="w-[150px]"
+          value={selection.agentId ?? ALL_SESSION_FILTER}
+          onChange={(event) => onSelect({ agentId: event.target.value === ALL_SESSION_FILTER ? null : event.target.value })}
+        >
+          {agentOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+        </Select>
+      </label>
+      <label className={FILTER_FIELD}>
+        <span>{t("sessions.filter.status")}</span>
+        <Select
+          aria-label={t("sessions.filter.status")}
+          data-session-filter-status
+          className="w-[130px]"
+          value={selection.status ?? ALL_SESSION_FILTER}
+          onChange={(event) => onSelect({
+            status: event.target.value === ALL_SESSION_FILTER ? null : event.target.value as SessionStatusFilter,
+          })}
+        >
+          <option value={ALL_SESSION_FILTER}>{t("sessions.filter.all")}</option>
+          {SESSION_STATUS_FILTERS.map((value) => <option key={value} value={value}>{statusLabels[value]}</option>)}
+        </Select>
+      </label>
+      <label className={FILTER_FIELD}>
+        <span>{t("sessions.filter.runner")}</span>
+        <Select
+          aria-label={t("sessions.filter.runner")}
+          data-session-filter-runner
+          className="w-[130px]"
+          value={selection.runner ?? ALL_SESSION_FILTER}
+          onChange={(event) => onSelect({
+            runner: event.target.value === ALL_SESSION_FILTER ? null : event.target.value as RunnerKind,
+          })}
+        >
+          <option value={ALL_SESSION_FILTER}>{t("sessions.filter.all")}</option>
+          {SESSION_RUNNER_FILTERS.map((value) => <option key={value} value={value}>{t(`runner.cli.${value}`)}</option>)}
+        </Select>
+      </label>
+      <label className={FILTER_FIELD}>
+        <span>{t("sessions.filter.range")}</span>
+        <Select
+          aria-label={t("sessions.filter.range")}
+          data-session-filter-range
+          className="w-[130px]"
+          value={selection.range}
+          onChange={(event) => onSelect({ range: event.target.value as SessionRangePreset })}
+        >
+          {SESSION_RANGE_PRESETS.map((value) => <option key={value} value={value}>{rangeLabels[value]}</option>)}
+        </Select>
+      </label>
+      {selection.range === "custom" ? (
+        <>
+          <label className={FILTER_FIELD}>
+            <span>{t("sessions.filter.since")}</span>
+            <Input
+              type="date"
+              aria-label={t("sessions.filter.since")}
+              data-session-filter-since
+              className="w-[150px]"
+              value={selection.since ?? ""}
+              onChange={(event) => onSelect({ since: event.target.value === "" ? null : event.target.value })}
+            />
+          </label>
+          <label className={FILTER_FIELD}>
+            <span>{t("sessions.filter.until")}</span>
+            <Input
+              type="date"
+              aria-label={t("sessions.filter.until")}
+              data-session-filter-until
+              className="w-[150px]"
+              value={selection.until ?? ""}
+              onChange={(event) => onSelect({ until: event.target.value === "" ? null : event.target.value })}
+            />
+          </label>
+        </>
+      ) : null}
+      <Button type="button" variant="legacy" size="legacy" data-session-filter-clear onClick={onClear}>
+        {t("sessions.filter.clear")}
+      </Button>
+    </div>
+  );
+};
+
 export const SessionsPage = (): ReactNode => {
   const { projectId, project } = useProjectScope();
-  const path = projectId === "" ? null : `/sessions?projectId=${encodeURIComponent(projectId)}&limit=${PAGE_SIZE}`;
+  // The hash carries the filters: a narrowed view can be shared, survives a
+  // reload, and is what a chain chip or the task page links to. Reading the
+  // selection from it rather than from state keeps those three the same path.
+  const search = useQuery().toString();
+  const selection = useMemo(() => readSessionSelection(new URLSearchParams(search)), [search]);
+  // One selection resolves one window. Reading the clock during render instead
+  // would move `since` under a relative range on every poll, and each new value
+  // is a new request path — the list would reload itself forever.
+  const filters = useMemo(() => sessionSelectionFilters(selection, new Date()), [selection]);
+  const path = projectId === "" ? null : sessionListPath(projectId, PAGE_SIZE, filters);
   const head = usePoll<Session[]>(path, POLL_MS);
+  // The Agent choices come from the project roster, not from the rows on
+  // screen: narrowing to one Agent must not leave that Agent as the only one
+  // left to choose.
+  const roster = usePoll<Agent[]>(projectId === "" ? null : `/projects/${encodeURIComponent(projectId)}/agents`, ROSTER_POLL_MS);
   // Older pages are history: fetched imperatively, never polled, and dropped
-  // whenever the project changes. usePoll replaces its data on every response,
+  // whenever the request changes. usePoll replaces its data on every response,
   // so the live head cannot also hold them.
   const [older, setOlder] = useState<Session[]>([]);
   const [exhausted, setExhausted] = useState(false);
@@ -272,25 +445,53 @@ export const SessionsPage = (): ReactNode => {
   const [seenSnapshot, setSeenSnapshot] = useState<{ projectId: string; state: SessionSeenState } | null>(() => (
     projectId === "" ? null : { projectId, state: readSessionSeenState(projectId) }
   ));
-  const [agentFilter, setAgentFilter] = useState<string>(ALL_SESSION_FILTER);
-  const [statusFilter, setStatusFilter] = useState<SessionStatusFilter>(ALL_SESSION_FILTER);
+  const [searchText, setSearchText] = useState(selection.q ?? "");
   const t = useT();
+
+  const select = useCallback((patch: Partial<SessionListSelection>): void => {
+    // `replace`, not `navigate`: the URL describes which slice of the history
+    // is on screen, and stepping through filters must not cost a press of Back
+    // each to leave the page.
+    replace(sessionsFilterHref({ ...selection, ...patch }));
+  }, [selection]);
+
   const seenProjectAtMount = useRef(projectId);
   useEffect(() => {
-    const changedProject = projectId !== seenProjectAtMount.current;
+    const previous = seenProjectAtMount.current;
     seenProjectAtMount.current = projectId;
+    if (projectId === "") {
+      setSeenSnapshot(null);
+      return;
+    }
+    if (previous === projectId) return;
+    setSeenSnapshot({ projectId, state: readSessionSeenState(projectId) });
+    // A different project is different work: it inherits neither the filters
+    // nor the link that named them. The scope resolving from empty to the
+    // selected project is not a change of project, so arriving on a shared
+    // filtered URL still lands filtered.
+    if (previous !== "") replace(SESSIONS_ROUTE);
+  }, [projectId]);
+
+  // Every filter change is a new first page. The cursor, the pages already
+  // fetched under the previous filters and the per-day expansions all belong to
+  // the request that produced them.
+  useEffect(() => {
     setOlder([]);
     setExhausted(false);
     setMoreError(null);
     setExpandedDays(new Set());
-    if (projectId === "") {
-      setSeenSnapshot(null);
-    } else if (changedProject) {
-      setSeenSnapshot({ projectId, state: readSessionSeenState(projectId) });
-    }
-    setAgentFilter(ALL_SESSION_FILTER);
-    setStatusFilter(ALL_SESSION_FILTER);
-  }, [projectId]);
+  }, [path]);
+
+  // The box is typed into locally and reaches the URL — and so the server —
+  // only once the operator pauses. A change from anywhere else (Clear, a shared
+  // link, a project switch) is followed back into the box.
+  useEffect(() => { setSearchText(selection.q ?? ""); }, [selection.q]);
+  useEffect(() => {
+    const next = searchText.trim();
+    if (next === (selection.q ?? "")) return;
+    const timer = setTimeout(() => select({ q: next.length === 0 ? null : next }), SESSION_SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [searchText, selection.q, select]);
 
   const sessions = useMemo(() => {
     const byId = new Map<string, Session>();
@@ -298,19 +499,12 @@ export const SessionsPage = (): ReactNode => {
     return [...byId.values()].sort((left, right) => right.requestedAt.localeCompare(left.requestedAt));
   }, [head.data, older]);
 
-  const dayGroups = useMemo(() => filterAndGroupSessions(sessions, { agentId: agentFilter, status: statusFilter }), [sessions, agentFilter, statusFilter]);
-  const agentOptions = useMemo(() => sessionAgentOptions(sessions, t("sessions.filter.all")), [sessions, t]);
-  const statusOptions = useMemo(() => {
-    const labels: Record<SessionStatusFilter, string> = {
-      all: t("sessions.filter.all"),
-      live: t("sessions.filter.live"),
-      done: t("sessions.filter.done"),
-      failed: t("sessions.filter.failed"),
-      cancelled: t("sessions.filter.cancelled"),
-    };
-    return SESSION_STATUS_FILTERS.map((value) => ({ value, label: labels[value] }));
-  }, [t]);
-  const filtersActive = agentFilter !== ALL_SESSION_FILTER || statusFilter !== ALL_SESSION_FILTER;
+  const dayGroups = useMemo(() => groupSessionsByDay(sessions), [sessions]);
+  const agentOptions = useMemo(
+    () => sessionAgentOptions(sessions, roster.data ?? [], t("sessions.filter.all")),
+    [sessions, roster.data, t],
+  );
+  const filtersActive = hasSessionListFilters(filters);
   const seenState = seenSnapshot?.projectId === projectId ? seenSnapshot.state : null;
 
   const toggleDay = (key: string): void => {
@@ -327,9 +521,9 @@ export const SessionsPage = (): ReactNode => {
     setLoadingMore(true);
     setMoreError(null);
     try {
-      const page = await api.get<Session[]>(
-        `/sessions?projectId=${encodeURIComponent(projectId)}&limit=${PAGE_SIZE}&before=${encodeURIComponent(oldest.requestedAt)}`,
-      );
+      // The same filters as the head, so paging continues through the narrowed
+      // history rather than reopening the whole of it.
+      const page = await api.get<Session[]>(sessionListPath(projectId, PAGE_SIZE, filters, oldest.requestedAt));
       setOlder((current) => [...current, ...page]);
       if (page.length < PAGE_SIZE) setExhausted(true);
     } catch (error) {
@@ -352,38 +546,21 @@ export const SessionsPage = (): ReactNode => {
           <div className={PAGE_HEAD_SUBTITLE}>{t("sessions.head.subtitle", { project: project?.name ?? t("tasks.head.thisProject") })}</div>
         </div>
         <div className={cn(PAGE_ACTIONS, "flex-wrap justify-end")}>
-          <label className="flex items-center gap-[6px] text-[12px] text-secondary-foreground">
-            <span>{t("sessions.filter.agent")}</span>
-            <Select
-              aria-label={t("sessions.filter.agent")}
-              data-session-filter-agent
-              className="w-[150px]"
-              value={agentFilter}
-              onChange={(event) => setAgentFilter(event.target.value)}
-            >
-              {agentOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-            </Select>
-          </label>
-          <label className="flex items-center gap-[6px] text-[12px] text-secondary-foreground">
-            <span>{t("sessions.filter.status")}</span>
-            <Select
-              aria-label={t("sessions.filter.status")}
-              data-session-filter-status
-              className="w-[130px]"
-              value={statusFilter}
-              onChange={(event) => setStatusFilter(event.target.value as SessionStatusFilter)}
-            >
-              {statusOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-            </Select>
-          </label>
           <Button type="button" variant="legacy" size="legacy" onClick={head.reload}><IconRefresh />{t("common.refresh")}</Button>
         </div>
       </div>
 
       <div className={STACK}>
+        <SessionFilterBar
+          selection={selection}
+          agentOptions={agentOptions}
+          searchText={searchText}
+          onSearchText={setSearchText}
+          onSelect={select}
+          onClear={() => replace(SESSIONS_ROUTE)}
+        />
         {head.missing ? <GapNotice endpoint="GET /sessions" what={t("sessions.gap.what")} /> : null}
         {head.error === null || head.missing ? null : <ErrorNotice message={`${head.error.status} ${head.error.message}`} onRetry={head.reload} />}
-        {filtersActive ? <div data-session-filter-hint className={HINT}>{t("sessions.filter.loaded")}</div> : null}
         <Card flush>
           <div data-session-list>
             {dayGroups.map((group) => (
@@ -397,7 +574,7 @@ export const SessionsPage = (): ReactNode => {
             ))}
           </div>
           {dayGroups.length === 0
-            ? <EmptyState>{t(head.loading ? "common.loading" : sessions.length > 0 && filtersActive ? "sessions.empty.filtered" : "sessions.empty")}</EmptyState>
+            ? <EmptyState>{t(head.loading ? "common.loading" : filtersActive ? "sessions.empty.filtered" : "sessions.empty")}</EmptyState>
             : null}
         </Card>
         {sessions.length >= PAGE_SIZE && !exhausted ? (

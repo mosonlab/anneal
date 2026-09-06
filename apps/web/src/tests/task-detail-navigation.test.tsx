@@ -488,3 +488,41 @@ test("the task-detail Chain card reflects a completed held layer on the next pol
     await page.dispose();
   }
 });
+
+test("the runs table links to this task's sessions, by chain when it has one", async () => {
+  const open = async (subject: TaskDetail, chain: Chain) => {
+    const page = await mountPage(<TaskDetailPage taskId={subject.id} />, {
+      [`/tasks/${subject.id}`]: subject,
+      [`/tasks/${subject.id}/output`]: new Response(JSON.stringify({ error: "not found" }), { status: 404 }),
+      [`/tasks/${subject.id}/startability`]: startability(true),
+      [`/tasks/${subject.id}/activity`]: [],
+      [`/tasks/${subject.id}/chain`]: chain,
+      "/projects/project-1/agents": [],
+    }, `http://localhost/tasks/${subject.id}`);
+    try {
+      const link = page.container.querySelector("[data-task-sessions-link]")?.closest("a");
+      assert.ok(link, page.container.innerHTML);
+      return { page, href: link.getAttribute("href"), label: link.textContent };
+    } catch (failure) {
+      await page.dispose();
+      throw failure;
+    }
+  };
+
+  // A chained step's sessions are rarely only its own: the operator reading its
+  // runs is looking for the neighbouring steps, so the link is the chain.
+  const chained = await open(task("chained", "Chained task", 0, "chain-c"), chainFor("chained"));
+  try {
+    assert.equal(chained.href, "#/sessions?chainId=chain-c");
+    assert.equal(chained.label, "View sessions");
+  } finally {
+    await chained.page.dispose();
+  }
+
+  const solo = await open(task("solo", "Solo task", 0), emptyChain());
+  try {
+    assert.equal(solo.href, "#/sessions?taskId=solo");
+  } finally {
+    await solo.page.dispose();
+  }
+});
