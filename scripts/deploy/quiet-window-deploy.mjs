@@ -59,6 +59,8 @@ import {
   DEPLOY_STEP_TIMEOUT_MS,
   deployBarrierTimeoutMsForRole,
   MIGRATION_DEPLOY_TIMEOUT_REASON,
+  QUIET_WINDOW_WAIT_EXCEEDED_REASON,
+  quietWindowWaitBudgetMs,
   waitForEscalationClear,
   waitForQuietWithWatchdog,
 } from "./quiet-window-deadlines.mjs";
@@ -597,15 +599,64 @@ const acquireDeployBarrier = async () => {
   }
 };
 
-const waitForQuiet = (startWatchdog, blockingRunsForHost = () => blockingRuns()) => waitForQuietWithWatchdog({
+/** Every quiet-window HOLD line carries how long the deploy has already waited
+ * and how many Runs are blocking it, so the journal shows the wait's shape
+ * rather than only that it is holding. */
+export const quietWindowHoldLine = (progress, detail) =>
+  `HOLD quiet-window blockers=${progress.blockingRuns} elapsed=${progress.elapsedSeconds}s${detail ? ` ${detail}` : ""}`;
+
+const waitForQuiet = (
+  startWatchdog,
+  blockingRunsForHost = () => blockingRuns(),
+  onWaitBudgetExceeded = () => undefined,
+) => waitForQuietWithWatchdog({
   blockingRuns: blockingRunsForHost,
   acquireBarrier: acquireDeployBarrier,
   startWatchdog,
   wait: () => sleep(POLL_MS),
-  onBlockingRuns: (runs) => log(`HOLD quiet-window blockers=${runs.length} statuses=${[...new Set(runs.map((run) => run.status))].join(",")}`),
-  onBarrierContended: () => log("HOLD quiet-window deploy-barrier-contended"),
-  onRacedBlockingRuns: (runs) => log(`HOLD quiet-window raced-blockers=${runs.length}`),
+  waitBudgetMs: quietWindowWaitBudgetMs(process.env),
+  onWaitBudgetExceeded,
+  onBlockingRuns: (runs, progress) => log(quietWindowHoldLine(progress, `statuses=${[...new Set(runs.map((run) => run.status))].join(",")}`)),
+  onBarrierContended: (progress) => log(quietWindowHoldLine(progress, "deploy-barrier-contended")),
+  onRacedBlockingRuns: (runs, progress) => log(quietWindowHoldLine(progress, "acquisition-raced")),
 });
+
+/** A wait that outlives its budget is reported once per alert interval and
+ * nothing else: no escalation marker, no change to when the deploy proceeds.
+ * Neither the ledger event nor the notification may end the wait, so each
+ * failure is logged and the loop keeps polling. */
+export const createQuietWindowWaitReporter = ({
+  attempt,
+  revisions,
+  notify: notifyImpl = notify,
+  log: logImpl = log,
+}) => async (event) => {
+  const detail = `elapsed-${event.elapsedSeconds}s-budget-${Math.round(event.budgetMs / 1_000)}s`;
+  logImpl(`HOLD quiet-window-wait-exceeded ${detail} blockers=${event.blockingRuns}`);
+  try {
+    attempt.fact("ledger")?.record("QUIET_WINDOW_WAIT_EXCEEDED", attempt.ledgerMetadata({
+      quietWindowWaitSeconds: event.elapsedSeconds,
+      quietWindowWaitPolls: event.polls,
+      quietWindowWaitPeakBlockingRuns: event.peakBlockingRuns,
+      quietWindowBlockingRunsByRunner: event.blockingRunsByRunner,
+    }));
+  } catch (error) {
+    const failure = failureOf(error);
+    logImpl(`STOP ${failure.reason} detail=${failure.detail}; quiet-window-wait-alert-unrecorded`);
+  }
+  try {
+    await notifyImpl({
+      outcome: "failure",
+      reason: QUIET_WINDOW_WAIT_EXCEEDED_REASON,
+      detail,
+      from: revisions.from,
+      to: revisions.to,
+    });
+  } catch (error) {
+    const failure = failureOf(error);
+    logImpl(`STOP ${failure.reason} detail=${failure.detail}; quiet-window-wait-alert-undelivered`);
+  }
+};
 
 const acquireLock = async () => {
   const lock = acquireProcessLock({ path: LOCK_PATH, stateDir: STATE_DIR });
@@ -978,7 +1029,7 @@ export const createDeployHost = ({
     waitForQuiet: async (attempt) => {
       const revisions = attempt.requireFact("revisions");
       const barrierTimeoutMs = deployBarrierTimeoutMsForRole(deployRole, serviceLabels.length);
-      const { barrier, watchdog } = await waitForQuiet(() => createBarrierWatchdog({
+      const { barrier, watchdog, quietWindowWait } = await waitForQuiet(() => createBarrierWatchdog({
         timeoutMs: barrierTimeoutMs,
         escalationPath: ESCALATION_PATH,
         escalationRecord: {
@@ -1003,9 +1054,9 @@ export const createDeployHost = ({
           log(`STOP ${failure.reason} detail=${failure.detail}`);
           interruption.interruptWithFailure(failure);
         },
-      }), scopedBlockingRuns);
-      log("PASS quiet-window deploy-barrier-held blockers=0");
-      return { barrier, resources: [barrier, watchdog] };
+      }), scopedBlockingRuns, createQuietWindowWaitReporter({ attempt, revisions }));
+      log(`PASS quiet-window deploy-barrier-held blockers=0 elapsed=${quietWindowWait.waitSeconds}s polls=${quietWindowWait.polls}`);
+      return { barrier, quietWindowWait, resources: [barrier, watchdog] };
     },
     prepareWorkspace: async (attempt) => {
       const release = attempt.requireFact("verifiedRelease");

@@ -59,6 +59,8 @@ import {
   canonicalSyncRefusedLines,
   createDeployHost,
   createDeployStartup,
+  createQuietWindowWaitReporter,
+  quietWindowHoldLine,
   DEFAULT_SERVICE_OBSERVATION_WINDOW_MS,
   deployRootFromEnvironment,
   HOST_SCOPED_ESCALATION_REASONS,
@@ -1206,9 +1208,13 @@ test("service inventory covers the thirteen production labels", () => {
 
 test("runner quiet-window SQL admits only exact local runner ids", () => {
   const defaults = blockingRunsStatement();
-  assert.equal(defaults.sql.includes('"runnerId"'), false);
+  // The database-wide query reads every Run's owning runner without scoping to
+  // one: the blocking counts name the runner-only hosts a control-plane deploy
+  // waits for.
+  assert.equal(defaults.sql.includes('AND "runnerId" IN'), false);
+  assert.equal(defaults.sql.includes('"status"::text AS "status", "runnerId" FROM "Run"'), true);
   const scoped = blockingRunsStatement(undefined, ["mac-runner-1", "mac-runner-2"]);
-  assert.equal(scoped.sql, 'SELECT "id", "status"::text AS "status" FROM "Run" WHERE "status"::text IN ($1,$2,$3) AND "runnerId" IN ($4,$5) ORDER BY "id"');
+  assert.equal(scoped.sql, 'SELECT "id", "status"::text AS "status", "runnerId" FROM "Run" WHERE "status"::text IN ($1,$2,$3) AND "runnerId" IN ($4,$5) ORDER BY "id"');
   assert.deepEqual(scoped.parameters, ["claimed", "provisioning", "running", "mac-runner-1", "mac-runner-2"]);
 });
 
@@ -2600,6 +2606,90 @@ test("the ledger entry records what the post-restart verification proved", () =>
     observation_window_ms: 20_000,
     observed_for_ms: 20_134,
   });
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+test("quiet-window HOLD lines carry the elapsed wait and the blocking count", () => {
+  assert.equal(
+    quietWindowHoldLine({ blockingRuns: 4, elapsedSeconds: 2_700 }, "statuses=running,claimed"),
+    "HOLD quiet-window blockers=4 elapsed=2700s statuses=running,claimed",
+  );
+  assert.equal(
+    quietWindowHoldLine({ blockingRuns: 0, elapsedSeconds: 60 }, "deploy-barrier-contended"),
+    "HOLD quiet-window blockers=0 elapsed=60s deploy-barrier-contended",
+  );
+});
+
+test("a quiet-window wait over budget writes one ledger event and one notification", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "anneal-deploy-quiet-wait-"));
+  const attempt = openDeploymentAttempt({
+    deployRoot: "/srv/anneal",
+    targetCommit: revisions.to,
+    transactionId: "quiet-window-wait-ledger",
+  });
+  const ledger = createDeploymentLedger({ stateDir, targetCommit: revisions.to });
+  ledger.start();
+  attempt.establish({ revisions, ledger });
+  const notices = [];
+  const lines = [];
+  const report = createQuietWindowWaitReporter({
+    attempt,
+    revisions,
+    notify: async (record) => { notices.push(record); },
+    log: (line) => lines.push(line),
+  });
+  await report({
+    elapsedMs: 2_700_000,
+    elapsedSeconds: 2_700,
+    polls: 45,
+    peakBlockingRuns: 7,
+    blockingRuns: 5,
+    budgetMs: 2_700_000,
+    blockingRunsByRunner: { "mac-runner-1": 3, "vm-control-plane": 2 },
+  });
+  const events = readFileSync(ledger.eventsPath, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  const exceeded = events.filter((event) => event.phase === "QUIET_WINDOW_WAIT_EXCEEDED");
+  assert.equal(exceeded.length, 1);
+  assert.equal(exceeded[0].target_commit, revisions.to);
+  assert.equal(exceeded[0].quiet_window_wait_seconds, 2_700);
+  assert.equal(exceeded[0].quiet_window_wait_polls, 45);
+  assert.equal(exceeded[0].quiet_window_wait_peak_blocking_runs, 7);
+  assert.deepEqual(exceeded[0].quiet_window_blocking_runs_by_runner, {
+    "mac-runner-1": 3,
+    "vm-control-plane": 2,
+  });
+  assert.deepEqual(notices, [{
+    outcome: "failure",
+    reason: "quiet-window-wait-exceeded",
+    detail: "elapsed-2700s-budget-2700s",
+    from: revisions.from,
+    to: revisions.to,
+  }]);
+  // Informational only: no escalation marker is written next to the ledger.
+  assert.equal(existsSync(join(stateDir, "escalated.json")), false);
+  assert.ok(lines.some((line) => line.startsWith("HOLD quiet-window-wait-exceeded")));
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+test("a completed quiet-window wait is recorded on the attempt's ledger entries", () => {
+  const attempt = openDeploymentAttempt({
+    deployRoot: "/srv/anneal",
+    targetCommit: revisions.to,
+    transactionId: "quiet-window-wait-completed",
+  });
+  attempt.establish({
+    revisions,
+    quietWindowWait: { waitSeconds: 312, polls: 6, peakBlockingRuns: 4 },
+  });
+  const stateDir = mkdtempSync(join(tmpdir(), "anneal-deploy-quiet-wait-done-"));
+  const ledger = createDeploymentLedger({ stateDir, targetCommit: revisions.to });
+  ledger.start();
+  ledger.record("SUCCEEDED", attempt.ledgerMetadata());
+  const snapshot = JSON.parse(readFileSync(ledger.statePath, "utf8"));
+  assert.equal(snapshot.quiet_window_wait_seconds, 312);
+  assert.equal(snapshot.quiet_window_wait_polls, 6);
+  assert.equal(snapshot.quiet_window_wait_peak_blocking_runs, 4);
+  assert.equal(snapshot.quiet_window_blocking_runs_by_runner, null);
   rmSync(stateDir, { recursive: true, force: true });
 });
 

@@ -24,6 +24,7 @@ export const DEPLOYMENT_LEDGER_STATES = Object.freeze([
   "STARTED",
   "ARTIFACT_PREPARED",
   "ARTIFACT_VERIFIED",
+  "QUIET_WINDOW_WAIT_EXCEEDED",
   "BACKED_UP",
   "SCHEMA_ADVANCED",
   "ACTIVATED",
@@ -104,6 +105,22 @@ const safeIdentifierList = (value) => {
 };
 
 const safeDurationMs = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
+
+const safeCount = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
+
+/** Blocking Runs by runner id at the moment a quiet-window wait crossed its
+ * budget. The control-plane query is database-wide, so the map names
+ * runner-only hosts as well as the deploying host. */
+const safeBlockingRunsByRunner = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const counts = {};
+  for (const [runner, total] of Object.entries(value).slice(0, MAX_VERIFICATION_ENTRIES)) {
+    const id = safeText(runner);
+    const count = safeCount(total);
+    if (id !== null && count !== null) counts[id] = count;
+  }
+  return Object.keys(counts).length === 0 ? null : counts;
+};
 
 /** What the post-restart verification actually proved: the units it sampled,
  * the local runners it saw re-registered, and how long everything stayed
@@ -319,6 +336,10 @@ export const createDeploymentLedger = ({
     pointerNewTarget: null,
     rollbackPointerOutcome: null,
     supersededEscalation: null,
+    quietWindowWaitSeconds: null,
+    quietWindowWaitPolls: null,
+    quietWindowWaitPeakBlockingRuns: null,
+    quietWindowBlockingRunsByRunner: null,
     reasonCode: null,
   };
 
@@ -347,6 +368,12 @@ export const createDeploymentLedger = ({
       pointerNewTarget: safePointerTarget(metadata.pointerNewTarget) ?? context.pointerNewTarget,
       rollbackPointerOutcome: safeRollbackPointerOutcome(metadata.rollbackPointerOutcome) ?? context.rollbackPointerOutcome,
       supersededEscalation: safeSupersededEscalation(metadata.supersededEscalation) ?? context.supersededEscalation,
+      quietWindowWaitSeconds: safeCount(metadata.quietWindowWaitSeconds) ?? context.quietWindowWaitSeconds,
+      quietWindowWaitPolls: safeCount(metadata.quietWindowWaitPolls) ?? context.quietWindowWaitPolls,
+      quietWindowWaitPeakBlockingRuns: safeCount(metadata.quietWindowWaitPeakBlockingRuns)
+        ?? context.quietWindowWaitPeakBlockingRuns,
+      quietWindowBlockingRunsByRunner: safeBlockingRunsByRunner(metadata.quietWindowBlockingRunsByRunner)
+        ?? context.quietWindowBlockingRunsByRunner,
       reasonCode: state === "FAILED" || state === "MANUAL_RECOVERY"
         ? safeReasonCode(metadata.reasonCode)
         : null,
@@ -365,6 +392,10 @@ export const createDeploymentLedger = ({
       pointer_new_target: nextContext.pointerNewTarget,
       rollback_pointer_outcome: nextContext.rollbackPointerOutcome,
       superseded_escalation: nextContext.supersededEscalation,
+      quiet_window_wait_seconds: nextContext.quietWindowWaitSeconds,
+      quiet_window_wait_polls: nextContext.quietWindowWaitPolls,
+      quiet_window_wait_peak_blocking_runs: nextContext.quietWindowWaitPeakBlockingRuns,
+      quiet_window_blocking_runs_by_runner: nextContext.quietWindowBlockingRunsByRunner,
       reason_code: nextContext.reasonCode,
     };
     const event = { ...payload, phase: state, timestamp: recordedAt };
