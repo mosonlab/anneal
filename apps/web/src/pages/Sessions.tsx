@@ -20,7 +20,7 @@ import {
   ALL_SESSION_FILTER, groupSessionsByDay, isLiveStatus,
   isSessionUnseen, markSessionOpened, readSessionSeenState, readSessionSelection,
   SESSION_DAY_PAGE_SIZE, SESSION_RANGE_PRESETS, SESSIONS_ROUTE, sessionAgentOptions, sessionDayLabelKind,
-  sessionListPath, sessionSelectionFilters, sessionSelectionSearch, sessionsFilterHref,
+  sessionListPath, sessionSelectionFilters, sessionsFilterHref,
   type SessionDayGroup, type SessionFilterOption, type SessionListSelection, type SessionRangePreset,
   type SessionSeenState,
 } from "../lib/session-list";
@@ -410,7 +410,7 @@ export const SessionFilterBar = ({ selection, agentOptions, searchText, onSearch
           </label>
         </>
       ) : null}
-      {sessionSelectionSearch(selection).length === 0 ? null : (
+      {!hasSessionListFilters(sessionSelectionFilters(selection, new Date())) ? null : (
         <Button type="button" variant="legacy" size="legacy" data-session-filter-clear onClick={onClear}>
           {t("sessions.filter.clear")}
         </Button>
@@ -426,11 +426,24 @@ export const SessionsPage = (): ReactNode => {
   // selection from it rather than from state keeps those three the same path.
   const search = useQuery().toString();
   const selection = useMemo(() => readSessionSelection(new URLSearchParams(search)), [search]);
-  // One selection resolves one window. Reading the clock during render instead
-  // would move `since` under a relative range on every poll, and each new value
-  // is a new request path — the list would reload itself forever.
-  const filters = useMemo(() => sessionSelectionFilters(selection, new Date()), [selection]);
+  // Today advances at local midnight; rolling ranges advance hourly. Polls
+  // between those boundaries retain their path and accumulated history.
+  const [windowClock, setWindowClock] = useState(() => new Date());
+  useEffect(() => {
+    if (!["today", "7d", "30d"].includes(selection.range)) return;
+    const now = new Date();
+    const next = selection.range === "today"
+      ? new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1).getTime()
+      : (Math.floor(now.getTime() / 3_600_000) + 1) * 3_600_000;
+    const timer = setTimeout(() => setWindowClock(new Date()), Math.max(1, next - now.getTime()));
+    return () => clearTimeout(timer);
+  }, [selection.range, windowClock]);
+  const filters = useMemo(() => sessionSelectionFilters(selection, new Date()), [selection, windowClock]);
   const path = projectId === "" ? null : sessionListPath(projectId, PAGE_SIZE, filters);
+  const requestGeneration = useRef({ path, generation: 0 });
+  if (requestGeneration.current.path !== path) {
+    requestGeneration.current = { path, generation: requestGeneration.current.generation + 1 };
+  }
   const head = usePoll<Session[]>(path, POLL_MS);
   // The Agent choices come from the project roster, not from the rows on
   // screen: narrowing to one Agent must not leave that Agent as the only one
@@ -479,6 +492,7 @@ export const SessionsPage = (): ReactNode => {
   // the request that produced them.
   useEffect(() => {
     setOlder([]);
+    setLoadingMore(false);
     setExhausted(false);
     setMoreError(null);
     setExpandedDays(new Set());
@@ -520,21 +534,24 @@ export const SessionsPage = (): ReactNode => {
   const loadMore = async (): Promise<void> => {
     const oldest = sessions.at(-1);
     if (!oldest) return;
+    const generation = requestGeneration.current.generation;
     setLoadingMore(true);
     setMoreError(null);
     try {
       // The same filters as the head, so paging continues through the narrowed
       // history rather than reopening the whole of it.
       const page = await api.get<Session[]>(sessionListPath(projectId, PAGE_SIZE, filters, oldest.requestedAt));
+      if (generation !== requestGeneration.current.generation) return;
       setOlder((current) => [...current, ...page]);
       if (page.length < PAGE_SIZE) setExhausted(true);
     } catch (error) {
       // Surfaced beside the button, which stays enabled as the retry. Without
       // this the failure is an unhandled rejection and the operator sees nothing.
+      if (generation !== requestGeneration.current.generation) return;
       const failure = error as { status?: number; message?: string };
       setMoreError(failure.status === undefined ? String(failure.message ?? error) : `${failure.status} ${failure.message}`);
     } finally {
-      setLoadingMore(false);
+      if (generation === requestGeneration.current.generation) setLoadingMore(false);
     }
   };
 
@@ -562,7 +579,7 @@ export const SessionsPage = (): ReactNode => {
           onClear={() => replace(SESSIONS_ROUTE)}
         />
         {head.missing ? <GapNotice endpoint="GET /sessions" what={t("sessions.gap.what")} /> : null}
-        {head.error === null || head.missing ? null : <ErrorNotice message={`${head.error.status} ${head.error.message}`} onRetry={head.reload} />}
+        {head.error === null || head.missing ? null : <ErrorNotice message={`${head.error.status} ${head.error.code ?? ""} ${head.error.message}`} onRetry={head.reload} />}
         <Card flush>
           <div data-session-list>
             {dayGroups.map((group) => (

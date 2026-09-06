@@ -2248,8 +2248,10 @@ the session's Task. `runner` is an exact `RunnerKind`.
 `q` is a case-insensitive substring search over human-authored text only: the
 Task name, the Run branch, and the session's `failureReason`. A row matching
 any of the three is returned. It never searches ids or event payloads, so an id
-is addressed through `taskId`, `chainId` or `agentId` rather than through `q`.
-It is at most 200 characters.
+is addressed through `taskId`, `chainId` or `agentId` rather than through `q`. `%`, `_`, and backslash are matched literally.
+
+`since` and `until` require a valid ISO calendar timestamp with time and a
+`Z` or numeric timezone offset; parseable prose and overflowing dates refuse.
 
 A request naming no filter answers exactly what it answered before the filters
 existed. A present-but-unusable filter is refused rather than ignored, so a

@@ -95,3 +95,10 @@ test("filters combine with the scope by AND", () => {
     },
   );
 });
+
+test("q escapes literal LIKE metacharacters on every searched column", () => {
+  const predicate = { contains: "100\\%\\_x\\\\", mode: "insensitive" };
+  assert.deepEqual(sessionListWhere(filters({ q: "100%_x\\" }), {}).OR, [
+    { task: { name: predicate } }, { run: { branch: predicate } }, { failureReason: predicate },
+  ]);
+});

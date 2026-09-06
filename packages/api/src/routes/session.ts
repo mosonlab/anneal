@@ -596,13 +596,13 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
     };
     /**
      * Projects each session's task down to the chain identity the wire contract
-     * declares. The name is derived from the whole page at once, because a
-     * direct chain's name is only provable from the rows that share its id; a
+     * declares. The list supplies all tasks for the chains represented on the page,
+     * so filtering and paging cannot hide a direct chain's name. A
      * lone row proves one only through its template-step suffix. The include
      * fields the merge outcome needed do not survive the projection.
      */
-    const chainIdentityFrom = <T extends ChainIdentitySubject>(page: readonly T[]) => {
-      const display = chainDisplayByTask(page.flatMap((session) => (session.task === null ? [] : [{
+    const chainIdentityFrom = <T extends ChainIdentitySubject>(page: readonly T[], chainTasks?: Parameters<typeof chainDisplayByTask>[0]) => {
+      const display = chainDisplayByTask(chainTasks ?? page.flatMap((session) => (session.task === null ? [] : [{
         id: session.task.id,
         projectId: session.projectId,
         name: session.task.name,
@@ -636,7 +636,14 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
         orderBy: { requestedAt: "desc" },
         take: limit,
       })).map(withMergeOutcome);
-      return context.json(page.map(chainIdentityFrom(page)) satisfies SessionResponse[]);
+      const chains = new Map(page.flatMap((session) => session.task?.chainId
+        ? [[`${session.projectId}\u0000${session.task.chainId}`, { projectId: session.projectId, chainId: session.task.chainId }] as const]
+        : []));
+      const chainTasks = chains.size === 0 ? [] : await db.task.findMany({
+        where: { OR: [...chains.values()] },
+        select: { id: true, projectId: true, name: true, chainId: true, templateStep: { select: { name: true } } },
+      });
+      return context.json(page.map(chainIdentityFrom(page, chainTasks)) satisfies SessionResponse[]);
     });
 
     app.get("/sessions/:sessionId", async (context) => {

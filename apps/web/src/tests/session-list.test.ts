@@ -200,7 +200,7 @@ test("agent options keep a roster Agent that no loaded row names", () => {
 const selection = (overrides: Partial<SessionListSelection> = {}): SessionListSelection =>
   ({ ...EMPTY_SESSION_SELECTION, ...overrides });
 
-test("a hash query round-trips through the selection, dropping what it cannot read", () => {
+test("a hash query round-trips through the selection, preserving invalid values", () => {
   const search = "status=failed&agentId=agent-1&runner=CODEX&taskId=task-1&chainId=chain-1&q=login&range=custom&since=2026-08-01&until=2026-08-03";
   const parsed = readSessionSelection(new URLSearchParams(search));
   assert.deepEqual(parsed, selection({
@@ -209,15 +209,11 @@ test("a hash query round-trips through the selection, dropping what it cannot re
   }));
   assert.equal(sessionSelectionSearch(parsed), search);
 
-  // The hash is operator-editable, so an unreadable value is dropped rather
-  // than sent on to earn a 400 the page could not act on.
-  assert.deepEqual(
-    readSessionSelection(new URLSearchParams("status=running&runner=pi&range=fortnight&agentId=%20")),
-    EMPTY_SESSION_SELECTION,
-  );
+  const invalid = readSessionSelection(new URLSearchParams("status=running&runner=pi"));
+  assert.equal(invalid.status, "running");
+  assert.equal(invalid.runner, "pi");
   assert.equal(sessionSelectionSearch(EMPTY_SESSION_SELECTION), "");
-  // Two date boxes left over from a custom window do not travel with a preset.
-  assert.equal(sessionSelectionSearch(selection({ range: "7d", since: "2026-08-01" })), "range=7d");
+  assert.equal(sessionSelectionSearch(selection({ range: "7d", since: "2026-08-01" })), "range=7d&since=2026-08-01");
 });
 
 test("a range preset resolves to the window the route filters requestedAt on", () => {
@@ -239,7 +235,7 @@ test("a range preset resolves to the window the route filters requestedAt on", (
     until: new Date(new Date(2026, 7, 4).getTime() - 1).toISOString(),
   });
   assert.deepEqual(sessionRangeWindow(selection({ range: "custom", until: "not-a-day" }), now), {
-    since: null, until: null,
+    since: null, until: "not-a-day",
   });
 });
 
@@ -274,4 +270,20 @@ test("a filter link opens the list narrowed to one axis only", () => {
   assert.equal(sessionsFilterHref({ chainId: "chain-1" }), "/sessions?chainId=chain-1");
   assert.equal(sessionsFilterHref({ taskId: "task-1" }), "/sessions?taskId=task-1");
   assert.equal(sessionsFilterHref({}), "/sessions");
+});
+
+ test("custom end dates follow local midnight across DST", () => {
+  const previous = process.env.TZ;
+  process.env.TZ = "America/New_York";
+  try {
+    for (const [until, expected] of [["2026-03-08", "2026-03-09T03:59:59.999Z"], ["2026-11-01", "2026-11-02T04:59:59.999Z"]] as const) {
+      assert.equal(sessionRangeWindow(selection({ range: "custom", until }), new Date()).until, expected);
+    }
+  } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; }
+});
+
+test("dates without a range infer custom and invalid calendar days reach refusal", () => {
+  const parsed = readSessionSelection(new URLSearchParams("until=2026-02-31"));
+  assert.equal(parsed.range, "custom");
+  assert.equal(sessionSelectionFilters(parsed, new Date()).until, "2026-02-31");
 });

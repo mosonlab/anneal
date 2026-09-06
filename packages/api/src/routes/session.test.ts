@@ -506,8 +506,17 @@ type EmittedWhere = {
 
 const modelledWhereKeys = ["projectId", "requestedAt", "executionStatus", "agentId", "runner", "taskId", "task", "OR"];
 
-const containsInsensitive = (value: string | null | undefined, needle: string): boolean =>
-  typeof value === "string" && value.toLowerCase().includes(needle.toLowerCase());
+// Model PostgreSQL LIKE: unescaped wildcards broaden, escaped ones are literal.
+const containsInsensitive = (value: string | null | undefined, needle: string): boolean => {
+  let pattern = "";
+  const literal = (character: string): string => character.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  for (let index = 0; index < needle.length; index += 1) {
+    const character = needle[index]!;
+    if (character === "\\" && index + 1 < needle.length) pattern += literal(needle[++index]!);
+    else pattern += character === "%" ? ".*" : character === "_" ? "." : literal(character);
+  }
+  return typeof value === "string" && new RegExp(pattern, "isu").test(value);
+};
 
 const matchesEmittedWhere = (row: SessionFixture, where: EmittedWhere): boolean => {
   for (const key of Object.keys(where)) {
@@ -539,6 +548,7 @@ type ListedSession = {
 
 const listSessions = (recorded: Array<Record<string, unknown>>) => {
   const app = createApp({
+    task: { findMany: async () => sessionFixtures.flatMap((row) => row.task ? [{ ...row.task, projectId: row.projectId }] : []) },
     session: {
       findMany: async (args: Record<string, unknown>) => {
         recorded.push(args);
@@ -622,6 +632,13 @@ test("GET /sessions refuses a present-but-unusable filter by name", async () => 
     } as unknown as PrismaClient);
     const get = (query: string) => app.request(`/sessions${query}`, { headers: { Authorization: "Bearer operator-unit-token" } });
 
+    for (const parameter of ["since", "until"]) {
+      for (const value of ["0", "August 16, 2026", "2026-02-31T00:00:00Z"]) {
+        const response = await get(`?${parameter}=${encodeURIComponent(value)}`);
+        assert.equal(response.status, 400);
+        assert.equal((await response.json() as { code: string }).code, `session-filter-${parameter}-invalid`);
+      }
+    }
     const since = await get("?since=yesterday");
     assert.equal(since.status, 400);
     assert.equal((await since.json() as { code: string }).code, "session-filter-since-invalid");
@@ -857,5 +874,30 @@ test("GET /session/runs/:runId/status omits the bound implementation task off th
     const body = await response.json() as { task: Record<string, unknown> };
     assert.equal("boundImplementationTask" in body.task, false);
     assert.equal(chainReads, 0);
+  });
+});
+
+test("GET /sessions resolves a direct chain from tasks outside the returned page", async () => {
+  await withTokens(async () => {
+    const row = sessionFixture("direct", "2026-08-20T00:00:00Z", { taskName: "Direct chain: Build", chainId: "direct-chain" });
+    const tasks = [row.task!, { ...row.task!, id: "other", name: "Direct chain: Review" }].map((task) => ({ ...task, projectId: "p" }));
+    const app = createApp({ session: { findMany: async () => [row] }, task: { findMany: async (args: unknown) => {
+      assert.deepEqual((args as { where: unknown }).where, { OR: [{ projectId: "p", chainId: "direct-chain" }] });
+      return tasks;
+    } } } as unknown as PrismaClient);
+    const response = await app.request("/sessions?limit=1&taskId=task-direct", { headers: { Authorization: "Bearer operator-unit-token" } });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as ListedSession[])[0]?.task?.chainName, "Direct chain");
+  });
+});
+
+test("GET /sessions matches percent literally instead of widening search", async () => {
+  await withTokens(async () => {
+    const literal = sessionFixture("literal", "2026-08-20T00:00:00Z", { failureReason: "100% complete" });
+    const plain = sessionFixture("plain", "2026-08-19T00:00:00Z", { failureReason: "100 complete" });
+    const app = createApp({ session: { findMany: async (args: { where: EmittedWhere }) => [literal, plain].filter((row) => matchesEmittedWhere(row, args.where)) } } as unknown as PrismaClient);
+    const response = await app.request("/sessions?q=100%25", { headers: { Authorization: "Bearer operator-unit-token" } });
+    assert.equal(response.status, 200);
+    assert.deepEqual((await response.json() as ListedSession[]).map((row) => row.id), ["literal"]);
   });
 });

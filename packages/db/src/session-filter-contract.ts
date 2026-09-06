@@ -72,10 +72,6 @@ export const SESSION_FILTER_PARAMETERS = [
 
 export type SessionFilterParameter = typeof SESSION_FILTER_PARAMETERS[number];
 
-/** The longest `q` the route accepts. Past this the value is a paste, not a
- *  search, and refusing it keeps an unbounded string out of the query. */
-export const SESSION_FILTER_QUERY_MAX = 200;
-
 /** One refusal code per parameter, so a 400 names the value that was wrong.
  *  A filter is never dropped silently: a present-but-unusable value refuses. */
 export const SESSION_FILTER_REFUSAL_CODES = {
@@ -90,6 +86,9 @@ export const SESSION_FILTER_REFUSAL_CODES = {
 } as const satisfies Record<SessionFilterParameter, string>;
 
 export type SessionFilterRefusalCode = typeof SESSION_FILTER_REFUSAL_CODES[SessionFilterParameter];
+
+/** Raw URL values retain invalid inputs until the shared parser refuses them. */
+export type SessionListFilterInput = Record<SessionFilterParameter, string | null>;
 
 /**
  * The parsed filters. `null` means the parameter was absent — never that it
@@ -145,6 +144,14 @@ const present = (read: SessionFilterQueryReader, parameter: SessionFilterParamet
 };
 
 const isoInstant = (value: string): string | null => {
+  const parts = /^(\d{4})-(\d{2})-(\d{2})T([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/u.exec(value);
+  if (!parts) return null;
+  const year = Number(parts[1]);
+  const month = Number(parts[2]);
+  const day = Number(parts[3]);
+  const calendar = new Date(0);
+  calendar.setUTCFullYear(year, month - 1, day);
+  if (calendar.getUTCFullYear() !== year || calendar.getUTCMonth() !== month - 1 || calendar.getUTCDate() !== day) return null;
   const parsed = new Date(value);
   return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 };
@@ -182,9 +189,6 @@ export const parseSessionListFilters = (read: SessionFilterQueryReader): Session
 
   const q = present(read, "q");
   if (q === undefined) return refuse("q", "q must be a non-empty search term");
-  if (q !== null && q.length > SESSION_FILTER_QUERY_MAX) {
-    return refuse("q", `q must be at most ${SESSION_FILTER_QUERY_MAX} characters`);
-  }
 
   return { filters: { status, agentId, runner, taskId, chainId, since, until, q } };
 };
@@ -192,7 +196,7 @@ export const parseSessionListFilters = (read: SessionFilterQueryReader): Session
 /** The filters as query parameters, absent ones omitted. The caller appends
  *  them to its own `projectId`/`limit`/`before`. */
 export const sessionListFilterParams = (
-  filters: SessionListFilters,
+  filters: SessionListFilterInput,
 ): Array<[SessionFilterParameter, string]> =>
   SESSION_FILTER_PARAMETERS
     .map((parameter) => [parameter, filters[parameter]] as const)
@@ -200,5 +204,5 @@ export const sessionListFilterParams = (
 
 /** Whether anything is narrowing the list. The page's empty state and its
  *  Clear control both read this rather than testing eight fields. */
-export const hasSessionListFilters = (filters: SessionListFilters): boolean =>
+export const hasSessionListFilters = (filters: SessionListFilterInput): boolean =>
   sessionListFilterParams(filters).length > 0;

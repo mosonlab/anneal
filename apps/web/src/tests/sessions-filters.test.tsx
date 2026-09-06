@@ -3,11 +3,11 @@ import test from "node:test";
 
 import { act } from "react";
 
-import { sessionStatusMatches, type SessionStatusFilter } from "@anneal/db/session-filter-contract";
+import { parseSessionListFilters, sessionStatusMatches, type SessionStatusFilter } from "@anneal/db/session-filter-contract";
 
 import { LocaleProvider } from "../lib/i18n";
 import type { Session } from "../lib/types";
-import { mountPage, type PageHarness } from "./dom-harness";
+import { mountPage, type PageHarness, type PageRoute } from "./dom-harness";
 
 /**
  * The Sessions list filters on the server, so these tests answer the page's
@@ -61,7 +61,7 @@ const listRequests = (page: PageHarness): URLSearchParams[] => page.requests
   .filter((request) => request.path.startsWith("/sessions?"))
   .map((request) => queryOf(request.path));
 
-const mountSessions = async (rows: readonly Session[], hash = "#/sessions"): Promise<PageHarness> => {
+const mountSessions = async (rows: readonly Session[], hash = "#/sessions", route?: PageRoute): Promise<PageHarness> => {
   const [{ SessionsPage }, { ProjectProvider }] = await Promise.all([
     import("../pages/Sessions"), import("../lib/project"),
   ]);
@@ -70,7 +70,7 @@ const mountSessions = async (rows: readonly Session[], hash = "#/sessions"): Pro
     {
       "/projects": [{ id: "p1", name: "Demo" }],
       "/projects/p1/agents": AGENTS,
-      "/sessions": ({ path }) => narrow(rows, queryOf(path)),
+      "/sessions": route ?? (({ path }) => narrow(rows, queryOf(path))),
     },
     `http://127.0.0.1:5173/${hash}`,
   );
@@ -163,6 +163,7 @@ test("a date range asks the server for a window and Clear puts the whole history
     assert.ok(from, "the custom window offers its two date boxes");
     assert.ok(to);
 
+    await select(page, "data-session-filter-range", "today");
     const clear = [...page.container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Clear");
     assert.ok(clear);
     await act(async () => { clear.dispatchEvent(new page.dom.window.MouseEvent("click", { bubbles: true, button: 0 })); });
@@ -289,4 +290,79 @@ test("Load more pages through the filtered history under the same filters", asyn
   } finally {
     await page.dispose();
   }
+});
+
+for (const outcome of ["success", "error"] as const) test(`stale Load more ${outcome} cannot update a new filter`, async () => {
+  let finish!: (value: Response | Session[]) => void;
+  const pending = new Promise<Response | Session[]>((resolve) => { finish = resolve; });
+  const rows = Array.from({ length: 50 }, (_, index) => session({ id: `current-${index}`, executionStatus: "FAILED", requestedAt: at(index), startedAt: at(index) }));
+  const page = await mountSessions(rows, "#/sessions", ({ path }) => queryOf(path).has("before") ? pending : rows);
+  try {
+    await page.press("Load more");
+    await select(page, "data-session-filter-status", "failed");
+    await act(async () => { finish(outcome === "success" ? [session({ id: "STALE", requestedAt: at(60), startedAt: at(60) })] : new Response(JSON.stringify({ error: "STALE" }), { status: 500 })); });
+    await page.settle();
+    assert.doesNotMatch(page.container.textContent ?? "", /STALE/u);
+    const more = [...page.container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Load more");
+    assert.ok(more);
+    assert.equal(more.disabled, false);
+  } finally { await page.dispose(); }
+});
+
+for (const [query, parameter, value] of [["status=running", "status", "running"], ["runner=pi", "runner", "pi"], ["range=custom&since=2026-02-31", "since", "2026-02-31"], ["until=bad", "until", "bad"]]) test(`invalid hash ${query} is explicitly refused`, async () => {
+  const page = await mountSessions([], `#/sessions?${query}`, ({ path }) => {
+    assert.equal(queryOf(path).get(parameter!), value);
+    const parsed = parseSessionListFilters((key) => queryOf(path).get(key));
+    assert.ok(parsed.refusal);
+    return new Response(JSON.stringify({ error: parsed.refusal.message, code: parsed.refusal.code }), { status: 400 });
+  });
+  try {
+    assert.ok(listRequests(page).length > 0);
+    assert.match(page.container.textContent ?? "", new RegExp(`session-filter-${parameter}-invalid`));
+  } finally { await page.dispose(); }
+});
+
+test("custom dates survive switching presets", async () => {
+  const page = await mountSessions([], "#/sessions?range=custom&since=2026-08-01&until=2026-08-03");
+  try {
+    await select(page, "data-session-filter-range", "today");
+    await select(page, "data-session-filter-range", "custom");
+    assert.equal(page.container.querySelector<HTMLInputElement>("[data-session-filter-since]")?.value, "2026-08-01");
+    assert.equal(page.container.querySelector<HTMLInputElement>("[data-session-filter-until]")?.value, "2026-08-03");
+    assert.equal(listRequests(page).at(-1)?.get("since"), new Date(2026, 7, 1).toISOString());
+  } finally { await page.dispose(); }
+});
+
+test("Today refreshes across midnight without a selection change", async (context) => {
+  context.mock.timers.enable({ apis: ["Date"], now: new Date(2026, 7, 16, 23, 59, 59) });
+  const page = await mountSessions([], "#/sessions?range=today");
+  try {
+    context.mock.timers.setTime(new Date(2026, 7, 17, 0, 0, 1).getTime());
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1100)); });
+    await page.settle();
+    assert.equal(listRequests(page).at(-1)?.get("since"), new Date(2026, 7, 17).toISOString());
+  } finally { await page.dispose(); }
+});
+
+test("one matching direct-chain session renders its resolved name", async () => {
+  const page = await mountSessions([session({ id: "direct", task: { id: "task-direct", name: "Direct chain: Build", chainId: "direct-chain", chainName: "Direct chain" } })], "#/sessions?taskId=task-direct");
+  try {
+    assert.equal(page.container.querySelector("[data-session-chain]")?.textContent, "Direct chain");
+    assert.equal(page.container.querySelector("[data-session-chain]")?.closest("a")?.getAttribute("href"), "#/sessions?chainId=direct-chain");
+  } finally { await page.dispose(); }
+});
+
+for (const range of ["7d", "30d"]) test(`${range} refreshes on the hourly boundary`, async (context) => {
+  context.mock.timers.enable({ apis: ["Date"], now: new Date(2026, 7, 16, 14, 59, 59) });
+  const page = await mountSessions([], `#/sessions?range=${range}`);
+  try {
+    const initial = listRequests(page).at(-1)?.get("since");
+    await page.settle();
+    assert.equal(listRequests(page).at(-1)?.get("since"), initial);
+    const next = new Date(2026, 7, 16, 15, 0, 1);
+    context.mock.timers.setTime(next.getTime());
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1100)); });
+    await page.settle();
+    assert.equal(listRequests(page).at(-1)?.get("since"), new Date(next.getTime() - Number.parseInt(range, 10) * 86_400_000).toISOString());
+  } finally { await page.dispose(); }
 });

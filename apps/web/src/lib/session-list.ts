@@ -1,13 +1,9 @@
 import {
-  isSessionRunnerFilter,
-  isSessionStatusFilter,
   NO_SESSION_FILTERS,
   SESSION_FILTER_PARAMETERS,
   sessionListFilterParams,
   sessionStatusMatches,
-  type SessionListFilters,
-  type SessionRunnerFilter,
-  type SessionStatusFilter,
+  type SessionListFilterInput,
 } from "@anneal/db/session-filter-contract";
 
 import { storage } from "./storage";
@@ -32,7 +28,7 @@ export type SessionFilterOption = {
 
 /** The date windows the list offers. `custom` is the only one that reads the
  *  two date boxes; the relative ones are resolved against the current instant
- *  whenever the selection changes, so a shared link means the same words
+ *  when selected and at clock boundaries, so a shared link means the same words
  *  rather than the same frozen hour. */
 export const SESSION_RANGE_PRESETS = ["all", "today", "7d", "30d", "custom"] as const;
 
@@ -49,46 +45,18 @@ const isRangePreset = (value: string): value is SessionRangePreset =>
  * `since`/`until` are local calendar days — the value an `input[type=date]`
  * holds — rather than instants, so a reload restores the boxes exactly.
  */
-export type SessionListSelection = {
-  status: SessionStatusFilter | null;
-  agentId: string | null;
-  runner: SessionRunnerFilter | null;
-  taskId: string | null;
-  chainId: string | null;
-  range: SessionRangePreset;
-  since: string | null;
-  until: string | null;
-  q: string | null;
-};
+export type SessionListSelection = SessionListFilterInput & { range: SessionRangePreset };
 
-export const EMPTY_SESSION_SELECTION: SessionListSelection = {
-  status: null, agentId: null, runner: null, taskId: null, chainId: null,
-  range: "all", since: null, until: null, q: null,
-};
+export const EMPTY_SESSION_SELECTION: SessionListSelection = { ...NO_SESSION_FILTERS, range: "all" };
 
-const text = (query: URLSearchParams, name: string): string | null => {
-  const raw = query.get(name);
-  if (raw === null) return null;
-  const trimmed = raw.trim();
-  return trimmed.length === 0 ? null : trimmed;
-};
-
-/** A hash an operator can edit by hand, so an unreadable value is dropped
- *  rather than sent on to earn a 400 the page cannot act on. */
+/** Preserve raw values so the shared server parser can refuse invalid links. */
 export const readSessionSelection = (query: URLSearchParams): SessionListSelection => {
-  const status = text(query, "status");
-  const runner = text(query, "runner");
-  const range = text(query, "range");
+  const axes = { ...NO_SESSION_FILTERS } as SessionListFilterInput;
+  for (const parameter of SESSION_FILTER_PARAMETERS) axes[parameter] = query.get(parameter);
+  const range = query.get("range");
   return {
-    status: status !== null && isSessionStatusFilter(status) ? status : null,
-    agentId: text(query, "agentId"),
-    runner: runner !== null && isSessionRunnerFilter(runner) ? runner : null,
-    taskId: text(query, "taskId"),
-    chainId: text(query, "chainId"),
-    range: range !== null && isRangePreset(range) ? range : "all",
-    since: text(query, "since"),
-    until: text(query, "until"),
-    q: text(query, "q"),
+    ...axes,
+    range: range !== null && isRangePreset(range) ? range : axes.since !== null || axes.until !== null ? "custom" : "all",
   };
 };
 
@@ -102,10 +70,8 @@ export const sessionSelectionSearch = (selection: SessionListSelection): string 
     if (value !== null) query.set(parameter, value);
   }
   if (selection.range !== "all") query.set("range", selection.range);
-  if (selection.range === "custom") {
-    if (selection.since !== null) query.set("since", selection.since);
-    if (selection.until !== null) query.set("until", selection.until);
-  }
+  if (selection.since !== null) query.set("since", selection.since);
+  if (selection.until !== null) query.set("until", selection.until);
   return query.toString();
 };
 
@@ -126,7 +92,7 @@ const localDay = (value: string): Date | null => {
   const parts = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
   if (!parts) return null;
   const day = new Date(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3]));
-  return Number.isNaN(day.getTime()) ? null : day;
+  return day.getFullYear() !== Number(parts[1]) || day.getMonth() !== Number(parts[2]) - 1 || day.getDate() !== Number(parts[3]) ? null : day;
 };
 
 const daysBefore = (now: Date, days: number): Date =>
@@ -146,8 +112,8 @@ export const sessionRangeWindow = (
   const from = selection.since === null ? null : localDay(selection.since);
   const to = selection.until === null ? null : localDay(selection.until);
   return {
-    since: from === null ? null : from.toISOString(),
-    until: to === null ? null : new Date(to.getTime() + 24 * 60 * 60 * 1_000 - 1).toISOString(),
+    since: from === null ? selection.since : from.toISOString(),
+    until: to === null ? selection.until : new Date(new Date(to.getFullYear(), to.getMonth(), to.getDate() + 1).getTime() - 1).toISOString(),
   };
 };
 
@@ -156,23 +122,17 @@ export const sessionRangeWindow = (
 export const sessionSelectionFilters = (
   selection: SessionListSelection,
   now: Date,
-): SessionListFilters => ({
-  ...NO_SESSION_FILTERS,
-  status: selection.status,
-  agentId: selection.agentId,
-  runner: selection.runner,
-  taskId: selection.taskId,
-  chainId: selection.chainId,
-  q: selection.q,
-  ...sessionRangeWindow(selection, now),
-});
+): SessionListFilterInput => {
+  const { range: _range, since: _since, until: _until, ...axes } = selection;
+  return { ...axes, ...sessionRangeWindow(selection, now) };
+};
 
 /** The list request, cursor included. Every filter reaches the server, so the
  *  page never narrows a page it has already loaded. */
 export const sessionListPath = (
   projectId: string,
   limit: number,
-  filters: SessionListFilters,
+  filters: SessionListFilterInput,
   before?: string,
 ): string => {
   const query = new URLSearchParams({ projectId, limit: String(limit) });

@@ -10,7 +10,6 @@ import {
   NO_SESSION_FILTERS,
   parseSessionListFilters,
   SESSION_FILTER_PARAMETERS,
-  SESSION_FILTER_QUERY_MAX,
   SESSION_FILTER_REFUSAL_CODES,
   SESSION_STATUS_EXECUTION_STATUSES,
   SESSION_STATUS_FILTERS,
@@ -101,7 +100,9 @@ test("an unusable value refuses with the code named for its parameter", () => {
     [{ taskId: "" }, "taskId"],
     [{ chainId: " " }, "chainId"],
     [{ q: "" }, "q"],
-    [{ q: "x".repeat(SESSION_FILTER_QUERY_MAX + 1) }, "q"],
+    [{ since: "0" }, "since"],
+    [{ until: "August 16, 2026" }, "until"],
+    [{ since: "2026-02-31T00:00:00Z" }, "since"],
   ];
   for (const [query, parameter] of cases) {
     const parsed = parseSessionListFilters(reader(query));
@@ -116,4 +117,8 @@ test("every parameter has exactly one refusal code and no code is shared", () =>
   const codes = SESSION_FILTER_PARAMETERS.map((parameter) => SESSION_FILTER_REFUSAL_CODES[parameter]);
   assert.equal(new Set(codes).size, codes.length);
   assert.deepEqual(Object.keys(SESSION_FILTER_REFUSAL_CODES).sort(), [...SESSION_FILTER_PARAMETERS].sort());
+});
+
+test("long free text remains searchable", () => {
+  assert.equal(parseSessionListFilters(reader({ q: "x".repeat(201) })).filters?.q?.length, 201);
 });

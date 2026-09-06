@@ -27,7 +27,7 @@ export type SessionListScope = {
  *  match, or a search for a word would surface rows an operator cannot see the
  *  reason for. */
 const insensitiveContains = (value: string) => ({
-  contains: value,
+  contains: value.replace(/[\\%_]/gu, (character) => `\\${character}`),
   mode: "insensitive",
 } satisfies Prisma.StringNullableFilter);
 
