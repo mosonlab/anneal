@@ -82,9 +82,12 @@ root-only exception described below. Require:
 
 - `current` and `previous` are relative symlinks to direct children of
   `releases/`;
-- `shared/.env` is mode 0600 and contains `DATABASE_URL`,
-  `FEISHU_DEFAULT_CHAT_ID`, and `GITHUB_READ_TOKEN` (the latter must be in the
-  file), plus the five absolute persistent paths beneath `shared/`:
+- `shared/.env` is mode 0600 and contains the keys for the deployed role:
+  control-plane requires `DATABASE_URL`, `FEISHU_DEFAULT_CHAT_ID`, and
+  `GITHUB_READ_TOKEN` (the latter must be in the file); runner requires
+  `OPERATOR_TOKEN` and `RUNNER_TOKEN`, with optional `RUNNER_API_URL` validated
+  by `controlPlaneApiBaseUrl`. It also contains the five absolute persistent
+  paths beneath `shared/`:
   `FILES_ROOT`, `RUNNER_WORKSPACE_ROOT`, `RUNNER_DEPENDENCY_CACHE_ROOT`,
   `RUNNER_REPO_MIRROR_ROOT`, and `CONTROL_PLANE_STATE_DIR`;
 - every configured service definition uses
