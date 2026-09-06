@@ -366,8 +366,12 @@ the executor unit uses:
 
 The file must be a regular file owned by root with mode 0600. The production
 defaults are `/usr/bin/chown`, `/usr/bin/chmod`, `/usr/bin/systemctl`,
-`/usr/bin/journalctl`, and `/usr/bin/sleep`; command substitutions are for
-hermetic tests and are not needed in this file:
+and `/usr/bin/journalctl`; command substitutions are for
+hermetic tests and are not needed in this file. Configuration and command
+ancestors must be root-owned and not group/world writable (sticky shared
+directories are allowed). The configured `nodePath` must resolve to the same
+executable as the rendered service; divergence fails with
+`config-nodePath-mismatch`. Update both paths together when upgrading Node:
 
 ```sh
 sudo install -d -o root -g root -m 0755 /etc/agentos
@@ -411,7 +415,8 @@ sudo systemctl show agentos-merge-executor-follower.service \
 sudo journalctl --unit agentos-merge-executor-follower.service --no-pager -n 50
 ```
 
-Require `Result=success` and `ExecMainStatus=0`. After the first run, check that
+Require `Result=success` and `ExecMainStatus=0`, including no
+`config-nodePath-mismatch` in the journal. After the first run, check that
 the executor's `current` points to the
 control-plane commit and that the adopted release is root-owned without group
 or world write permission. A mid-deploy control-plane pointer or a failed
@@ -419,9 +424,18 @@ manifest check leaves the executor untouched; the next timer tick retries.
 The follower checks that the executor stays active with the same main PID for
 30 seconds and that its journal contains no completion-contract mismatch. A
 failed check restores the previous pointer and restarts it; the candidate stays
-for diagnosis. Success retains the current release and two rollback releases,
+for diagnosis. The failed commit is recorded under
+`<executor-root>/failed-adoptions/<commit>`; subsequent ticks refuse that commit
+with `release-adoption-poisoned` without restarting again. After diagnosing and
+correcting the failure, an administrator can remove that commit’s marker to
+permit a retry; a different deployed commit can be adopted immediately.
+The follower uses a Linux abstract socket for mutual exclusion: the kernel
+releases it on process death or reboot, and legacy `.follower-lock` directories
+do not block it. Success retains the current release and two rollback releases,
 always preserving the one just replaced. The follower never modifies the
-executor environment file or its service unit.
+executor environment file or its service unit. A pruning error is reported as
+`retention-failed` with a nonzero exit after the adoption success line; the
+healthy adopted pointer is retained.
 
 ### Why no passwordless sudo or generic root helper is installed
 
