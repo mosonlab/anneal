@@ -74,7 +74,7 @@ it can.
 
 ## Routing
 
-Implementation has five routes:
+Implementation has six routes:
 
 - **senior-dev-luna-max** (template default): a brief with mechanical Acceptance
   is work that tier finishes under the chain's review and regression tail.
@@ -90,6 +90,9 @@ Implementation has five routes:
   steps unchanged.
 - **frontend-dev-opus-medium** for the frontend scope defined in
   [Implementation assignee routing](governance/task-routing-v1.md#implementation-assignee-routing).
+- **frontend-dev-opus-high** for that same frontend scope when the operator names
+  it because the frontend work is harder. It is the same frontend-developer
+  prompt on Claude Opus 5 high; it is never a default.
 
 The [Implementation assignee routing](governance/task-routing-v1.md#implementation-assignee-routing)
 section owns the default, hazard escalation, exact `Route:` grammar, refusal

@@ -91,7 +91,9 @@ model is unavailable; it is never a default. Use
 `senior-dev-opus-medium` when the operator names it to spend Claude capacity
 on the implementation instead of Codex capacity; it is never a default.
 Use `frontend-dev-opus-medium` for work primarily consisting of a new or
-redesigned web page or UI surface. The review-fix step keeps its template
+redesigned web page or UI surface, and `frontend-dev-opus-high` for that same
+work when the operator names it because the frontend work is harder; it is
+never a default. The review-fix step keeps its template
 assignee `senior-dev-astra-low` on every route; implementation routing does not
 move it.
 
