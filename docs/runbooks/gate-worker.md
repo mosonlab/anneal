@@ -335,15 +335,21 @@ set `GATE_DISPATCH_FALLBACK_AFTER_MINUTES` to a non-negative integer to change
 it, or to `0` for the immediate fallback behavior. An unavailable primary is
 not counted as busy, so its fallback remains immediate.
 
-Agent sessions receive a single operator-selected worker when their runner
+Agent sessions receive an operator-selected gate topology when their runner
 daemon is configured with `RUNNER_GATE_SERVER=<ssh-alias>`. The runner validates
-that destination and exposes it to the session as `AGENTOS_GATE_SERVER`, which
-puts `gate-dispatch.sh` into its existing single-server mode. To contribute local
-capacity, also set
+that destination. Without a fallback, it exposes it to the session as
+`AGENTOS_GATE_SERVER`, which puts `gate-dispatch.sh` into its existing
+single-server mode with one remote slot. When
+`RUNNER_GATE_FALLBACK_SERVER=<ssh-alias>` is also configured, the fallback must
+be a different destination; the runner exposes the pair as
+`AGENTOS_GATE_PRIMARY_SERVER` and `AGENTOS_GATE_FALLBACK_SERVER` and does not
+set `AGENTOS_GATE_SERVER`. This gives the primary two remote slots
+(`remote-1`, `remote-1-2`) and the fallback one (`remote-2`), tried in that
+order before polling. To contribute local capacity, also set
 `RUNNER_GATE_LOCAL_SLOTS=<positive integer, at most 1024>` on the runner. The
 runner then enables local dispatch and passes the count as
-`AGENTOS_GATE_LOCAL_SLOTS`; local slots are tried before that remote worker.
-Task secrets cannot override either runner-owned choice. If
+`AGENTOS_GATE_LOCAL_SLOTS`; local slots are tried before the configured remote
+topology. Task secrets cannot override any runner-owned gate variable. If
 `RUNNER_GATE_LOCAL_SLOTS` is unset, the session gets no local capacity. An unset
 `RUNNER_GATE_SERVER`
 provides no remote capacity to a canonical regression step, but a configured
