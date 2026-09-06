@@ -54,7 +54,7 @@ for (const check of ["head", "ref-missing", "ref-mismatch", "head-ancestry", "ba
   if (check === "ref-mismatch") f.state.ref = P1;
   if (check === "head-ancestry") f.train.isAncestor = async () => ({ status: "ok", ancestor: false });
   if (check.startsWith("base-")) f.state.base = "9".repeat(40);
-  
+
   const result = await execute(f.deps);
   assert.equal(result.outcome, "stopped");
   if (result.outcome === "stopped") { assert.equal(result.condition, "train-precondition-failed"); assert.ok(JSON.parse(result.evidence).check); }

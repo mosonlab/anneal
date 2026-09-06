@@ -434,7 +434,7 @@ Once those checks pass, the executor publishes the prefix by updating
 with the App installation token. The update is never forced and must be a
 fast-forward. The send is bounded by `GUARDED_MERGE_SENDS`, uses the same
 idempotency key and `confirmedWrite` read-back discipline as the ordinary merge
-API call, and rechecks `superseded-authorization` at the same points. If the
+path, and rechecks `superseded-authorization` at the same points. If the
 default branch already equals `publishHead` or contains it, the update is
 skipped. A GitHub non-fast-forward refusal records `train-publish-rejected`.
 
@@ -450,7 +450,9 @@ pull request with another shape still records `changed-underneath-me`.
 
 When the candidate at the highest position in a prefix reports `merged`, the
 executor deletes `refs/anneal/train/<publishHead>`. A deletion failure is
-logged for operator follow-up and does not stop the run.
+logged for operator follow-up and does not stop the run. Once the default
+branch contains the prefix, replay relies on immutable commit lineage and does
+not require the staging ref to remain present.
 
 ## Rotation and recovery
 
