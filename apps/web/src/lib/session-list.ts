@@ -1,34 +1,149 @@
+import {
+  NO_SESSION_FILTERS,
+  SESSION_FILTER_PARAMETERS,
+  sessionListFilterParams,
+  sessionStatusMatches,
+  type SessionListFilterInput,
+} from "@anneal/db/session-filter-contract";
+
 import { storage } from "./storage";
-import type { Session, SessionExecutionStatus } from "./types";
+import type { Agent, Session, SessionExecutionStatus } from "./types";
 
 /** The number of rows that keep a busy calendar day from hiding later days. */
 export const SESSION_DAY_PAGE_SIZE = 5;
 
-/** The lifecycle states that are still running or waiting on work. Keep this
- *  next to the list predicates so the filter and the page's status vocabulary
+/** Whether this session is still running or waiting on work, answered from the
+ *  shared status mapping so the page's vocabulary and the server's filter
  *  cannot drift apart. */
-export const LIVE_SESSION_STATUSES: readonly SessionExecutionStatus[] = [
-  "REQUESTED", "PROVISIONING", "RUNNING", "WAITING_INBOX",
-];
+export const isLiveStatus = (status: SessionExecutionStatus): boolean => sessionStatusMatches(status, "live");
 
-export const isLiveStatus = (status: SessionExecutionStatus): boolean => LIVE_SESSION_STATUSES.includes(status);
-
+/** The select value that stands for "do not narrow on this axis". It is a UI
+ *  word only: an unfiltered axis is simply absent from the request. */
 export const ALL_SESSION_FILTER = "all" as const;
-
-export const SESSION_STATUS_FILTERS = [
-  ALL_SESSION_FILTER, "live", "done", "failed", "cancelled",
-] as const;
-
-export type SessionStatusFilter = typeof SESSION_STATUS_FILTERS[number];
-
-export type SessionListFilters = {
-  agentId: string;
-  status: SessionStatusFilter;
-};
 
 export type SessionFilterOption = {
   value: string;
   label: string;
+};
+
+/** The date windows the list offers. `custom` is the only one that reads the
+ *  two date boxes; the relative ones are resolved against the current instant
+ *  when selected and at clock boundaries, so a shared link means the same words
+ *  rather than the same frozen hour. */
+export const SESSION_RANGE_PRESETS = ["all", "today", "7d", "30d", "custom"] as const;
+
+export type SessionRangePreset = typeof SESSION_RANGE_PRESETS[number];
+
+const isRangePreset = (value: string): value is SessionRangePreset =>
+  (SESSION_RANGE_PRESETS as readonly string[]).includes(value);
+
+/**
+ * What the operator chose, as the URL carries it.
+ *
+ * The filter axes keep the shared contract's parameter names, so the hash and
+ * the request spell them identically. `range` is the page's own control, and
+ * `since`/`until` are local calendar days — the value an `input[type=date]`
+ * holds — rather than instants, so a reload restores the boxes exactly.
+ */
+export type SessionListSelection = SessionListFilterInput & { range: SessionRangePreset };
+
+export const EMPTY_SESSION_SELECTION: SessionListSelection = { ...NO_SESSION_FILTERS, range: "all" };
+
+/** Preserve raw values so the shared server parser can refuse invalid links. */
+export const readSessionSelection = (query: URLSearchParams): SessionListSelection => {
+  const axes = { ...NO_SESSION_FILTERS } as SessionListFilterInput;
+  for (const parameter of SESSION_FILTER_PARAMETERS) axes[parameter] = query.get(parameter);
+  const range = query.get("range");
+  return {
+    ...axes,
+    range: range !== null && isRangePreset(range) ? range : axes.since !== null || axes.until !== null ? "custom" : "all",
+  };
+};
+
+/** The selection as a hash query, in a fixed order so an unchanged selection
+ *  never rewrites the address bar. Empty when nothing is narrowed. */
+export const sessionSelectionSearch = (selection: SessionListSelection): string => {
+  const query = new URLSearchParams();
+  for (const parameter of SESSION_FILTER_PARAMETERS) {
+    if (parameter === "since" || parameter === "until") continue;
+    const value = selection[parameter];
+    if (value !== null) query.set(parameter, value);
+  }
+  // `all` is the default and stays out of an otherwise empty hash, but dates
+  // kept from an earlier custom window would be read back as an inferred
+  // custom range, so a remembered window keeps the preset spelled out.
+  if (selection.range !== "all" || selection.since !== null || selection.until !== null) {
+    query.set("range", selection.range);
+  }
+  if (selection.since !== null) query.set("since", selection.since);
+  if (selection.until !== null) query.set("until", selection.until);
+  return query.toString();
+};
+
+/** The list's own route, so every link into it agrees on the spelling. */
+export const SESSIONS_ROUTE = "/sessions";
+
+/** A link that opens the Sessions list already narrowed — the chain chip on a
+ *  row, and the task detail page's way in. Unnamed axes stay unfiltered. */
+export const sessionsFilterHref = (selection: Partial<SessionListSelection>): string => {
+  const search = sessionSelectionSearch({ ...EMPTY_SESSION_SELECTION, ...selection });
+  return search.length === 0 ? SESSIONS_ROUTE : `${SESSIONS_ROUTE}?${search}`;
+};
+
+const startOfDay = (date: Date): Date =>
+  new Date(date.getFullYear(), date.getMonth(), date.getDate());
+
+const localDay = (value: string): Date | null => {
+  const parts = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value);
+  if (!parts) return null;
+  const day = new Date(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3]));
+  return day.getFullYear() !== Number(parts[1]) || day.getMonth() !== Number(parts[2]) - 1 || day.getDate() !== Number(parts[3]) ? null : day;
+};
+
+const daysBefore = (now: Date, days: number): Date =>
+  new Date(now.getTime() - days * 24 * 60 * 60 * 1_000);
+
+/** The chosen window as the two instants the route filters `requestedAt` on.
+ *  A custom `until` covers the whole day it names, which is what an operator
+ *  who typed one date and expected its sessions means. */
+export const sessionRangeWindow = (
+  selection: SessionListSelection,
+  now: Date,
+): { since: string | null; until: string | null } => {
+  if (selection.range === "today") return { since: startOfDay(now).toISOString(), until: null };
+  if (selection.range === "7d") return { since: daysBefore(now, 7).toISOString(), until: null };
+  if (selection.range === "30d") return { since: daysBefore(now, 30).toISOString(), until: null };
+  if (selection.range !== "custom") return { since: null, until: null };
+  const from = selection.since === null ? null : localDay(selection.since);
+  const to = selection.until === null ? null : localDay(selection.until);
+  return {
+    since: from === null ? selection.since : from.toISOString(),
+    until: to === null ? selection.until : new Date(new Date(to.getFullYear(), to.getMonth(), to.getDate() + 1).getTime() - 1).toISOString(),
+  };
+};
+
+/** The selection as the shared filter contract, ready to be spelled into a
+ *  request. `now` is passed in so one render resolves one window. */
+export const sessionSelectionFilters = (
+  selection: SessionListSelection,
+  now: Date,
+): SessionListFilterInput => {
+  const { range: _range, since: _since, until: _until, ...axes } = selection;
+  return { ...axes, ...sessionRangeWindow(selection, now) };
+};
+
+/** The list request, cursor included. Every filter reaches the server, so the
+ *  page never narrows a page it has already loaded. */
+export const sessionListPath = (
+  projectId: string,
+  limit: number,
+  filters: SessionListFilterInput,
+  before?: string,
+): string => {
+  const query = new URLSearchParams({ projectId, limit: String(limit) });
+  for (const [parameter, value] of sessionListFilterParams(filters)) query.set(parameter, value);
+  if (before !== undefined) query.set("before", before);
+  return `/sessions?${query.toString()}`;
 };
 
 export type SessionDayGroup = {
@@ -43,21 +158,22 @@ export type SessionDayGroup = {
 export const sessionTimestamp = (session: Pick<Session, "startedAt" | "requestedAt">): string =>
   session.startedAt ?? session.requestedAt;
 
-/** Match one execution status against the user-facing lifecycle buckets. */
-export const sessionStatusMatches = (status: SessionExecutionStatus, filter: SessionStatusFilter): boolean => {
-  if (filter === ALL_SESSION_FILTER) return true;
-  if (filter === "live") return isLiveStatus(status);
-  if (filter === "done") return status === "SUCCEEDED";
-  if (filter === "failed") return status === "FAILED" || status === "TIMED_OUT" || status === "LOST";
-  return filter === "cancelled" && status === "CANCELLED";
-};
-
-/** Distinct Agent choices from the Sessions that are already loaded. */
+/**
+ * The Agent choices the filter offers.
+ *
+ * The project roster is the stable source — narrowing to one Agent must not
+ * shrink the list of Agents to choose from next. Loaded rows are merged in
+ * because a session outlives its Agent: an archived Agent no longer on the
+ * roster is still the one that ran, and dropping it would hide the only way to
+ * find its sessions.
+ */
 export const sessionAgentOptions = (
   sessions: readonly Pick<Session, "agentId" | "agent">[],
+  roster: readonly Pick<Agent, "id" | "title">[],
   allLabel: string,
 ): SessionFilterOption[] => {
   const labels = new Map<string, string>();
+  for (const agent of roster) labels.set(agent.id, agent.title || agent.id);
   for (const session of sessions) {
     const label = session.agent?.title || session.agentId;
     const current = labels.get(session.agentId);
@@ -70,15 +186,6 @@ export const sessionAgentOptions = (
     .sort((left, right) => left.label.localeCompare(right.label) || left.value.localeCompare(right.value));
   return [{ value: ALL_SESSION_FILTER, label: allLabel }, ...options];
 };
-
-/** Apply both client-side filters without changing the caller's array. */
-export const filterSessions = (
-  sessions: readonly Session[],
-  filters: SessionListFilters,
-): Session[] => sessions.filter((session) => (
-  (filters.agentId === ALL_SESSION_FILTER || session.agentId === filters.agentId)
-    && sessionStatusMatches(session.executionStatus, filters.status)
-));
 
 /** Format an instant as a calendar day in the browser's local timezone. */
 export const localDayKey = (value: string): string => {
@@ -121,12 +228,6 @@ export const groupSessionsByDay = (sessions: readonly Session[]): SessionDayGrou
   }
   return [...groups.values()];
 };
-
-/** Filtering must happen before day grouping and the group's row cap. */
-export const filterAndGroupSessions = (
-  sessions: readonly Session[],
-  filters: SessionListFilters,
-): SessionDayGroup[] => groupSessionsByDay(filterSessions(sessions, filters));
 
 export type SessionDayLabelKind = "today" | "yesterday" | "date";
 
