@@ -1,19 +1,28 @@
 # Quiet-window auto-deploy
 
-> This runbook covers the maintainer's macOS appliance and Linux systemd
-> deployment profiles. It is published for auditability and reproducibility;
-> it is outside the Developer Preview Quickstart, the supported installation
-> shape, and a production-support commitment.
+> This runbook's production profile is Linux systemd on the control-plane
+> host. The macOS launchd profile is for a runner-only Mac and, historically,
+> the former appliance; the macOS control-plane profile is maintainer-unverified.
+> It is published for auditability and reproducibility; it is outside the
+> Developer Preview Quickstart, the supported installation shape, and a
+> production-support commitment.
 
 The job advances the release named by `current` to an exact target commit from
-`main`. On the control-plane host it manages `com.agentos.api`,
-`com.agentos.inbox`, the configured runner labels (10 by default), and
-`com.agentos.web` (13 labels at the default count). Linux uses the same
-generated inventory. The release may contain the resident merge-executor
-runtime, but that service is outside this activation set. An Anneal Run
-workspace is never deployed.
+`main`. On the Linux systemd control-plane host it manages the generated
+`<label>.service` units for the API, Inbox, configured runners (10 by default),
+and web (13 units at the default count); on a macOS control-plane host, the
+corresponding launchd labels are `com.agentos.api`, `com.agentos.inbox`,
+configured runner labels (10 by default), and `com.agentos.web` (13 labels at
+the default count). Linux and macOS use the same generated inventory. The
+macOS control-plane profile is maintainer-unverified; a macOS runner-only host
+uses launchd only for its configured runner labels. The release may contain
+the resident merge-executor runtime, but that service is outside this
+activation set. An Anneal Run workspace is never deployed.
 
 ## Runner-only host
+
+The maintainer's Mac is this runner-only profile: its six Claude runners follow
+the control plane's deployed build (PR #462).
 
 Set `AGENTOS_DEPLOY_ROLE=runner` while rendering a separate runner host's
 service and auto-deploy definitions. The unset value, or explicit
@@ -21,12 +30,15 @@ service and auto-deploy definitions. The unset value, or explicit
 canonical prompts. The install manifest records the role; stage two refuses a
 manifest whose recorded role differs from the configured role.
 
-A runner host installs only the configured `com.agentos.runner` labels,
+A runner host installs only the configured runner services: Linux systemd
+`<label>.service` units or macOS launchd `com.agentos.runner` labels,
 controlled by `AGENTOS_RUNNER_COUNT` and `AGENTOS_RUNNER_ID_PREFIX`. Its prefix
 is required, host-specific, and disjoint from the control-plane host's runner
 IDs; an empty or invalid prefix fails preflight. It never installs, restarts,
-or verifies `com.agentos.api`, `com.agentos.inbox`, or `com.agentos.web`. Its
-deployment phases omit `backup`, `guarded-migration`,
+or verifies the control-plane API, Inbox, or web services: Linux systemd
+`<label>.service` units or macOS launchd `com.agentos.api`,
+`com.agentos.inbox`, and `com.agentos.web`. Its deployment phases omit `backup`,
+`guarded-migration`,
 `generate-prisma-client`, `canonical-prompt-sync`, and
 `verify-runtime-prisma-client`, so it does not change the control-plane
 database or canonical prompts.
@@ -70,15 +82,16 @@ The source checkout is inspection state. Services and auto-deploy run through
 `current`; deployment does not read, fast-forward, clean, or publish files
 from the source checkout. Develop in an independent clone or worktree.
 
-`com.agentos.web` serves `apps/web/dist` with Vite preview at
-`http://127.0.0.1:4173`. Use the numeric loopback address; the
-credential-bearing proxy rejects other origins.
+On Linux systemd, the generated web `<label>.service` serves `apps/web/dist`
+with Vite preview at `http://127.0.0.1:4173`; on a macOS control-plane host,
+the launchd label `com.agentos.web` serves the same path. Use the numeric
+loopback address; the credential-bearing proxy rejects other origins.
 
 ## Preconditions
 
-For macOS and unprivileged Linux stages, use the account that owns the service
-definitions; never run those stages as `root`. Linux stage two is the explicit
-root-only exception described below. Require:
+For unprivileged Linux systemd and macOS launchd stages, use the account that
+owns the service definitions; never run those stages as `root`. Linux systemd
+stage two is the explicit root-only exception described below. Require:
 
 - `current` and `previous` are relative symlinks to direct children of
   `releases/`;
@@ -93,7 +106,8 @@ root-only exception described below. Require:
   persistent paths beneath `shared/`:
   `FILES_ROOT`, `RUNNER_WORKSPACE_ROOT`, `RUNNER_DEPENDENCY_CACHE_ROOT`,
   `RUNNER_REPO_MIRROR_ROOT`, and `CONTROL_PLANE_STATE_DIR`;
-- every configured service definition uses
+- every configured service definition, whether a Linux systemd `<label>.service`
+  unit or a macOS launchd label, uses
   `shared/bin/agentos-service-wrapper.mjs`;
 - the control-plane PostgreSQL container and its `pg_dump` binary are running
   when container backup mode is selected; and
@@ -164,52 +178,6 @@ artifact readiness, service readiness, backup readiness, and each role's
 activation steps as `mutation=skipped`. `claimed`, `provisioning`, and
 `running` block; `queued` and `waiting-inbox` do not. A non-zero dry-run stops
 the procedure until its named artifact or precondition is repaired.
-
-## Install service wrappers
-
-The wrapper migration must finish before pointer activation. On macOS, plan
-then apply the complete generated service inventory:
-
-```sh
-node scripts/deploy/install-launchd-services.mjs --replace-existing
-node scripts/deploy/install-launchd-services.mjs --replace-existing --apply
-```
-
-The installer records original definitions and manifests, creates
-`shared/bin/agentos-service-wrapper.mjs`, and writes wrapper-based plists. Its
-apply path may `bootout` retired labels and `kickstart` changed owned labels;
-if a label must be reloaded manually, let its graceful predecessor disappear
-before bootstrapping the same label. Require every inventory label to be
-running, each log to identify the same `current` release, `/health` to pass,
-and `/version` to report the exact current commit.
-
-## Install auto-deploy
-
-If an existing macOS definition has a different log path, explicitly unload
-and remove it before installing the new definition. Plan, then apply:
-
-```sh
-node scripts/deploy/install-launchd.mjs \
-  --pg-dump-mode container \
-  --docker-binary "$DEPLOY_DOCKER_BINARY" \
-  --pg-dump-container agentos-postgres-1 \
-  --container-pg-dump-binary /usr/local/bin/pg_dump
-
-node scripts/deploy/install-launchd.mjs \
-  --pg-dump-mode container \
-  --docker-binary "$DEPLOY_DOCKER_BINARY" \
-  --pg-dump-container agentos-postgres-1 \
-  --container-pg-dump-binary /usr/local/bin/pg_dump \
-  --apply
-launchctl print "gui/$(id -u)/com.agentos.auto-deploy"
-```
-
-The macOS plist runs `current/scripts/deploy/quiet-window-deploy.mjs` with the
-source remote and absolute toolchain recorded, logs under
-`~/Library/Logs/Anneal`, runs at load, and repeats every five minutes. The
-installer refuses to overwrite a different existing definition. A runner-only
-host does not need database backup arguments because its backup phase is
-omitted.
 
 ## Linux systemd
 
@@ -283,17 +251,18 @@ transaction record. The unprivileged manifest cannot rewrite that record. A
 successful revert consumes and removes it after the final `daemon-reload`.
 
 The service manifest has the stable wrapper as its first entry and one entry
-per generated service. The auto-deploy manifest is separate: one plist on
-macOS, or a `Type=oneshot` service and timer on Linux. The Linux oneshot is
+per generated service. The auto-deploy manifest is separate: a `Type=oneshot`
+service and timer on Linux, or one plist on macOS. The Linux oneshot is
 installed but never enabled or started directly; `enable --now` applies to the
 timer only, so installation cannot trigger an immediate deployment.
 
 ### Runner count, accounts, and logs
 
 `AGENTOS_RUNNER_COUNT` defaults to 10 and accepts integers 1 through 64. In
-control-plane inventory order, labels are API, Inbox, runner 1 as
-`com.agentos.runner`, runners 2 through the configured count, then web. A
-runner-only inventory contains only the runner labels.
+control-plane inventory order, the labels are API, Inbox, runner 1 as
+`com.agentos.runner`, runners 2 through the configured count, then web; Linux
+systemd installs each as `<label>.service` and macOS launchd uses the label
+directly. A runner-only inventory contains only the runner labels.
 
 The os-isolation account pool uses `ACCOUNT_COUNT` (default 8) and maps runner
 `i` to account `((i - 1) % ACCOUNT_COUNT) + 1`. Each account has its own mode-700
@@ -325,7 +294,8 @@ sudo -n /bin/systemctl show -p ExecStart --value <label>.service
 
 `is-active` must return `active`; `ExecStart` must contain both the stable
 wrapper path and the label. HTTP readiness, release identity, and the deploy
-barrier checks are the same as on macOS. If activation verification fails,
+barrier checks are the same as on macOS
+([Install service wrappers](#install-service-wrappers) below). If activation verification fails,
 atomically point `current` to `previous`, then repeat restart, active, and
 wrapper-boundary checks for the prior release. The auto-deploy oneshot is not
 restarted; its timer remains the scheduler.
@@ -348,10 +318,63 @@ receive `systemctl disable --now`, and the process finishes with
 drop-ins, wrapper, and generated control grant to their recorded pre-install
 state.
 
+## Install service wrappers
+
+This section applies to the macOS launchd profile; the Linux systemd procedure
+is in [Linux systemd](#linux-systemd) above.
+
+The wrapper migration must finish before pointer activation. On macOS, plan
+then apply the complete generated service inventory:
+
+```sh
+node scripts/deploy/install-launchd-services.mjs --replace-existing
+node scripts/deploy/install-launchd-services.mjs --replace-existing --apply
+```
+
+The installer records original definitions and manifests, creates
+`shared/bin/agentos-service-wrapper.mjs`, and writes wrapper-based plists. Its
+apply path may `bootout` retired labels and `kickstart` changed owned labels;
+if a label must be reloaded manually, let its graceful predecessor disappear
+before bootstrapping the same label. Require every inventory label to be
+running, each log to identify the same `current` release, `/health` to pass,
+and `/version` to report the exact current commit.
+
+## Install auto-deploy
+
+This section applies to the macOS launchd profile; the Linux systemd procedure
+is in [Linux systemd](#linux-systemd) above.
+
+If an existing macOS definition has a different log path, explicitly unload
+and remove it before installing the new definition. Plan, then apply:
+
+```sh
+node scripts/deploy/install-launchd.mjs \
+  --pg-dump-mode container \
+  --docker-binary "$DEPLOY_DOCKER_BINARY" \
+  --pg-dump-container agentos-postgres-1 \
+  --container-pg-dump-binary /usr/local/bin/pg_dump
+
+node scripts/deploy/install-launchd.mjs \
+  --pg-dump-mode container \
+  --docker-binary "$DEPLOY_DOCKER_BINARY" \
+  --pg-dump-container agentos-postgres-1 \
+  --container-pg-dump-binary /usr/local/bin/pg_dump \
+  --apply
+launchctl print "gui/$(id -u)/com.agentos.auto-deploy"
+```
+
+The macOS plist runs `current/scripts/deploy/quiet-window-deploy.mjs` with the
+source remote and absolute toolchain recorded, logs under
+`~/Library/Logs/Anneal`, runs at load, and repeats every five minutes. The
+installer refuses to overwrite a different existing definition. A runner-only
+host does not need database backup arguments because its backup phase is
+omitted.
+
 ## Activation sequence
 
 For a new target commit, the job records `STARTED`, invokes the explicit
-builder, and performs this order:
+builder, and performs this order. Linux systemd services are `<label>.service`
+units; macOS launchd services are labels.
 
 1. After `ARTIFACT_PREPARED`, verify release name, exact commit stamp, manifest
    inventory, content digest, excluded-path record, and read-only permissions;
@@ -362,8 +385,9 @@ builder, and performs this order:
    recovery.
 3. Copy the verified release to a disposable writable operation workspace. It
    is not a Git checkout and is never published.
-4. Prove every configured service is running through the stable wrapper and
-   still identifies the old `current` release.
+4. Prove every configured Linux systemd `<label>.service` unit or macOS launchd
+   label is running through the stable wrapper and still identifies the old
+   `current` release.
 5. On the control-plane role, stream a custom-format `pg_dump` to a mode-0600
    temporary host file, fsync it, and rename it only after a successful,
    non-empty result; record `BACKED_UP`.
@@ -378,9 +402,11 @@ builder, and performs this order:
    artifact. On a runner host, also read the control plane's `/version` and
    require the same target commit immediately before publication.
 9. Atomically update `previous` and `current`, durably record `ACTIVATED`, and
-   restart every configured label.
-10. Require all labels running. On the control plane, require `/health` success
-    and `/version` reporting the exact clean target commit. On a runner host,
+   restart every configured Linux systemd `<label>.service` unit or macOS
+   launchd label.
+10. Require all configured Linux systemd `<label>.service` units or macOS
+    launchd labels running. On the control plane, require `/health` success and
+    `/version` reporting the exact clean target commit. On a runner host,
     require every local registration online, newer than its pre-restart
     observation, and on that commit. Record `VERIFIED` and `SUCCEEDED`, then
     write the success Inbox record.
@@ -415,16 +441,21 @@ half-applied schema.
 
 After repairing the cause, run the existing `--clear-escalation` operation.
 The held process observes the cleared marker, releases its barrier, and exits
-non-zero. Wait for that old process to exit normally; only then kick the
+non-zero. Wait for that old process to exit normally. On Linux systemd, leave
+scheduling to the timer described above; on macOS launchd, only then kick the
 scheduled job with the retry command below.
 
-While the log says `HOLD deploy-barrier migration-timeout`, do not boot out,
-kickstart, or kill `com.agentos.auto-deploy`, and do not log out or reboot the
+This hold instruction is for the macOS launchd profile. While the log says
+`HOLD deploy-barrier migration-timeout`, do not boot out, kickstart, or kill
+`com.agentos.auto-deploy`, and do not log out or reboot the
 host. The process deliberately refuses `SIGTERM`; `--clear-escalation` is the
 only safe way to end the hold after the operator has established that the
 schema is safe.
 
 #### Timeout or hang evidence
+
+Linux systemd output is in the journal described above. The following evidence
+is for the macOS launchd profile:
 
 Start with `~/Library/Logs/Anneal/auto-deploy.log`, identify the stalled child
 PID, and capture its stack before changing process state:
@@ -466,6 +497,9 @@ node current/scripts/deploy/quiet-window-deploy.mjs --prune-history
 
 ## Failure and escalation
 
+These escalation rules cover Linux systemd units and macOS launchd labels;
+platform-specific commands are identified below.
+
 Remote-main reads use a bounded retry budget with backoff; each retry and
 outcome is visible in the deploy log. A successful retry continues without an
 escalation.
@@ -500,14 +534,19 @@ holding `current/` and `.agentos-deploy/`. The marker is resolved from
 `NO-ESCALATION-TO-CLEAR path=...`. Check the printed path before assuming the
 escalation is gone.
 
+The first command below clears the marker for either profile. On Linux systemd,
+leave scheduling to the timer described above; on macOS launchd, then kick the
+auto-deploy label:
+
 ```sh
 AGENTOS_REPOSITORY_ROOT="$PWD" \
   node current/scripts/deploy/quiet-window-deploy.mjs --clear-escalation
 launchctl kickstart -k "gui/$(id -u)/com.agentos.auto-deploy"
 ```
 
-The second command is valid only after a migration-timeout hold has ended as
-described above.
+On the macOS launchd profile, the second command is valid only after a
+migration-timeout hold has ended as described above; it does not apply to
+Linux systemd.
 
 ### Canonical prompt sync refused by an archived Agent
 
