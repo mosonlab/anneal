@@ -5,7 +5,7 @@
 #
 #   1. Append-only directories. docs/reviews, docs/merge-notes, docs/briefs and
 #      docs/plans/archive hold dated records of finished work. Once a file there
-#      is on master it is history: a branch may add files, but may not modify or
+#      is on main it is history: a branch may add files, but may not modify or
 #      delete one. Every file a branch adds there must carry a YYYY-MM-DD-
 #      basename prefix, which is the half of the convention the first version of
 #      this script wrote down in CONTRIBUTING.md and then never checked.
@@ -28,14 +28,14 @@
 #      gate enforces the marker's form, never its presence. CONTRIBUTING.md
 #      says the same thing; do not quote this script as enforcing more than that.
 #
-# Baseline. The rules are about what is already on master, so the answer depends
-# entirely on which commit "master" is. In order:
+# Baseline. The rules are about what is already on main, so the answer depends
+# entirely on which commit "main" is. In order:
 #
-#   --master <oid> (or AGENTOS_MASTER_OID) — the authoritative master, bound by
+#   --master <oid> (or AGENTOS_MASTER_OID) — the authoritative baseline, bound by
 #     the caller. This is what the gate always passes: merge-gate.sh takes the
 #     oid from its own caller or asks origin, and run-gate.sh carries it onto a
 #     worker that cannot ask anyone. A ref is a cache; an oid is a decision.
-#   otherwise refs/remotes/origin/master and refs/heads/master, for a human
+#   otherwise refs/remotes/origin/main and refs/heads/main, for a human
 #     running this by hand — and it says on stderr that the answer is only as
 #     fresh as the last fetch and is not gate authority. A stale baseline
 #     turns a modification of a frozen file into an addition and waves it
@@ -45,14 +45,14 @@
 #     refuses to guess. Neither ref can be proved fresh from inside this
 #     repository; that is what --master is for.
 #
-# Compares HEAD against its merge-base with that baseline. Gating master itself
+# Compares HEAD against its merge-base with that baseline. Gating main itself
 # makes the diff empty and passes trivially.
 #
 # Runs inside the merge gate, reads only git, writes nothing.
 
 set -euo pipefail
 
-FROZEN=(docs/reviews docs/merge-notes docs/briefs docs/plans/archive)
+FROZEN_RECORD_DIRECTORIES=(docs/reviews docs/merge-notes docs/briefs docs/plans/archive)
 
 MASTER_OID="${AGENTOS_MASTER_OID:-}"
 
@@ -87,37 +87,37 @@ if [ -n "${MASTER_OID}" ]; then
   [ "${#MASTER_OID}" -eq 40 ] || die "--master needs a full 40-character object id, got: ${MASTER_OID}"
   MASTER_OID="$(printf '%s' "${MASTER_OID}" | tr '[:upper:]' '[:lower:]')"
   git cat-file -e "${MASTER_OID}^{commit}" 2>/dev/null \
-    || die "the authoritative master ${MASTER_OID} is not a commit in this repository"
+    || die "the authoritative baseline ${MASTER_OID} is not a commit in this repository"
   baseline_oid="${MASTER_OID}"
   baseline_source="authoritative oid"
 else
-  origin_oid="$(git rev-parse --verify --quiet "refs/remotes/origin/master^{commit}" || true)"
-  local_oid="$(git rev-parse --verify --quiet "refs/heads/master^{commit}" || true)"
+  origin_oid="$(git rev-parse --verify --quiet "refs/remotes/origin/main^{commit}" || true)"
+  local_oid="$(git rev-parse --verify --quiet "refs/heads/main^{commit}" || true)"
   if [ -n "${origin_oid}" ] && [ -n "${local_oid}" ] && [ "${origin_oid}" != "${local_oid}" ]; then
     # Disagreement is the interesting case, because the older ref is the one
     # that turns a modification of a frozen file into an addition and lets it
     # through. When one ref is an ancestor of the other the answer is not a
-    # preference: the descendant is the later master, and a later baseline can
-    # only ever refuse more, so it is taken. A stale local master — the normal
+    # preference: the descendant is the later main, and a later baseline can
+    # only ever refuse more, so it is taken. A stale local main — the normal
     # state of a checkout that works on branches — is therefore not an error.
     # Divergence is different: neither ref is a version of the other, nothing
     # here can say which is authority, and the check refuses.
     if git merge-base --is-ancestor "${origin_oid}" "${local_oid}"; then
-      baseline_oid="${local_oid}"; baseline_source="heads/master, ahead of origin/master"
+      baseline_oid="${local_oid}"; baseline_source="heads/main, ahead of origin/main"
     elif git merge-base --is-ancestor "${local_oid}" "${origin_oid}"; then
-      baseline_oid="${origin_oid}"; baseline_source="remotes/origin/master, ahead of master"
+      baseline_oid="${origin_oid}"; baseline_source="remotes/origin/main, ahead of main"
     else
-      printf 'check-frozen-docs: the two master refs have diverged, so which one is authority is unknown:\n' >&2
-      printf '  refs/remotes/origin/master %s\n' "${origin_oid}" >&2
-      printf '  refs/heads/master          %s\n' "${local_oid}" >&2
+      printf 'check-frozen-docs: the two main refs have diverged, so which one is authority is unknown:\n' >&2
+      printf '  refs/remotes/origin/main %s\n' "${origin_oid}" >&2
+      printf '  refs/heads/main          %s\n' "${local_oid}" >&2
       die "refusing to pick one; reconcile them, or pass --master <oid>"
     fi
   elif [ -n "${origin_oid}" ]; then
-    baseline_oid="${origin_oid}"; baseline_source="remotes/origin/master"
+    baseline_oid="${origin_oid}"; baseline_source="remotes/origin/main"
   elif [ -n "${local_oid}" ]; then
-    baseline_oid="${local_oid}"; baseline_source="heads/master"
+    baseline_oid="${local_oid}"; baseline_source="heads/main"
   else
-    die "no master ref to compare against; pass --master <oid>"
+    die "no main ref to compare against; pass --master <oid>"
   fi
 fi
 
@@ -142,7 +142,7 @@ violation() { violations="${violations}${violations:+$'\n'}  $1"; }
 # The frozen directory a path lives in, or nothing.
 frozen_root_of() {
   local path="$1" root
-  for root in "${FROZEN[@]}"; do
+  for root in "${FROZEN_RECORD_DIRECTORIES[@]}"; do
     case "${path}" in "${root}"/*) printf '%s' "${root}"; return 0 ;; esac
   done
   return 1
@@ -189,7 +189,7 @@ DIFF_OUTPUT="$(mktemp "${TMPDIR:-/tmp}/agentos-frozen-docs.XXXXXXXX")" \
   || die "could not create a temporary file for the diff"
 trap 'rm -f -- "${DIFF_OUTPUT}"' EXIT
 
-git diff --find-renames=100% -l0 --name-status -z "${base}" HEAD -- "${FROZEN[@]}" > "${DIFF_OUTPUT}" \
+git diff --find-renames=100% -l0 --name-status -z "${base}" HEAD -- "${FROZEN_RECORD_DIRECTORIES[@]}" > "${DIFF_OUTPUT}" \
   || die "git diff against ${base} failed; the append-only rule was not established"
 
 while IFS= read -r -d '' code; do
