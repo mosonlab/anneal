@@ -77,24 +77,26 @@ test("sustained tool output holds the bound while lifecycle and error events sur
   );
 });
 
-test("protected traffic alone still holds the bound, by payload first and by event last", () => {
-  const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 500, maxEvents: 3 });
+test("protected traffic alone is never shed, however far past the bound it runs", () => {
+  const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 500, maxEvents: 3, batchMaxEvents: 1_000 });
   for (let index = 0; index < 1_000; index += 1) {
     queue.push({ source: "CLAUDE", type: "ADAPTER_ERROR", payload: { error: "invalid-json", line: "x".repeat(200) } });
-    assert.ok(queue.length <= 4, `the count bound must hold under protected traffic, held ${queue.length}`);
-    assert.ok(queue.bytes <= 500 + 400, `the byte bound must hold under protected traffic, held ${queue.bytes}`);
   }
 
+  assert.equal(queue.length, 1_000, "an error event is never given up, whatever the bound says");
   const held = queue.batch();
-  const record = held.find((event) => event.type === EVENTS_DROPPED_EVENT_TYPE);
-  assert.ok(record, "shedding a protected event is recorded like any other loss");
-  const dropped = record.payload as { droppedEvents: number; firstDroppedSeq: number; lastDroppedSeq: number };
-  const survivors = held.filter((event) => event.type === "ADAPTER_ERROR");
-  assert.equal(dropped.droppedEvents + survivors.length, 1_000, "every pushed event is either held or counted as lost");
-  assert.ok(dropped.lastDroppedSeq >= dropped.firstDroppedSeq, "the record names the range it lost");
+  assert.equal(
+    held.filter((event) => event.type === EVENTS_DROPPED_EVENT_TYPE).length,
+    0,
+    "nothing was dropped, so there is nothing to record",
+  );
+  assert.deepEqual(held.map((event) => event.seq), Array.from({ length: 1_000 }, (_, index) => index),
+    "every error the provider raised reaches the control plane, in order");
+  const detail = held.filter((event) => (event.payload as { truncated?: boolean }).truncated !== true);
+  assert.ok(detail.length <= 2, `pressure takes the payloads first, kept ${detail.length} intact`);
   assert.ok(
-    survivors.every((event) => event.seq > dropped.lastDroppedSeq),
-    "what survives is the newest traffic, in order",
+    queue.bytes / queue.length < 200,
+    `a marker-only queue costs a fraction of an untruncated one, held ${queue.bytes} over ${queue.length}`,
   );
 });
 

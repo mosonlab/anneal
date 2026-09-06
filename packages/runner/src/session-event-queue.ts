@@ -23,16 +23,16 @@ import type { SessionEventPayload } from "./api.js";
  * error events are the record of what the Run did and are kept while anything
  * else can be given up.
  *
- * The bound is nevertheless strict, because a provider can produce protected
- * events without limit too — one `ADAPTER_ERROR` per unparsable line, a
- * `TOOL_STARTED` per call — and a bound that those escape is not a bound. Once
- * nothing droppable is left, a protected event first loses its payload to a
- * `truncated` marker, keeping its sequence number, type and time; only when
- * every protected event is already reduced to its marker is the oldest of them
- * shed, counted in the same record. So the account of the Run degrades
- * gradually under pressure instead of the process dying with all of it. The
- * only excess left is the batch in flight and the drop record itself, both
- * bounded by the batch cap.
+ * A protected event is never shed, but it is not exempt from the bound either,
+ * because a provider can produce protected events without limit too — one
+ * `ADAPTER_ERROR` per unparsable line, a `TOOL_STARTED` per call. Once nothing
+ * droppable is left, a protected event loses its payload to a `truncated`
+ * marker, keeping its sequence number, type, source and time. A queue of
+ * nothing but such markers holds past the bound rather than losing the account
+ * of the Run: each costs about a hundred bytes instead of the 256 KiB an
+ * untruncated payload may carry, so what memory that queue can reach is
+ * reduced by three orders of magnitude while every event the Run recorded still
+ * reaches the control plane.
  *
  * A batch is *claimed* from the moment it is formed until its request settles.
  * A claimed entry is never dropped and never accumulated into: the queue is
@@ -231,9 +231,9 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
 
   /**
    * The next thing to give up, cheapest first: a droppable liveness event, then
-   * the payload of the oldest protected event, then the oldest protected event
-   * that has nothing left to give. A claimed entry belongs to a request in
-   * flight and the open drop record is the account itself; neither is available.
+   * the payload of the oldest protected event. A protected event itself is
+   * never given up. A claimed entry belongs to a request in flight and is not
+   * available either.
    */
   const enforceBound = (): void => {
     let droppedEvents = 0;
@@ -241,25 +241,21 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
     let firstSeq = 0;
     let lastSeq = 0;
     while (bytes > maxBytes || entries.length > maxEvents) {
-      const droppableIndex = entries.findIndex((entry) => entry.droppable && !entry.claimed);
-      if (droppableIndex === -1) {
+      const index = entries.findIndex((entry) => entry.droppable && !entry.claimed);
+      if (index === -1) {
+        // Nothing droppable is left. The oldest protected event that still has
+        // a payload gives it up for its marker; once none does, the queue holds
+        // what remains rather than losing the account of the Run.
         const degradable = entries.find((entry) => !entry.claimed && !entry.degraded);
-        if (degradable) {
-          degrade(degradable);
-          continue;
-        }
+        if (!degradable) break;
+        degrade(degradable);
+        continue;
       }
-      const index = droppableIndex === -1
-        ? entries.findIndex((entry) => !entry.claimed && entry !== dropRecord)
-        : droppableIndex;
-      if (index === -1) break;
       const [removed] = entries.splice(index, 1) as [Entry];
       forget(removed);
       droppedBytes += removed.bytes;
-      // The range, not the order of removal: liveness events go before
-      // protected ones, so the last event shed is not the newest one lost.
-      if (droppedEvents === 0 || removed.event.seq < firstSeq) firstSeq = removed.event.seq;
-      if (droppedEvents === 0 || removed.event.seq > lastSeq) lastSeq = removed.event.seq;
+      if (droppedEvents === 0) firstSeq = removed.event.seq;
+      lastSeq = removed.event.seq;
       droppedEvents += 1;
     }
     if (droppedEvents > 0) recordDrop(droppedEvents, droppedBytes, firstSeq, lastSeq);

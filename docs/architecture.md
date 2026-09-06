@@ -85,12 +85,14 @@ Local runner -----> ephemeral git workspace
   runners on it. Bounding means choosing what to lose: liveness detail
   (streaming deltas, raw provider frames, captured stderr) is dropped
   oldest-first along with tool output and provider status — the largest events a
-  Run produces. Lifecycle, terminal and error events outlive all of that, but
-  the bound is strict rather than advisory, because a provider can also produce
-  them without limit: once nothing droppable is left, such an event keeps its
+  Run produces. Lifecycle, terminal and error events are never dropped, but they
+  are not exempt from the bound either, because a provider can produce them
+  without limit too: once nothing droppable is left, such an event keeps its
   sequence number, type and time and loses only its payload to a `truncated`
-  marker, and only when every one of them is already a marker is the oldest
-  shed. Every drop or truncation is itself recorded as an event. The batch in flight is
+  marker. A queue of nothing but those markers holds past the bound rather than
+  losing the account of the Run, at about a hundred bytes each instead of the
+  256 KiB a payload may carry. Every drop or truncation is itself recorded as an
+  event. The batch in flight is
   exempt from dropping and is released by identity, so a provider streaming
   during an append cannot cost an event the request never carried. A 413 the API
   raises names the one offending event, so the runner loses that event rather
