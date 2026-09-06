@@ -148,6 +148,15 @@ test("a task at its spend cap refuses the next attempt by name, and a raised cap
   });
   assert.equal(named.length, 1, "the REVIEW states its reason by name");
   assert.match(String(named[0]?.body), /Spend cap \$1\.00 reached: \$1\.50 spent across 3 runs/u);
+  // The committed metadata carries the amounts as data, not only as prose, so
+  // an operator filtering the REVIEW reads the cap and the total without
+  // parsing the message.
+  assert.deepEqual(named[0]?.metadata, {
+    refusal: "spend-cap-exhausted",
+    spendCapUsd: "1.00",
+    spentUsd: "1.50",
+    runs: 3,
+  });
 
   // The board shows the limit beside what has been spent against it.
   const cards = await readBoard(db, { projectId: seeded.project.id, archived: "false" });

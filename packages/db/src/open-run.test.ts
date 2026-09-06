@@ -1577,8 +1577,15 @@ test("the park a raising caller owes a spend-cap refusal names the cap and the t
     "Run birth refused: Spend cap $1.00 reached: $1.50 spent across 1 run;"
       + " raise or clear spendCap to continue",
   );
-  // Named, not merely prose: this is what an operator filters the REVIEW by.
-  assert.deepEqual(activities[0]?.metadata, { refusal: "spend-cap-exhausted" });
+  // Named, not merely prose: this is what an operator filters the REVIEW by,
+  // and it carries the refusal's own detail so the cap and the total are
+  // readable as data, in the same money rendering as the message.
+  assert.deepEqual(activities[0]?.metadata, {
+    refusal: "spend-cap-exhausted",
+    spendCapUsd: "1.00",
+    spentUsd: "1.50",
+    runs: 1,
+  });
 });
 
 test("the spend basis counts reported and estimated run cost, and a raised cap queues again", async () => {

@@ -1371,8 +1371,11 @@ export const recordRunBirthRefusal = async (
       actorType: "control-plane",
       body: `Run birth refused: ${refusal.message}`,
       // Named, not merely prose, for the same reason as the lease-loss refusal:
-      // this is what an operator filters the REVIEW by.
-      metadata: { refusal: refusal.code },
+      // this is what an operator filters the REVIEW by. The refusal's own
+      // detail travels with it — for a spend cap that is the formatted
+      // `spendCapUsd` and `spentUsd` the handbook promises an operator reading
+      // the park, which the message states in prose and nothing else recorded.
+      metadata: { ...refusal.detail, refusal: refusal.code },
     },
   });
 };
