@@ -126,28 +126,6 @@ export const registerSystemRoutes = (app: RouteApp, deps: RouteDeps): (() => voi
         throw error;
       }
     });
-    app.post("/files/mkdir", async (context) => {
-      try {
-        const { path } = await readJson(context.req.raw, z.object({ path: z.string() }));
-        await (await getFileStore()).mkdir(path);
-        return context.json({ ok: true });
-      } catch (error: unknown) {
-        const response = fileErrorResponse(context, error);
-        if (response) return response;
-        throw error;
-      }
-    });
-    app.post("/files/move", async (context) => {
-      try {
-        const { from, to } = await readJson(context.req.raw, z.object({ from: z.string(), to: z.string() }));
-        await (await getFileStore()).move(from, to);
-        return context.json({ ok: true });
-      } catch (error: unknown) {
-        const response = fileErrorResponse(context, error);
-        if (response) return response;
-        throw error;
-      }
-    });
     app.delete("/files", async (context) => {
       try {
         const store = await getFileStore();
