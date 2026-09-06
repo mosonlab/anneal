@@ -704,9 +704,34 @@ test("runner deploy preflight rejects a non-HTTP RUNNER_API_URL", () => {
   }
 });
 
-test("runner deploy preflight accepts a shared environment without control-plane keys", () => {
+for (const missingKey of ["DATABASE_URL", "FEISHU_DEFAULT_CHAT_ID"]) {
+  test(`runner deploy preflight requires ${missingKey}`, () => {
+    const contents = Object.entries({
+      OPERATOR_TOKEN: "operator-fixture",
+      RUNNER_TOKEN: "runner-fixture",
+      RUNNER_API_URL: "http://127.0.0.1:1",
+      DATABASE_URL: "postgresql://fixture",
+      FEISHU_DEFAULT_CHAT_ID: "fixture",
+    }).filter(([key]) => key !== missingKey).map(([key, value]) => `${key}=${value}`).join("\n");
+    const { root, result } = runDeployWithSharedEnvironment({
+      contents,
+      environment: { AGENTOS_DEPLOY_ROLE: "runner" },
+    });
+    try {
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, 1);
+      assert.ok(result.stdout.includes(`STOP environment-unreadable detail=${missingKey}-missing`));
+    } finally {
+      removeTree(root);
+    }
+  });
+}
+
+test("runner deploy preflight accepts a shared environment without GITHUB_READ_TOKEN", () => {
   const { root, result } = runDeployWithSharedEnvironment({
     contents: [
+      "DATABASE_URL=postgresql://fixture",
+      "FEISHU_DEFAULT_CHAT_ID=fixture",
       "OPERATOR_TOKEN=operator-fixture",
       "RUNNER_TOKEN=runner-fixture",
       "RUNNER_API_URL=http://127.0.0.1:1",

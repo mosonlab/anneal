@@ -327,6 +327,8 @@ const loadEnvironment = async (deployRole = resolveDeployRoleOrFail()) => {
     if (!loaded.parsed?.OPERATOR_TOKEN?.trim()) fail("environment-unreadable", "OPERATOR_TOKEN-missing");
     if (!loaded.parsed?.RUNNER_TOKEN?.trim()) fail("environment-unreadable", "RUNNER_TOKEN-missing");
     controlPlaneApiBaseUrl(process.env);
+    if (loaded.error || !process.env.DATABASE_URL) fail("environment-unreadable", "DATABASE_URL-missing");
+    if (!process.env.FEISHU_DEFAULT_CHAT_ID) fail("environment-unreadable", "FEISHU_DEFAULT_CHAT_ID-missing");
     return;
   }
   if (loaded.error || !process.env.DATABASE_URL) fail("environment-unreadable", "DATABASE_URL-missing");
