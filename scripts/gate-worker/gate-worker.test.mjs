@@ -26,7 +26,7 @@
 //    into "the worker cannot reach GitHub", which would be an isolation claim
 //    nothing enforces.
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
   cpSync,
@@ -657,6 +657,179 @@ test("merge-gate accepts the bypass only under the runner regression tool", (t) 
   assert.doesNotMatch(output, /^GATE NOT RUN: refused inside Anneal run regression-gate-run$/m);
 });
 
+// --- the host the gate is standing on ---------------------------------------
+
+// A checkout complete enough for the real merge-gate.sh to reach its docker
+// preflight: the two install-free steps that run before it, the classifier it
+// asks for a profile, and the four files it sources. The profile fixtures step
+// is a placeholder here — what these cases are about is which verdict the gate
+// forms once it is standing in front of a host it cannot use, and running the
+// real classifier fixtures would only add a second suite to every case.
+const mergeGateHostFixture = (t) => {
+  const root = scratch(t);
+  const repo = join(root, "repo");
+  mkdirSync(join(repo, "scripts", "gate-worker"), { recursive: true });
+  mkdirSync(join(repo, "packages", "runner", "runtime-tools", "gate-worker"), { recursive: true });
+  writeFileSync(join(repo, "package.json"), '{"name": "anneal"}\n');
+  // This repository's own ignore rules, not a fixture's: the gate takes the
+  // worktree lock before it checks that the tree is clean, so a lock file the
+  // rules do not cover fails every gate. Copying them is what makes that a
+  // failure here rather than on the next branch.
+  cpSync(join(here, "..", "..", ".gitignore"), join(repo, ".gitignore"));
+  cpSync(mergeGatePath, join(repo, "scripts", "merge-gate.sh"));
+  for (const name of ["check-frozen-docs.sh", "merge-gate-profile.mjs", "run-scope-bypass.sh"]) {
+    cpSync(join(here, "..", name), join(repo, "scripts", name));
+  }
+  writeFileSync(
+    join(repo, "scripts", "merge-gate-profile.test.mjs"),
+    'import test from "node:test";\ntest("placeholder for the gate\'s profile fixtures step", () => {});\n',
+  );
+  for (const name of ["host-sizing.sh", "step-engine.sh", "verdict.sh"]) {
+    cpSync(join(here, name), join(repo, "scripts", "gate-worker", name));
+  }
+  cpSync(libPath, join(repo, "packages", "runner", "runtime-tools", "gate-worker", "lib.sh"));
+  git(repo, "init", "-q", "-b", "main");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-q", "-m", "fixture");
+  const oid = git(repo, "rev-parse", "HEAD");
+
+  // A host whose docker daemon is not reachable. `reached` is what proves the
+  // preflight got this far, and `hold` is how a case keeps one gate standing in
+  // the preflight while another tries to take the worktree from under it.
+  const bin = join(root, "bin");
+  mkdirSync(bin, { recursive: true });
+  const reached = join(root, "docker-info-callers");
+  const hold = join(root, "release-docker-info");
+  writeFileSync(
+    join(bin, "docker"),
+    "#!/usr/bin/env bash\n"
+      + 'if [ "$1" = info ]; then\n'
+      + '  printf "%s\\n" "$$" >> "$DOCKER_INFO_CALLERS"\n'
+      + '  while [ -n "${DOCKER_INFO_HOLD:-}" ] && [ ! -e "$DOCKER_INFO_HOLD" ]; do sleep 0.05; done\n'
+      + '  printf "Cannot connect to the Docker daemon\\n" >&2\n'
+      + "  exit 1\n"
+      + "fi\n"
+      + "exit 0\n",
+  );
+  chmodSync(join(bin, "docker"), 0o755);
+
+  const env = (extra = {}) => ({
+    ...FIXTURE_ENV,
+    PATH: `${bin}:${process.env.PATH}`,
+    DOCKER_INFO_CALLERS: reached,
+    ...extra,
+  });
+  const argv = [join(repo, "scripts", "merge-gate.sh"), "--expect-head", oid, "--master", oid];
+  return { repo, oid, reached, hold, env, argv };
+};
+
+// The verdict as run-gate.sh reads it back: the last line of either documented
+// shape, which is what `gate_verdict_read` greps for. Lines after it are the
+// gate telling an operator what to do next, not the verdict.
+const lastVerdictLine = (output) =>
+  stripAnsi(output)
+    .split("\n")
+    .filter((line) => line.startsWith("MERGE GATE: ") || line.startsWith("GATE NOT RUN: "))
+    .at(-1) ?? "";
+
+test("an unreachable docker daemon is GATE NOT RUN, not a FAIL about the commit", (t) => {
+  // The defect this closes. The daemon being down says nothing about the
+  // commit, and the gate used to answer `MERGE GATE: FAIL (docker preflight)`:
+  // the dispatcher reads 1 as a judgement, stops looking for a worker that
+  // could have judged it, and a reviewer records a verdict nothing formed.
+  const fixture = mergeGateHostFixture(t);
+  const result = spawnSync("bash", fixture.argv, {
+    cwd: fixture.repo,
+    encoding: "utf8",
+    timeout: 120_000,
+    env: fixture.env(),
+  });
+  const output = `${result.stdout}${result.stderr}`;
+  assert.equal(result.status, 76, output);
+  assert.equal(lastVerdictLine(result.stdout), "GATE NOT RUN: the docker daemon on this host is not reachable");
+  assert.doesNotMatch(stripAnsi(output), /MERGE GATE: FAIL/);
+  assert.equal(readFileSync(fixture.reached, "utf8").trim().split("\n").length, 1);
+});
+
+test("a host with no docker binary at all is GATE NOT RUN as well", (t) => {
+  const fixture = mergeGateHostFixture(t);
+  // The host's own PATH with every directory that carries a docker removed,
+  // rather than a PATH built here: the gate still needs the node and git this
+  // machine runs on, and a fixture that kept a real docker on the path would
+  // start a real daemon check.
+  const withoutDocker = (process.env.PATH ?? "")
+    .split(":")
+    .filter((directory) => directory !== "" && !existsSync(join(directory, "docker")))
+    .join(":");
+  const result = spawnSync("bash", fixture.argv, {
+    cwd: fixture.repo,
+    encoding: "utf8",
+    timeout: 120_000,
+    env: fixture.env({ PATH: withoutDocker }),
+  });
+  const output = `${result.stdout}${result.stderr}`;
+  assert.equal(result.status, 76, output);
+  assert.match(lastVerdictLine(result.stdout), /^GATE NOT RUN: docker is required and this host has none/);
+});
+
+test("two gates racing for one worktree leave exactly one holder", async (t) => {
+  // The lock's whole purpose, as a race rather than as a state on disk. Two
+  // gates in one checkout share node_modules, dist/ and the prisma client, and
+  // `npm ci` empties node_modules before it refills it: 33 gates in one
+  // worktree deleting each other's dependencies is the incident. The lock this
+  // replaced created its directory before it wrote the pid into it, so a gate
+  // reading that window found a lock naming nobody, called it abandoned, and
+  // took the worktree the other one was installing into.
+  //
+  // The winner is held inside `docker info`, so the loser meets a live holder
+  // rather than a race this fixture would have to time.
+  const fixture = mergeGateHostFixture(t);
+  const run = () =>
+    new Promise((resolve) => {
+      const child = spawn("bash", fixture.argv, {
+        cwd: fixture.repo,
+        env: fixture.env({ DOCKER_INFO_HOLD: fixture.hold }),
+      });
+      let output = "";
+      child.stdout.on("data", (chunk) => {
+        output += chunk;
+      });
+      child.stderr.on("data", (chunk) => {
+        output += chunk;
+      });
+      child.on("exit", (code, signal) => resolve({ status: code ?? signal, output: stripAnsi(output) }));
+    });
+
+  const first = run();
+  const second = run();
+  // Whichever gate lost the lock exits at once; the winner is still in the
+  // preflight. Releasing the hold only after that keeps the case deterministic.
+  // The deadline is what turns "both gates took the lock" — the failure this
+  // exists to catch — into a failing assertion rather than a suite that stops
+  // returning.
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => resolve({ status: "neither gate refused", output: "" }), 60_000);
+  });
+  const loser = await Promise.race([first, second, deadline]);
+  clearTimeout(timer);
+  writeFileSync(fixture.hold, "");
+  const [a, b] = await Promise.all([first, second]);
+
+  const statuses = [a.status, b.status].sort();
+  assert.deepEqual(statuses, [1, 76], `${a.output}\n---\n${b.output}`);
+  assert.equal(loser.status, 1, loser.output);
+  assert.match(
+    loser.output,
+    /another merge gate is running in .* \(pid \d+\)/u,
+    "the refusal did not name the process holding the worktree",
+  );
+  assert.match(loser.output, /MERGE GATE: FAIL \(worktree lock\)/);
+  // Exactly one gate got past the lock, which is the invariant: the loser never
+  // reached the preflight step the winner was held in.
+  assert.equal(readFileSync(fixture.reached, "utf8").trim().split("\n").length, 1);
+});
+
 test("a gate that passes is reported as the gate's own verdict", (t) => {
   const fixture = gateHome(t);
   const result = runGate(fixture.home, [fixture.oid]);
@@ -1280,6 +1453,21 @@ test("the runbook's exit-code table is the table lib.sh defines", () => {
   assert.match(runbook, /`75` and `76` are not interchangeable/);
   assert.match(runbook, /\|\s*`128\+N`\s*\|/);
   assert.match(runbook, /`137`/);
+  // Which side of the judgement line a host failure falls on, in the table an
+  // operator reads. The gate reports 76 for a docker preflight it could not
+  // complete and 3 for a teardown that failed after every step passed, and a
+  // runbook that still promised FAIL for either would send someone to look for
+  // a defect in a commit nothing had judged.
+  assert.match(
+    runbook,
+    new RegExp(`\\|\\s*\`${noVerdict}\`\\s*\\|[^|]*docker preflight[^|]*reachable daemon`, "u"),
+    "the runbook's no-verdict row does not name the docker preflight",
+  );
+  assert.match(
+    runbook,
+    new RegExp(`\\|\\s*\`${notAuthoritative}\`\\s*\\|[^|]*cleanup`, "u"),
+    "the runbook's not-authoritative row does not name a cleanup that failed after a pass",
+  );
 });
 
 test("the isolation claim stays the one that is actually enforced", () => {

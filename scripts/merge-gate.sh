@@ -12,18 +12,25 @@
 #
 #   0  PASS             every step passed, on a clean worktree, at one commit
 #                       that did not move, and the throwaway database is gone
-#   1  FAIL             a step failed, a precondition was missing, the tree
-#                       drifted, or cleanup did not complete
-#   3  NOT AUTHORITATIVE the run was asked to leave state behind, so it may not
-#                       be used to authorise a merge even if every step passed
+#   1  FAIL             a step failed, or a precondition about this commit or
+#                       this invocation was missing, or the tree drifted
+#   3  NOT AUTHORITATIVE the run was asked to leave state behind, or the host
+#                       did not finish tearing the run down, so it may not be
+#                       used to authorise a merge even if every step passed
 #  76  GATE NOT RUN     a step was stopped from outside before it could be
-#                       judged, so no verdict about this commit exists
+#                       judged, or the host could not give the gate what it
+#                       needs to run one at all (no docker daemon), so no
+#                       verdict about this commit exists
 # 130  GATE NOT RUN     the gate itself was interrupted (SIGINT), reported under
 # 143                   the signal that stopped it (SIGTERM)
 #
 # 1 is the only code that says the commit was judged and did not pass. A run
 # that was killed judged nothing, and must not hand its caller a FAIL: a
-# reviewer who records that string records a judgement nothing made.
+# reviewer who records that string records a judgement nothing made. The same
+# rule covers the host the gate is standing on. A machine with no docker daemon
+# says nothing about the commit either, so it is 76 and the dispatcher moves the
+# work to a worker that can judge it, rather than 1 and a merge blocked on a
+# daemon that was not running.
 #
 # The last line of output is one of MERGE GATE: PASS <oid> / FAIL / NOT
 # AUTHORITATIVE, or GATE NOT RUN: <reason> when the run was stopped rather than
@@ -157,10 +164,11 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
-# Two things come from here. Build-cache publication is shared by distinct
-# worktrees on one host, so it reuses the tested atomic pid-lock primitive
-# instead of a mkdir-then-pid lock whose empty-owner window lets two concurrent
-# gates both become the writer. And the verdict this gate exists to produce —
+# Two things come from here. Both of this gate's locks — the worktree it runs in
+# and the build cache entry it publishes — are the tested atomic pid-lock
+# primitive rather than a mkdir-then-pid lock, whose empty-owner window lets two
+# concurrent gates both conclude the other's lock was abandoned. And the verdict
+# this gate exists to produce —
 # its exit codes and the four lines that carry them — is written by lib.sh's
 # emit functions, because run-gate.sh reads those lines back and one format
 # needs one writer.
@@ -191,9 +199,11 @@ fi
 CONTAINER="agentos-merge-gate-$$"
 # The lock lives in the worktree because the worktree is what is being contended:
 # two checkouts of the same repository may gate at the same time, two gates in one
-# checkout may not. It is a directory because mkdir is the one filesystem create
-# that is atomic and fails on an existing name everywhere this runs.
-LOCK_DIR="${REPO_ROOT}/.merge-gate.lock"
+# checkout may not. Which lock it is, and why it is that one rather than a
+# directory, is lib.sh's slot lock and is stated there.
+LOCK_ROOT="${REPO_ROOT}"
+LOCK_SLOT=".merge-gate"
+LOCK_FILE="$(gate_slot_path "${LOCK_ROOT}" "${LOCK_SLOT}")"
 LOCK_HELD=0
 GATE_TMP=""
 POSTGRES_STARTED=0
@@ -209,6 +219,23 @@ die() {
   printf '\n\033[31mmerge-gate: %s\033[0m\n' "$1" >&2
   FAILED_STEP="${FAILED_STEP:-preflight}"
   exit "${GATE_EXIT_FAIL}"
+}
+
+# The other half of `die`, and the line between them is who the failure is
+# about. `die` is for the commit and the invocation — a dirty tree, an
+# --expect-head that does not match, a baseline that is not in this repository —
+# and those are judgements: this commit cannot be gated as asked, which is a
+# FAIL. This one is for the host the gate is standing on. A machine with no
+# docker daemon has said nothing about the commit, so the run reports the
+# absence of a verdict under the same code as a step that was stopped from
+# outside, and the dispatcher takes the work to capacity that can judge it.
+# Recorded through the step engine's own state rather than exited directly, so
+# the reason travels to the one place that prints the last line.
+die_no_verdict() {
+  printf '\n\033[33mmerge-gate: %s\033[0m\n' "$1" >&2
+  NO_VERDICT_REASON="$1"
+  NO_VERDICT_EXIT="${GATE_EXIT_NO_VERDICT}"
+  exit "${GATE_EXIT_NO_VERDICT}"
 }
 
 # Only ever discards the directory this run created, identified by the prefix it
@@ -232,49 +259,44 @@ discard_gate_tmp() {
   esac
 }
 
-# Same rule as discard_gate_tmp: only ever release a lock this run is holding, and
-# only after re-reading the pid file, so a run that somehow lost the race cannot
-# delete the directory that another gate is standing on.
+# Same rule as discard_gate_tmp: only ever release a lock this run is holding.
+# gate_slot_release re-reads the holder and refuses when it is somebody else, so
+# a run that somehow lost the lock cannot free the slot another gate is standing
+# in; its refusal is this run's cleanup failure and is reported as one.
 release_lock() {
   [ "${LOCK_HELD}" -eq 1 ] || return 0
-  local owner=""
-  owner="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
-  if [ "${owner}" != "$$" ]; then
-    printf 'merge-gate: refusing to release %s, it is now held by pid %s\n' \
-      "${LOCK_DIR}" "${owner:-unknown}" >&2
-    return 1
-  fi
-  rm -rf -- "${LOCK_DIR}"
+  gate_slot_release "${LOCK_ROOT}" "${LOCK_SLOT}" || return 1
+  LOCK_HELD=0
 }
 
-# Acquire before the first write of any kind. mkdir either creates the directory
-# or fails, with no window in between, so the loser of a race is always the one
-# that sees the failure. A holder whose process is gone left the lock behind by
-# being killed rather than by exiting, so it is reclaimed; a holder that is alive
-# is reported and this run stops.
+# Acquire before the first write of any kind, through the same primitive the
+# dispatcher rations its slots with. The lock is a file created with `ln` that
+# already names its owner the instant it exists, which is what the mkdir lock
+# this replaced could not do: mkdir creates the directory empty and writes the
+# pid a moment later, and a second gate reading that window sees a lock naming
+# nobody, calls it abandoned, and takes the worktree the first one is installing
+# into. gate_slot_try reclaims a lock whose holder is gone and refuses one that
+# names no pid, both for reasons stated where it is defined.
+#
+# A live holder is a FAIL and never a wait: this gate does not queue, because a
+# queue silently serialises runs whose commits have already moved on.
 acquire_lock() {
-  local holder=""
-  if mkdir "${LOCK_DIR}" 2>/dev/null; then
-    LOCK_HELD=1
-    printf '%s\n' "$$" > "${LOCK_DIR}/pid"
-    return 0
-  fi
-
-  holder="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
-  if [ -n "${holder}" ] && kill -0 "${holder}" 2>/dev/null; then
-    die "another merge gate is running in ${REPO_ROOT} (pid ${holder}); this gate does not queue, rerun once that one has finished"
-  fi
-
-  # Stale: nobody owns the recorded pid, or no pid was ever recorded because the
-  # holder died between mkdir and the write. Pids are recycled, so `kill -0`
-  # succeeding on an unrelated process only ever costs a spurious FAIL and a
-  # rerun, which is the direction this check is allowed to be wrong in.
-  note "reclaiming stale lock ${LOCK_DIR} (pid ${holder:-none} is gone)"
-  rm -rf -- "${LOCK_DIR}"
-  mkdir "${LOCK_DIR}" 2>/dev/null \
-    || die "could not take the merge gate lock ${LOCK_DIR} after reclaiming it; another gate started in the same instant"
-  LOCK_HELD=1
-  printf '%s\n' "$$" > "${LOCK_DIR}/pid"
+  local status=0
+  gate_slot_try "${LOCK_ROOT}" "${LOCK_SLOT}" || status=$?
+  case "${status}" in
+    0)
+      LOCK_HELD=1
+      return 0
+      ;;
+    "${GATE_SLOT_BUSY}")
+      die "another merge gate is running in ${REPO_ROOT} (pid $(cat "${LOCK_FILE}" 2>/dev/null || printf 'unknown')); this gate does not queue, rerun once that one has finished"
+      ;;
+    *)
+      # Not busy: the lock itself cannot be operated, and the reason is already
+      # on stderr. Waiting changes nothing, so this run stops the same way.
+      die "the merge gate lock ${LOCK_FILE} could not be taken; clear it once no gate is running in ${REPO_ROOT}"
+      ;;
+  esac
 }
 
 # How this run ends, and the last line it ends with: cleanup, the signal
@@ -826,7 +848,7 @@ grep -q '"name": "anneal"' "${REPO_ROOT}/package.json" || die "${REPO_ROOT} is n
 FAILED_STEP="worktree lock"
 acquire_lock
 FAILED_STEP=""
-note "lock:       ${LOCK_DIR} (pid $$)"
+note "lock:       ${LOCK_FILE} (pid $$)"
 
 git -C "${REPO_ROOT}" rev-parse --git-dir >/dev/null 2>&1 || die "${REPO_ROOT} is not a git worktree"
 
@@ -976,9 +998,15 @@ fi
 # checks above are the ones a documentation branch actually needs to hear about.
 # run-gate.sh on the worker deliberately no longer pre-checks it either, so that
 # the ordering here is the ordering everywhere.
+#
+# Neither of these is a statement about the commit, so neither is a FAIL. A host
+# with no docker daemon judged nothing, and reporting 1 here is how a dispatcher
+# came to record a verdict for a commit no gate had run: it reads 1 as a
+# judgement and stops looking for capacity that could have produced one.
 FAILED_STEP="docker preflight"
-command -v docker >/dev/null 2>&1 || die "docker is required: the gate runs its own throwaway PostgreSQL"
-docker info >/dev/null 2>&1 || die "the docker daemon is not reachable"
+command -v docker >/dev/null 2>&1 \
+  || die_no_verdict "docker is required and this host has none: the gate runs its own throwaway PostgreSQL"
+docker info >/dev/null 2>&1 || die_no_verdict "the docker daemon on this host is not reachable"
 FAILED_STEP=""
 
 # --- how much of this host the gate may use ---------------------------------

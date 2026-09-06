@@ -342,6 +342,29 @@ test("VERDICT a step that really failed is still a FAIL naming it", () => {
   assert.doesNotMatch(run.stdout, /GATE NOT RUN/);
 });
 
+test("VERDICT a cleanup that failed after every step passed is not a FAIL", () => {
+  // The container would not delete, or the lock would not release. That is the
+  // host failing to finish tearing this run down, and it says nothing about the
+  // commit: reporting FAIL here hands a reviewer a judgement no step formed.
+  // It is not a PASS either — the gate promises the container is gone — so it
+  // is the code that already means "every step passed and this may still not
+  // authorise a merge".
+  const run = runVerdict(`release_lock() { return 1; }\nexit 0`);
+  assert.equal(run.status, 3);
+  assert.match(run.stdout, /MERGE GATE: NOT AUTHORITATIVE \(cleanup: the merge gate lock could not be released\)/);
+  assert.doesNotMatch(run.stdout, /MERGE GATE: FAIL/);
+  assert.doesNotMatch(run.stdout, /MERGE GATE: PASS/);
+});
+
+test("VERDICT a cleanup that failed after a step failed is still that step's FAIL", () => {
+  // The boundary. This run did judge the commit, and nothing about the teardown
+  // afterwards may turn that judgement into an errand.
+  const run = runVerdict(`release_lock() { return 1; }\nFAILED_STEP="a step"\nexit 1`);
+  assert.equal(run.status, 1);
+  assert.match(run.stdout, /MERGE GATE: FAIL \(a step\)/);
+  assert.doesNotMatch(run.stdout, /NOT AUTHORITATIVE/);
+});
+
 test("VERDICT a clean run still passes and still names its commit", () => {
   const run = runVerdict(`exit 0`);
   assert.equal(run.status, 0);

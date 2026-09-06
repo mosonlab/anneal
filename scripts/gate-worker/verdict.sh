@@ -63,10 +63,22 @@ cleanup() {
     gate_verdict_fail "unknown"
     exit "${GATE_EXIT_FAIL}"
   fi
+  # Every step passed and the host then failed to finish tearing the run down:
+  # a container that would not delete, a lock that would not release. That is a
+  # fact about the host, not about the commit, so it is not a FAIL — nothing
+  # here judged the commit and did not pass. It is not a PASS either, because
+  # the gate promises the container is gone and the worktree is free and this
+  # run cannot say so. NOT AUTHORITATIVE is the code that already means exactly
+  # that: every step passed, and this run may still not authorise a merge.
+  #
+  # A cleanup failure after a step failed is a different case and stays a FAIL:
+  # that run did judge the commit, and the `fail` branch above has already
+  # reported that judgement naming the step it is about.
   if [ -n "${cleanup_error}" ]; then
     printf '\n'
-    gate_verdict_fail "cleanup: ${cleanup_error}"
-    exit "${GATE_EXIT_FAIL}"
+    gate_verdict_not_authoritative "cleanup: ${cleanup_error}"
+    printf 'Every step passed, but this run could not finish tearing itself down and must not authorise a merge.\n'
+    exit "${GATE_EXIT_NOT_AUTHORITATIVE}"
   fi
   if [ "${KEEP_POSTGRES}" -eq 1 ]; then
     printf '\n'
