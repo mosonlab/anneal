@@ -2,14 +2,12 @@ import {
   InboxDeliveryStatus,
   InboxKind,
   InboxSender,
-  InboxStatus,
   Prisma,
   RunStatus,
   SessionExecutionStatus,
   type PrismaClient,
 } from "@anneal/db";
 
-import { lockTaskMutationRows } from "./task-write.js";
 import {
   type FenceRefusalResponse,
   fencedRunWhere,
@@ -17,7 +15,6 @@ import {
   type RunFence,
   withFencedRun,
 } from "./run-fence.js";
-import type { Refusal } from "./refusal.js";
 
 export const defaultInboxResumeWindowMs = 7 * 24 * 60 * 60 * 1_000;
 
@@ -31,11 +28,6 @@ export type SuspendQuestion = {
   resumableUntil?: Date | null;
 };
 
-export type SupersedeInboxMessageResult =
-  | { closed: true; duplicate: false; requestId: string }
-  | { closed: false; duplicate: true; requestId: string }
-  | Refusal;
-
 export class InboxRunFenceRefusal extends Error {
   readonly refusal: FenceRefusalResponse;
 
@@ -45,89 +37,6 @@ export class InboxRunFenceRefusal extends Error {
     this.refusal = refusal;
   }
 }
-
-/**
- * Closes one historical task-linked Inbox message after the operator has
- * archived its task. The Task row is the lifecycle mutex shared by archive and
- * unarchive, so the archived check remains true until this Inbox-only write
- * commits. The message body, decisions, replies, and every task-owned audit
- * row are deliberately untouched.
- */
-export const supersedeTaskInboxMessage = async (
-  db: PrismaClient,
-  messageId: string,
-  requestId: string,
-): Promise<SupersedeInboxMessageResult> => db.$transaction(async (tx) => {
-  const initial = await tx.inboxMessage.findUnique({
-    where: { id: messageId },
-    select: { status: true, from: true, taskId: true, gateTaskId: true, replyToMessageId: true },
-  });
-  if (!initial) return { reason: "not-found", message: "Inbox message not found" };
-  if (initial.taskId === null) {
-    return { reason: "conflict", message: "Only a task-linked Inbox message can be superseded" };
-  }
-  if (initial.from !== InboxSender.AGENT || initial.replyToMessageId !== null) {
-    return { reason: "conflict", message: "Only a top-level agent Inbox message can be superseded" };
-  }
-  if (initial.gateTaskId !== null) {
-    return { reason: "conflict", message: "Only a non-gate Inbox message can be superseded" };
-  }
-  // A prior successful supersession is safe to acknowledge without touching
-  // the Task row again. This keeps retries idempotent even if the operator
-  // later restores the task for inspection.
-  if (initial.status === InboxStatus.CLOSED) {
-    return { closed: false, duplicate: true, requestId };
-  }
-
-  // Archive and unarchive both take this lock before reading or writing
-  // archivedAt. Do not replace this with an unlocked task read: that would
-  // allow an unarchive to commit between the check and the Inbox update.
-  const task = await lockTaskMutationRows(tx, initial.taskId);
-  if (!task) return { reason: "not-found", message: "Inbox message task not found" };
-  if (task.archivedAt === null) {
-    return { reason: "conflict", message: "Only an Inbox message for an archived task can be superseded" };
-  }
-
-  // Re-read the mutable status after the Task lock. The conditional update
-  // below is the message CAS: concurrent decisions or closes may win, but this
-  // action never turns an ineligible or non-OPEN message into CLOSED.
-  const message = await tx.inboxMessage.findUnique({
-    where: { id: messageId },
-    select: { status: true },
-  });
-  if (!message) return { reason: "not-found", message: "Inbox message not found" };
-  if (message.status === InboxStatus.CLOSED) {
-    return { closed: false, duplicate: true, requestId };
-  }
-  if (message.status !== InboxStatus.OPEN) {
-    return { reason: "conflict", message: "Only an open Inbox message can be superseded" };
-  }
-
-  const closed = await tx.inboxMessage.updateMany({
-    where: {
-      id: messageId,
-      taskId: task.id,
-      gateTaskId: null,
-      status: InboxStatus.OPEN,
-    },
-    // Superseded is not an answer. CLOSED removes the active Inbox noise while
-    // leaving answeredAt null and preserving the absence of a decision.
-    data: { status: InboxStatus.CLOSED },
-  });
-  if (closed.count === 1) {
-    await tx.taskActivity.create({ data: {
-      taskId: task.id,
-      actorType: "operator",
-      body: "Inbox message superseded",
-      metadata: { inboxMessageId: messageId, requestId },
-    } });
-    return { closed: true, duplicate: false, requestId };
-  }
-
-  const current = await tx.inboxMessage.findUnique({ where: { id: messageId }, select: { status: true } });
-  if (current?.status === InboxStatus.CLOSED) return { closed: false, duplicate: true, requestId };
-  return { reason: "conflict", message: "Inbox message changed before it could be superseded" };
-}, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
 
 /** Creates the durable outbox item and releases the Run lease in one commit. */
 export const suspendForInbox = async (db: PrismaClient, input: SuspendQuestion, now = new Date()) => {
