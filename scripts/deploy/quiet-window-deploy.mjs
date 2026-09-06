@@ -694,6 +694,7 @@ const makeWritable = (root) => {
 export const createDeployHost = ({
   serviceControl: providedServiceControl,
   runCommand = runDeployCommand,
+  readMigrationTail = migrationTail,
   verifyRecoveredServices = verifyStableServicePaths,
   environment = process.env,
   deployRole = resolveDeployRoleOrFail(environment),
@@ -702,6 +703,10 @@ export const createDeployHost = ({
   serviceVerificationTimeoutMs = 30_000,
   serviceVerificationWait = sleep,
 } = {}) => {
+  const hostChecked = (reason, program, args, options) => checked(reason, program, args, {
+    ...options,
+    run: runCommand,
+  });
   const runnerConfig = deployRole === "runner" ? requireRunnerDeployPreflight(environment) : null;
   // The one inventory this invocation installs, controls and verifies. The
   // service control is built from it rather than resolving a second one, so a
@@ -772,12 +777,13 @@ export const createDeployHost = ({
       }),
     }),
     prepareReleaseArtifact: async (attempt) => {
-      const built = await checked(
+      const built = await hostChecked(
         "release-artifact-build-failed",
         loadBinaries().node,
         [join(SCRIPT_DIR, "build-release-artifact.mjs"), attempt.targetCommit],
         {
           capture: true,
+          env: prismaChildEnvironment(environment),
           timeoutMs: DEPLOY_STEP_TIMEOUT_MS.releaseArtifactBuild,
           timeoutReason: "release-artifact-build-timeout",
         },
@@ -885,15 +891,14 @@ export const createDeployHost = ({
     },
     guardedMigration: async (attempt) => {
       const operationWorkspace = attempt.requireFact("operationWorkspace");
-      const migrationTailBefore = await migrationTail();
-      await checked("guarded-migration-refused", loadBinaries().node, ["node_modules/tsx/dist/cli.mjs", "packages/db/prisma/preflight-goal-execution.ts"], {
+      const migrationTailBefore = await readMigrationTail();
+      await hostChecked("guarded-migration-refused", loadBinaries().node, ["node_modules/tsx/dist/cli.mjs", "packages/db/prisma/preflight-goal-execution.ts"], {
         cwd: operationWorkspace,
         timeoutMs: DEPLOY_STEP_TIMEOUT_MS.migrationPreflight,
         timeoutReason: "migration-preflight-timeout",
-        run: runCommand,
       });
       const barrier = attempt.requireFact("barrier");
-      await checked(
+      await hostChecked(
         "guarded-migration-refused",
         loadBinaries().node,
         [
@@ -905,30 +910,28 @@ export const createDeployHost = ({
         ],
         {
           cwd: operationWorkspace,
-          env: prismaChildEnvironment(),
+          env: prismaChildEnvironment(environment),
           timeoutMs: DEPLOY_STEP_TIMEOUT_MS.migrationDeploy,
           timeoutReason: MIGRATION_DEPLOY_TIMEOUT_REASON,
           onTermination: () => barrier.retainUntilEscalationCleared(),
-          run: runCommand,
         },
       );
-      const migrationTailAfter = await migrationTail();
+      const migrationTailAfter = await readMigrationTail();
       return { migration: { migrationTailBefore, migrationTailAfter } };
     },
-    generatePrismaClient: (attempt) => checked("prisma-client-generation-refused", loadBinaries().node, [
+    generatePrismaClient: (attempt) => hostChecked("prisma-client-generation-refused", loadBinaries().node, [
       "node_modules/prisma/build/index.js",
       "generate",
       "--schema",
       "packages/db/prisma/schema.prisma",
     ], {
       cwd: attempt.requireFact("operationWorkspace"),
-      env: prismaChildEnvironment(),
+      env: prismaChildEnvironment(environment),
       timeoutMs: DEPLOY_STEP_TIMEOUT_MS.prismaClientGeneration,
       timeoutReason: "prisma-client-generation-timeout",
-      run: runCommand,
     }),
     syncCanonicalPrompts: async (attempt) => {
-      const result = await checked("canonical-prompt-sync-refused", loadBinaries().node, [
+      const result = await hostChecked("canonical-prompt-sync-refused", loadBinaries().node, [
         "node_modules/tsx/dist/cli.mjs",
         "packages/db/prisma/sync-canonical-prompts.ts",
       ], {
