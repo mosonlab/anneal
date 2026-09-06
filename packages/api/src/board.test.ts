@@ -740,11 +740,13 @@ test("a capped task carries its cap beside what its runs have spent against it",
   ];
 
   const capped = boardCard(row({ spendCap: new Prisma.Decimal("1.00"), runs }), null, moveContext);
-  assert.deepEqual(capped.spendCapUsage, { capUsd: "1", spentUsd: "1.5", exhausted: true });
-  assert.match(JSON.stringify(capped), /"spentUsd":"1\.5"/u);
+  assert.deepEqual(capped.spendCapUsage, { capUsd: "1.00", spentUsd: "1.50", exhausted: true });
+  // Money with cents on the wire, from the one formatter the refusal message,
+  // its metadata and the cap-edit trail also use.
+  assert.match(JSON.stringify(capped), /"spentUsd":"1\.50"/u);
 
   const roomLeft = boardCard(row({ spendCap: new Prisma.Decimal("2.00"), runs }), null, moveContext);
-  assert.deepEqual(roomLeft.spendCapUsage, { capUsd: "2", spentUsd: "1.5", exhausted: false });
+  assert.deepEqual(roomLeft.spendCapUsage, { capUsd: "2.00", spentUsd: "1.50", exhausted: false });
 
   // No cap, nothing to show: the board never displays a limit that is absent.
   assert.equal(boardCard(row({ runs }), null, moveContext).spendCapUsage, null);

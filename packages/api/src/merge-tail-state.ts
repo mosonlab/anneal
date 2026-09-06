@@ -1,7 +1,10 @@
 import {
   attemptRunBirth,
   closeIntegratorQuestions,
-  enqueueTaskRun,
+  enqueueTaskRunInternal,
+  errorForOpenRunRefusal,
+  parksInsteadOfRaising,
+  recordRunBirthRefusal,
   MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
   openRun,
@@ -266,7 +269,22 @@ export const enterRepair = async (
     }
     return null;
   }
-  const run = attempt?.run ?? await enqueueTaskRun(tx, context.regressionTaskId, input.now);
+  let run = attempt?.run ?? null;
+  if (!run) {
+    // Not `enqueueTaskRun`: a raised refusal aborts this transaction, and a
+    // spend cap must leave the regression task parked with the cap that
+    // refused it. Every other refusal keeps raising.
+    const opened = await enqueueTaskRunInternal(tx, context.regressionTaskId, input.now, null);
+    if (!opened.ok) {
+      if (!parksInsteadOfRaising(opened.refusal)) throw errorForOpenRunRefusal(opened.refusal);
+      await recordRunBirthRefusal(tx, context.regressionTaskId, opened.refusal);
+      await transitionMergeRecovery(tx, input.aggregateId, MergeRecoveryStatus.BLOCKED_DOWNSTREAM, {
+        failureReason: opened.refusal.message, endedAt: input.now,
+      });
+      return null;
+    }
+    run = opened.run;
+  }
   await transitionMergeRecovery(tx, input.aggregateId, MergeRecoveryStatus.REPAIRING, {
     recoveryRunId: run.id,
     currentBaseSha: input.currentBaseSha,

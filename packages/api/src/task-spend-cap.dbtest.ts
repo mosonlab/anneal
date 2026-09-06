@@ -151,15 +151,15 @@ test("a task at its spend cap refuses the next attempt by name, and a raised cap
 
   // The board shows the limit beside what has been spent against it.
   const cards = await readBoard(db, { projectId: seeded.project.id, archived: "false" });
-  assert.deepEqual(cards[0]?.spendCapUsage, { capUsd: "1", spentUsd: "1.5", exhausted: true });
+  assert.deepEqual(cards[0]?.spendCapUsage, { capUsd: "1.00", spentUsd: "1.50", exhausted: true });
 
   // The operator's way out: raise the cap, retry, and the attempt is queued.
   const patched = await call("PATCH", `/tasks/${seeded.task.id}`, { spendCap: 5 });
   assert.equal(patched.status, 200, JSON.stringify(patched.body));
   const capEdit = await db.taskActivity.findMany({ where: { taskId: seeded.task.id, actorType: "operator" } });
   assert.ok(
-    capEdit.some((activity) => /Spend cap: \$1 → \$5/u.test(String(activity.body))),
-    "the cap edit leaves an operator trail",
+    capEdit.some((activity) => /Spend cap: \$1\.00 → \$5\.00/u.test(String(activity.body))),
+    "the cap edit names the value the write replaced, read under its own lock",
   );
 
   const retried = await call("POST", `/tasks/${seeded.task.id}/retry`);
@@ -170,13 +170,71 @@ test("a task at its spend cap refuses the next attempt by name, and a raised cap
   assert.equal(queued.runNumber, 4);
   assert.equal(queued.status, RunStatus.QUEUED);
   const afterRaise = await readBoard(db, { projectId: seeded.project.id, archived: "false" });
-  assert.deepEqual(afterRaise[0]?.spendCapUsage, { capUsd: "5", spentUsd: "1.5", exhausted: false });
+  assert.deepEqual(afterRaise[0]?.spendCapUsage, { capUsd: "5.00", spentUsd: "1.50", exhausted: false });
 
   // Clearing the cap removes the limit and the projection with it.
   const cleared = await call("PATCH", `/tasks/${seeded.task.id}`, { spendCap: null });
   assert.equal(cleared.status, 200, JSON.stringify(cleared.body));
   const uncapped = await readBoard(db, { projectId: seeded.project.id, archived: "false" });
   assert.equal(uncapped[0]?.spendCapUsage, null);
+  // Removing a spend limit is an operator action and leaves the same trail
+  // raising one does; without the locked read it left none at all.
+  const clearEdit = await db.taskActivity.findMany({ where: { taskId: seeded.task.id, actorType: "operator" } });
+  assert.ok(
+    clearEdit.some((activity) => /Spend cap: \$5\.00 → none/u.test(String(activity.body))),
+    "clearing the cap is recorded",
+  );
+});
+
+test("a cap out of the column's range refuses rather than overflowing the database", async () => {
+  const seeded = await seedTask("task-spend-cap-range", null);
+  const refused = await call("PATCH", `/tasks/${seeded.task.id}`, { spendCap: 1e15 });
+  assert.equal(refused.status, 400, JSON.stringify(refused.body));
+  assert.equal(
+    (await db.task.findUniqueOrThrow({ where: { id: seeded.task.id } })).spendCap,
+    null,
+    "the refused cap was never written",
+  );
+});
+
+/**
+ * The trail must survive the caller, not just the decision point. Start raises
+ * every other Run-birth refusal out of its transaction, which would roll the
+ * park back with it and leave a spend cap enforced silently — the operator
+ * would see a 409 and a task whose row says nothing about which cap refused it.
+ */
+test("Start commits the spend-cap park it refuses on, not only Retry", async () => {
+  const seeded = await seedTask("task-spend-cap-start", "1.00");
+  await db.task.update({ where: { id: seeded.task.id }, data: { status: TaskStatus.TODO } });
+  await seedCostedRun(seeded, 1, "1.50");
+
+  const refused = await call("POST", `/tasks/${seeded.task.id}/start`);
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.equal(await db.run.count({ where: { taskId: seeded.task.id } }), 1, "no attempt is queued");
+
+  const parked = await db.task.findUniqueOrThrow({ where: { id: seeded.task.id } });
+  assert.equal(parked.status, TaskStatus.REVIEW, "the park committed with the refusal");
+  assert.match(String(parked.failureReason), /Spend cap \$1\.00 reached: \$1\.50 spent/u);
+  const named = await db.taskActivity.findMany({
+    where: { taskId: seeded.task.id, metadata: { path: ["refusal"], equals: "spend-cap-exhausted" } },
+  });
+  assert.equal(named.length, 1, "exactly one activity, written once by the caller");
+  assert.match(String(named[0]?.body), /Spend cap \$1\.00 reached: \$1\.50 spent across 1 run/u);
+
+  // And only this code is parked: Start's other refusals leave the task where
+  // the operator found it rather than moving it to REVIEW.
+  const other = await seedTask("task-spend-cap-start-other", null);
+  await db.task.update({
+    where: { id: other.task.id },
+    data: { status: TaskStatus.TODO, archivedAt: new Date() },
+  });
+  const archived = await call("POST", `/tasks/${other.task.id}/start`);
+  assert.equal(archived.status, 409, JSON.stringify(archived.body));
+  assert.equal(
+    (await db.task.findUniqueOrThrow({ where: { id: other.task.id } })).status,
+    TaskStatus.TODO,
+    "an archived-task refusal parks nothing",
+  );
 });
 
 test("a task under its cap, and a task with no cap, queue their next attempt", async () => {

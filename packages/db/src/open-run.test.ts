@@ -23,7 +23,9 @@ import {
   leaseLossRefundAvailable,
   leaseLossRefundDecision,
   openRun,
+  parksInsteadOfRaising,
   pinnedImplementationRange,
+  recordRunBirthRefusal,
   runBudgetCeiling,
 } from "./run-open.js";
 import { runOwnedHead } from "./run-head.js";
@@ -983,7 +985,7 @@ test("every OpenRunRefusal code comes from a real guard, carries a disposition, 
       reason: "conflict",
       disposition: "fault",
       message: "Spend cap $1.00 reached: $1.50 spent across 1 run; raise or clear spendCap to continue",
-      detail: { spendCapUsd: "1", spentUsd: "1.5", runs: 1 },
+      detail: { spendCapUsd: "1.00", spentUsd: "1.50", runs: 1 },
       context: { taskId: "task-1", taskName: "Implement seam" },
     },
     "chain-held": {
@@ -1531,20 +1533,52 @@ test("a spend cap refuses every replacement intent, loudly, once the task's runs
     if (opened.ok) return;
     assert.equal(opened.refusal.code, "spend-cap-exhausted", intent.kind);
     assert.equal(creates.length, 0, `${intent.kind} must not open a Run`);
-    // No silent enforcement: the refusal parks the task and names both numbers.
-    assert.equal(taskUpdates[0]?.status, "REVIEW", intent.kind);
     assert.equal(
-      activities[0]?.body,
-      "Run birth refused: Spend cap $1.00 reached: $1.50 spent across 2 runs;"
+      opened.refusal.message,
+      "Spend cap $1.00 reached: $1.50 spent across 2 runs;"
         + " raise or clear spendCap to continue",
       intent.kind,
     );
-    assert.deepEqual(
-      activities[0]?.metadata,
-      { refusal: "spend-cap-exhausted", spendCapUsd: "1", spentUsd: "1.5" },
-      intent.kind,
-    );
+    // The consequence belongs to the caller, as it does for every other code:
+    // `attemptRunBirth` rolls the birth back to a savepoint, so a park written
+    // here would not survive on the paths that use it and would be written
+    // twice on the ones that write their own.
+    assert.equal(taskUpdates.length, 0, `${intent.kind} must not park the task itself`);
+    assert.equal(activities.length, 0, `${intent.kind} must not write its own activity`);
   }
+});
+
+test("the park a raising caller owes a spend-cap refusal names the cap and the total", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const task = taskRow({
+    repoId: repo.id,
+    repo,
+    spendCap: new Prisma.Decimal("1.00"),
+    runs: [priorRun({ repoId: repo.id })],
+  });
+  const { tx, activities, taskUpdates } = fakeTx(task, { costedRuns: [costedRun("1.50")] });
+  const opened = await openRun(tx, task.id, { kind: "retry", readyAt: now });
+  assert.equal(opened.ok, false);
+  if (opened.ok) return;
+
+  // Only this code is parked rather than raised. Every other refusal either
+  // belongs to a caller that already parks it or is an invariant failure.
+  assert.equal(parksInsteadOfRaising(opened.refusal), true);
+  await recordRunBirthRefusal(tx, task.id, opened.refusal);
+  assert.equal(taskUpdates.length, 1);
+  assert.equal(taskUpdates[0]?.status, "REVIEW");
+  assert.equal(
+    taskUpdates[0]?.failureReason,
+    "Spend cap $1.00 reached: $1.50 spent across 1 run; raise or clear spendCap to continue",
+  );
+  assert.equal(activities.length, 1);
+  assert.equal(
+    activities[0]?.body,
+    "Run birth refused: Spend cap $1.00 reached: $1.50 spent across 1 run;"
+      + " raise or clear spendCap to continue",
+  );
+  // Named, not merely prose: this is what an operator filters the REVIEW by.
+  assert.deepEqual(activities[0]?.metadata, { refusal: "spend-cap-exhausted" });
 });
 
 test("the spend basis counts reported and estimated run cost, and a raised cap queues again", async () => {

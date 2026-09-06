@@ -21,6 +21,7 @@ import {
   stopStateRefusal,
   type Task,
   TaskStatus,
+  usd,
 } from "@anneal/db";
 import { z } from "zod";
 
@@ -101,7 +102,9 @@ export const taskInput = z.object({
 // this route exists for is raising or clearing a cap that has already refused
 // an attempt. Null clears it.
 export const taskPatch = z.object(taskFields).partial().extend({
-  spendCap: z.number().nonnegative().nullable().optional(),
+  // Bounded to the `Decimal(12,2)` column, like every other numeric task field:
+  // an out-of-range cap is a refusal, not a Postgres overflow surfacing as 500.
+  spendCap: z.number().nonnegative().max(9_999_999_999.99).nullable().optional(),
   status: z.nativeEnum(TaskStatus).optional(),
   failureReason: failureReasonText(FAILURE_REASON_LIMIT).nullable().optional(),
 }).refine((value) => Object.keys(value).length > 0);
@@ -120,11 +123,13 @@ export type TaskPatchResult = { task: Task } | TaskPatchRefusal;
  * task.
  */
 export const fieldEditActivity = (
-  locked: { maxSessionsPerTask: number; spendCap?: Prisma.Decimal | null },
+  locked: { maxSessionsPerTask: number; spendCap: Prisma.Decimal | null },
   body: TaskPatchInput,
 ): TaskActivityInput | null => {
+  // Rendered by the cost basis's own formatter so the trail agrees with the
+  // refusal it answers. Required, not optional: see `LockedTask.spendCap`.
   const cap = (value: Prisma.Decimal | number | null | undefined): string =>
-    value === null || value === undefined ? "none" : `$${value.toString()}`;
+    value === null || value === undefined ? "none" : `$${usd(value)}`;
   const notes = [
     body.maxSessionsPerTask !== undefined && body.maxSessionsPerTask !== locked.maxSessionsPerTask
       ? `Run budget: ${locked.maxSessionsPerTask} → ${body.maxSessionsPerTask}`

@@ -1946,8 +1946,12 @@ must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-fr
   `Cannot rewrite task brief: <reason>`. Every other task stores `description`
   verbatim.
 - A `maxSessionsPerTask`, `spendCap` or `description` change is recorded as an
-  operator TaskActivity naming the budget's or cap's previous and new value, or
-  stating that the prompt was edited. The prompt text itself is not copied into
+  operator TaskActivity naming the budget's or cap's previous and new value —
+  both read under the write's own lock, so the stated previous value is the one
+  the write replaced — or stating that the prompt was edited. Clearing a cap is
+  such a change and is recorded as `Spend cap: $<previous> → none`. `spendCap`
+  accepts `0` through `9999999999.99`, the range of its `Decimal(12,2)` column,
+  or `null` to clear it; anything else refuses with `400 Bad Request`. The prompt text itself is not copied into
   the activity.
 - A change to `assigneeType` or `assigneeAgentId`, including clearing the
   assignee to `null`, is refused with `409 Conflict` while the task has a Run in
@@ -2401,10 +2405,18 @@ after-completion and after-lease-loss retries — is measured against it. When
 the cap is set and the task's accumulated spend is at or above it, no Run is
 opened: the Task moves to `REVIEW` with a `failureReason` beginning
 `Spend cap $<cap> reached`, and a TaskActivity carrying
-`metadata.refusal = "spend-cap-exhausted"` together with the cap and the total.
-Callers surface the refusal as a `409 Conflict`. Recover by raising or clearing
-`spendCap` through `PATCH /tasks/:taskId` and calling
+`metadata.refusal = "spend-cap-exhausted"`. That park is the caller's write and
+is made on a path that commits, so it survives on every intent above: the
+callers that raise other Run-birth refusals out of their transaction park this
+one instead, because rolling it back would delete the record naming the cap the
+operator has to raise. Callers surface the refusal as a `409 Conflict`. Recover
+by raising or clearing `spendCap` through `PATCH /tasks/:taskId` and calling
 `POST /tasks/:taskId/retry`; the retry is measured against the new value.
+
+The cap, the total and every rendering of either are money with cents
+(`$1.00`, not `$1`) — the `failureReason`, the activity's `spendCapUsd` and
+`spentUsd` metadata, the board's `spendCapUsage`, and the operator activity a
+cap edit leaves, all from one formatter beside the basis below.
 
 The cost basis is defined once, in `packages/db/src/spend-cap.ts`:
 
@@ -2421,6 +2433,11 @@ The cost basis is defined once, in `packages/db/src/spend-cap.ts`:
   the attempt *after* the one that crossed it, never the one that is running.
 - The comparison is `spent >= cap`: reaching the cap exactly leaves nothing for
   another attempt. A cap of `0` refuses every attempt.
+- `Task.spendCapApplicable` is not part of the decision: a cap is in force
+  whenever it is set. That column, and `Run.spendCap` and
+  `Run.spendCapApplicable` beside it, are written by nothing an operator can
+  reach and read by nothing; they are dead and can be dropped by a change that
+  owns the migration.
 
 `GET /tasks?view=board` projects `spendCapUsage`, and `GET /tasks/:taskId`
 returns `spendCap` beside `taskCost`, so the limit is never displayed without

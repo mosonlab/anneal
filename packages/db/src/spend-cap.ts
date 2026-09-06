@@ -22,9 +22,25 @@ import { type CostableRun, runSessionUsageCost } from "./cost.js";
  *   therefore stops the attempt *after* the one that crossed it, never the one
  *   that is running.
  *
+ * - *`Task.spendCapApplicable`*: not part of this decision. The flag is written
+ *   by nothing but the recurring-copy carry in `scheduler.ts` and read by
+ *   nothing, as are `Run.spendCap` and `Run.spendCapApplicable`; a cap is in
+ *   force whenever it is set, because a set-but-inert limit is the defect this
+ *   basis exists to close. Those three columns are dead and can be dropped by a
+ *   change that owns the migration.
+ *
  * The comparison is `spent >= cap`: a cap is the amount the task may spend, so
  * reaching it exactly leaves nothing for another attempt.
+ *
+ * *How an amount from this basis is rendered*: `usd` below, everywhere. The
+ * column is `Decimal(12,2)` money, so cap and spend are shown with cents in the
+ * refusal message, the activity metadata, the board projection and the
+ * operator's cap-edit trail rather than in Decimal's unpadded `toString`.
  */
+/** The one rendering of an amount from this basis. See the docblock above. */
+export const usd = (value: Prisma.Decimal | number): string =>
+  new Prisma.Decimal(value).toFixed(2);
+
 export const taskSpendUsd = (runs: readonly CostableRun[]): Prisma.Decimal =>
   runs.reduce((total, run) => {
     const cost = runSessionUsageCost(run);
@@ -39,9 +55,9 @@ export const spendCapExhausted = (
 /** What a payload shows an operator about a cap: the limit, what the basis
  *  above has already spent against it, and whether it now refuses attempts.
  *  Null when the task has no cap, so nothing is displayed that nothing bounds. */
-export type SpendCapUsage<DecimalValue = Prisma.Decimal> = {
-  capUsd: DecimalValue;
-  spentUsd: DecimalValue;
+export type SpendCapUsage = {
+  capUsd: Prisma.Decimal;
+  spentUsd: Prisma.Decimal;
   exhausted: boolean;
 };
 

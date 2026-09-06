@@ -31,6 +31,7 @@ import {
   enqueueTaskRunInternal,
   gateQuestion,
   isCompoundImplementationStep,
+  parksInsteadOfRaising,
 } from "./run-open.js";
 
 type Tx = Prisma.TransactionClient;
@@ -834,7 +835,11 @@ const activateChainSuccessorInternal = async (
           throw errorForOpenRunRefusal(refusal);
         }
         case "fault":
-          if (options.onRefusal === "raise") {
+          // A spend cap parks the successor even where the caller asked to
+          // raise: raising rolls back the activation transaction, so the park
+          // below — the only record of which cap refused the attempt — would
+          // never reach the operator who has to raise it.
+          if (options.onRefusal === "raise" && !parksInsteadOfRaising(refusal)) {
             // A compound implementation step is bound to one Agent by
             // construction, so a refusal carrying no error of its own is that
             // invariant failing. The operator's answer is the compound-assignee

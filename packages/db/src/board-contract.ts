@@ -28,6 +28,7 @@ import type {
 
 import type { Agent, Repo } from "./wire-contract.js";
 import type { GateSlot } from "./gate-slot.js";
+import type { SpendCapUsage } from "./spend-cap.js";
 
 export type TaskStatus = PrismaTaskStatus;
 export type TaskSource = PrismaTaskSource;
@@ -92,13 +93,14 @@ export type UsageCost = {
 };
 
 /** A task's spend cap and what its Runs have already spent against it, both
- *  serialized Decimals. Null on a task with no cap: the board shows a limit
- *  only where one exists and is enforced. See `spend-cap.ts` for the basis. */
-export type SpendCapUsageProjection = {
+ *  rendered by `spend-cap.ts`'s `usd`. Null on a task with no cap: the board
+ *  shows a limit only where one exists and is enforced. Derived from the domain
+ *  type — `exhausted` (true once the cap refuses further attempts) and any field
+ *  added beside it carry through, so the two shapes cannot drift apart
+ *  unnoticed. See `spend-cap.ts` for the basis. */
+export type SpendCapUsageProjection = Omit<SpendCapUsage, "capUsd" | "spentUsd"> & {
   capUsd: string;
   spentUsd: string;
-  /** True once the cap refuses further attempts (`spent >= cap`). */
-  exhausted: boolean;
 };
 
 /** A local calendar day in the costs window and its spend by agent. */

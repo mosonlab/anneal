@@ -21,7 +21,15 @@ test("the browser-safe board contract imports only types", () => {
   const typeSpecifiers = [
     ...source.matchAll(/(?:^|\n)\s*import\s+type\b[^;]*?from\s+"([^"]+)"/gu),
   ].map((match) => match[1]);
-  assert.deepEqual(typeSpecifiers, ["@prisma/client", "./wire-contract.js", "./gate-slot.js"]);
+  // `./spend-cap.js` is a value module, and it is on this list deliberately:
+  // the import is type-only and erased, which is what lets the spend-cap board
+  // projection be derived from the domain type instead of hand-copied.
+  assert.deepEqual(typeSpecifiers, [
+    "@prisma/client",
+    "./wire-contract.js",
+    "./gate-slot.js",
+    "./spend-cap.js",
+  ]);
 });
 
 test("the package publishes the board contract as an isolated subpath", () => {

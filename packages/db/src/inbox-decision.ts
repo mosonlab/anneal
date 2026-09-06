@@ -22,7 +22,14 @@ import {
   releaseMergeReadinessGate,
 } from "./merge-gate.js";
 import { isMergeReadinessStep } from "./merge-tail.js";
-import { ArchivedTaskError, WorkflowRefusalError, enqueueTaskRun } from "./run-open.js";
+import {
+  ArchivedTaskError,
+  WorkflowRefusalError,
+  enqueueTaskRunInternal,
+  errorForOpenRunRefusal,
+  parksInsteadOfRaising,
+  recordRunBirthRefusal,
+} from "./run-open.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -380,7 +387,14 @@ export const applyInboxDecisionTx = async (
         [APPROVAL_GATE_NOTE_METADATA_FIELD]: gateNote,
       } }),
     } });
-    await enqueueTaskRun(tx, redo.id, now);
+    // The rejection above is already written. A raised refusal would roll it
+    // back, so a spend cap parks the redo target instead of discarding the
+    // human's decision — the REVIEW naming the cap is what they act on.
+    const redoOpened = await enqueueTaskRunInternal(tx, redo.id, now, null);
+    if (!redoOpened.ok) {
+      if (!parksInsteadOfRaising(redoOpened.refusal)) throw errorForOpenRunRefusal(redoOpened.refusal);
+      await recordRunBirthRefusal(tx, redo.id, redoOpened.refusal);
+    }
     return { duplicate: false, resumed: false, gateAction: "rejected", messageId: reply.id };
   }
 

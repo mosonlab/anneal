@@ -27,7 +27,7 @@ import {
   stopStateFor,
 } from "./merge-integrator-db.js";
 import { runnerFor } from "./model-routing.js";
-import { spendCapExhausted, taskSpendUsd } from "./spend-cap.js";
+import { spendCapExhausted, taskSpendUsd, usd } from "./spend-cap.js";
 import { runOwnedHead } from "./run-head.js";
 import { stepRole } from "./step-role.js";
 
@@ -1154,9 +1154,12 @@ export const openRun = async (
   // hold check — a held chain is queueing nothing and must not be parked in
   // REVIEW — so every replacement intent crosses it exactly once.
   //
-  // `spend-cap-exhausted` is the one refusal that writes its own consequence.
-  // Its callers' `fault` handling differs (some park the task, some quarantine
-  // a schedule, some only record), and a spend limit that can be crossed
+  // The consequence is the caller's, as it is for every other refusal code: a
+  // birth attempted through `attemptRunBirth` is rolled back to a savepoint, so
+  // a write made here would not survive on those paths and would be written
+  // twice on the ones where it did. `recordRunBirthRefusal` below is the shared
+  // write, and the callers that used to raise this refusal out of their own
+  // transaction now park the task with it instead — a spend limit crossed
   // silently by arriving through the wrong caller is the defect this closes.
   const spendCap = task.spendCap ?? null;
   if (spendCap !== null) {
@@ -1178,25 +1181,11 @@ export const openRun = async (
     });
     const spentUsd = taskSpendUsd(costedRuns);
     if (spendCapExhausted(spendCap, spentUsd)) {
-      const cap = spendCap.toString();
-      const spent = spentUsd.toString();
-      const message = `Spend cap $${spendCap.toFixed(2)} reached:`
-        + ` $${spentUsd.toFixed(2)} spent across ${costedRuns.length}`
+      const cap = usd(spendCap);
+      const spent = usd(spentUsd);
+      const message = `Spend cap $${cap} reached:`
+        + ` $${spent} spent across ${costedRuns.length}`
         + ` run${costedRuns.length === 1 ? "" : "s"}; raise or clear spendCap to continue`;
-      await tx.task.update({
-        where: { id: task.id },
-        data: { status: TaskStatus.REVIEW, failureReason: message },
-      });
-      await tx.taskActivity.create({
-        data: {
-          taskId: task.id,
-          actorType: "control-plane",
-          body: `Run birth refused: ${message}`,
-          // Named, not merely prose, for the same reason as the lease-loss
-          // refusal: this is what an operator filters the REVIEW by.
-          metadata: { refusal: "spend-cap-exhausted", spendCapUsd: cap, spentUsd: spent },
-        },
-      });
       return openRunRefusal(
         "spend-cap-exhausted",
         "conflict",
@@ -1356,6 +1345,47 @@ export const attemptRunBirth = async (
   if (executeRaw) await executeRaw(`RELEASE SAVEPOINT ${RUN_BIRTH_SAVEPOINT}`);
   return { outcome: "opened", run: opened.run };
 };
+
+/**
+ * The park a Run-birth refusal leaves behind, for the callers that have none of
+ * their own. `reconcile`, `workspace-reclaim`, `scheduler` and the chain
+ * activation paths each write their own REVIEW and named activity, shaped by
+ * what the refusal means to them; the callers that instead *raised* the refusal
+ * wrote nothing, and raising rolls their transaction back, so a refusal that
+ * arrived through one of them left no durable trace at all. This is the write
+ * they were missing. It must be called on a path that goes on to commit —
+ * never before a `throw`, and never inside `attemptRunBirth`'s savepoint.
+ */
+export const recordRunBirthRefusal = async (
+  tx: Tx,
+  taskId: string,
+  refusal: OpenRunRefusal,
+): Promise<void> => {
+  await tx.task.update({
+    where: { id: taskId },
+    data: { status: TaskStatus.REVIEW, failureReason: refusal.message },
+  });
+  await tx.taskActivity.create({
+    data: {
+      taskId,
+      actorType: "control-plane",
+      body: `Run birth refused: ${refusal.message}`,
+      // Named, not merely prose, for the same reason as the lease-loss refusal:
+      // this is what an operator filters the REVIEW by.
+      metadata: { refusal: refusal.code },
+    },
+  });
+};
+
+/**
+ * A refusal a caller must park rather than raise. `spend-cap-exhausted` is the
+ * only one: every other code either belongs to a caller that already parks it,
+ * or is an invariant failure whose honest answer is an error. A spend cap is an
+ * operator's own limit, and rolling its refusal back would delete the very
+ * record that tells them which cap to raise.
+ */
+export const parksInsteadOfRaising = (refusal: OpenRunRefusal): boolean =>
+  refusal.code === "spend-cap-exhausted";
 
 export const errorForOpenRunRefusal = (refusal: OpenRunRefusal): Error => {
   if (refusal.reason === "archived-task") {

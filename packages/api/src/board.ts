@@ -10,6 +10,7 @@ import {
   runOwnsMergeOutcome,
   runSessionUsageCost,
   spendCapUsage,
+  usd,
   type SpendCapUsage,
   sumUsageCosts,
   TaskStatus,
@@ -161,11 +162,14 @@ export type SerializedUsageCost = BoardUsageCost;
 export const serializeUsageCost = (cost: UsageCost | null): SerializedUsageCost | null =>
   cost === null ? null : { ...cost, costUsd: decimal(cost.costUsd) };
 
+/** Not `decimal()`: a cap and its spend are money from the `spend-cap.ts`
+ *  basis, and that module owns the one rendering they all share with the
+ *  refusal message, its metadata and the operator's cap-edit trail. */
 export const serializeSpendCapUsage = (
   usage: SpendCapUsage | null,
 ): SpendCapUsageProjection | null => usage === null ? null : {
-  capUsd: String(usage.capUsd),
-  spentUsd: String(usage.spentUsd),
+  capUsd: usd(usage.capUsd),
+  spentUsd: usd(usage.spentUsd),
   exhausted: usage.exhausted,
 };
 

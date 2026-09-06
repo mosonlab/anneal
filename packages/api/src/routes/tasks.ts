@@ -4,7 +4,8 @@ import {
   chainControlReadProjection,
   chainRunHistoryRefusal,
   deleteChain,
-  enqueueTaskRun,
+  enqueueTaskRunInternal,
+  errorForOpenRunRefusal,
   gateSlotOf,
   MERGE_INTEGRATOR_KIND,
   holdChain,
@@ -18,8 +19,10 @@ import {
   mergeRecoveryPhase,
   observedChainPullRequests,
   openRun,
+  parksInsteadOfRaising,
   Prisma,
   projectMergeOutcome,
+  recordRunBirthRefusal,
   requestConfirmationCard,
   resumeChain,
   runOwnsMergeOutcome,
@@ -601,7 +604,16 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         return refusal("conflict", "Task already has an active run");
       }
       const opened = await openRun(tx, taskId, { kind: "retry", readyAt: now });
-      if (!opened.ok) return opened.refusal;
+      if (!opened.ok) {
+        // Retry has no park of its own — a refused retry ordinarily leaves the
+        // task exactly as the operator found it. A spend cap is the exception:
+        // it is the operator's own limit, and the REVIEW naming the cap and the
+        // total is the only thing that says which cap to raise.
+        if (parksInsteadOfRaising(opened.refusal)) {
+          await recordRunBirthRefusal(tx, taskId, opened.refusal);
+        }
+        return opened.refusal;
+      }
       const run = opened.run;
       await tx.task.update({ where: { id: taskId }, data: { status: TaskStatus.TODO, failureReason: null } });
       await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: `Run ${run.runNumber} queued by operator retry` } });
@@ -621,7 +633,17 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         if (!admission.task) return admission.refusal;
         if (admission.refusal) return admission.refusal;
         const task = admission.task;
-        const run = await enqueueTaskRun(tx, taskId);
+        // Not `enqueueTaskRun`: raising the refusal aborts this transaction, so
+        // a spend-cap park written inside it would be rolled back and Start
+        // would enforce the cap silently. Every other refusal keeps raising —
+        // its family is what maps to this route's status code.
+        const opened = await enqueueTaskRunInternal(tx, taskId, new Date(), null);
+        if (!opened.ok) {
+          if (!parksInsteadOfRaising(opened.refusal)) throw errorForOpenRunRefusal(opened.refusal);
+          await recordRunBirthRefusal(tx, taskId, opened.refusal);
+          return opened.refusal;
+        }
+        const run = opened.run;
         const recovering = task.status === TaskStatus.BACKLOG;
         if (recovering) {
           await tx.task.update({ where: { id: taskId }, data: { status: TaskStatus.TODO } });
