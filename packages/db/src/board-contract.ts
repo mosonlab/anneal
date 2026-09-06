@@ -269,7 +269,11 @@ export type Session<DateTime = string, DecimalValue = string> = {
    *  session rows nested inside a Run. `run.repo` is a nullable relation, and
    *  its remoteUrl is what makes the Branch field a link. */
   agent?: { id: string; title: string } | null;
-  task?: { id: string; name: string } | null;
+  /** `chainId` is the persisted chain the task belongs to, and what the
+   *  Sessions list filters on. `chainName` is display-only and derived from the
+   *  rows in the same response, so it is null whenever those rows cannot prove
+   *  a name — the id is what addresses the chain either way. */
+  task?: { id: string; name: string; chainId: string | null; chainName: string | null } | null;
   goal?: { id: string; title: string } | null;
   run?: {
     id: string;
