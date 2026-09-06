@@ -2,7 +2,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { DependencyProvisioning, PrismaClient } from "@anneal/db";
+import { DependencyProvisioning, PrismaClient, recordReadinessRequeue } from "@anneal/db";
 
 import { COSTS_TOP_RUNS, readProjectCosts } from "./costs.js";
 import { createApp } from "./test-app.js";
@@ -42,6 +42,10 @@ const costsPath = (projectId: string, days?: number, tz = "UTC"): string =>
   `/projects/${projectId}/costs?${days === undefined ? "" : `days=${days}&`}tz=${encodeURIComponent(tz)}`;
 
 const unique = (label: string): string => `${label}-${Date.now()}-${Math.round(performance.now() * 1000)}`;
+
+const BASE_SHA = "a".repeat(40);
+const FIRST_DRIFT_SHA = "b".repeat(40);
+const SECOND_DRIFT_SHA = "c".repeat(40);
 
 const daysAgo = (days: number): Date => new Date(Date.now() - days * 24 * 60 * 60 * 1000);
 
@@ -463,6 +467,70 @@ test("completed chains survive raw PostgreSQL Task status decoding", async () =>
   assert.equal(report.chains.length, 1);
   assert.equal(report.chains[0]?.chainId, task.chainId);
   assert.equal(report.chains[0]?.costUsd?.toString(), "1");
+});
+
+test("a chain's readiness requeues and their grants are summed onto the chain row", async () => {
+  const { project, repo, agent } = await seedProject("costs-readiness-requeue");
+  const dev = await agent("dev", "Developer");
+  const startedAt = daysAgo(1);
+  const endedAt = new Date(startedAt.getTime() + 5 * 60 * 1000);
+  const chainId = unique("requeue-chain");
+  const readiness = await db.task.create({ data: {
+    projectId: project.id,
+    name: "Autonomous merge tail: merge readiness",
+    description: "costs",
+    status: "DONE",
+    assigneeAgentId: dev.id,
+    repoId: repo.id,
+    chainId,
+    chainIndex: 0,
+    chainLayer: 0,
+  } });
+  const run = await db.run.create({ data: {
+    projectId: project.id,
+    taskId: readiness.id,
+    agentId: dev.id,
+    repoId: repo.id,
+    runNumber: 1,
+    dedupeKey: `task:${readiness.id}:run:1:requeue-chain`,
+    runner: "CLAUDE",
+    status: "SUCCEEDED",
+    model: "claude-opus-5",
+    promptHash: "hash",
+    startedAt,
+    endedAt,
+  } });
+  await db.session.create({ data: {
+    runId: run.id,
+    projectId: project.id,
+    agentId: dev.id,
+    taskId: readiness.id,
+    runner: "CLAUDE",
+    executionStatus: "SUCCEEDED",
+    startedAt,
+    endedAt,
+    nativeChildUsed: false,
+    costUsd: "1.0000",
+    cacheCreationInputTokens: 0,
+  } });
+  // Written the way the settlement writes them, so the SQL sum is read from
+  // the same rows and ordinals the control plane produces.
+  for (const [stale, current] of [[BASE_SHA, FIRST_DRIFT_SHA], [FIRST_DRIFT_SHA, SECOND_DRIFT_SHA]]) {
+    await recordReadinessRequeue(db, {
+      readinessTaskId: readiness.id,
+      regressionTaskId: readiness.id,
+      staleBaseSha: stale!,
+      currentBaseSha: current!,
+      budgetGrant: 1,
+      reason: "base moved before authorization",
+    });
+  }
+
+  const report = await readProjectCosts(db, project.id, 7, "UTC", new Date());
+
+  assert.equal(report.chains.length, 1);
+  assert.equal(report.chains[0]?.readinessRequeues, 2);
+  assert.equal(report.chains[0]?.readinessGrants, 2);
 });
 
 test("the 90-day costs read uses one project-wide query per table", async () => {
