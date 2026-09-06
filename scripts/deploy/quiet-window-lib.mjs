@@ -67,6 +67,33 @@ export const parseDeployArguments = (args) => {
   return modes.length === 0 ? "upgrade" : modes[0].slice("--".length);
 };
 
+/** A commit-scoped escalation latches its own commit, not the job. Read what
+ * main points at now: a different commit is attempted, and the supersession is
+ * recorded as an additive ledger fact on the attempt that follows. `null`
+ * means the escalation still blocks this invocation.
+ *
+ * A target read that fails here refuses without persisting a new failure: it
+ * proves nothing about main having moved, and persisting would replace the
+ * latched marker this decision is reading. */
+const supersedeLatchedCommit = async (startup, supersedable) => {
+  let targetCommit;
+  try {
+    targetCommit = await startup.readRemoteMain();
+  } catch (error) {
+    startup.log(`STOP escalation-active target-unreadable reason=${failureOf(error).reason}`);
+    return null;
+  }
+  if (targetCommit === supersedable.failedCommit) {
+    startup.log(`STOP escalation-active commit-unchanged commit=${targetCommit}`);
+    return null;
+  }
+  startup.log(`SUPERSEDE escalation reason=${supersedable.reason} failed-commit=${supersedable.failedCommit} target=${targetCommit}`);
+  return {
+    targetCommit,
+    fact: supersedable,
+  };
+};
+
 /** Decide the whole invocation before any deployment host exists: the mode,
  * the commit it targets, the retryable escalation the run may self-clear, and
  * the one process lock a locked mode holds until its resources are released.
@@ -104,8 +131,21 @@ export const decideInvocation = async (startup, mode) => {
     if (mode === "prune-history") return { mode, lock, retryEscalation: null };
     const escalation = await startup.checkEscalation();
     if (escalation.active) {
-      await lock.release();
-      return { mode, exitCode: 2 };
+      const superseded = escalation.supersedable
+        ? await supersedeLatchedCommit(startup, escalation.supersedable)
+        : null;
+      if (superseded === null) {
+        await lock.release();
+        return { mode, exitCode: 2 };
+      }
+      // The marker stays on disk as history; the new commit is a new question.
+      return {
+        mode,
+        targetCommit: superseded.targetCommit,
+        lock,
+        retryEscalation: null,
+        supersededEscalation: superseded.fact,
+      };
     }
     let targetCommit;
     try {
@@ -115,7 +155,13 @@ export const decideInvocation = async (startup, mode) => {
       await lock.release();
       return { mode, exitCode: 1 };
     }
-    return { mode, targetCommit, lock, retryEscalation: escalation.retryEscalation ?? null };
+    return {
+      mode,
+      targetCommit,
+      lock,
+      retryEscalation: escalation.retryEscalation ?? null,
+      supersededEscalation: null,
+    };
   } catch (error) {
     await lock.release();
     throw error;
@@ -169,7 +215,10 @@ export const executeUpgrade = async (host, attempt, deployRole = DEFAULT_DEPLOY_
       host.log?.(`STOP ${failure.reason}${failure.detail ? ` detail=${failure.detail}` : ""}`);
     }
     const revisions = attempt.fact("revisions") ?? { from: "unknown", to: attempt.targetCommit };
-    const record = { outcome: "failure", reason: failure.reason, detail: failure.detail, ...revisions };
+    const record = {
+      outcome: "failure", reason: failure.reason, detail: failure.detail, ...revisions,
+      ...(activationAttempted && !activationOutcomeProven ? { activationOutcomeProven: false } : {}),
+    };
     if (shouldPersistFailure({ dryRun: false, reason: failure.reason, upgradeStarted })) {
       await host.escalate(record);
       try {
