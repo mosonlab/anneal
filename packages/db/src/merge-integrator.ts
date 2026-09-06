@@ -25,25 +25,17 @@ export const MERGE_INTEGRATOR_KIND = {
   result: "mergeIntegrator.result",
 } as const;
 
-export type MergeIntegratorKind = (typeof MERGE_INTEGRATOR_KIND)[keyof typeof MERGE_INTEGRATOR_KIND];
-
 export const MERGE_INTEGRATOR_SCHEMA_VERSION = 1;
 
 /** v1.1 pins exactly one merge method (SPEC D4). */
 export const AUTHORIZED_MERGE_METHOD = "merge";
 
 /**
- * These ordinals describe persisted graph topology. Step role recognition no
- * longer depends on them because outputKind is unique within every canonical
- * template generation.
+ * These ordinals describe persisted graph topology. Step role recognition uses
+ * stepRole(); canonicalStepOrdinals supplies topology from the canonical registry.
  */
 export const INTEGRATOR_STEP_INDEX = 12;
 export const DIRECT_INTEGRATOR_STEP_INDEX = 7;
-/** The regression-first thirteen-step graph put the integrator one node later; that ordinal is frozen with the renamed row. */
-export const LEGACY_REGRESSION_FIRST_INTEGRATOR_STEP_INDEX = 13;
-/** The adjudication-era graphs carried one extra node before the integrator; those ordinals are frozen with the renamed rows. */
-export const LEGACY_PRE_ADJUDICATION_INTEGRATOR_STEP_INDEX = 13;
-export const LEGACY_PRE_ADJUDICATION_DIRECT_INTEGRATOR_STEP_INDEX = 8;
 export const LEGACY_INTEGRATOR_STEP_INDEX = 12;
 export const LEGACY_DIRECT_INTEGRATOR_STEP_INDEX = 7;
 export const INTEGRATOR_OUTPUT_KIND = "merge-result";
@@ -72,7 +64,7 @@ export const isIntegratorStep = isCanonicalIntegratorStep;
 /**
  * Bidirectional: the sentinel Agent may bind only the integrator step, and the
  * integrator step may bind only the sentinel Agent. One direction alone leaves
- * a hole — the sentinel dispatchable as an ordinary model agent, or step 12
+ * a hole — the sentinel dispatchable as an ordinary model agent, or the integrator step
  * executable by a real LLM.
  */
 export const integratorBindingValid = (
