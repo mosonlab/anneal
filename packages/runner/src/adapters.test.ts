@@ -1247,6 +1247,49 @@ test("the runner pins its configured gate destination over task secrets", () => 
   assert.equal(env.AGENTOS_GATE_SERVER, "agentos-gate");
 });
 
+test("RUNNER_GATE_FALLBACK_SERVER selects a runner-owned two-host environment", async () => {
+  const home = await mkdtemp(join(tmpdir(), "gate-environment-"));
+  try {
+    const config = {
+      path: "/bin", home, apiUrl: "http://api", runAsPrefix: ["/usr/bin/env", "-i"],
+      workspaceRoot: home, hostProofSlots: 3, gateServer: "gate-self",
+    };
+    const secrets = {
+      ...claim.secrets,
+      AGENTOS_GATE_SERVER: "secret-single",
+      AGENTOS_GATE_PRIMARY_SERVER: "secret-primary",
+      AGENTOS_GATE_FALLBACK_SERVER: "secret-fallback",
+    };
+    const single = buildChildEnvironment(config, claim, scratch, "/work");
+    assert.equal(single.AGENTOS_GATE_SERVER, "gate-self");
+    assert.equal(Object.hasOwn(single, "AGENTOS_GATE_PRIMARY_SERVER"), false);
+    assert.equal(Object.hasOwn(single, "AGENTOS_GATE_FALLBACK_SERVER"), false);
+    assert.deepEqual(buildChildEnvironment(config, { ...claim, secrets }, scratch, "/work"), single);
+    const dual = buildChildEnvironment(
+      { ...config, gateFallbackServer: "agentos-gate" }, { ...claim, secrets }, scratch, "/work",
+    );
+    const { AGENTOS_GATE_SERVER: _singleServer, ...unchanged } = single;
+    assert.deepEqual(dual, {
+      ...unchanged,
+      AGENTOS_GATE_PRIMARY_SERVER: "gate-self",
+      AGENTOS_GATE_FALLBACK_SERVER: "agentos-gate",
+    });
+    const launch = launchArgv(
+      { binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" }, runAsPrefix: config.runAsPrefix },
+      "CODEX", [], dual,
+    );
+    assert.equal(launch.args.includes("AGENTOS_GATE_PRIMARY_SERVER=gate-self"), true);
+    assert.equal(launch.args.includes("AGENTOS_GATE_FALLBACK_SERVER=agentos-gate"), true);
+    assert.equal(launch.args.some((arg) => arg.startsWith("AGENTOS_GATE_SERVER=")), false);
+    const unconfigured = buildChildEnvironment({ ...config, gateServer: undefined }, { ...claim, secrets }, scratch, "/work");
+    for (const name of ["AGENTOS_GATE_SERVER", "AGENTOS_GATE_PRIMARY_SERVER", "AGENTOS_GATE_FALLBACK_SERVER"]) {
+      assert.equal(Object.hasOwn(unconfigured, name), false);
+    }
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test("a run-as launcher cannot strip the operator-selected gate destination", () => {
   const env = buildChildEnvironment(
     { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: ["/usr/bin/env", "-i"], workspaceRoot: productionRoot, hostProofSlots: 3, gateServer: "agentos-gate" },
