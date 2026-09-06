@@ -822,7 +822,7 @@ const activateChainSuccessorInternal = async (
       now,
       stopBypass,
       options.mergeTailRequeue && isRegressionVerificationOutputKind(successorStep?.outputKind)
-        ? { budgetGrant: 1 }
+        ? { budgetGrant: 1, repairCompleted: true }
         : {},
     ));
     if (attempt.outcome === "already-queued") continue;

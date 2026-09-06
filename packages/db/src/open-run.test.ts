@@ -1426,3 +1426,20 @@ test("a terminalized source cannot record a refund belonging to a newer Run", ()
   assert.equal(decision.maxRunsPerTask, source.maxRunsPerTask);
   assert.equal(decision.budgetGrants, source.budgetGrants);
 });
+
+test("completed merge-tail repairs grant verification attempts without spending loss refunds", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  for (const runNumber of [1, 2, 3, 4, 5]) {
+    const task = taskRow({ repoId: repo.id, repo, runs: [priorRun({
+      repoId: repo.id, runNumber, budgetGrants: runNumber - 1,
+      leaseLossRefunds: LEASE_LOSS_REFUND_CAP,
+    })] });
+    const { tx, creates } = fakeTx(task);
+    const opened = await enqueueTaskRun(tx, task.id, now, {
+      budgetGrant: 1, repairCompleted: true,
+    });
+    assert.equal(opened.runNumber, runNumber + 1, `repair ${runNumber}`);
+    assert.equal(creates[0]?.budgetGrants, runNumber);
+    assert.equal(creates[0]?.leaseLossRefunds, LEASE_LOSS_REFUND_CAP);
+  }
+});

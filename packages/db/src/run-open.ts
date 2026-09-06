@@ -789,7 +789,7 @@ export type IntegratorStopBypass = { integratorTaskId: string; sourceStopId: str
 
 export type OpenRunIntent =
   | { kind: "enqueue"; readyAt: Date; stopBypass?: IntegratorStopBypass | null }
-  | { kind: "merge-tail-requeue"; readyAt: Date; budgetGrant: 1 }
+  | { kind: "merge-tail-requeue"; readyAt: Date; budgetGrant: 1; repairCompleted?: true }
   /** The replacement for a claim a late salvage invalidated before it started.
    *  Its budget arithmetic is an ordinary enqueue's — the revoked claim already
    *  carries the refund — but it is a platform-caused refund, so it is named
@@ -928,12 +928,14 @@ const sourceRetryIntent = (
  * `retry` is not one of them: an operator asking for another attempt is
  * measured against `runBudgetCeiling` and refused as `run-budget-exhausted`,
  * which is the path this bound deliberately leaves as the way out.
+ * Completed merge-tail repairs are bounded by the repair-attempt limits and
+ * grant fresh verification without spending a platform-loss refund.
  * `retry-after-completion` is not one either — a refunded external failure is
  * the separate class `EXTERNAL_FAILURE_REFUND_CAP` already bounds.
  */
 const platformRefundIntent = (intent: OpenRunIntent): boolean =>
   intent.kind === "retry-after-lease-loss"
-  || intent.kind === "merge-tail-requeue"
+  || (intent.kind === "merge-tail-requeue" && !intent.repairCompleted)
   || intent.kind === "claim-invalidated";
 
 /**
@@ -1350,7 +1352,10 @@ export const enqueueTaskRunInternal = async (
   stopBypass: IntegratorStopBypass | null,
   options: EnqueueTaskRunOptions = {},
 ): Promise<OpenRunResult> => openRun(tx, taskId, options.budgetGrant === 1
-    ? { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1 }
+    ? {
+      kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1,
+      ...(options.repairCompleted ? { repairCompleted: true } : {}),
+    }
     : { kind: "enqueue", readyAt: now, stopBypass });
 
 /**
@@ -1359,7 +1364,7 @@ export const enqueueTaskRunInternal = async (
  * retries are platform compensation for a successful run, not agent failure,
  * and every other enqueue/retry path must retain its existing budget rule.
  */
-export type EnqueueTaskRunOptions = { budgetGrant?: never } | { budgetGrant: 1 };
+export type EnqueueTaskRunOptions = { budgetGrant?: never } | { budgetGrant: 1; repairCompleted?: true };
 
 export const enqueueTaskRun = async (
   tx: Tx,

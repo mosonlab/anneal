@@ -86,6 +86,10 @@ const seedTask = async (label: string) => {
     mountPath: "/repo",
     dependencyProvisioning: DependencyProvisioning.NONE,
   } });
+  await db.agentRepoAccess.create({ data: {
+    projectId: project.id, agentId: agent.id, repoId: repo.id,
+    mountPath: "/repo", permissions: "GIT_WRITE",
+  } });
   const task = await db.task.create({ data: {
     projectId: project.id,
     name: "Lease-loss task",
