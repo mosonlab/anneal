@@ -142,6 +142,25 @@ merge. Re-derive the thresholds from measured holds then; changing them now
 would only paper over the review and the semantic verification sitting inside
 the lock.
 
+#### Amendment (2026-09-06): the threshold applies unless the caller says `--human`
+
+`STALE_SECONDS` is still 45 minutes. What changed is who it applies to.
+`merge-lease.sh steal` used to treat a terminal on any standard stream as a
+human and skip the threshold, so whether the machine rule applied depended on
+how the command was launched rather than on what the caller claimed: an
+operator stealing interactively bypassed it without ever saying so, and the
+same command in a pipeline did not. Only `--human` waives it now, and a refusal
+prints how much of the window is left.
+
+The measurements R3 asks for now exist on both sides of the lease: chain-tail
+holds were already recorded as `MergeLeaseEvent.heldForSeconds`, `merge-train`
+reports `leaseHeldForSeconds` on its own release through the same adapter, and a
+chain shut out of the lease for longer than
+`MERGE_LEASE_CONTENTION_ALERT_MINUTES` (default 30) is recorded as a `contended`
+event and alerted once to the operator. Nothing steals automatically, so the
+thresholds can be re-derived from recorded holds rather than from the queueing
+they cause.
+
 ## Alternatives considered
 
 - **Do nothing; raise the thresholds (R3 alone).** Cheapest, changes no

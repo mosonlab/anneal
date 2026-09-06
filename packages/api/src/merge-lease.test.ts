@@ -473,6 +473,24 @@ test("a contended merge Lease does not run the callback", async () => {
   assert.equal(releaseCalled, false);
 });
 
+test("a contended merge Lease carries the holder the script named", async () => {
+  const holder = {
+    holder: "runner@executor",
+    task: "chain-other",
+    reason: "chain merge tail chain-other",
+    acquiredAt: "2026-09-06T10:00:00.000Z",
+    sha: "b".repeat(40),
+  };
+  const result = await withMergeLease(leaseTarget("chain-5"), async () => (
+    { leaseOutcome: { kind: "stop" as const, taskId: "task-1" }, value: null }
+  ), holdDb, {
+    acquire: async () => ({ outcome: "contended", holder }),
+    release: async () => released,
+  });
+
+  assert.deepEqual(result, { outcome: "contended", holder });
+});
+
 test("an unreachable merge Lease is a retryable result and does not run the callback", async () => {
   let callbackCalled = false;
   let releaseCalled = false;

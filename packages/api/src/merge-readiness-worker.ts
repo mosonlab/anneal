@@ -50,6 +50,8 @@ import {
   type WithMergeLease,
 } from "./merge-lease.js";
 import type { MergeLeaseTarget } from "./merge-lease-hold.js";
+import { clearLeaseContention, noteLeaseContention } from "./merge-lease-contention.js";
+import type { MergeLeaseHolder } from "../../../scripts/merge-lease-adapter.mjs";
 import {
   claimReadinessStep,
   READINESS_CLAIM_LEASE_MS,
@@ -710,6 +712,44 @@ const applyReadinessDecision = async (
   });
 };
 
+/**
+ * Contention bookkeeping is what the tick reports, not what it depends on: the
+ * lease is held either way and this chain comes back on the next tick. A failed
+ * write is said out loud here rather than raised, because the readiness catch
+ * below stops the merge tail, and losing visibility of a contention must not
+ * also stop the chain that reported it.
+ */
+const recordContention = async (
+  db: PrismaClient,
+  input: { target: MergeLeaseTarget | null; readinessTaskId: string; holder: MergeLeaseHolder | null; now: Date },
+): Promise<void> => {
+  if (!input.target) return;
+  try {
+    await noteLeaseContention(db, {
+      target: input.target,
+      readinessTaskId: input.readinessTaskId,
+      holder: input.holder,
+      now: input.now,
+    });
+  } catch (error: unknown) {
+    console.error(`Recording merge Lease contention for chain ${input.target.chainId} failed`, error);
+  }
+};
+
+const forgetContention = async (
+  db: PrismaClient,
+  target: MergeLeaseTarget | null,
+  readinessTaskId: string,
+  now: Date,
+): Promise<void> => {
+  if (!target) return;
+  try {
+    await clearLeaseContention(db, { target, readinessTaskId, now });
+  } catch (error: unknown) {
+    console.error(`Clearing merge Lease contention for chain ${target.chainId} failed`, error);
+  }
+};
+
 const runReadinessDecision = async (
   db: PrismaClient,
   read: ClaimedReadiness,
@@ -770,7 +810,15 @@ const runReadinessDecision = async (
       value,
     };
   }, db);
-  if (leased.outcome === "contended") return;
+  if (leased.outcome === "contended") {
+    await recordContention(db, {
+      target,
+      readinessTaskId: readiness.id,
+      holder: leased.holder ?? null,
+      now: read.input.now,
+    });
+    return;
+  }
   if (leased.outcome === "unreachable") {
     if (!leased.releaseDeferred) {
       await recordLeaseDeferral(db, {
@@ -782,6 +830,10 @@ const runReadinessDecision = async (
     }
     return;
   }
+  // Only taking the lease ends an episode. An unreachable origin says nothing
+  // about who holds it, so a flapping remote must not keep restarting the
+  // window that makes a stranded lease visible.
+  await forgetContention(db, target, readiness.id, read.input.now);
   if (leased.value === "authorized") result.authorized += 1;
 };
 

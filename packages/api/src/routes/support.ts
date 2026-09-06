@@ -4,7 +4,7 @@ import type { Context } from "hono";
 import { z } from "zod";
 
 import { etagFor, etagMatches } from "../board.js";
-import type { ReleaseMergeLease } from "../merge-lease.js";
+import type { MergeLeaseHolderReader, ReleaseMergeLease } from "../merge-lease.js";
 import {
   DirectoryNotEmptyError,
   InvalidPathError,
@@ -28,6 +28,8 @@ export interface LiveAppOptions {
   onboardingRepositoryPreflight?: typeof preflightOnboardingRepository;
   repositoryPreflight?: RepositoryPreflight;
   releaseMergeLease?: ReleaseMergeLease;
+  /** Lease holder read used by `GET /merge-lease`; injectable for route tests. */
+  readMergeLeaseHolder?: MergeLeaseHolderReader;
   /** Repository content capability used to verify materialized review specs. */
   specificationReader?: SpecificationReader | null;
   /** Source loaders used by POST /projects; injectable for route tests. */
@@ -40,6 +42,7 @@ export type RouteDeps = {
   repositoryPreflight: RepositoryPreflight;
   projectBootstrapLoaders: ProjectBootstrapLoaders;
   releaseChainLease: ReleaseMergeLease;
+  readLeaseHolder: MergeLeaseHolderReader;
   runners: ReturnType<typeof createRunnerRegistry>;
   appendFencedActivity: ReturnType<typeof createAppendFencedActivityHandler>;
 };

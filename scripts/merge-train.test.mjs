@@ -188,8 +188,14 @@ for (const scenario of ["unchanged", "moved", "expired", "unreachable"]) {
             }),
           releaseLease: async () => {
             events.push("released");
-            return { outcome: "released" };
+            return {
+              outcome: "released",
+              ref: "refs/merge-lease/holder",
+              sha: "1".repeat(40),
+              acquiredAt: "2026-01-01T00:00:00.000Z",
+            };
           },
+          now: () => new Date("2026-01-01T00:02:07.400Z"),
           readPullRequest: fixture.readPullRequest(candidates),
           sleep: async () => {},
         },
@@ -213,8 +219,13 @@ for (const scenario of ["unchanged", "moved", "expired", "unreachable"]) {
         if (scenario === "expired") {
           assert.equal(result.leaseWaitedMs, 120_000);
           assert.deepEqual(events, ["acquire-attempted"]);
+          // A train that never held the lease has no hold to compare.
+          assert.equal(result.leaseHeldForSeconds, undefined);
         } else {
           assert.deepEqual(events, ["acquire-attempted", "acquired", "released"]);
+          // The same measurement the chain tail records on its own release, so
+          // a train hold and a chain-tail hold are comparable numbers.
+          assert.equal(result.leaseHeldForSeconds, 127);
         }
       }
     } finally {

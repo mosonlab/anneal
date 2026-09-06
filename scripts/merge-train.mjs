@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import {
   acquireMergeLease,
   isMergeLeaseReleaseAnomaly,
+  mergeLeaseHoldSeconds,
   releaseMergeLease,
 } from "./merge-lease-adapter.mjs";
 
@@ -147,6 +148,7 @@ const realAdapters = {
   readMain,
   readPullRequest: defaultReadPullRequest,
   releaseLease: releaseMergeTrainLease,
+  now: () => new Date(),
   sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
 };
 
@@ -270,8 +272,8 @@ const validateLeaseWaitMinutes = (value) => {
   }
 };
 
-export const coordinateMergeTrain = async ({
-  repoRoot, task, candidates, leaseWaitMinutes = DEFAULT_LEASE_WAIT_MINUTES, adapters: overrides = {},
+const publishMergeTrain = async ({
+  repoRoot, task, candidates, leaseWaitMinutes = DEFAULT_LEASE_WAIT_MINUTES, adapters: overrides = {}, hold,
 }) => {
   validateLeaseWaitMinutes(leaseWaitMinutes);
   validateCandidates(candidates);
@@ -307,6 +309,12 @@ export const coordinateMergeTrain = async ({
   let buildWorktreeAdded = false;
   let leaseHeld = false;
   let safeToRelease = false;
+  // The chain tail records every confirmed release as a hold duration
+  // (packages/api/src/merge-lease-hold.ts). The train held the same lease and
+  // recorded nothing, so the two kinds of hold could not be compared. Both now
+  // measure the release the same way, from the acquiredAt in the lease blob the
+  // release confirmed.
+  let leaseHeldForSeconds = null;
   let primaryError = null;
   try {
     buildWorktreeAdded = true;
@@ -416,6 +424,18 @@ export const coordinateMergeTrain = async ({
           if (isMergeLeaseReleaseAnomaly(release)) {
             const detail = release.detail ?? release.heldFor ?? release.heldBy ?? "no detail";
             cleanupError = new Error(`merge Lease release ${release.outcome}: ${detail}`);
+          } else if (release.outcome === "released") {
+            leaseHeldForSeconds = mergeLeaseHoldSeconds(release.acquiredAt, adapters.now());
+            // The lease is already back either way, so a hold that cannot be
+            // measured is a missing measurement rather than a failed release:
+            // it is said out loud and the publication result stands.
+            if (leaseHeldForSeconds === null) {
+              process.stderr.write(
+                `merge-train: released the merge lease but could not measure the hold from acquiredAt ${String(release.acquiredAt)}\n`,
+              );
+            } else {
+              process.stderr.write(`merge-train: held the merge lease for ${leaseHeldForSeconds}s\n`);
+            }
           }
         } catch (error) {
           cleanupError = error;
@@ -444,7 +464,20 @@ export const coordinateMergeTrain = async ({
       if (!primaryError) throw cleanupError;
       process.stderr.write(`merge-train: cleanup also failed: ${cleanupError.message}\n`);
     }
+    hold.seconds = leaseHeldForSeconds;
   }
+};
+
+/**
+ * The hold duration is only known once the release in the `finally` above has
+ * confirmed it, which is after the result object each publication path returns
+ * was built. Carrying it out through a box and attaching it here keeps those
+ * paths untouched: a run that never held the lease has no hold to report.
+ */
+export const coordinateMergeTrain = async (options) => {
+  const hold = { seconds: null };
+  const result = await publishMergeTrain({ ...options, hold });
+  return hold.seconds === null ? result : { ...result, leaseHeldForSeconds: hold.seconds };
 };
 
 const usage = () => {
@@ -458,6 +491,7 @@ publishes only the longest contiguous passing prefix under the merge lease.
   --lease-wait-minutes <n>  Wait up to n whole minutes for the publication lease
                             (default: 10; 0 tries immediately).
 On lease-contended, JSON includes leaseWaitedMs (elapsed acquisition milliseconds).
+When the lease was held and released, JSON includes leaseHeldForSeconds.
 `);
 };
 
@@ -511,6 +545,7 @@ const main = async () => {
   const summary = {
     status: result.status,
     ...(result.status === "lease-contended" ? { leaseWaitedMs: result.leaseWaitedMs } : {}),
+    ...(result.leaseHeldForSeconds === undefined ? {} : { leaseHeldForSeconds: result.leaseHeldForSeconds }),
     baseSha: result.baseSha,
     liveMain: result.liveMain ?? result.baseSha,
     alreadyDelivered: result.alreadyDelivered.map((candidate) => candidate.pullRequest),

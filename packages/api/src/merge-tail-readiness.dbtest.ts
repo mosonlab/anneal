@@ -621,9 +621,16 @@ test("manual start cannot turn server-owned readiness into a model run", async (
 test("a contended lease leaves readiness for a later tick instead of authorizing", async () => {
   const seeded = await seedReadiness();
   const asked: string[] = [];
+  const holder = {
+    holder: "runner@executor",
+    task: "chain-elsewhere",
+    reason: "chain merge tail chain-elsewhere",
+    acquiredAt: "2026-09-06T10:00:00.000Z",
+    sha: "b".repeat(40),
+  };
   const contended: MergeLeaseAcquirer = async (chainId) => {
     asked.push(chainId);
-    return { outcome: "contended" };
+    return { outcome: "contended", holder };
   };
   const started = new Date();
   assert.deepEqual(
@@ -635,6 +642,17 @@ test("a contended lease leaves readiness for a later tick instead of authorizing
   assert.equal(await db.run.count({ where: { taskId: seeded.integrator.id } }), 0);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DOING);
   assert.deepEqual(releasedChainLeases, []);
+  // The contention is visible from the first tick: an operator reading this
+  // task learns who is in the way without waiting for the alert window.
+  const contention = await db.taskActivity.findMany({
+    where: {
+      taskId: seeded.readiness.id,
+      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseContention },
+    },
+  });
+  assert.equal(contention.length, 1);
+  assert.equal((contention[0]!.metadata as Record<string, unknown>).state, "contended");
+  assert.match(contention[0]!.body, /held by runner@executor \(task chain-elsewhere/u);
 
   // The claim, not a retry counter, is what brings it back: once the claim
   // expires the next tick re-evaluates and takes the lease it could not get.
@@ -652,6 +670,16 @@ test("a contended lease leaves readiness for a later tick instead of authorizing
   );
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
   assert.equal(await db.run.count({ where: { taskId: seeded.integrator.id } }), 1);
+  // Taking the lease closes the episode, so the next contention is measured
+  // from its own beginning rather than from this one.
+  const resolved = await db.taskActivity.findFirst({
+    where: {
+      taskId: seeded.readiness.id,
+      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseContention },
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  assert.equal((resolved!.metadata as Record<string, unknown>).state, "resolved");
 });
 
 test("a stale worker cannot stop readiness after a newer worker owns the claim", async () => {
