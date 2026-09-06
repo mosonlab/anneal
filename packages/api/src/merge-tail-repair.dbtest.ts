@@ -8,17 +8,27 @@ import { promisify } from "node:util";
 
 import {
   AssigneeType,
+  CleanupStatus,
   DependencyProvisioning,
   INTEGRATOR_TEMPLATE_NAME,
+  MergeRecoveryStatus,
+  PushStatus,
   templateRolloverName,
   PrismaClient,
   TaskStatus,
+  asJsonObject,
   enqueueTaskRun,
   latestMarker,
+  readMarkerHistory,
   readMarkers,
 } from "@anneal/db";
 
-import { handleRegressionCompletion } from "./merge-tail-actions.js";
+import {
+  MERGE_TAIL_REPAIR_BINDING_MISMATCH,
+  MERGE_TAIL_REPAIR_BINDING_MISMATCH_KIND,
+  handleRegressionCompletion,
+} from "./merge-tail-actions.js";
+import { completeRun } from "./run-completion.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -1434,4 +1444,219 @@ test("a stale branch is mechanically refreshed before exact-head PASS advances",
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+/**
+ * The chain's base-drift recovery, bound to a Run that is not the one a repair
+ * repairs. Every column `recoveryContext` requires is present and the aggregate
+ * is REPAIRING, so what the tail refuses is the binding itself rather than an
+ * identity it could not read.
+ */
+const seedRecoveryBoundTo = async (
+  seeded: Awaited<ReturnType<typeof seedRegression>>,
+  boundRunId: string,
+) => {
+  const integrator = await db.task.create({ data: {
+    projectId: seeded.project.id, repoId: seeded.repo.id, name: "Integrator", description: "merge",
+    assigneeType: AssigneeType.AGENT, assigneeAgentId: seeded.reviewAgent.id,
+    status: TaskStatus.DOING, targetBranch: "main",
+  } });
+  const readiness = await db.task.create({ data: {
+    projectId: seeded.project.id, repoId: seeded.repo.id, templateId: seeded.template.id,
+    templateStepId: seeded.readinessStep.id, name: "Readiness", description: "authorize",
+    assigneeType: AssigneeType.AGENT, assigneeAgentId: seeded.reviewAgent.id,
+    status: TaskStatus.DOING, chainId: seeded.regression.chainId,
+    chainIndex: seeded.readinessStep.stepIndex, chainLayer: seeded.readinessStep.layer,
+    targetBranch: "main",
+  } });
+  // The Run the recovery was opened from. It is neither the Run the recovery is
+  // bound to nor the Run a repair would repair, so the recorded
+  // `boundSourceRunId` can only match by reading the aggregate's binding.
+  const sourceRun = await db.run.create({ data: {
+    projectId: seeded.project.id, taskId: readiness.id, agentId: seeded.reviewAgent.id,
+    repoId: seeded.repo.id, runNumber: 1, dedupeKey: `task:${readiness.id}:run:1`,
+    runner: "CODEX", model: seeded.reviewAgent.model, promptHash: "hash",
+    status: "SUCCEEDED", branch: BRANCH, pushedBranch: BRANCH, targetBranch: "main", headSha: HEAD,
+  } });
+  const authorization = await db.taskActivity.create({ data: {
+    taskId: readiness.id, actorType: "control-plane", body: "merge authorized for the recovered head",
+  } });
+  const stop = await db.taskActivity.create({ data: {
+    taskId: integrator.id, actorType: "control-plane", body: "merge tail stopped on base drift",
+  } });
+  const recovery = await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: integrator.id,
+    sourceStopId: stop.id,
+    attempt: 1,
+    status: MergeRecoveryStatus.REPAIRING,
+    boundSourceRunId: sourceRun.id,
+    authorizationActivityId: authorization.id,
+    // The binding every repair is read against.
+    recoveryRunId: boundRunId,
+    readinessTaskId: readiness.id,
+    regressionTaskId: seeded.regression.id,
+    repository: "acme/widgets",
+    prNumber: 123,
+    targetBranch: "main",
+    authorizedHeadSha: HEAD,
+    authorizedBaseSha: BASE,
+    observedBaseSha: BASE,
+    currentBaseSha: BASE,
+  } });
+  return { integrator, readiness, recovery };
+};
+
+/** Run A: a Regression Run of the same chain that is not the Run whose verdict
+ *  is being settled, so it can stand in for a recovery bound elsewhere. */
+const seedOtherRegressionRun = (seeded: Awaited<ReturnType<typeof seedRegression>>) => db.run.create({ data: {
+  projectId: seeded.project.id, taskId: seeded.regression.id, agentId: seeded.regressionAgent.id,
+  repoId: seeded.repo.id, runNumber: 2, dedupeKey: `task:${seeded.regression.id}:run:2`,
+  runner: "CODEX", model: seeded.regressionAgent.model, promptHash: "hash",
+  status: "SUCCEEDED", branch: BRANCH, pushedBranch: BRANCH, targetBranch: "main", headSha: HEAD,
+} });
+
+/**
+ * `exercise`, with the chain's recovery already naming another Run when the
+ * failing verdict arrives. The aggregate is not bound to this Run, so the
+ * recovery-aware branch of `handleRegressionCompletion` does not fire and the
+ * ordinary automatic repair path is the one that has to refuse.
+ */
+const exerciseWithRecoveryBoundElsewhere = async (outcome: RegressionOutcome = "gate-fail") => {
+  const seeded = await seedRegression();
+  await db.taskStepOutput.create({ data: {
+    taskId: seeded.regression.id, runId: seeded.run.id, kind: "regression-verification",
+    body: verdict(outcome), commitSha: HEAD,
+  } });
+  const recoveryRun = await seedOtherRegressionRun(seeded);
+  const { recovery } = await seedRecoveryBoundTo(seeded, recoveryRun.id);
+  const input = {
+    task: seeded.regression,
+    run: {
+      id: seeded.run.id, agentId: seeded.regressionAgent.id,
+      branch: BRANCH, headSha: HEAD, sessionId: seeded.session.id,
+    },
+    now: new Date(),
+  };
+  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, input)), "handled");
+  return { ...seeded, input, recoveryRun, recovery };
+};
+
+/**
+ * `completeRepair` through the action rather than the route, because the value
+ * under test is the classified refusal the route turns into a 409: over HTTP it
+ * survives only as a status code.
+ */
+const completeRepairThroughAction = async (
+  seeded: Awaited<ReturnType<typeof seedRegression>>,
+  repairId: string,
+  output: string,
+  headSha: string = RESOLVED,
+) => {
+  const run = await db.run.findFirstOrThrow({ where: { taskId: repairId, runNumber: 1 } });
+  const repair = await db.task.findUniqueOrThrow({ where: { id: repairId } });
+  const publishBranch = run.branch;
+  assert.ok(publishBranch, "repair Run 1 was born without a publish head");
+  const runnerId = `repair-runner-${run.id}`;
+  const fencingToken = `repair:${run.id}:1`;
+  await db.run.update({ where: { id: run.id }, data: {
+    status: "RUNNING", runnerId, fencingToken, leaseExpiresAt: new Date(Date.now() + 60_000),
+  } });
+  await db.session.create({ data: {
+    runId: run.id, projectId: seeded.project.id, agentId: repair.assigneeAgentId!, taskId: repair.id,
+    runner: "CODEX", executionStatus: "RUNNING",
+  } });
+  await db.task.update({ where: { id: repair.id }, data: { status: TaskStatus.DOING } });
+  await db.taskStepOutput.create({ data: {
+    taskId: repair.id, runId: run.id, kind: "result", body: output, commitSha: headSha,
+  } });
+  const result = await completeRun(db, {
+    runId: run.id,
+    body: {
+      runnerId, fencingToken, outcome: { case: "succeeded" }, exitCode: 0,
+      cleanupStatus: CleanupStatus.SUCCEEDED, branch: publishBranch, pushedBranch: publishBranch,
+      pushStatus: PushStatus.SUCCEEDED, headSha, workspaceRetained: false,
+    },
+    claimantClass: "runner",
+  });
+  return { run, result };
+};
+
+test("a repair is refused at open when the chain's recovery names another Run", async () => {
+  const seeded = await exerciseWithRecoveryBoundElsewhere();
+
+  // No card, and therefore no agent handed a repair whose completion could
+  // never be reported.
+  assert.equal(await repairCount(seeded), 0);
+  const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+  assert.equal(regression.status, TaskStatus.REVIEW);
+  assert.ok((regression.failureReason ?? "").includes(MERGE_TAIL_REPAIR_BINDING_MISMATCH), regression.failureReason ?? "");
+  // A refused open consumes no attempt: the head keeps no repairAttempt marker.
+  assert.equal(latestMarker(await readMarkerHistory(db, seeded.regression.id), "repairAttempt"), null);
+  assert.equal(await db.inboxMessage.count({
+    where: { taskId: seeded.regression.id, body: { startsWith: "Autonomous merge tail stopped:" } },
+  }), 1);
+});
+
+test("the binding mismatch is recorded on the regression task with all three ids", async () => {
+  const seeded = await exerciseWithRecoveryBoundElsewhere("review-fail");
+
+  const recorded = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.regression.id,
+    actorType: "control-plane",
+    metadata: { path: ["kind"], equals: MERGE_TAIL_REPAIR_BINDING_MISMATCH_KIND },
+  } });
+  const metadata = asJsonObject(recorded.metadata);
+  assert.ok(metadata);
+  assert.equal(metadata.phase, "open");
+  assert.equal(metadata.recoveryId, seeded.recovery.id);
+  assert.equal(metadata.boundSourceRunId, seeded.recoveryRun.id);
+  assert.equal(metadata.repairedRunId, seeded.run.id);
+  assert.ok(String(metadata.reason).includes(MERGE_TAIL_REPAIR_BINDING_MISMATCH), String(metadata.reason));
+});
+
+test("a repair completion the platform cannot bind is rejected without a 500", async () => {
+  // The card is opened while nothing contradicts it; the aggregate that names
+  // another Run appears while the repair is in flight, which is the only way a
+  // genuine repair reaches settlement unbindable.
+  const seeded = await exercise("gate-fail");
+  const repair = await repairFor(seeded, "gate-fix");
+  const recoveryRun = await seedOtherRegressionRun(seeded);
+  const { recovery } = await seedRecoveryBoundTo(seeded, recoveryRun.id);
+
+  const { run, result } = await completeRepairThroughAction(
+    seeded,
+    repair.id,
+    "Fixed the failing regression and reran the affected suite.",
+  );
+  // A classified refusal, not a thrown error and not a RunCompletion.
+  assert.ok("message" in result, JSON.stringify(result));
+  assert.equal(result.reason, "merge-tail-repair-unbound");
+  assert.ok(result.message.includes(MERGE_TAIL_REPAIR_BINDING_MISMATCH), result.message);
+  assert.deepEqual(result.detail, {
+    recoveryId: recovery.id,
+    boundSourceRunId: recoveryRun.id,
+    repairedRunId: seeded.run.id,
+  });
+
+  // The repair's work is real and published, so the Run stays terminal and
+  // carries why its completion was rejected.
+  const settled = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+  assert.equal(settled.status, "SUCCEEDED");
+  assert.ok((settled.failureReason ?? "").includes(MERGE_TAIL_REPAIR_BINDING_MISMATCH), settled.failureReason ?? "");
+  const parked = await db.task.findUniqueOrThrow({ where: { id: repair.id } });
+  assert.equal(parked.status, TaskStatus.REVIEW);
+  assert.equal(parked.failureReason, settled.failureReason);
+
+  const recorded = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.regression.id,
+    actorType: "control-plane",
+    metadata: { path: ["kind"], equals: MERGE_TAIL_REPAIR_BINDING_MISMATCH_KIND },
+  } });
+  const metadata = asJsonObject(recorded.metadata);
+  assert.ok(metadata);
+  assert.equal(metadata.phase, "settlement");
+  assert.equal(metadata.recoveryId, recovery.id);
+  assert.equal(metadata.boundSourceRunId, recoveryRun.id);
+  assert.equal(metadata.repairedRunId, seeded.run.id);
+  assert.equal(metadata.repairTaskId, repair.id);
 });
