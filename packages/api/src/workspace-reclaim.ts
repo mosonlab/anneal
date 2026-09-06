@@ -1,8 +1,8 @@
 import { resolve } from "node:path";
 
 import {
-  CleanupStatus, FailureClass, openRun, resolveRunBranches, runOwnedHead, RunStatus, SessionExecutionStatus,
-  type Prisma, type PrismaClient,
+  CleanupStatus, FailureClass, leaseLossRefundAvailable, openRun, resolveRunBranches, runOwnedHead, RunStatus,
+  SessionExecutionStatus, type Prisma, type PrismaClient,
 } from "@anneal/db";
 
 import { lockTaskMutationRows } from "./task-write.js";
@@ -479,11 +479,17 @@ export const repairReplacementAfterSalvage = async (
   if (!await lockTaskMutationRows(tx, run.taskId)) return "already-started";
   const replacement = await tx.run.findFirst({
     where: { taskId: run.taskId, runNumber: run.runNumber + 1 },
-    select: { id: true, status: true, startedAt: true },
+    select: { id: true, status: true, startedAt: true, leaseLossRefunds: true },
   });
   if (!replacement) return "none";
   if (replacement.status === RunStatus.CLAIMED && replacement.startedAt === null) {
     const revokedAt = new Date();
+    // Invalidating the stale claim is not optional — its clone base is wrong —
+    // but the attempt it refunds is, and it is the same bounded refund the
+    // lease-loss path spends. `openRun` below refuses once the bound is
+    // reached, so recording a grant here that nothing may use would leave the
+    // operator's own retry holding an attempt this transaction just refused.
+    const refundAvailable = leaseLossRefundAvailable(replacement.leaseLossRefunds);
     const revoked = await tx.run.updateMany({
       where: { id: replacement.id, status: RunStatus.CLAIMED, startedAt: null },
       data: {
@@ -494,8 +500,9 @@ export const repairReplacementAfterSalvage = async (
         failureClass: FailureClass.CANCELLED_OR_TIMED_OUT,
         failureReason: "Claim invalidated before start because late salvage changed its clone base",
         retryable: true,
-        maxRunsPerTask: { increment: 1 },
-        budgetGrants: { increment: 1 },
+        ...(refundAvailable
+          ? { maxRunsPerTask: { increment: 1 }, budgetGrants: { increment: 1 } }
+          : {}),
       },
     });
     if (revoked.count !== 1) return "already-started";
@@ -507,7 +514,9 @@ export const repairReplacementAfterSalvage = async (
         failureReason: "Claim invalidated before start because late salvage changed its clone base",
       },
     });
-    const opened = await openRun(tx, run.taskId, { kind: "enqueue", readyAt: revokedAt });
+    // Named rather than `enqueue`: this replacement exists because the platform
+    // invalidated a claim, so it is one of the refunds the bound counts.
+    const opened = await openRun(tx, run.taskId, { kind: "claim-invalidated", readyAt: revokedAt });
     if (!opened.ok) {
       const refusal = opened.refusal;
       switch (refusal.disposition) {

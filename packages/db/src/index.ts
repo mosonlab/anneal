@@ -78,6 +78,8 @@ export {
   isIntegratorStoppedError,
   isPinnedBaseCommitError,
   isWorkflowRefusalError,
+  LEASE_LOSS_REFUND_CAP,
+  leaseLossRefundAvailable,
   nativeImplementationSubagentRunConfig,
   openRun,
   pinnedImplementationRange,

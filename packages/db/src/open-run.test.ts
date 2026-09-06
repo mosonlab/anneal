@@ -18,6 +18,8 @@ import {
   codexGptCapability,
   compoundImplementationAssigneeValid,
   enqueueTaskRun,
+  LEASE_LOSS_REFUND_CAP,
+  leaseLossRefundAvailable,
   openRun,
   pinnedImplementationRange,
   runBudgetCeiling,
@@ -97,6 +99,7 @@ const taskRow = (overrides: Record<string, unknown> = {}) => ({
 const intents = (): OpenRunIntent[] => [
   { kind: "enqueue", readyAt: now },
   { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1 },
+  { kind: "claim-invalidated", readyAt: now },
   { kind: "merge-tail-repair", readyAt: now },
   { kind: "task-created", readyAt: now },
   { kind: "retry", readyAt: now },
@@ -435,6 +438,15 @@ test("every birth intent takes its publish head from one module and none is left
       name: "merge-tail-requeue",
       task: taskRow({ repoId: repo.id, repo }),
       intent: { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1 },
+      branch: runOwnedHead("task-1", 1),
+      targetBranch: "main",
+    },
+    {
+      // The replacement for an invalidated claim is an ordinary birth: the
+      // revoked claim never published, so it hands nothing on.
+      name: "claim-invalidated",
+      task: taskRow({ repoId: repo.id, repo }),
+      intent: { kind: "claim-invalidated", readyAt: now },
       branch: runOwnedHead("task-1", 1),
       targetBranch: "main",
     },
@@ -912,6 +924,25 @@ test("every OpenRunRefusal code comes from a real guard, carries a disposition, 
       disposition: "fault",
       message: "Run budget exhausted",
     },
+    "lease-loss-refunds-exhausted": {
+      task: taskRow({
+        repoId: repo.id,
+        repo,
+        runs: [priorRun({ repoId: repo.id, leaseLossRefunds: 3 })],
+      }),
+      intent: {
+        kind: "retry-after-lease-loss",
+        readyAt: now,
+        sourceRunId: "run-3",
+        sourceMaxRunsPerTask: 5,
+        sourceBudgetGrants: 1,
+      },
+      reason: "conflict",
+      disposition: "fault",
+      message: "Lease-loss refunds exhausted after 3 platform-refunded attempts; raise maxSessionsPerTask and retry",
+      detail: { leaseLossRefunds: 3, cap: 3 },
+      context: { taskId: "task-1", taskName: "Implement seam" },
+    },
     "chain-held": {
       task: taskRow({
         repoId: repo.id,
@@ -981,6 +1012,17 @@ test("each OpenRunIntent creates through one seam with its named budget rule", a
         repoId: repo.id,
         repo,
         runs: [priorRun({ runNumber: 5, maxRunsPerTask: 5, budgetGrants: 0 })],
+      }),
+      expected: { runNumber: 6, maxRunsPerTask: 6, budgetGrants: 1 },
+    },
+    {
+      // The revoked claim already carries the refund, so the replacement's
+      // arithmetic is an ordinary enqueue's; only the refund count moves.
+      intent: { kind: "claim-invalidated", readyAt: now },
+      task: taskRow({
+        repoId: repo.id,
+        repo,
+        runs: [priorRun({ runNumber: 5, maxRunsPerTask: 6, budgetGrants: 1 })],
       }),
       expected: { runNumber: 6, maxRunsPerTask: 6, budgetGrants: 1 },
     },
@@ -1066,6 +1108,110 @@ test("enqueueTaskRun's merge-tail option grants one attempt and ordinary enqueue
   const mergeTailRun = await enqueueTaskRun(mergeTail.tx, task.id, now, { budgetGrant: 1 });
   assert.equal(mergeTailRun.maxRunsPerTask, 6);
   assert.equal(mergeTailRun.budgetGrants, 1);
+});
+
+// §D-P7's ledger half. A refund raises `maxRunsPerTask` and `budgetGrants` by
+// construction, so a bound read off either can never be reached: these tests
+// pin the count that is kept apart from them, and the one seam that spends it.
+test("a platform refund is bounded by the refunds already granted, not by the ceiling they raised", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const leaseLoss = (sourceRunId = "run-3"): OpenRunIntent => ({
+    kind: "retry-after-lease-loss",
+    readyAt: now,
+    sourceRunId,
+    sourceMaxRunsPerTask: 5,
+    sourceBudgetGrants: 1,
+  });
+
+  // Each refund raises the ceiling it is measured against, so the ceiling
+  // never refuses. The count does.
+  for (const refunds of [0, 1, 2] as const) {
+    const task = taskRow({
+      repoId: repo.id,
+      repo,
+      runs: [priorRun({
+        repoId: repo.id,
+        leaseLossRefunds: refunds,
+        maxRunsPerTask: 5 + refunds,
+        budgetGrants: refunds,
+      })],
+    });
+    const { tx, creates } = fakeTx(task);
+    const opened = await openRun(tx, task.id, leaseLoss());
+    assert.equal(opened.ok, true, `refund ${refunds}`);
+    assert.equal(creates[0]?.leaseLossRefunds, refunds + 1, `refund ${refunds} increments once`);
+  }
+
+  const spent = taskRow({
+    repoId: repo.id,
+    repo,
+    runs: [priorRun({ repoId: repo.id, leaseLossRefunds: LEASE_LOSS_REFUND_CAP, maxRunsPerTask: 8, budgetGrants: 3 })],
+  });
+  const { tx, creates } = fakeTx(spent);
+  const refused = await openRun(tx, spent.id, leaseLoss());
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.equal(refused.refusal.code, "lease-loss-refunds-exhausted");
+  assert.equal(creates.length, 0);
+});
+
+test("the refund bound is a property of the task, not of the intent kind that reaches it", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const spentPrior = priorRun({
+    repoId: repo.id,
+    leaseLossRefunds: LEASE_LOSS_REFUND_CAP,
+    maxRunsPerTask: 8,
+    budgetGrants: 3,
+  });
+  const refunding: OpenRunIntent[] = [
+    { kind: "retry-after-lease-loss", readyAt: now, sourceRunId: "run-3", sourceMaxRunsPerTask: 5, sourceBudgetGrants: 1 },
+    { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1 },
+    { kind: "claim-invalidated", readyAt: now },
+  ];
+  for (const intent of refunding) {
+    const task = taskRow({ repoId: repo.id, repo, runs: [spentPrior] });
+    const { tx, creates } = fakeTx(task);
+    const opened = await openRun(tx, task.id, intent);
+    assert.equal(opened.ok, false, intent.kind);
+    if (!opened.ok) assert.equal(opened.refusal.code, "lease-loss-refunds-exhausted", intent.kind);
+    assert.equal(creates.length, 0, intent.kind);
+  }
+
+  // The way out the bound deliberately leaves open: an operator raises the
+  // configured budget and asks for the attempt itself. `retry` keeps its own
+  // refusal, and it does not spend a refund.
+  const raised = taskRow({ repoId: repo.id, repo, maxSessionsPerTask: 9, runs: [spentPrior] });
+  const { tx, creates } = fakeTx(raised);
+  const retried = await openRun(tx, raised.id, { kind: "retry", readyAt: now });
+  assert.equal(retried.ok, true);
+  assert.equal(creates[0]?.leaseLossRefunds, LEASE_LOSS_REFUND_CAP);
+  assert.equal(creates[0]?.maxRunsPerTask, 12);
+});
+
+test("an ordinary birth carries the task's refund count forward without spending one", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const task = taskRow({
+    repoId: repo.id,
+    repo,
+    runs: [priorRun({ repoId: repo.id, leaseLossRefunds: 2 })],
+  });
+  const { tx, creates } = fakeTx(task);
+  assert.equal((await openRun(tx, task.id, { kind: "enqueue", readyAt: now })).ok, true);
+  assert.equal(creates[0]?.leaseLossRefunds, 2);
+  // A task that has never been refunded starts at zero rather than at null.
+  const fresh = taskRow({ repoId: repo.id, repo });
+  const first = fakeTx(fresh);
+  assert.equal((await openRun(first.tx, fresh.id, { kind: "task-created", readyAt: now })).ok, true);
+  assert.equal(first.creates[0]?.leaseLossRefunds, 0);
+});
+
+test("leaseLossRefundAvailable reads the count alone and clamps a negative one", () => {
+  assert.equal(LEASE_LOSS_REFUND_CAP, 3);
+  assert.deepEqual(
+    [-1, 0, 1, 2, 3, 4].map((refunds) => leaseLossRefundAvailable(refunds)),
+    [true, true, true, true, false, false],
+  );
+  assert.equal(leaseLossRefundAvailable(null), true);
+  assert.equal(leaseLossRefundAvailable(undefined), true);
 });
 
 test("runBudgetCeiling is the only ceiling algorithm and clamps negative grants", () => {

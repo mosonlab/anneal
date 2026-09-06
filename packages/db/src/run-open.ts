@@ -37,6 +37,28 @@ type Tx = Prisma.TransactionClient;
 export const EXTERNAL_FAILURE_REFUND_CAP = 3;
 
 /**
+ * How many attempts one task may have refunded because the *platform* lost the
+ * Run: a lease declared LOST by reconciliation, a claim invalidated by a late
+ * salvage, a merge-tail requeue.
+ *
+ * These refunds raise the ceiling they are measured against. `maxRunsPerTask`
+ * and `budgetGrants` both grow by one with every refund, so `runNumber <
+ * runBudgetCeiling(...)` is true forever in a pure lease-loss sequence and a
+ * task that never runs a single agent attempt can requeue itself without end.
+ * The count of refunds is therefore kept apart from the budget it produced,
+ * and it is the only thing this bound reads.
+ *
+ * Matches `EXTERNAL_FAILURE_REFUND_CAP` in size and in reason, and bounds a
+ * different class: that one bounds a provider or fetch that keeps failing, this
+ * one bounds a runner that keeps disappearing.
+ */
+export const LEASE_LOSS_REFUND_CAP = 3;
+
+/** Whether a task carrying `leaseLossRefunds` may still be refunded once more. */
+export const leaseLossRefundAvailable = (leaseLossRefunds: number | null | undefined): boolean =>
+  Math.max(0, leaseLossRefunds ?? 0) < LEASE_LOSS_REFUND_CAP;
+
+/**
  * The ceiling a task's next attempt is measured against.
  *
  * `Task.maxSessionsPerTask` is the configured budget: how many attempts the
@@ -736,6 +758,7 @@ const declaredPublishTarget = async (
     // here instead of inheriting this rule by accident.
     case "enqueue":
     case "merge-tail-requeue":
+    case "claim-invalidated":
     case "task-created":
     case "retry":
       return chainDeclaredBranches(tx, task, prior ? { branch: prior.branch } : null);
@@ -751,6 +774,11 @@ export type IntegratorStopBypass = { integratorTaskId: string; sourceStopId: str
 export type OpenRunIntent =
   | { kind: "enqueue"; readyAt: Date; stopBypass?: IntegratorStopBypass | null }
   | { kind: "merge-tail-requeue"; readyAt: Date; budgetGrant: 1 }
+  /** The replacement for a claim a late salvage invalidated before it started.
+   *  Its budget arithmetic is an ordinary enqueue's — the revoked claim already
+   *  carries the refund — but it is a platform-caused refund, so it is named
+   *  rather than borrowing `enqueue` and escaping the bound below. */
+  | { kind: "claim-invalidated"; readyAt: Date }
   /** The first Run of an automatic merge-tail repair card, which publishes onto
    *  the chain head it was created to repair rather than onto a ref of its own. */
   | { kind: "merge-tail-repair"; readyAt: Date }
@@ -823,6 +851,7 @@ export type OpenRunRefusal =
   | OpenRunRefusalShape<"source-run-stale", "conflict">
   | OpenRunRefusalShape<"task-not-integrator", "invalid-request">
   | OpenRunRefusalShape<"run-budget-exhausted", "conflict">
+  | OpenRunRefusalShape<"lease-loss-refunds-exhausted", "conflict">
   | OpenRunRefusalShape<"chain-held", "chain-held">;
 
 /**
@@ -845,6 +874,7 @@ const dispositionByCode = {
   "source-run-stale": "fault",
   "task-not-integrator": "fault",
   "run-budget-exhausted": "fault",
+  "lease-loss-refunds-exhausted": "fault",
   "chain-held": "held",
 } as const satisfies Record<OpenRunRefusal["code"], OpenRunDisposition>;
 
@@ -874,6 +904,21 @@ const sourceRetryIntent = (
   intent: OpenRunIntent,
 ): intent is Extract<OpenRunIntent, { kind: "retry-after-completion" | "retry-after-lease-loss" }> =>
   intent.kind === "retry-after-completion" || intent.kind === "retry-after-lease-loss";
+
+/**
+ * The birth intents that exist because the platform lost a Run, each of which
+ * raises the task's ceiling without an operator asking for it.
+ *
+ * `retry` is not one of them: an operator asking for another attempt is
+ * measured against `runBudgetCeiling` and refused as `run-budget-exhausted`,
+ * which is the path this bound deliberately leaves as the way out.
+ * `retry-after-completion` is not one either — a refunded external failure is
+ * the separate class `EXTERNAL_FAILURE_REFUND_CAP` already bounds.
+ */
+const platformRefundIntent = (intent: OpenRunIntent): boolean =>
+  intent.kind === "retry-after-lease-loss"
+  || intent.kind === "merge-tail-requeue"
+  || intent.kind === "claim-invalidated";
 
 /**
  * The only place a Run comes into existence.
@@ -907,6 +952,7 @@ export const openRun = async (
   }
   if (!task.repo && (intent.kind === "enqueue"
     || intent.kind === "merge-tail-requeue"
+    || intent.kind === "claim-invalidated"
     || intent.kind === "merge-tail-repair"
     || intent.kind === "task-created"
     || intent.kind === "integrator-authorized")) {
@@ -1006,6 +1052,25 @@ export const openRun = async (
   }
 
   const runNumber = (prior?.runNumber ?? 0) + 1;
+  // The one place a platform-caused refund is decided, before any arm computes
+  // the ceiling that refund would raise. Every intent that refunds crosses it,
+  // so the bound cannot be escaped by arriving under a different intent kind —
+  // which is exactly how lease loss, late-salvage claim invalidation and
+  // merge-tail requeue escaped `run-budget-exhausted`, a refusal only `retry`
+  // ever reached.
+  const priorRefunds = prior?.leaseLossRefunds ?? 0;
+  const refunding = platformRefundIntent(intent);
+  if (refunding && !leaseLossRefundAvailable(priorRefunds)) {
+    return openRunRefusal(
+      "lease-loss-refunds-exhausted",
+      "conflict",
+      `Lease-loss refunds exhausted after ${priorRefunds} platform-refunded attempts;`
+        + " raise maxSessionsPerTask and retry",
+      { leaseLossRefunds: priorRefunds, cap: LEASE_LOSS_REFUND_CAP },
+      { taskId: task.id, taskName: task.name },
+    );
+  }
+  const leaseLossRefunds = priorRefunds + (refunding ? 1 : 0);
   let budgetGrants = prior?.budgetGrants ?? 0;
   let maxRunsPerTask: number;
   if (intent.kind === "integrator-authorized") {
@@ -1145,6 +1210,10 @@ export const openRun = async (
     // Run, while later operator actions recompute from the current task budget.
     maxRunsPerTask,
     budgetGrants,
+    // Written only here, never by the terminalize path that records the refund
+    // on the lost Run: two writers would count one refund twice, and this is
+    // the row every later birth reads its predecessor's total from.
+    leaseLossRefunds,
     readyAt: intent.readyAt,
   } });
   return { ok: true, run };
