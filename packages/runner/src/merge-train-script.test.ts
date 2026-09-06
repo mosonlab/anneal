@@ -8,6 +8,8 @@ import { type AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { parseMergeTrainRecord } from "@anneal/db";
+
 const script = resolve(dirname(fileURLToPath(import.meta.url)), "../runtime-tools/merge-train.sh");
 const CHAIN_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -233,6 +235,7 @@ test("runtime merge train builds and gates three cumulative prefixes", async () 
     const result = await runTool(fixture, trainInput(fixture, candidates));
     assert.equal(result.status, 0, result.stderr);
     const record = recordOf(result);
+    assert.equal(parseMergeTrainRecord(JSON.stringify(record)).status, "ok");
     assert.equal(record.width, 3);
     assert.equal(record.prefixes.length, 3);
     assert.equal(record.contiguousPassCount, 3);
