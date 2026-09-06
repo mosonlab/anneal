@@ -61,7 +61,7 @@ const listen = async (server: Server): Promise<number> => {
   return (server.address() as AddressInfo).port;
 };
 
-const makeFixture = async (): Promise<Fixture> => {
+const makeFixture = async (outputStatus = 200): Promise<Fixture> => {
   const root = mkdtempSync(join(tmpdir(), "agentos-merge-train-runtime-"));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -99,16 +99,29 @@ try {
 const behavior = process.env.MERGE_TRAIN_FIXTURE_GATE_BEHAVIOR || "pass";
 if (behavior === "require-ref") {
   const ref = "refs/anneal/train/" + oid;
-  const found = cp.execFileSync("git", ["ls-remote", "origin", ref], { encoding: "utf8" }).trim();
-  if (!found.startsWith(oid + "\\t" + ref)) process.exit(76);
+  const found = cp.execFileSync("git", ["ls-remote", "origin", "refs/anneal/train/*"], { encoding: "utf8" }).trim().split("\\n");
+  if (found.length !== 3 || !found.includes(oid + "\\t" + ref)) process.exit(76);
 }
 if (behavior === "delayed-pass") {
   fs.appendFileSync(process.env.MERGE_TRAIN_FIXTURE_GATE_LOG, "start " + oid + "\\n");
-  setTimeout(() => {
+  const deadline = Date.now() + 10000;
+  const interval = setInterval(() => {
+    const starts = fs.readFileSync(process.env.MERGE_TRAIN_FIXTURE_GATE_LOG, "utf8").split("\\n").filter(line => line.startsWith("start "));
+    if (starts.length < 3) {
+      if (Date.now() >= deadline) process.exit(97);
+      return;
+    }
+    clearInterval(interval);
     fs.appendFileSync(process.env.MERGE_TRAIN_FIXTURE_GATE_LOG, "end " + oid + "\\n");
     console.log("MERGE GATE: PASS " + oid);
     process.exit(0);
-  }, 120);
+  }, 10);
+} else if (behavior === "busy-pass") {
+  console.log("MERGE GATE: PASS " + oid);
+  process.exit(75);
+} else if (behavior === "split-pass") {
+  process.stdout.write("MERGE GATE: PA");
+  process.stderr.write("SS " + oid);
 } else if (behavior === "no-verdict") {
   console.log("GATE NOT RUN: fixture no verdict " + index);
   process.exit(76);
@@ -128,12 +141,14 @@ if (behavior === "delayed-pass") {
 
   const outputRequests: Array<{ path: string; body: Record<string, unknown> }> = [];
   const server = createServer((request, response) => {
+    assert.equal(request.method, "PUT");
+    assert.equal(request.headers.authorization, "Bearer session-merge-train-fixture");
     let body = "";
     request.setEncoding("utf8");
     request.on("data", (chunk) => { body += chunk; });
     request.on("end", () => {
       outputRequests.push({ path: request.url ?? "", body: JSON.parse(body) as Record<string, unknown> });
-      response.writeHead(200, { "content-type": "application/json" });
+      response.writeHead(outputStatus, { "content-type": "application/json" });
       response.end("{}\n");
     });
   });
@@ -245,6 +260,8 @@ test("runtime merge train builds and gates three cumulative prefixes", async () 
     assert.equal(fixture.outputRequests.length, 1);
     assert.equal(fixture.outputRequests[0]!.path, "/session/runs/run-merge-train-fixture/output");
     assert.equal(fixture.outputRequests[0]!.body.kind, "merge-train-v1");
+    assert.equal(fixture.outputRequests[0]!.body.fencingToken, "fence-merge-train-fixture");
+    assert.deepEqual(JSON.parse(fixture.outputRequests[0]!.body.body as string), record);
     assert.equal(fixture.outputRequests[0]!.body.commitSha, git(fixture.workspace, "rev-parse", "HEAD"));
     for (const prefix of record.prefixes) {
       assert.equal(git(fixture.workspace, "ls-remote", "origin", prefix.ref).split("\t")[0], prefix.prefixOid);
@@ -421,7 +438,7 @@ test("a candidate whose origin branch moved is refused with exit two", async () 
 });
 
 test("a PASS with the wrong OID or a suffix is never accepted", async () => {
-  for (const behavior of ["wrong-pass", "suffix-pass"]) {
+  for (const behavior of ["wrong-pass", "suffix-pass", "split-pass", "busy-pass"]) {
     const fixture = await makeFixture();
     try {
       const candidate = fixture.candidate("task-1", "chain-1", { "a.txt": "a\n" });
@@ -432,6 +449,7 @@ test("a PASS with the wrong OID or a suffix is never accepted", async () => {
       const record = recordOf(result);
       assert.equal(record.prefixes[0].verdict, "no-verdict");
       assert.equal(record.contiguousPassCount, 0);
+      assert.equal(readFileSync(fixture.gateLog, "utf8").trim().split("\n").length, behavior === "busy-pass" ? 3 : 1);
     } finally {
       await fixture.cleanup();
     }
@@ -473,6 +491,49 @@ test("built prefixes dispatch concurrently within the configured width", async (
     const firstEnd = lines.findIndex((line) => line.startsWith("end "));
     assert.equal(starts.length, 3);
     assert.ok(firstEnd > Math.max(...starts), "all gates should start before the first delayed gate ends");
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("output persistence failure is a named failure and prints no successful record", async () => {
+  const fixture = await makeFixture(503);
+  try {
+    const candidate = fixture.candidate("task-1", "chain-1", { "a.txt": "a\n" });
+    const result = await runTool(fixture, trainInput(fixture, [candidate]));
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /output-persist-failed: API returned HTTP 503/u);
+    assert.equal(result.stdout, "");
+    assert.equal(fixture.outputRequests.length, 1);
+    assert.equal(git(fixture.workspace, "worktree", "list", "--porcelain").match(/^worktree /gmu)?.length, 1);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("malformed Git branch names are refused with exit two before writes", async () => {
+  const fixture = await makeFixture();
+  try {
+    const candidate = fixture.candidate("task-1", "chain-1", { "a.txt": "a\n" });
+    const result = await runTool(fixture, trainInput(fixture, [{ ...candidate, branch: "invalid.lock" }]));
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /malformed-input/u);
+    assert.equal(git(fixture.origin, "for-each-ref", "refs/anneal/train/"), "");
+    assert.equal(fixture.outputRequests.length, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("a rewound origin candidate tip is refused even with a newer cached tracking ref", async () => {
+  const fixture = await makeFixture();
+  try {
+    const candidate = fixture.candidate("task-1", "chain-1", { "a.txt": "a\n" });
+    git(fixture.origin, "update-ref", "refs/heads/chain-1", fixture.baseSha);
+    const result = await runTool(fixture, trainInput(fixture, [candidate]));
+    assert.equal(result.status, 2);
+    assert.match(result.stderr, /candidate-tip-mismatch/u);
+    assert.equal(git(fixture.origin, "for-each-ref", "refs/anneal/train/"), "");
   } finally {
     await fixture.cleanup();
   }
