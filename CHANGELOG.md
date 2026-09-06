@@ -24,7 +24,8 @@ written.
   request-body cap, answering 413 with the offending event's index so the runner
   drops that one event and resends the rest. Heartbeats now carry
   `eventQueueBytes`.
-
+- Retired the `POST /files/mkdir` and `POST /files/move` routes and their
+  underlying store operations.
 - Removed `POST /inbox/messages/:messageId/supersede`;
   `POST /inbox/messages/:messageId/close` is now the only Inbox route whose sole
   purpose is closing a message. Archiving a task still closes its open merge-tail

@@ -250,40 +250,5 @@ export const createLocalFileStore = async (logicalRoot: string): Promise<FileSto
         mapPathError(error, path);
       }
     },
-
-    async mkdir(path) {
-      const resolved = await resolvePath(path, "create-parents");
-      requireNonRoot(resolved);
-      try {
-        await mkdir(resolved.target, { mode: 0o750 });
-      } catch (error: unknown) {
-        if (codeOf(error) !== "EEXIST") mapPathError(error, path);
-        try {
-          await inspectDirectory(resolved.target);
-        } catch (inspectError: unknown) {
-          mapPathError(inspectError, path);
-        }
-      }
-    },
-
-    async move(from, to) {
-      const source = await resolvePath(from, "existing");
-      const destination = await resolvePath(to, "create-parents");
-      requireNonRoot(source);
-      requireNonRoot(destination);
-      try {
-        const sourceInfo = await lstat(source.target);
-        if (sourceInfo.isSymbolicLink()) throw new SymlinkError(`Symlink refused: ${from}`);
-        try {
-          const destinationInfo = await lstat(destination.target);
-          if (destinationInfo.isSymbolicLink()) throw new SymlinkError(`Symlink refused: ${to}`);
-        } catch (error: unknown) {
-          if (codeOf(error) !== "ENOENT") throw error;
-        }
-        await rename(source.target, destination.target);
-      } catch (error: unknown) {
-        mapPathError(error, `${from} -> ${to}`);
-      }
-    },
   };
 };
