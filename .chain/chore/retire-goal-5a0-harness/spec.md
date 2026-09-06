@@ -26,5 +26,5 @@ Route: implementation=senior-dev-astra-medium - published-surface removal adjace
 
 ## Acceptance
 
-- `git grep -n "goal-5a0\|dependency-gate\|handoff-preimage\|evidence-destination\|evidence-preimage-b64\|HANDOFF_TASK_MISSING"` returns only CHANGELOG.md and historical release notes.
+- `git grep -n "goal-5a0\|dependency-gate\|handoff-preimage\|evidence-destination\|evidence-preimage-b64\|HANDOFF_TASK_MISSING" -- . ":(exclude).chain/**" ":(exclude)packages/db/prisma/migrations/20260818000000_goal_execution_safety_kernel/migration.sql"` returns only CHANGELOG.md and historical release notes. The chain specification is excluded because it records the retired names; the exact applied migration is excluded solely for its unchanged historical plan/spec provenance comments.
 - `npm run test:snapshot-scan`, `npm run snapshot:scan`, `npm run test:release-docs`, `npm run test:frozen-docs`, `npm run lint` pass.

@@ -52,7 +52,7 @@ bypass proof slots; host tests retain Node's default concurrency.
 
 The local gate is available to every clone. Remote workers require explicitly
 configured operator infrastructure; the repository provides no host or credentials.
-Checks outside the gate remain developer responsibilities:
+One check outside the gate remains a developer responsibility:
 `npm run verify:compose-binding`.
 
 ### Delivering to main

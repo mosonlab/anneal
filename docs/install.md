@@ -265,6 +265,10 @@ npm run test:snapshot-scan
 npm run snapshot:scan
 ```
 
+Root `npm test` delegates to `npm run test --workspaces --if-present` and never
+reaches `scripts/`, which is why the `scripts/`-level checks are named separately
+above.
+
 `npm test` runs every workspace's unit tests and needs no database and no
 running service. It requires installed dependencies and a generated Prisma
 client, but no prior build. Until the Merge Gate's build has run, the web CSS
