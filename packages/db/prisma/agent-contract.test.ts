@@ -191,10 +191,10 @@ test("the frontend roles differ only in their name and model frontmatter lines",
   assert.equal(frontmatterValue(high, "model"), "claude-opus-5:high");
   assert.equal(frontmatterValue(medium, "model"), "claude-opus-5:medium");
 
-  const withoutRuntimeLines = (source: string): string[] => source
+  const withoutNameAndModelLines = (source: string): string[] => source
     .split("\n")
     .filter((line) => !/^(name|model):/u.test(line));
-  assert.deepEqual(withoutRuntimeLines(high), withoutRuntimeLines(medium));
+  assert.deepEqual(withoutNameAndModelLines(high), withoutNameAndModelLines(medium));
   assert.equal(bodyOf(high), bodyOf(medium));
 });
 
