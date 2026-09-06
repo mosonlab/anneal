@@ -264,7 +264,14 @@ for (const channel of ["inbox", "patch"] as const) {
         label: `attest-${channel}-${purpose}`, shape: "canonical-compound-readiness", gatedReadiness: true,
       });
       const readiness = chain.readinessTask!;
-      await db.task.update({ where: { id: readiness.id }, data: { status: TaskStatus.REVIEW } });
+      // A confirmation card is a renewal: its gate was already released, so the
+      // readiness Task is DONE and PATCH re-asserts DONE to answer the card.
+      // From REVIEW the chain-ownership rule refuses the move before any
+      // authorization is attempted, which is a different refusal than the one
+      // under test here.
+      await db.task.update({ where: { id: readiness.id }, data: {
+        status: channel === "patch" && purpose === "confirmation" ? TaskStatus.DONE : TaskStatus.REVIEW,
+      } });
       const regression = await addRegressionStep(chain, V2);
       await db.$transaction((tx) => recordGateAttestation(tx, {
         chainId: chain.chainId, taskId: regression.task.id, runId: null,
