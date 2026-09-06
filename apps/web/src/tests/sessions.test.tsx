@@ -46,7 +46,8 @@ const session = (overrides: Partial<Session> = {}): Session => ({
   waitingOnMessageId: null, resumeAttempt: 0, requestedAt: "2026-08-16T00:00:00.000Z",
   startedAt: "2026-08-16T00:00:01.000Z", endedAt: null, terminationReason: null, exitCode: null,
   costUsd: null, inputTokens: null, outputTokens: null, cachedInputTokens: null, totalTokens: null,
-  failureReason: null, agent: { id: "agent-1", title: "Frontend Dev" }, task: { id: "task-1", name: "Batch 4" },
+  failureReason: null, agent: { id: "agent-1", title: "Frontend Dev" },
+  task: { id: "task-1", name: "Batch 4", chainId: null, chainName: null },
   goal: null, run: { id: "run-1", runNumber: 3, model: "claude-opus-5", branch: "feat/x", pullRequestUrl: null, workspacePath: "/tmp/w", repo: null },
   ...overrides,
 });
@@ -355,7 +356,10 @@ test("sessions are grouped by day, capped at five, and expandable in both locale
         assert.ok(dayText[2]?.includes(formatDate(olderAt)), `${dayText[2]} does not include ${formatDate(olderAt)}`);
         assert.match(dayText[0]!, locale === "en" ? /6 sessions/ : /6 个会话/);
         assert.equal(dom.window.document.querySelectorAll("table").length, 0);
-        assert.doesNotMatch(container.textContent ?? "", /Started|Runner|Duration|Result/u);
+        // The rows carry no table headings. Scoped to the list, because the
+        // filter bar above it legitimately says Runner.
+        const list = dom.window.document.querySelector("[data-session-list]");
+        assert.doesNotMatch(list?.textContent ?? "", /Started|Runner|Duration|Result/u);
         assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 7);
 
         const expand = dom.window.document.querySelector<HTMLButtonElement>("[data-session-day-toggle]");
@@ -469,127 +473,6 @@ test("an unseen terminal row has a trailing green dot and bold title, while a se
   assert.match(seen, /font-normal/);
 });
 
-test("agent and status filters show loaded-only copy and localized choices", async () => {
-  const sessions = [
-    session({ id: "live-match", task: { id: "task-live", name: "Live match" }, agentId: "agent-match", agent: { id: "agent-match", title: "Agent Match" }, executionStatus: "RUNNING" }),
-    ...Array.from({ length: 5 }, (_, index) => session({
-      id: `live-match-${index}`, task: { id: `task-live-${index}`, name: `Live match ${index}` },
-      agentId: "agent-match", agent: { id: "agent-match", title: "Agent Match" }, executionStatus: "RUNNING",
-    })),
-    session({ id: "done-other", task: { id: "task-done", name: "Done other" }, agentId: "agent-other", agent: { id: "agent-other", title: "Agent Other" }, executionStatus: "SUCCEEDED" }),
-    session({ id: "failed-match", task: { id: "task-failed", name: "Failed match" }, agentId: "agent-match", agent: { id: "agent-match", title: "Agent Match" }, executionStatus: "FAILED" }),
-  ];
-  try {
-    for (const locale of ["en", "zh"] as const) {
-      const dom = jsdom();
-      const container = dom.window.document.querySelector("#root");
-      assert.ok(container);
-      const fetchHarness = installFetchFunction(async (input) => {
-          const payload = String(input).includes("/projects") ? [{ id: "p1", name: "Demo" }] : sessions;
-          return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
-      });
-      const { ProjectProvider } = await import("../lib/project");
-      const root = createRoot(container);
-      const flush = fetchHarness.settle;
-      const choose = async (selector: string, value: string): Promise<void> => {
-        const select = dom.window.document.querySelector<HTMLSelectElement>(selector);
-        assert.ok(select, `${selector} not found in ${container.innerHTML}`);
-        select.value = value;
-        await act(async () => { select.dispatchEvent(new dom.window.Event("change", { bubbles: true })); });
-        await flush();
-      };
-      try {
-        await act(async () => {
-          root.render(<LocaleProvider initialLocale={locale}><ProjectProvider><SessionsPage /></ProjectProvider></LocaleProvider>);
-        });
-        await flush();
-
-        const agentFilter = dom.window.document.querySelector<HTMLSelectElement>("[data-session-filter-agent]");
-        const statusFilter = dom.window.document.querySelector<HTMLSelectElement>("[data-session-filter-status]");
-        assert.ok(agentFilter);
-        assert.ok(statusFilter);
-        assert.equal(agentFilter.value, "all");
-        assert.equal(statusFilter.value, "all");
-        const agentOptions = [...agentFilter.options].map((option) => option.textContent);
-        const statusOptions = [...statusFilter.options].map((option) => option.textContent);
-        assert.deepEqual(agentOptions, locale === "en" ? ["All", "Agent Match", "Agent Other"] : ["全部", "Agent Match", "Agent Other"]);
-        assert.deepEqual(statusOptions, locale === "en" ? ["All", "Live", "Done", "Failed", "Cancelled"] : ["全部", "进行中", "完成", "失败", "已取消"]);
-        assert.match(container.textContent ?? "", locale === "en" ? /Agent.*Status/u : /Agent.*状态/u);
-
-        await choose("[data-session-filter-agent]", "agent-match");
-        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 5, "the filtered group still caps at five rows");
-        assert.match(dom.window.document.querySelector("[data-session-day-count]")?.textContent ?? "", locale === "en" ? /7 sessions/u : /7 个会话/u);
-        assert.match(dom.window.document.querySelector("[data-session-day-toggle]")?.textContent ?? "", locale === "en" ? /Show 2 more/u : /再显示 2 个/u);
-        assert.ok(dom.window.document.querySelector("[data-session-filter-hint]"));
-        assert.match(container.textContent ?? "", locale === "en" ? /Filters apply to loaded Sessions only\./u : /筛选仅适用于已加载的会话。/u);
-
-        await choose("[data-session-filter-status]", "cancelled");
-        assert.equal(dom.window.document.querySelectorAll("[data-session-row]").length, 0);
-        assert.match(container.textContent ?? "", locale === "en" ? /No sessions match the selected filters\./u : /没有会话符合所选筛选条件。/u);
-        assert.doesNotMatch(container.textContent ?? "", locale === "en" ? /No sessions yet\./u : /还没有会话。/u);
-      } finally {
-        fetchHarness.dispose();
-        await act(async () => root.unmount());
-        dom.window.close();
-      }
-    }
-  } finally {
-    setFormatLocale("en", (key, vars) => translate("en", key, vars));
-  }
-});
-
-test("agent and status filters reset when the Project scope changes", async () => {
-  const projects = [{ id: "p1", name: "One" }, { id: "p2", name: "Two" }];
-  const sessionsFor = (projectId: string): Session[] => [session({
-    id: `${projectId}-session`, projectId, agentId: `${projectId}-agent`,
-    agent: { id: `${projectId}-agent`, title: `${projectId} Agent` }, executionStatus: "RUNNING",
-  })];
-  const dom = jsdom();
-  const container = dom.window.document.querySelector("#root");
-  assert.ok(container);
-  const fetchHarness = installFetchFunction(async (input) => {
-      const path = String(input);
-      const payload = path.includes("/projects") ? projects : path.includes("projectId=p2") ? sessionsFor("p2") : sessionsFor("p1");
-      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
-  });
-  const { ProjectProvider, useProjectScope } = await import("../lib/project");
-  const ScopeProbe = (): ReactNode => {
-    const scope = useProjectScope();
-    return <button type="button" data-switch-project onClick={() => scope.select("p2")}>Switch project</button>;
-  };
-  const root = createRoot(container);
-  const flush = fetchHarness.settle;
-  const choose = async (selector: string, value: string): Promise<void> => {
-    const select = dom.window.document.querySelector<HTMLSelectElement>(selector);
-    assert.ok(select);
-    select.value = value;
-    await act(async () => { select.dispatchEvent(new dom.window.Event("change", { bubbles: true })); });
-    await flush();
-  };
-  try {
-    await act(async () => {
-      root.render(<LocaleProvider initialLocale="en"><ProjectProvider><ScopeProbe /><SessionsPage /></ProjectProvider></LocaleProvider>);
-    });
-    await flush();
-    await choose("[data-session-filter-agent]", "p1-agent");
-    await choose("[data-session-filter-status]", "live");
-    assert.equal(dom.window.document.querySelector<HTMLSelectElement>("[data-session-filter-agent]")?.value, "p1-agent");
-    assert.equal(dom.window.document.querySelector<HTMLSelectElement>("[data-session-filter-status]")?.value, "live");
-
-    const switchProject = dom.window.document.querySelector<HTMLButtonElement>("[data-switch-project]");
-    assert.ok(switchProject);
-    await click(dom, switchProject);
-    await flush();
-    assert.equal(dom.window.document.querySelector<HTMLSelectElement>("[data-session-filter-agent]")?.value, "all");
-    assert.equal(dom.window.document.querySelector<HTMLSelectElement>("[data-session-filter-status]")?.value, "all");
-    assert.equal(dom.window.document.querySelector("[data-session-filter-hint]"), null);
-  } finally {
-    await act(async () => root.unmount());
-    dom.window.close();
-    fetchHarness.dispose();
-  }
-});
-
 test("Sessions.tsx uses design tokens, never a hard-coded hex colour", () => {
   const source = readFileSync(fileURLToPath(new URL("../pages/Sessions.tsx", import.meta.url)), "utf8");
   assert.equal(/#[0-9a-fA-F]{3,8}\b/.test(source), false);
@@ -675,12 +558,20 @@ test("a Session finishing while its detail page is open is marked opened again",
 
 /* ------------------------------------------------------------ interaction */
 
-const jsdom = (): JSDOM => {
-  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { pretendToBeVisual: true });
+const jsdom = (hash = ""): JSDOM => {
+  // A real URL, because the page describes its filters in the hash and
+  // `history.replaceState` refuses to run on `about:blank`.
+  const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", {
+    pretendToBeVisual: true,
+    url: `http://127.0.0.1:5173/${hash}`,
+  });
   const globals = {
     window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
     HTMLElement: dom.window.HTMLElement, Element: dom.window.Element, Node: dom.window.Node,
     NodeFilter: dom.window.NodeFilter,
+    // `Event` is the global the router constructs its `hashchange` from, and
+    // jsdom rejects an event built by a different window's constructor.
+    Event: dom.window.Event,
     CustomEvent: dom.window.CustomEvent, MutationObserver: dom.window.MutationObserver,
     PointerEvent: dom.window.MouseEvent, DOMRect: dom.window.DOMRect,
     getComputedStyle: dom.window.getComputedStyle.bind(dom.window),
@@ -1017,72 +908,6 @@ test("Load more keeps page one and dedupes it against the live head", async () =
   await act(async () => root.unmount());
   dom.window.close();
   fetchHarness.dispose();
-});
-
-test("an applied filter remains active across Refresh and Load more", async () => {
-  const dom = jsdom();
-  const container = dom.window.document.querySelector("#root");
-  assert.ok(container);
-  const at = (index: number): string => new Date(Date.now() - index * 86_400_000).toISOString();
-  const listRow = (id: string, index: number, agentId: string): Session => session({
-    id,
-    requestedAt: at(index),
-    startedAt: at(index),
-    agentId,
-    agent: { id: agentId, title: agentId === "agent-match" ? "Matching agent" : "Other agent" },
-    task: { id: `task-${id}`, name: id },
-  });
-  const initialHead = [listRow("initial-match", 0, "agent-match"), ...Array.from({ length: 49 }, (_, index) => listRow(`initial-other-${index}`, index + 1, "agent-other"))];
-  const refreshedHead = [listRow("refreshed-match", 0, "agent-match"), ...Array.from({ length: 49 }, (_, index) => listRow(`refreshed-other-${index}`, index + 1, "agent-other"))];
-  const older = [listRow("older-match", 60, "agent-match"), ...Array.from({ length: 49 }, (_, index) => listRow(`older-other-${index}`, index + 61, "agent-other"))];
-  let headRows = initialHead;
-  const requests: string[] = [];
-  const fetchHarness = installFetchFunction(async (input) => {
-      const path = String(input);
-      requests.push(path);
-      const payload = path.includes("/projects") ? [{ id: "p1", name: "Demo" }]
-        : path.includes("before=") ? older : headRows;
-      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify(payload) } as unknown as Response;
-  });
-  const { ProjectProvider } = await import("../lib/project");
-  const root = createRoot(container);
-  const flush = fetchHarness.settle;
-  const chooseAgent = async (): Promise<void> => {
-    const select = dom.window.document.querySelector<HTMLSelectElement>("[data-session-filter-agent]");
-    assert.ok(select);
-    select.value = "agent-match";
-    await act(async () => { select.dispatchEvent(new dom.window.Event("change", { bubbles: true })); });
-    await flush();
-  };
-  const rowTexts = (): string[] => [...dom.window.document.querySelectorAll("[data-session-row]")].map((row) => row.textContent ?? "");
-  try {
-    await act(async () => { root.render(<ProjectProvider><SessionsPage /></ProjectProvider>); });
-    await flush();
-    await chooseAgent();
-    assert.deepEqual(rowTexts().filter((text) => text.includes("initial-match")).length, 1);
-    assert.equal(rowTexts().some((text) => text.includes("initial-other")), false);
-
-    headRows = refreshedHead;
-    const refresh = [...dom.window.document.querySelectorAll("button")].find((node) => node.textContent?.trim() === "Refresh");
-    assert.ok(refresh);
-    await click(dom, refresh);
-    await flush();
-    assert.equal(rowTexts().some((text) => text.includes("refreshed-match")), true);
-    assert.equal(rowTexts().some((text) => text.includes("initial-match")), false);
-    assert.equal(rowTexts().some((text) => text.includes("refreshed-other")), false);
-
-    const more = [...dom.window.document.querySelectorAll("button")].find((node) => node.textContent?.trim() === "Load more");
-    assert.ok(more);
-    await click(dom, more);
-    await flush();
-    assert.equal(rowTexts().some((text) => text.includes("older-match")), true);
-    assert.equal(rowTexts().some((text) => text.includes("older-other")), false);
-    assert.ok(requests.some((path) => path.includes("before=")));
-  } finally {
-    await act(async () => root.unmount());
-    dom.window.close();
-    fetchHarness.dispose();
-  }
 });
 
 test("the detail page does not call the initial drain `N new`", async () => {

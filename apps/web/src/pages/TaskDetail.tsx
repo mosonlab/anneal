@@ -7,6 +7,7 @@ import { useT } from "../lib/i18n";
 import { Link } from "../lib/router";
 import { fatal } from "../lib/poll-state";
 import { isRegressionStep } from "../lib/repair-subtimeline";
+import { sessionsFilterHref } from "../lib/session-list";
 import { partitionTaskPrompt } from "../lib/task-prompt";
 import type { Agent, Chain, ChainStep, Run, RunMetrics, RunPhaseMetrics, TaskActivity, TaskDetail, TaskStartability, TaskStepOutput, TaskStatus } from "../lib/types";
 import { supportsCodexServiceTier } from "../lib/models";
@@ -853,7 +854,24 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
 
         <StrandedSalvageList branches={strandedSalvageBranches} remoteUrl={task.repo?.remoteUrl} />
 
-        <Card title={t("taskDetail.runs.title")} extra={<span className={COUNT}>{runs.length}</span>} flush>
+        <Card
+          title={t("taskDetail.runs.title")}
+          extra={
+            <span className={ROW}>
+              <span className={COUNT}>{runs.length}</span>
+              {/* The chain, when there is one: a step's runs are rarely the
+                  whole story, and the sibling steps' sessions are what an
+                  operator reading this table goes looking for next. */}
+              <Link
+                to={sessionsFilterHref(task.chainId === null ? { taskId: task.id } : { chainId: task.chainId })}
+                className="text-[12px] text-primary hover:underline"
+              >
+                <span data-task-sessions-link>{t("taskDetail.runs.viewSessions")}</span>
+              </Link>
+            </span>
+          }
+          flush
+        >
           <Table>
             <TableHeader>
               <TableRow>
