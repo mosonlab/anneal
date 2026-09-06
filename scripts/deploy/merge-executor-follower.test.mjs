@@ -21,7 +21,10 @@ if (process.env.ANNEAL_FOLLOWER_TEST_NODE !== process.execPath) {
     const env = { ...process.env, ANNEAL_FOLLOWER_TEST_NODE: node };
     delete env.NODE_TEST_CONTEXT;
     const result = spawnSync(node, ['--test', new URL(import.meta.url).pathname], {
-      env, encoding: 'utf8', timeout: 120_000,
+      // This runs the whole file again under the copied Node, so the budget
+      // covers every case below, not one of them. Bounded so a wedged nested run
+      // still fails; sized for the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s), not for an idle host.
+      env, encoding: 'utf8', timeout: 300_000,
     });
     assert.ifError(result.error);
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);

@@ -15,8 +15,11 @@ const alive = (pid) => {
   try { process.kill(pid, 0); return true; } catch { return false; }
 };
 
+// Reaping a signalled descendant is the kernel's work plus a scheduler slice.
+// Bounded so a survivor still fails the assertion below rather than hanging the
+// suite, but sized for the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s), not for an idle host.
 const waitForDeath = async (pid) => {
-  for (let waited = 0; waited < 1_000; waited += 20) {
+  for (let waited = 0; waited < 10_000; waited += 20) {
     if (!alive(pid)) return true;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
@@ -70,9 +73,11 @@ test("timeout kills descendants even when the process-group leader exits first",
     const error = await runDeployCommand("/bin/sh", ["-c", script, "fixture", pidFile], {
       cwd: directory,
       env,
-      // Leave enough time for the shell to create the descendant under the
-      // gate's concurrent build load before exercising the timeout path.
-      timeoutMs: 500,
+      // Not a deadline under test: this is the race budget for /bin/sh to fork
+      // the descendant and write its pid before the timeout path is exercised.
+      // Bounded so the timeout still fires and the case still runs, but sized for
+      // the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s), not for an idle host.
+      timeoutMs: 5_000,
       timeoutReason: "fixture-tree-timeout",
       killGraceMs: 50,
     }).then(() => null, (reason) => reason);

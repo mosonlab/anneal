@@ -79,7 +79,10 @@ const runLease = (fixture, args, holder = "machine@fixture", options = {}) =>
   spawnSync("bash", [join(fixture.root, "scripts", "merge-lease.sh"), ...args], {
     cwd: fixture.root,
     encoding: "utf8",
-    timeout: options.timeout ?? 15_000,
+    // merge-lease.sh does real git work against a real origin. Bounded so a
+    // wedged lease still fails the case; the default matches the cases that
+    // already opt in, and is sized for the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s), not for an idle host.
+    timeout: options.timeout ?? 60_000,
     env: { ...FIXTURE_ENV, MERGE_LEASE_HOLDER: holder, ...options.env },
   });
 

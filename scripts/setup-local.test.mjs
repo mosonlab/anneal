@@ -809,7 +809,10 @@ const seededRandomBytes = () => {
 const beforePublish = () => {
   writeFileSync(join(barrierDirectory, \`ready-\${label}\`), "");
   const sleeper = new Int32Array(new SharedArrayBuffer(4));
-  const deadline = Date.now() + 20_000;
+  // Both writers are separately spawned node processes; the barrier only has to
+  // outlast the slower one's start-up. Bounded so a writer that never arrives
+  // throws below instead of hanging the suite, and sized for the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s), not for an idle host.
+  const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     if (readdirSync(barrierDirectory).filter((name) => name.startsWith("ready-")).length >= 2) return;
     Atomics.wait(sleeper, 0, 0, 5);
@@ -1001,7 +1004,10 @@ test("a run killed between the write and the link leaves an ignored temporary fi
     });
     const closed = new Promise((resolve) => child.on("close", (code, signal) => resolve({ code, signal })));
 
-    const deadline = Date.now() + 20_000;
+    // The writer is a spawned node process that must reach its pre-publication
+    // window. Bounded so a writer that never gets there fails the assertion
+    // rather than hanging, and sized for the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s), not for an idle host.
+    const deadline = Date.now() + 60_000;
     while (!existsSync(signalPath)) {
       assert.ok(Date.now() < deadline, "the writer never reached the pre-publication window");
       await delay(5);
