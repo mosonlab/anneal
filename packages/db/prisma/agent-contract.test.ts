@@ -156,6 +156,7 @@ test("named canonical roles use their model catalog runner and retired role name
     "spec-opus-high",
     "code-reviewer-opus-high",
     "frontend-dev-opus-medium",
+    "frontend-dev-opus-high",
     "review-coordinator-astra-medium",
     "code-reviewer-sol-high",
     "regression-verifier-luna-xhigh",
@@ -173,6 +174,28 @@ test("named canonical roles use their model catalog runner and retired role name
   }
   assert.equal(canonical.has("senior-dev-high"), false);
   assert.equal(canonical.has("review-adjudicator-opus"), false);
+});
+
+/**
+ * The two frontend roles are one prompt at two efforts: the only permitted
+ * difference is the `name` and `model` frontmatter lines, so a prompt edit that
+ * lands on one file and not the other stops here rather than in production.
+ */
+test("the frontend roles differ only in their name and model frontmatter lines", async () => {
+  const [medium, high] = await Promise.all([
+    roleSource("frontend-dev-opus-medium"),
+    roleSource("frontend-dev-opus-high"),
+  ]);
+
+  assert.equal(frontmatterValue(high, "name"), "frontend-dev-opus-high");
+  assert.equal(frontmatterValue(high, "model"), "claude-opus-5:high");
+  assert.equal(frontmatterValue(medium, "model"), "claude-opus-5:medium");
+
+  const withoutRuntimeLines = (source: string): string[] => source
+    .split("\n")
+    .filter((line) => !/^(name|model):/u.test(line));
+  assert.deepEqual(withoutRuntimeLines(high), withoutRuntimeLines(medium));
+  assert.equal(bodyOf(high), bodyOf(medium));
 });
 
 test("the split review prompts enforce persisted-range, blindness, and regression contracts", async () => {
