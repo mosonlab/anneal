@@ -2,6 +2,7 @@ import {
   settleLeaseEvent,
   type PrismaClient,
 } from "@anneal/db";
+import { mergeLeaseHoldSeconds } from "../../../scripts/merge-lease-adapter.mjs";
 
 /** What one `merge-lease.sh release` did. */
 export type MergeLeaseRelease =
@@ -23,16 +24,20 @@ export type MergeLeaseHold = {
   heldForSeconds: number;
 };
 
-/** Calculate a non-negative whole-second hold from the lease blob timestamp. */
+/**
+ * Calculate a non-negative whole-second hold from the lease blob timestamp. The
+ * seconds come from the lease adapter so that this hold and the merge train's
+ * are the same measurement rather than two implementations of one rule.
+ */
 export const mergeLeaseHold = (acquiredAt: string, releasedAt: Date): MergeLeaseHold | null => {
   const acquiredAtMs = Date.parse(acquiredAt);
   const releasedAtMs = releasedAt.getTime();
-  if (!Number.isFinite(acquiredAtMs) || !Number.isFinite(releasedAtMs)) return null;
+  const heldForSeconds = mergeLeaseHoldSeconds(acquiredAt, releasedAt);
+  if (heldForSeconds === null) return null;
   return {
     acquiredAt: new Date(acquiredAtMs),
     releasedAt: new Date(releasedAtMs),
-    // A clock adjustment must not produce a negative hold in the evidence.
-    heldForSeconds: Math.max(0, Math.floor((releasedAtMs - acquiredAtMs) / 1_000)),
+    heldForSeconds,
   };
 };
 
