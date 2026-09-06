@@ -2646,6 +2646,32 @@ test("observation overrides reject overflow and durations beyond five minutes", 
   assert.equal(resolveObservationWindowMs({ AGENTOS_DEPLOY_OBSERVATION_WINDOW_MS: "300000" }), 300000);
 });
 
+test("a refusal sampled across the deadline preserves the named rollback failure", async () => {
+  let now = 0;
+  await assert.rejects(observeReadiness({
+    sample: async () => { now = 11; return "service-start-failed:com.agentos.api"; },
+    observationWindowMs: 0, timeoutMs: 10, now: () => now,
+    wait: async () => assert.fail("expired sample must not wait"),
+    failureReason: "previous-service-verification-failed",
+  }), (error) => error.reason === "previous-service-verification-failed"
+    && error.detail === "service-start-failed:com.agentos.api");
+});
+
+test("a regression sampled across the deadline preserves the named rollback failure", async () => {
+  let now = 0;
+  await assert.rejects(observeReadiness({
+    sample: async () => {
+      if (now === 0) return null;
+      now = 11;
+      return "service-start-failed:com.agentos.api";
+    },
+    observationWindowMs: 5, timeoutMs: 10, now: () => now,
+    wait: async () => { now = 1; },
+    failureReason: "previous-service-verification-failed",
+  }), (error) => error.reason === "previous-service-verification-failed"
+    && error.detail === "observation-window-regressed-service-start-failed:com.agentos.api");
+});
+
 test("a first green sample near the deadline cannot complete the window after timeout", async () => {
   let now = 0;
   let samples = 0;

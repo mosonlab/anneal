@@ -743,15 +743,18 @@ export const observeReadiness = async ({
   while (now() < deadline) {
     const refusal = await sample();
     const sampledAt = now();
+    // Preserve failure evidence even when the sample exhausts the budget.
+    if (refusal !== null) {
+      if (windowOpenedAt !== null) {
+        fail(failureReason, `observation-window-regressed-${refusal}`);
+      }
+      lastReason = refusal;
+    }
     if (sampledAt >= deadline) break;
     if (refusal === null) {
       windowOpenedAt ??= sampledAt;
       const observedForMs = sampledAt - windowOpenedAt;
       if (observedForMs >= observationWindowMs) return observedForMs;
-    } else if (windowOpenedAt !== null) {
-      fail(failureReason, `observation-window-regressed-${refusal}`);
-    } else {
-      lastReason = refusal;
     }
     const remainingMs = deadline - now();
     if (remainingMs <= 0) break;
