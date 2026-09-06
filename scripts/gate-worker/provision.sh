@@ -319,16 +319,29 @@ run mkdir -p "$GATE_HOME"
 # shares its machine with runners: one gate at a time, and not the whole box.
 # The runbook says so; this file is where that decision goes. Never overwritten,
 # because it is an operator's acceptance, not a fact about the box.
+#
+# And never written at all on a box that has not stated a capacity yet. Writing
+# a snapshot of an absent capacity froze the share at 1, and the runbook's own
+# order provisions before the capacity-two acceptance sets `worker-capacity`:
+# raising the capacity afterwards would then have left two concurrent gates each
+# sized for the whole machine. An absent file already means "the capacity" to
+# run-gate.sh, and that default keeps tracking a capacity stated later.
 host_share_file="${GATE_HOME}/host-share"
+worker_capacity_file="${GATE_HOME}/worker-capacity"
+default_host_share="$(tr -d '[:space:]' < "$worker_capacity_file" 2>/dev/null || true)"
+# Padding is not a different number: `00` is a zero, and a share of zero would
+# divide this host by nothing.
+default_host_share="$(printf '%s\n' "$default_host_share" | sed 's/^0*//')"
+case "$default_host_share" in
+  ''|*[!0-9]*) default_host_share="" ;;
+esac
 if [ -f "$host_share_file" ]; then
   ok "host share $(tr -d '[:space:]' < "$host_share_file" 2>/dev/null) in ${host_share_file}"
-else
-  default_host_share="$(tr -d '[:space:]' < "${GATE_HOME}/worker-capacity" 2>/dev/null || true)"
-  case "$default_host_share" in
-    ''|0|*[!0-9]*) default_host_share=1 ;;
-  esac
+elif [ -n "$default_host_share" ]; then
   run_sh "printf '%s\n' '${default_host_share}' > '${host_share_file}'"
   did "wrote ${host_share_file} (a gate takes 1/${default_host_share} of this host)"
+else
+  ok "no ${host_share_file}; a gate takes 1/(worker capacity) of this host until one is written"
 fi
 
 repo_dirs="$(find "$GATE_HOME" -mindepth 2 -maxdepth 2 -type d -name mirror.git 2>/dev/null)"

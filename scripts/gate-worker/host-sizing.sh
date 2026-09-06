@@ -18,10 +18,18 @@
 # more than the gates it runs at once. What the value must be is a whole number
 # the host can be divided by; what it must not be is a fraction, a zero or a
 # word, all of which would silently size a gate for a machine nobody has.
-GATE_HOST_SHARE="${AGENTOS_GATE_HOST_SHARE:-2}"
+GATE_HOST_SHARE_STATED="${AGENTOS_GATE_HOST_SHARE:-2}"
+GATE_HOST_SHARE="${GATE_HOST_SHARE_STATED}"
 case "${GATE_HOST_SHARE}" in
-  0|*[!0-9]*|'') die "AGENTOS_GATE_HOST_SHARE must be a whole number of shares, at least 1, got ${GATE_HOST_SHARE}" ;;
+  *[!0-9]*|'') die "AGENTOS_GATE_HOST_SHARE must be a whole number of shares, at least 1, got ${GATE_HOST_SHARE_STATED}" ;;
 esac
+# Decimal padding is not a different number. A bare `0` was refused and `00` was
+# not, and `00` reaches the division below as `Number("00")`, which is a zero
+# that produces `Infinity` lanes and kills the gate with the FAIL code over
+# nothing but a worker's own setting file.
+GATE_HOST_SHARE="$(printf '%s\n' "${GATE_HOST_SHARE}" | sed 's/^0*//')"
+[[ -n "${GATE_HOST_SHARE}" ]] \
+  || die "AGENTOS_GATE_HOST_SHARE must be a whole number of shares, at least 1, got ${GATE_HOST_SHARE_STATED}"
 GATE_CPUS="$(node -e 'const { availableParallelism } = require("node:os");
 process.stdout.write(String(Math.max(1, Math.floor(availableParallelism() / Number(process.argv[1])))));' \
   "${GATE_HOST_SHARE}")" || die "could not size this gate against the host"

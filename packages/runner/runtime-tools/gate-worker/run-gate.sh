@@ -58,8 +58,9 @@
 # questions: a worker that shares its machine with runners runs one gate at a
 # time and still must not hand that gate the whole box.
 #
-# Every run first reaps the PostgreSQL containers of gates that died without
-# running their own cleanup, and only those it can prove are dead.
+# Every run reclaims what earlier gates abandoned: first their worktrees, then
+# the PostgreSQL containers of gates that died without running their own
+# cleanup, and only those it can prove are dead.
 #
 # Stateless: nothing is remembered between runs except the mirror and the logs.
 # Re-running the same oid after a dropped connection is the supported recovery,
@@ -113,6 +114,13 @@ case "$SLOT_WAIT_MINUTES" in
   ''|*[!0-9]*) printf 'run-gate: SLOT_WAIT_MINUTES must be a whole number of minutes, got: %s\n' \
                  "$SLOT_WAIT_MINUTES" >&2; exit 2 ;;
 esac
+# Decimal padding is not a different number, and bash arithmetic disagrees: it
+# reads a leading zero as octal, so `08` would abort the deadline expression
+# below with a fatal error — an exit 1 the dispatcher reads as a FAIL about the
+# commit, from worker state alone. Stripping the padding here is what
+# gate-dispatch.sh already does with its own minutes setting.
+SLOT_WAIT_MINUTES="$(printf '%s\n' "$SLOT_WAIT_MINUTES" | sed 's/^0*//')"
+SLOT_WAIT_MINUTES="${SLOT_WAIT_MINUTES:-0}"
 
 VERBOSE=0
 OID=""
@@ -131,7 +139,7 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || die_usage "--master needs an object id"
       MASTER_OID="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"; shift ;;
     --master=*) MASTER_OID="$(printf '%s' "${1#--master=}" | tr '[:upper:]' '[:lower:]')" ;;
-    -h|--help) sed -n '2,66p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,67p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0 ;;
     -*) die_usage "unknown argument $1" ;;
     *)
       [ -z "$OID" ] || die_usage "more than one commit given: $OID and $1"
@@ -208,22 +216,36 @@ fi
 mkdir -p "$WORKTREES_DIR" "$LOGS_DIR" || no_verdict "could not create the gate directories under ${GATE_HOME}"
 
 # The repository directory is one level below the worker root installed by
-# mirror-push.sh. Capacity is host state, not repository state: an absent file
-# means one slot, while the only larger supported value is the measured desktop
-# capacity of two. There is no load-sensitive resizing and no third slot.
+# mirror-push.sh.
 WORKER_ROOT="$(dirname "$GATE_HOME")"
+
+# Both worker settings are one file apiece beside the mirror, and both are read
+# the same way: absent means the stated default, a symlink or an unreadable file
+# is worker state this script must not guess at, and what the file says is
+# checked by the caller because the two settings accept different values. Said
+# once, because a second copy of this shape is how the two validations came to
+# disagree. WORKER_SETTING carries the value out: no_verdict inside a command
+# substitution would exit the subshell and leave this run going.
+WORKER_SETTING=""
+read_worker_setting() {
+  local path="$1" label="$2"
+  WORKER_SETTING="$3"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] || no_verdict "${label} at ${path} is not a regular file"
+    WORKER_SETTING="$(cat "$path" 2>/dev/null)" || no_verdict "could not read ${label} at ${path}"
+  fi
+}
+
+# Capacity is host state, not repository state: an absent file means one slot,
+# while the only larger supported value is the measured desktop capacity of two.
+# There is no load-sensitive resizing and no third slot.
 WORKER_CAPACITY_FILE="${WORKER_ROOT}/worker-capacity"
-WORKER_CAPACITY=1
-if [ -e "$WORKER_CAPACITY_FILE" ] || [ -L "$WORKER_CAPACITY_FILE" ]; then
-  [ -f "$WORKER_CAPACITY_FILE" ] && [ ! -L "$WORKER_CAPACITY_FILE" ] \
-    || no_verdict "worker capacity at ${WORKER_CAPACITY_FILE} is not a regular file"
-  WORKER_CAPACITY="$(cat "$WORKER_CAPACITY_FILE" 2>/dev/null)" \
-    || no_verdict "could not read worker capacity at ${WORKER_CAPACITY_FILE}"
-  case "$WORKER_CAPACITY" in
-    1|2) ;;
-    *) no_verdict "worker capacity at ${WORKER_CAPACITY_FILE} must be exactly 1 or 2" ;;
-  esac
-fi
+read_worker_setting "$WORKER_CAPACITY_FILE" "worker capacity" 1
+WORKER_CAPACITY="$WORKER_SETTING"
+case "$WORKER_CAPACITY" in
+  1|2) ;;
+  *) no_verdict "worker capacity at ${WORKER_CAPACITY_FILE} must be exactly 1 or 2" ;;
+esac
 
 # How much of this host one gate may size itself for. It is worker state like
 # the capacity beside it and a different question from it: capacity is how many
@@ -234,16 +256,27 @@ fi
 # capacity, which is the value this script passed before the file existed, so an
 # installed worker's sizing is unchanged until an operator states otherwise.
 WORKER_HOST_SHARE_FILE="${WORKER_ROOT}/host-share"
-WORKER_HOST_SHARE="$WORKER_CAPACITY"
-if [ -e "$WORKER_HOST_SHARE_FILE" ] || [ -L "$WORKER_HOST_SHARE_FILE" ]; then
-  [ -f "$WORKER_HOST_SHARE_FILE" ] && [ ! -L "$WORKER_HOST_SHARE_FILE" ] \
-    || no_verdict "host share at ${WORKER_HOST_SHARE_FILE} is not a regular file"
-  WORKER_HOST_SHARE="$(cat "$WORKER_HOST_SHARE_FILE" 2>/dev/null)" \
-    || no_verdict "could not read host share at ${WORKER_HOST_SHARE_FILE}"
-  case "$WORKER_HOST_SHARE" in
-    ''|0|*[!0-9]*) no_verdict "host share at ${WORKER_HOST_SHARE_FILE} must be a whole number of shares, at least 1" ;;
-  esac
-fi
+read_worker_setting "$WORKER_HOST_SHARE_FILE" "host share" "$WORKER_CAPACITY"
+WORKER_HOST_SHARE="$WORKER_SETTING"
+case "$WORKER_HOST_SHARE" in
+  ''|*[!0-9]*) no_verdict "host share at ${WORKER_HOST_SHARE_FILE} must be a whole number of shares, at least 1" ;;
+esac
+# `00` is a zero however it is spelled, and `007` is seven. Stripping decimal
+# padding before the comparison is what makes the refusal below mean what its
+# message says: the bare `0` pattern this replaces let every padded zero
+# through, to be divided by inside merge-gate.sh and die there as a FAIL.
+WORKER_HOST_SHARE="$(printf '%s\n' "$WORKER_HOST_SHARE" | sed 's/^0*//')"
+[ -n "$WORKER_HOST_SHARE" ] \
+  || no_verdict "host share at ${WORKER_HOST_SHARE_FILE} must be a whole number of shares, at least 1"
+
+# The invariant the share exists to keep: this worker runs WORKER_CAPACITY gates
+# at once and each of them sizes itself for 1/WORKER_HOST_SHARE of the machine,
+# so a share below the capacity is a configuration under which the concurrent
+# gates add up to more than one host. That combination is not a smaller machine,
+# it is an over-subscribed one — the memory ceiling the sizing exists to respect
+# — so it is refused here rather than sized around.
+[ "$WORKER_HOST_SHARE" -ge "$WORKER_CAPACITY" ] \
+  || no_verdict "host share ${WORKER_HOST_SHARE} at ${WORKER_HOST_SHARE_FILE} is below the worker capacity ${WORKER_CAPACITY}; ${WORKER_CAPACITY} concurrent gates would each size for 1/${WORKER_HOST_SHARE} of this host"
 
 # A gate runs many phases in parallel and every one of them has to fit inside
 # the share of the host this worker states. State the share once; the gate
@@ -327,7 +360,6 @@ reap_orphaned_gate_databases() {
 $names
 EOF
 }
-reap_orphaned_gate_databases
 
 # Slot one retains the original lock path, so a rollout beside an older
 # run-gate.sh still counts the old process. Slot two has one additional lock
@@ -404,6 +436,13 @@ EOF
   git -C "$MIRROR_DIR" worktree prune 2>/dev/null || true
 }
 sweep_stale_worktrees
+
+# After the sweep, not before it: the reaper removes a container only when its
+# gate's worktree is gone, and the sweep above is what reclaims the worktree of
+# a gate the kernel killed. Ordered the other way round, the run that finally
+# deleted the tree could not delete the matching container, and a 3 GiB tmpfs
+# waited for a further dispatch that an idle worker may never get.
+reap_orphaned_gate_databases
 
 # --- run --------------------------------------------------------------------
 

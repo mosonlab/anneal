@@ -1343,7 +1343,7 @@ test("the share run-gate states is the one merge-gate sizes from, and nothing re
     "run-gate.sh names a fan-out of its own; it may only state the share",
   );
 
-  assert.match(mergeGate, /GATE_HOST_SHARE="\$\{AGENTOS_GATE_HOST_SHARE:-2\}"/);
+  assert.match(mergeGate, /GATE_HOST_SHARE_STATED="\$\{AGENTOS_GATE_HOST_SHARE:-2\}"/);
   assert.doesNotMatch(
     mergeGate,
     /^\s*export\s+AGENTOS_GATE_HOST_SHARE/m,
@@ -1418,6 +1418,78 @@ test("a host share that is not a whole number of shares is refused without a ver
   assert.doesNotMatch(result.stdout, /MERGE GATE/);
 });
 
+test("a padded zero is the same zero, and is refused as one", (t) => {
+  // `00` is not `0` to a `case` pattern and is exactly `0` to everything that
+  // divides by it: it used to be accepted here and then kill merge-gate.sh's
+  // sizing with the FAIL code, reporting a worker's own setting file as a
+  // judgement about the commit.
+  const fixture = gateHome(t);
+  writeFileSync(join(fixture.root, "host-share"), "00\n");
+  const result = runGate(fixture.home, [fixture.oid]);
+  assert.equal(result.status, 76, result.stdout + result.stderr);
+  assert.match(result.stdout, /^GATE NOT RUN: host share .* must be a whole number of shares, at least 1/m);
+  assert.doesNotMatch(result.stdout, /MERGE GATE/);
+});
+
+test("a padded share is still the number it spells", (t) => {
+  const workerRoot = scratch(t);
+  const sink = join(workerRoot, "share-sink");
+  const fixture = gateHome(t, {
+    workerRoot,
+    verdict: `
+      printf '%s\n' "\${AGENTOS_GATE_HOST_SHARE:-unset}" > "$WORKER_SHARE_SINK"
+      printf 'MERGE GATE: PASS fixture\n'
+    `,
+  });
+  writeFileSync(join(workerRoot, "host-share"), "004\n");
+  const result = runGate(fixture.home, [fixture.oid], { WORKER_SHARE_SINK: sink });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(readFileSync(sink, "utf8").trim(), "4");
+});
+
+test("a share below the worker's capacity is refused, because those gates do not add up to one host", (t) => {
+  // The invariant the share exists to keep. Two slots each sizing for the whole
+  // machine is not a smaller gate, it is an over-subscribed box — the memory
+  // ceiling the sizing was introduced to respect — so the worker declines to
+  // run rather than sizing around it.
+  const workerRoot = scratch(t);
+  const fixture = gateHome(t, { workerRoot });
+  writeFileSync(join(workerRoot, "worker-capacity"), "2\n");
+  writeFileSync(join(workerRoot, "host-share"), "1\n");
+  const result = runGate(fixture.home, [fixture.oid]);
+  assert.equal(result.status, 76, result.stdout + result.stderr);
+  assert.match(result.stdout, /^GATE NOT RUN: host share 1 .* is below the worker capacity 2/m);
+  assert.doesNotMatch(result.stdout, /MERGE GATE/);
+});
+
+test("a worker whose capacity is raised after provisioning is sized by the new capacity", (t) => {
+  // provision.sh writes host-share only on a box that has already stated a
+  // capacity. The runbook provisions first and accepts capacity two later, so a
+  // share frozen at provisioning time would have handed each of the two gates
+  // the whole machine.
+  const provision = readFileSync(provisionPath, "utf8");
+  assert.match(
+    provision,
+    /elif \[ -n "\$default_host_share" \]; then/,
+    "provision.sh writes host-share without a capacity to derive it from",
+  );
+
+  const workerRoot = scratch(t);
+  const sink = join(workerRoot, "share-sink");
+  const fixture = gateHome(t, {
+    workerRoot,
+    verdict: `
+      printf '%s\n' "\${AGENTOS_GATE_HOST_SHARE:-unset}" > "$WORKER_SHARE_SINK"
+      printf 'MERGE GATE: PASS fixture\n'
+    `,
+  });
+  assert.equal(existsSync(join(workerRoot, "host-share")), false);
+  writeFileSync(join(workerRoot, "worker-capacity"), "2\n");
+  const result = runGate(fixture.home, [fixture.oid], { WORKER_SHARE_SINK: sink });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(readFileSync(sink, "utf8").trim(), "2");
+});
+
 // --- the bounded wait for a worker slot --------------------------------------
 
 // Slot one's lock, held by this fixture's own shell for as long as the gate it
@@ -1475,6 +1547,18 @@ test("a malformed SLOT_WAIT_MINUTES is refused rather than turned into an unboun
   const result = runGate(fixture.home, [fixture.oid], { SLOT_WAIT_MINUTES: "-1; id" });
   assert.equal(result.status, 2);
   assert.match(result.stderr, /SLOT_WAIT_MINUTES/);
+});
+
+test("a zero-padded SLOT_WAIT_MINUTES is a decimal number of minutes, not an octal crash", (t) => {
+  // `08` passed the digit check and then met bash arithmetic, which reads a
+  // leading zero as octal: the deadline expression aborted the script with
+  // exit 1 — the code lib.sh defines as FAIL — so worker state was reported as
+  // a judgement about a commit that was never gated.
+  const fixture = gateHome(t);
+  const result = runGate(fixture.home, [fixture.oid], { SLOT_WAIT_MINUTES: "08" });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /MERGE GATE: PASS fixture/);
+  assert.doesNotMatch(result.stderr, /value too great for base|unbound variable/);
 });
 
 // --- the orphaned-database reaper --------------------------------------------
@@ -1553,6 +1637,26 @@ test("the sweep reclaims a worktree whose gate is gone", (t) => {
   const result = runGate(fixture.home, [fixture.oid], { STALE_WORKTREE_MINUTES: "1" });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(existsSync(dir), false, "an abandoned worktree survived the sweep");
+});
+
+test("the run that reclaims a killed gate's worktree reclaims its database too", (t) => {
+  // Ordering, not two independent reclaims. The reaper removes a container only
+  // when its gate's worktree is gone, and the sweep is what makes that true, so
+  // running the reaper first meant the run that finally deleted the tree could
+  // not delete the matching container — a 3 GiB tmpfs waiting on a further
+  // dispatch an idle worker may never get.
+  const fixture = gateHome(t);
+  const dead = deadPid();
+  const dir = abandonedWorktree(fixture.home, dead);
+  const container = `agentos-merge-gate-${dead}`;
+  const state = dockerState(t, { [container]: { pid: dead, worktree: dir } });
+  const result = runGate(fixture.home, [fixture.oid], {
+    STALE_WORKTREE_MINUTES: "1",
+    DOCKER_FIXTURE_STATE: state,
+  });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.equal(existsSync(dir), false, "an abandoned worktree survived the sweep");
+  assert.equal(containerSurvives(state, container), false, "the killed gate's container outlived its worktree");
 });
 
 test("the sweep leaves a worktree whose gate is still running", (t) => {

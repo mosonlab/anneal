@@ -435,14 +435,22 @@ Removing the file returns the worker to one slot.
 
 `~/gate/host-share` is the other half of that decision and a different question:
 capacity is how many gates run at once, share is how much of the machine each
-one sizes itself for. `provision.sh` writes it with the worker's capacity as its
-default, which is what `run-gate.sh` used before the file existed, so an
-existing worker's sizing is unchanged. **A worker that shares its host with
-runners must set it to at least `2`**: `gate-self` runs one gate at a time
-beside sixteen runners, and at capacity one an unstated share handed that gate
-the whole machine. Any whole number of one or more is accepted, and `N`
-concurrent gates must still add up to one host — raise the share when the box is
-shared, not when a single gate feels slow.
+one sizes itself for. An absent file means the worker's capacity, which is what
+`run-gate.sh` used before the file existed, so an existing worker's sizing is
+unchanged and a capacity raised later still halves the machine by itself.
+`provision.sh` writes the file only on a worker that has already stated a
+capacity, and never overwrites one; on a fresh box it deliberately leaves the
+file absent rather than freezing a share the operator has not chosen.
+**A worker that shares its host with runners must set it to at least `2`**:
+`gate-self` runs one gate at a time beside sixteen runners, and at capacity one
+an unstated share handed that gate the whole machine.
+
+The share must be **at least the capacity**, because that is the arithmetic of
+`N` concurrent gates adding up to one host: `run-gate.sh` refuses a share below
+the capacity with `GATE NOT RUN` rather than over-subscribing the box, so
+`worker-capacity=2` with `host-share=1` never runs. Above that floor any whole
+number is accepted — raise the share when the box is shared, not when a single
+gate feels slow.
 
 **2. Push the exact gate inputs (local).** The first push creates
 `~/gate/<repo>/mirror.git` and installs `run-gate.sh` beside it.
@@ -494,7 +502,9 @@ lines in the PR.
 **5. Capacity-two acceptance.** This is required only for a host proposed for
 two slots. Use one fixed full-profile commit and a warm build cache. Record
 three single runs, then five rounds with two `remote-gate.sh` processes started
-together. Sample host CPU, memory availability and memory pressure during each
+together. Set `~/gate/host-share` to at least `2` for the acceptance and keep it
+there while the capacity is two — a share below the capacity is refused, and a
+share equal to it is what makes two overlapping gates add up to one host. Sample host CPU, memory availability and memory pressure during each
 round. Keep `worker-capacity=2` only when all ten overlapping gates pass, none
 times out or leaks a database/worktree, there is no OOM or sustained memory
 pressure, and the median two-gate batch finishes at least 15 percent sooner
@@ -581,7 +591,15 @@ the pid is gone and the worktree is gone, and logs the removal with both. It
 leaves alone — and says so — a container whose gate is still running, one whose
 worktree is still on disk, and one carrying no gate labels at all, because
 deleting the database out from under a running gate is the one failure this must
-never have. An unlabelled container is therefore yours to remove by hand:
+never have. An unlabelled container is therefore yours to remove by hand.
+
+The reaper runs on gate workers only, after the worktree sweep in the same run,
+so a container whose gate the kernel killed is removed by the run that reclaims
+its worktree. A gate that ran in the dispatcher's **local slot** is never
+reaped: it runs in the persistent checkout rather than a throwaway worktree, so
+the worktree the label names never disappears and the reaper — which only ever
+runs on a worker — never sees it. On the dispatching machine, remove such a
+container by hand with the same two commands, without the `ssh`:
 
 ```sh
 ssh primary-worker 'docker ps --filter name=agentos-merge-gate- --format "{{.Names}}\t{{.RunningFor}}"'
