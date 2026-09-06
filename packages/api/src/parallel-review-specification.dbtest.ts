@@ -470,7 +470,13 @@ test("an extended all-timeout episode broken by another transient parks on the o
   const parked = await db.run.findUniqueOrThrow({ where: { id: runId } });
   assert.equal(parked.status, RunStatus.FAILED);
   assert.match(parked.failureReason ?? "", /spec-transcription-unreadable/u);
-  assert.match(parked.failureReason ?? "", /last underlying error: proxy flap after the extension/u);
+  // The underlying error named is the transient that broke the extension, not
+  // the deadline hits before it; it carries the read's own retry-count detail.
+  assert.match(
+    parked.failureReason ?? "",
+    /last underlying error: after \d+ retries \(\d+ total attempts\); last failure: proxy flap after the extension/u,
+  );
+  assert.equal(/server deadline/u.test(parked.failureReason ?? ""), false);
   // The window named is the one the episode ran, not the budget it parked on.
   const [, elapsedMs, budgetMs] = /exhausted after (\d+)ms \(budget (\d+)ms\)/u
     .exec(parked.failureReason ?? "") ?? [];
