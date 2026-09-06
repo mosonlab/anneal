@@ -14,7 +14,7 @@ import { isSessionUnseen, sessionSeenKey } from "../lib/session-list";
 import { storage } from "../lib/storage";
 import { TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES } from "../lib/session-stream";
 import type { Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
-import { installFetchFunction } from "./dom-harness";
+import { installFetch, installFetchFunction } from "./dom-harness";
 
 // Radix chooses useLayoutEffect or useEffect when its module is first loaded.
 // Seed a browser global before importing Sessions so portaled hover-card content
@@ -381,18 +381,12 @@ test("a 404 from GET /sessions renders the standard error state", async () => {
   const dom = jsdom();
   const container = dom.window.document.querySelector("#root");
   assert.ok(container);
-  const fetchHarness = installFetchFunction(async (input) => {
-    const path = String(input);
-    if (path.includes("/projects")) {
-      return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify([{ id: "p1", name: "Demo" }]) } as unknown as Response;
-    }
-    if (path.includes("/sessions")) {
-      return new Response(JSON.stringify({ error: "Session list is gone" }), {
-        status: 404,
-        headers: new Headers({ "Content-Type": "application/json" }),
-      });
-    }
-    throw new Error(`unexpected fetch: ${path}`);
+  const fetchHarness = installFetch({
+    "/projects": [{ id: "p1", name: "Demo" }],
+    "GET /sessions": () => new Response(JSON.stringify({ error: "Session list is gone" }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" },
+    }),
   });
   const { ProjectProvider } = await import("../lib/project");
   const root = createRoot(container);
