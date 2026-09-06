@@ -616,6 +616,12 @@ test("sync rolls parked and not-yet-started v1 chains forward without changing t
   const refusedWhileActive = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
   assert.notEqual(refusedWhileActive.status, 0, refusedWhileActive.output);
   assert.match(refusedWhileActive.output, /tasks with active Runs or no chain identity/u);
+  // The operator has to find what to settle or archive, so the refusal names
+  // the blocking task rather than only counting it.
+  assert.ok(
+    refusedWhileActive.output.includes(`${activeTarget.id} (${activeTarget.name})`),
+    refusedWhileActive.output,
+  );
   await prisma.run.delete({ where: { id: activeRun.id } });
 
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
