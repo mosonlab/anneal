@@ -152,12 +152,40 @@ test("a mismatched daemon rechecks on its own interval, logs each state change o
   assert.match(infos[0]!, /contract mismatch cleared/u);
 });
 
+test("shutdown interrupts a real pending contract recheck", async () => {
+  const controller = new AbortController();
+  const started = performance.now();
+  const polling = pollClaims({
+    signal: controller.signal,
+    pollIntervalMs: 5_000,
+    contractRecheckMs: 60_000,
+    log: makeLog(makeRedactor(), { log: () => {}, warn: () => {}, error: () => {} }),
+    claim: async () => {
+      setImmediate(() => controller.abort());
+      return { kind: "contract-mismatch", executorVersion: 1, apiVersion: 2 };
+    },
+  });
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      polling,
+      new Promise<never>((_resolve, reject) => {
+        deadline = setTimeout(() => reject(new Error("shutdown did not interrupt the recheck")), 900);
+      }),
+    ]);
+    assert.ok(performance.now() - started < 1_000);
+  } finally {
+    clearTimeout(deadline);
+  }
+});
+
 test("a mismatched daemon process stays alive and still exits 0 on SIGTERM", async () => {
   // The regression this stands in front of is a *process* fact: awaiting an
   // abort listener alone left nothing keeping the event loop alive, so node
   // exited 13 within a second. Only a real child process can show the park.
   const here = fileURLToPath(new URL(".", import.meta.url));
   const scratch = mkdtempSync(join(tmpdir(), "merge-executor-park-"));
+  let child: ReturnType<typeof spawn> | undefined;
   try {
     const script = join(scratch, "park.mjs");
     writeFileSync(script, `
@@ -170,26 +198,49 @@ await pollClaims({
   signal: shutdown.signal,
   pollIntervalMs: 1000,
   contractRecheckMs: 50,
-  log: makeLog(makeRedactor(), { log: () => {}, warn: () => {}, error: () => {} }),
+  // The immediate runs after pollClaims has installed the real recheck timer.
+  log: makeLog(makeRedactor(), { log: () => {}, warn: () => {}, error: () => { setImmediate(() => process.stdout.write("READY\\n")); } }),
   claim: async () => ({ kind: "contract-mismatch", executorVersion: 1, apiVersion: 2 }),
 });
 `);
-    const child = spawn(
+    child = spawn(
       process.execPath,
       ["--conditions=development", "--import", import.meta.resolve("tsx"), script],
       { cwd: scratch, env: { PATH: process.env.PATH ?? "" }, stdio: ["ignore", "pipe", "pipe"] },
     );
     let stderr = "";
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
-    const exited = new Promise<number | null>((resolve) => { child.on("exit", (code) => resolve(code)); });
+    child.stderr!.setEncoding("utf8");
+    child.stderr!.on("data", (chunk: string) => { stderr += chunk; });
+    const running = child;
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
+      running.on("exit", (code, signal) => resolve({ code, signal }));
+    });
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(`child readiness timed out: ${stderr}`)), 10_000);
+      let stdout = "";
+      running.stdout!.setEncoding("utf8");
+      running.stdout!.on("data", (chunk: string) => {
+        stdout += chunk;
+        if (stdout.includes("READY\n")) {
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+      running.once("error", (error) => { clearTimeout(timeout); reject(error); });
+      running.once("exit", () => {
+        clearTimeout(timeout);
+        reject(new Error(`child exited before readiness: ${stderr}`));
+      });
+    });
 
     await new Promise<void>((resolve) => { setTimeout(resolve, 300); });
     assert.equal(child.exitCode, null, `child exited early: ${stderr}`);
+    assert.equal(child.signalCode, null, `child was signaled early: ${stderr}`);
 
     child.kill("SIGTERM");
-    assert.equal(await exited, 0, `child stderr was ${JSON.stringify(stderr)}`);
+    assert.deepEqual(await exited, { code: 0, signal: null }, `child stderr was ${JSON.stringify(stderr)}`);
   } finally {
+    child?.kill("SIGKILL");
     rmSync(scratch, { recursive: true, force: true });
   }
 });
