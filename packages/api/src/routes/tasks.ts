@@ -344,6 +344,9 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
     const toolEvents = metricsSessionIds.length === 0 ? [] : await db.sessionEvent.findMany({
       where: { sessionId: { in: metricsSessionIds }, type: { in: [...TOOL_METRIC_EVENT_TYPES] } },
       select: { id: true, sessionId: true, type: true, at: true, toolCallId: true, payload: true },
+      // Emission order, so a start and its completion inside the same
+      // millisecond still pair in the order the adapter reported them.
+      orderBy: [{ sessionId: "asc" }, { seq: "asc" }],
     });
     const toolEventsBySession = new Map<string, RunMetricsToolEvent[]>();
     for (const event of toolEvents) {
