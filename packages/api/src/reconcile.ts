@@ -1,9 +1,9 @@
 import {
   executionModeFor,
   isRegressionVerificationOutputKind,
+  leaseLossRefundDecision,
   lockTaskRow,
   openRun,
-  runBudgetCeiling,
   RunStatus,
   TaskStatus,
   type PrismaClient,
@@ -24,6 +24,7 @@ import {
   parseCompletionRejection,
 } from "./completion-rejection.js";
 import { handleRegressionCompletion, regressionVerdictForRun } from "./merge-tail-actions.js";
+import { leaseLossRetryDelayMs } from "./execution.js";
 import { openReclaimIntentCount } from "./workspace-reclaim.js";
 import { terminalizeRun } from "./run-terminal.js";
 
@@ -138,6 +139,7 @@ export const reconcileDatabaseRuns = async (
         stallTimeoutMin: true,
         maxRunsPerTask: true,
         budgetGrants: true,
+        leaseLossRefunds: true,
         headSha: true,
         session: { select: { id: true } },
         task: {
@@ -263,11 +265,18 @@ export const reconcileDatabaseRuns = async (
       // Losing a lease is an external failure: it buys an attempt, never spends one.
       // A lost lease refunds the already-authorized Run; it does not recompute
       // from a task budget that may have changed while the Run was in flight.
-      const budgetCeiling = runBudgetCeiling(run.maxRunsPerTask, 1);
-      // The same grant, recorded apart from the ceiling it produced, so the
-      // gates an operator reaches can still tell it from the configured budget
-      // after that budget changes. See `runBudgetCeiling`.
-      const budgetGrants = run.budgetGrants + 1;
+      //
+      // Bounded, though. `openRun` refuses the replacement once this task's
+      // platform refunds are spent, and a refund nobody may use is not recorded
+      // here either: leaving the grant on the LOST row would hand the operator's
+      // own retry the very attempt the bound just refused, and the operator's
+      // way out is to raise `maxSessionsPerTask` deliberately.
+      // The candidate predates the Task lock. A newer Run must not leave this
+      // older row holding a grant that birth will reject as source-run-stale.
+      const latest = run.taskId ? await tx.run.findFirst({
+        where: { taskId: run.taskId }, orderBy: { runNumber: "desc" }, select: { id: true },
+      }) : null;
+      const { refundAvailable, maxRunsPerTask: budgetCeiling, budgetGrants } = leaseLossRefundDecision(run, latest?.id ?? null);
       const rejectionFailureReason = completionRejection?.parsed.status === "ok"
         ? `Mechanical completion rejected with HTTP ${completionRejection.parsed.rejection.status}: ${completionRejection.parsed.rejection.responseBody}`
         : completionRejection?.parsed.status === "malformed"
@@ -331,13 +340,16 @@ export const reconcileDatabaseRuns = async (
         });
         continue;
       }
-      if (run.runNumber < budgetCeiling) {
+      if (!refundAvailable || run.runNumber < budgetCeiling) {
         const opened = await openRun(tx, run.taskId, {
           kind: "retry-after-lease-loss",
           sourceRunId: run.id,
           sourceMaxRunsPerTask: run.maxRunsPerTask,
           sourceBudgetGrants: run.budgetGrants,
-          readyAt: now,
+          // Spaced by the refunds already granted, not queued at `now`: a host
+          // that keeps losing runs is given time to come back before the next
+          // attempt is spent on it.
+          readyAt: new Date(now.getTime() + leaseLossRetryDelayMs(run.leaseLossRefunds)),
         });
         if (opened.ok) {
           await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DOING, failureReason: null } });
@@ -351,7 +363,14 @@ export const reconcileDatabaseRuns = async (
             data: { status: TaskStatus.REVIEW, failureReason: `Lease-loss retry refused: ${opened.refusal.message}` },
           });
           await tx.taskActivity.create({
-            data: { taskId: run.taskId, actorType: "control-plane", body: `Run ${run.runNumber} lost; automatic retry refused: ${opened.refusal.message}` },
+            data: {
+              taskId: run.taskId,
+              actorType: "control-plane",
+              body: `Run ${run.runNumber} lost; automatic retry refused: ${opened.refusal.message}`,
+              // Named, not merely prose: `lease-loss-refunds-exhausted` is the
+              // reason an operator filters this REVIEW by.
+              metadata: { refusal: opened.refusal.code },
+            },
           });
           await tx.inboxMessage.create({
             data: {

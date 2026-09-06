@@ -1,12 +1,12 @@
 import { contains, normalizeRelPath } from "./paths.js";
 
-export type FileOperation = "list" | "stat" | "read" | "write" | "mkdir" | "delete";
+export type FileOperation = "list" | "stat" | "read" | "write" | "delete";
 export type FileCapability = "canRead" | "canWrite" | "canDelete";
 export type GrantLike = { folderPath: string; canRead: boolean; canWrite: boolean; canDelete: boolean };
 
 export const requiredCapability = (operation: FileOperation): FileCapability => {
   if (operation === "list" || operation === "stat" || operation === "read") return "canRead";
-  if (operation === "write" || operation === "mkdir") return "canWrite";
+  if (operation === "write") return "canWrite";
   return "canDelete";
 };
 
