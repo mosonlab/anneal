@@ -6,66 +6,13 @@ installation sequence is
 
 ## Start locally
 
-The verified Developer Preview release path targets an Apple Silicon Mac or
-Linux (Ubuntu 24.04 LTS, x86_64). macOS on Intel is expected to work but is
-not yet release-verified; Windows is unsupported. For this release, use Node.js
-`22.17.0` from `.nvmrc`.
-Installation enforces Node.js satisfying `^20.19.0 || ^22.13.0 || >=24`, the
-range shared by the locked toolchain; Node 22.12.x and 23 are refused. You also
-need
+Follow the [Developer Preview quickstart](release/developer-preview.md) for its
+prerequisites and complete, literal local installation sequence.
 
-- npm 10.9.2 or newer;
-- Docker with Docker Compose, for the PostgreSQL service defined here;
-- Git;
-- a read-only GitHub token for `GITHUB_READ_TOKEN`; every API process requires
-  it at startup, independently of whether Direct or Full Assurance is enabled;
-- the official **Codex CLI, already installed and already signed in**, under the
-  same user account that will run the Anneal runner;
-- the GitHub CLI (`gh`), installed and authenticated under that account, for
-  every GitHub-backed run configured to open a pull request. If `gh` cannot
-  record an open pull request, the run fails while preserving its already-pushed
-  branch.
-
-Codex is the only provider CLI this preview requires. The starter agent it
-installs runs on Codex; Claude Code and Pi are optional,
-and a machine without them is a complete installation. Anneal never logs you
-into a provider and never reads a credential store.
-
-```sh
-git clone https://github.com/mosonlab/anneal.git
-cd anneal
-git checkout v0.8.0
-npm ci
-printf 'GitHub read token: '
-IFS= read -r -s GITHUB_READ_TOKEN
-printf '\n'
-export GITHUB_READ_TOKEN
-npm run setup:local
-unset GITHUB_READ_TOKEN
-npm run build
-docker compose up -d --wait --wait-timeout 60 postgres
-npm run db:migrate:release -- --fresh
-```
-
-This is the release installation path, not a contributor bootstrap. Follow the
-corrected, literal sequence in
-[`docs/release/developer-preview.md`](release/developer-preview.md),
-including its filesystem, port, runner identity and repository preflights. Then
-start `npm run dev:api`, `npm run dev:runner` and `npm run dev:web`, in that
-order, in three terminals, and open `http://127.0.0.1:5173`.
-
-Once the installation is running, follow [Add a project](runbooks/add-a-project.md)
-to add a GitHub repository and run A1's pull-request workflow.
-
-`npm ci` must be allowed to run the lockfile's lifecycle scripts — this
-repository's `postinstall` generates the Prisma client — so `--ignore-scripts`
-is not supported. The Inbox service is optional. No launchd definition is
-shipped for the foreground Developer Preview sequence; remote access and this
-repository's internal task-chain templates are also outside that sequence. A
-separate self-hosted merge executor instead has a maintainer-verified Linux
-systemd profile and an unverified macOS LaunchDaemon profile in the public
-[`docs/runbooks/merge-executor.md`](runbooks/merge-executor.md) runbook.
-The authoritative classifications are in the support matrix.
+The sections below cover the installation notes that are unique to this
+document: experimental second-machine runners, repository mirror pre-seeding,
+project onboarding, advanced delivery infrastructure, the templates release
+demo, and verification.
 
 ## Runners on a second machine (experimental)
 
@@ -162,7 +109,9 @@ isolated `@anneal/merge-executor` service for the mechanical merge. The public
 [`merge-executor`](runbooks/merge-executor.md) runbooks document those two
 services. Anneal bundles no host, credential, provider account or GitHub App,
 and a missing prerequisite stops the chain rather than authorizing a weaker
-merge.
+merge. The merge executor has a
+maintainer-verified Linux systemd profile and an unverified macOS LaunchDaemon profile;
+the support matrix is authoritative.
 
 When the control plane and runners are on separate hosts, install the second,
 runner-only host with `AGENTOS_DEPLOY_ROLE=runner`, a nonempty host-specific
