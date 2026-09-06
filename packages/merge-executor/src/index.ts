@@ -233,26 +233,32 @@ export const runClaim = async (
   }
 };
 
+/**
+ * One claim attempt. A contract mismatch is *reported*, not logged, here: the
+ * poll loop rechecks on an interval and only it can tell a newly entered
+ * mismatch from the same one observed a minute later.
+ */
+export type ClaimOnceResult =
+  | { kind: "idle" }
+  | { kind: "handled" }
+  | { kind: "contract-mismatch"; executorVersion: number | null; apiVersion: number };
+
 export const claimOnce = async (
   config: ExecutorConfig,
   privateKeyFile: string,
   log: ExecutorLog,
   fetchImpl: typeof fetch = fetch,
   runClaimImpl: typeof runClaim = runClaim,
-): Promise<"idle" | "handled" | "contract-mismatch"> => {
+): Promise<ClaimOnceResult> => {
   const agentos = makeAgentOsClient(config, fetchImpl);
   let claimed: MechanicalClaim | null;
   try {
     claimed = await agentos.claim();
   } catch (error: unknown) {
     if (!(error instanceof MechanicalContractMismatchError)) throw error;
-    log.error("mechanical completion contract mismatch", {
-      executorVersion: error.executorVersion,
-      apiVersion: error.apiVersion,
-    });
-    return "contract-mismatch";
+    return { kind: "contract-mismatch", executorVersion: error.executorVersion, apiVersion: error.apiVersion };
   }
-  if (!claimed) return "idle";
+  if (!claimed) return { kind: "idle" };
   if (claimed.executionMode !== "mechanical") {
     // Symmetric to the ordinary runner's refusal: an allowlisted runner id
     // should be offered nothing else, so being handed an agent run means the
@@ -262,42 +268,68 @@ export const claimOnce = async (
       { succeeded: false, outcome: null, failureReason: "the merge executor does not execute model runs" },
       makeRedactor(),
     );
-    return "handled";
+    return { kind: "handled" };
   }
   await runClaimImpl(config, privateKeyFile, claimed, log, fetchImpl);
-  return "handled";
+  return { kind: "handled" };
 };
 
-type ClaimOnceResult = Awaited<ReturnType<typeof claimOnce>>;
-
-const waitForAbort = async (signal: AbortSignal): Promise<void> => {
+/**
+ * A `setTimeout` wait that a shutdown cuts short. The timer is what keeps the
+ * event loop alive: a promise that only registers an `abort` listener settles
+ * nothing and node exits 13 ("Detected unsettled top-level await"), which is
+ * exactly how the documented mismatch "park" used to become a restart loop.
+ */
+const sleepUnlessAborted = async (ms: number, signal: AbortSignal): Promise<void> => {
   if (signal.aborted) return;
   await new Promise<void>((resolve) => {
-    signal.addEventListener("abort", () => resolve(), { once: true });
+    const finish = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, ms);
+    signal.addEventListener("abort", finish, { once: true });
   });
 };
 
 /**
- * Poll until shutdown. A contract mismatch parks the daemon without issuing
- * another claim, so unconditional service-manager restart policies cannot
- * turn incompatibility into a slower claim loop.
+ * Poll until shutdown. A contract mismatch parks the daemon *alive*: it stops
+ * claiming at the poll interval and re-checks once per recheck interval, so an
+ * incompatible executor neither hammers the API nor dies into a service-manager
+ * restart loop, and it resumes claiming by itself when a deploy or rollback on
+ * either side makes the versions agree again. Logging follows the state, not
+ * the attempt: one error on entering the mismatch, one line on leaving it.
  */
 export const pollClaims = async (input: {
   signal: AbortSignal;
   pollIntervalMs: number;
+  contractRecheckMs: number;
   log: ExecutorLog;
   claim: () => Promise<ClaimOnceResult>;
   sleep?: (ms: number) => Promise<void>;
 }): Promise<void> => {
-  const sleepImpl = input.sleep ?? sleep;
+  const sleepImpl = input.sleep ?? ((ms: number) => sleepUnlessAborted(ms, input.signal));
+  let mismatched = false;
   while (!input.signal.aborted) {
     try {
       const result = await input.claim();
-      if (result === "contract-mismatch") {
-        await waitForAbort(input.signal);
-        return;
+      if (result.kind === "contract-mismatch") {
+        if (!mismatched) {
+          mismatched = true;
+          input.log.error("mechanical completion contract mismatch", {
+            executorVersion: result.executorVersion,
+            apiVersion: result.apiVersion,
+          });
+        }
+        await sleepImpl(input.contractRecheckMs);
+        continue;
       }
-      if (result === "idle") await sleepImpl(input.pollIntervalMs);
+      if (mismatched) {
+        mismatched = false;
+        input.log.info("contract mismatch cleared");
+      }
+      if (result.kind === "idle") await sleepImpl(input.pollIntervalMs);
     } catch (error: unknown) {
       input.log.error("claim loop error", { error });
       await sleepImpl(input.pollIntervalMs);
@@ -327,6 +359,7 @@ export const main = async (): Promise<void> => {
   await pollClaims({
     signal: shutdown.signal,
     pollIntervalMs: config.pollIntervalMs,
+    contractRecheckMs: config.contractRecheckMs,
     log,
     claim: () => claimOnce(config, gate.privateKeyFile, log),
   });
