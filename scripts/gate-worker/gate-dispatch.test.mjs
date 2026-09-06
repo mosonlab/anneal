@@ -203,6 +203,8 @@ test("busy and broken are different return values, not different messages", (t) 
 test("sixteen concurrent claimers on one slot produce exactly one holder", (t) => {
   const root = slotRoot(t);
   const winners = join(root, "winners");
+  const attempts = join(root, "attempts");
+  const release = join(root, "release");
   // Each claimer appends only if it took the slot. A single `>>` of a short
   // line is atomic enough for a count, and the count is the whole assertion:
   // the old shape produced more than one here.
@@ -210,11 +212,19 @@ test("sixteen concurrent claimers on one slot produce exactly one holder", (t) =
   // leaves a lock naming a dead pid, which the next claimer is *right* to
   // reclaim — that is a lock working, not a lock failing, and a fixture that
   // does not hold the slot open would be measuring the wrong thing.
+  // How long it holds is therefore a condition, not a duration: every claimer
+  // records that it tried, and the winner holds until the parent has seen all
+  // sixteen records. A fixed hold instead races the last claimer's `bash` start,
+  // and on the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s) the
+  // rival that starts late is exactly the one that finds a dead pid.
   const claimer = `
     . "${libPath}"
     if gate_slot_try "${root}" local; then
       printf '%s\\n' "$$" >> "${winners}"
-      sleep 2
+      printf 'tried\\n' >> "${attempts}"
+      while [ ! -f "${release}" ]; do sleep 0.05; done
+    else
+      printf 'tried\\n' >> "${attempts}"
     fi
   `;
   const result = spawnSync(
@@ -223,9 +233,17 @@ test("sixteen concurrent claimers on one slot produce exactly one holder", (t) =
       "-c",
       `set -uo pipefail
        : > "${winners}"
+       : > "${attempts}"
        for i in $(seq 1 16); do
          bash -c '${claimer.replace(/'/g, "'\\''")}' &
        done
+       # Bounded: if a claimer never records an attempt the hold is released
+       # anyway and the count below fails, rather than the suite hanging.
+       for _ in $(seq 1 600); do
+         [ "$(wc -l < "${attempts}" | tr -d ' ')" -ge 16 ] && break
+         sleep 0.1
+       done
+       : > "${release}"
        wait`,
     ],
     { encoding: "utf8" },
@@ -238,15 +256,26 @@ test("sixteen concurrent claimers on one slot produce exactly one holder", (t) =
 test("eight concurrent claimers across two slots produce exactly two holders", (t) => {
   const root = slotRoot(t);
   const winners = join(root, "winners");
+  const attempts = join(root, "attempts");
+  const release = join(root, "release");
+  // Same handshake as the single-slot case: both winners hold their slot until
+  // every claimer has recorded an attempt, so a claimer that starts late on
+  // the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s) still meets a
+  // live holder rather than a lock naming a dead pid.
   const claimer = `
     . "${libPath}"
+    held=""
     for slot in remote-1 local; do
       if gate_slot_try "${root}" "$slot"; then
         printf '%s %s\\n' "$slot" "$$" >> "${winners}"
-        sleep 2
+        held="$slot"
         break
       fi
     done
+    printf 'tried\\n' >> "${attempts}"
+    if [ -n "$held" ]; then
+      while [ ! -f "${release}" ]; do sleep 0.05; done
+    fi
   `;
   const result = spawnSync(
     "bash",
@@ -254,9 +283,17 @@ test("eight concurrent claimers across two slots produce exactly two holders", (
       "-c",
       `set -uo pipefail
        : > "${winners}"
+       : > "${attempts}"
        for i in $(seq 1 8); do
          bash -c '${claimer.replace(/'/g, "'\\''")}' &
        done
+       # Bounded: a claimer that never records an attempt releases the holders
+       # anyway and fails the count below instead of hanging the suite.
+       for _ in $(seq 1 600); do
+         [ "$(wc -l < "${attempts}" | tr -d ' ')" -ge 8 ] && break
+         sleep 0.1
+       done
+       : > "${release}"
        wait`,
     ],
     { encoding: "utf8" },
@@ -285,8 +322,15 @@ test("a killed holder's lock is released by the signal traps", (t) => {
        sleep 20 &
        wait $!`,
     ],
-    { encoding: "utf8", timeout: 3000, killSignal: "SIGTERM" },
+    // spawnSync's own timeout is the kill, so this budget is not a deadline
+    // under test: it only has to outlast bash sourcing lib.sh and taking the
+    // slot. Bounded because the kill is what exercises the trap, and sized for
+    // the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s), not for an idle host.
+    { encoding: "utf8", timeout: 15_000, killSignal: "SIGTERM" },
   );
+  // The holder must have taken the slot before the timeout killed it, or a
+  // released lock would prove nothing about the traps.
+  assert.equal(existsSync(started), true, "the holder never took the slot before the kill");
   // spawnSync's own timeout is the kill: the point is that the trap ran.
   assert.ok(holder.signal === "SIGTERM" || holder.status !== null);
   const result = runBash(`test ! -e "${root}/local.slot"`);
@@ -403,7 +447,10 @@ const startDispatch = (repo, cache, args, env = {}, options = {}) => {
   return run;
 };
 
-const waitFor = async (condition, message, timeoutMs = 10_000) => {
+// Bounded so a dispatcher that never reaches the condition fails the named
+// assertion rather than hanging the suite, and sized for
+// the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s), not for an idle host.
+const waitFor = async (condition, message, timeoutMs = 60_000) => {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (condition()) return;

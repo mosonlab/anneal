@@ -293,11 +293,23 @@ test("PARALLEL-DURATION charges each member for its own time, not the wait befor
     `"a group" "slow" sh -c 'sleep 3' :: "quick" sh -c 'true'`,
   );
   assert.equal(run.status, 0);
-  const quick = run.report.find((line) => line.includes("quick"));
-  assert.ok(quick, "the quick member should appear in the report");
-  const seconds = Number(/(\d+)s$/.exec(quick.trim())?.[1]);
-  assert.ok(Number.isInteger(seconds), `expected a duration, got ${quick}`);
-  assert.ok(seconds <= 1, `the quick member should not be charged for the slow one: ${quick}`);
+  const durationOf = (name) => {
+    const line = run.report.find((entry) => entry.includes(name));
+    assert.ok(line, `the ${name} member should appear in the report`);
+    const seconds = Number(/(\d+)s$/u.exec(line.trim())?.[1]);
+    assert.ok(Number.isInteger(seconds), `expected a duration, got ${line}`);
+    return { line, seconds };
+  };
+  const quick = durationOf("quick");
+  const slow = durationOf("slow");
+  // The property is relative, not absolute: the quick member must be charged
+  // strictly less than the member it waited behind. A wall-clock ceiling would
+  // instead charge it for its own `sh` start-up, which on
+  // the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s) is not the parent's wait this case is about.
+  assert.ok(
+    quick.seconds < slow.seconds,
+    `the quick member should not be charged for the slow one: ${quick.line} / ${slow.line}`,
+  );
 });
 
 test("PARALLEL-STOPPED a member killed from outside is not a FAIL", () => {
@@ -521,7 +533,11 @@ const interruptGroup = async (members, observed = "") => {
     });
     harness.stderr.on("data", () => {});
 
-    const deadline = Date.now() + 15_000;
+    // Waits for a spawned bash harness to reach the member and for the member to
+    // publish its pid. Bounded so a harness that never gets there fails the
+    // assertion below rather than hanging, and sized for
+    // the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s), not for an idle host.
+    const deadline = Date.now() + 60_000;
     let memberPid = "";
     while (Date.now() < deadline) {
       try {
@@ -595,7 +611,10 @@ test("PARALLEL-INTERRUPT stops members still running before the gate tears down"
 
     // The member has to have reported its own pid before the signal, or the
     // test would pass by racing rather than by stopping anything.
-    const deadline = Date.now() + 15_000;
+    // Bounded so a harness that never starts the member fails the assertion
+    // below rather than hanging, and sized for
+    // the loaded gate worker (load1 20-55 observed, where a node or bash+git start alone can exceed 10s), not for an idle host.
+    const deadline = Date.now() + 60_000;
     let memberPid = "";
     while (Date.now() < deadline) {
       try {
