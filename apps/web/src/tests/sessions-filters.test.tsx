@@ -279,12 +279,15 @@ test("Load more pages through the filtered history under the same filters", asyn
 
     const more = [...page.container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Load more");
     assert.ok(more, page.container.innerHTML);
+    const beforeClick = listRequests(page).length;
     await act(async () => { more.dispatchEvent(new page.dom.window.MouseEvent("click", { bubbles: true, button: 0 })); });
     await page.settle();
 
-    const paged = listRequests(page).at(-1);
-    assert.ok(paged?.get("before"), "the second page carries the cursor");
-    assert.equal(paged?.get("agentId"), "agent-match", "and the same filter");
+    // The head keeps polling under the same filters, so the paging request is
+    // named by its cursor rather than by being the last one on the wire.
+    const paged = listRequests(page).slice(beforeClick).find((query) => query.get("before") !== null);
+    assert.ok(paged, "the second page carries the cursor");
+    assert.equal(paged.get("agentId"), "agent-match", "and the same filter");
     assert.ok(rowText(page).some((text) => text.includes("page-two-0")), "the older page is appended");
     assert.equal(rowText(page).some((text) => text.includes("other-agent")), false);
   } finally {

@@ -173,9 +173,16 @@ export const installFetch = (routes: PageRoutes): FetchHarness => {
     requests,
     settle: async () => {
       let previousActivity: number | null = null;
+      let quiet = 0;
       for (let guard = 0; guard < 100; guard += 1) {
-        await act(async () => { await Promise.resolve(); });
-        if (activity === previousActivity) return;
+        // Turns of the task queue, not just a microtask drain: jsdom delivers
+        // `hashchange` from a queued task and React schedules a render off one,
+        // so work started by a click is still ahead of any number of resolved
+        // promises. Quiet is only quiet once it holds across two of them.
+        await act(async () => { await new Promise((resolve) => { setTimeout(resolve, 0); }); });
+        await act(async () => { await new Promise((resolve) => { setImmediate(resolve); }); });
+        quiet = activity === previousActivity ? quiet + 1 : 0;
+        if (quiet === 2) return;
         previousActivity = activity;
       }
       assert.fail("fetch did not become quiet after 100 observed state changes");
