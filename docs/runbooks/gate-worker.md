@@ -137,11 +137,19 @@ AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" AGENTOS_GATE_SERVER=pr
   local checkout may be detached or single-branch; its incomplete ref namespace
   is never mirrored and cannot delete worker refs.
 - If the primary is offline, its mirror push fails, its SSH connection drops,
-  or both of its slots are busy, the fallback receives the same frozen candidate
-  and baseline. A real `PASS`, `FAIL`, or `NOT AUTHORITATIVE` result is final;
+  or no usable primary slot can accept the gate because a primary slot is
+  unavailable, the fallback receives the same frozen candidate and baseline
+  immediately. A real `PASS`, `FAIL`, or `NOT AUTHORITATIVE` result is final;
   only absence of a verdict falls through to another machine. SSH connection
-  setup is bounded at 10 seconds, and a dead established connection is detected
-  by keepalives instead of waiting on the operating-system TCP timeout.
+  setup is bounded at 10 seconds, and a dead established connection is
+  detected by keepalives instead of waiting on the operating-system TCP
+  timeout.
+- When every primary slot is healthy but busy, the dispatcher waits for
+  `GATE_DISPATCH_FALLBACK_AFTER_MINUTES` minutes before trying the fallback
+  (default `6`; it accepts a non-negative integer, and `0` tries the fallback
+  immediately). It keeps polling the primary during that grace period, so a
+  primary slot that frees up handles the gate before the slower fallback is
+  used. A broken or unavailable primary slot does not count as busy.
 - All usable slots busy: the dispatcher blocks and re-polls (default every 30s,
   for 60 minutes — `GATE_DISPATCH_POLL_SECONDS`,
   `GATE_DISPATCH_TIMEOUT_MINUTES`).
@@ -318,7 +326,11 @@ Each worker needs an SSH-reachable Ubuntu account that can `sudo`, plus a
 default destination. Configure `AGENTOS_GATE_SERVER` for one worker, configure
 `AGENTOS_GATE_PRIMARY_SERVER` and optionally
 `AGENTOS_GATE_FALLBACK_SERVER` for a two-host topology, or pass
-`--server <alias>` for one invocation.
+`--server <alias>` for one invocation. In two-host mode, a healthy primary
+whose slots are all busy gets a six-minute fallback grace period by default;
+set `GATE_DISPATCH_FALLBACK_AFTER_MINUTES` to a non-negative integer to change
+it, or to `0` for the immediate fallback behavior. An unavailable primary is
+not counted as busy, so its fallback remains immediate.
 
 Agent sessions receive a single operator-selected worker when their runner
 daemon is configured with `RUNNER_GATE_SERVER=<ssh-alias>`. The runner validates
