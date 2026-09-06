@@ -9,6 +9,9 @@ installation sequence is
 Follow the [Developer Preview quickstart](release/developer-preview.md) for its
 prerequisites and complete, literal local installation sequence.
 
+Once the installation is running, follow [Add a project](runbooks/add-a-project.md)
+to add a GitHub repository and run A1's pull-request workflow.
+
 The sections below cover the installation notes that are unique to this
 document: experimental second-machine runners, repository mirror pre-seeding,
 project onboarding, advanced delivery infrastructure, the templates release
