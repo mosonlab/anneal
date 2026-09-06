@@ -188,9 +188,14 @@ test("a mismatched daemon process stays alive and still exits 0 on SIGTERM", asy
   let child: ReturnType<typeof spawn> | undefined;
   try {
     const script = join(scratch, "park.mjs");
+    // `BOOT` is written before the daemon's module graph is imported, so a
+    // readiness failure says which half was slow: no `BOOT` is node + the tsx
+    // loader still starting on the host, `BOOT` without `READY` is this
+    // package's own import or claim loop.
     writeFileSync(script, `
-import { pollClaims } from ${JSON.stringify(pathToFileURL(join(here, "index.ts")).href)};
-import { makeLog, makeRedactor } from ${JSON.stringify(pathToFileURL(join(here, "redaction.ts")).href)};
+process.stdout.write("BOOT\\n");
+const { pollClaims } = await import(${JSON.stringify(pathToFileURL(join(here, "index.ts")).href)});
+const { makeLog, makeRedactor } = await import(${JSON.stringify(pathToFileURL(join(here, "redaction.ts")).href)});
 
 const shutdown = new AbortController();
 process.on("SIGTERM", () => { shutdown.abort(); });
@@ -206,7 +211,17 @@ await pollClaims({
     child = spawn(
       process.execPath,
       ["--conditions=development", "--import", import.meta.resolve("tsx"), script],
-      { cwd: scratch, env: { PATH: process.env.PATH ?? "" }, stdio: ["ignore", "pipe", "pipe"] },
+      // TMPDIR is this test's own scratch directory so the child's startup does
+      // not depend on the host's history. `tsx` keeps its transform cache under
+      // `os.tmpdir()`, indexes that whole directory with a synchronous
+      // `readdirSync` before it transforms anything, and then sweeps expired
+      // entries; a host that has run gates for days accumulates them there,
+      // because entries live about a week and every gate worktree path is a
+      // fresh key. Measured at 60k entries that scan costs about 100ms, so it
+      // is a contributor rather than a proven whole cause of the readiness
+      // timeout seen on a gate worker — but a private cache is empty, and the
+      // child's startup is then bounded by this repository alone.
+      { cwd: scratch, env: { PATH: process.env.PATH ?? "", TMPDIR: scratch }, stdio: ["ignore", "pipe", "pipe"] },
     );
     let stderr = "";
     child.stderr!.setEncoding("utf8");
@@ -215,9 +230,16 @@ await pollClaims({
     const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
       running.on("exit", (code, signal) => resolve({ code, signal }));
     });
+    // Reaching readiness is a cold node + tsx + import-graph start on whatever
+    // host runs the gate, and this test asserts the park, never a startup
+    // latency. The budget is therefore generous rather than tuned: it exists
+    // only so a child that never starts fails with its output instead of
+    // hanging the suite.
+    let stdout = "";
     await new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error(`child readiness timed out: ${stderr}`)), 10_000);
-      let stdout = "";
+      const timeout = setTimeout(() => reject(new Error(
+        `child readiness timed out ${stdout.includes("BOOT\n") ? "while importing the daemon" : "before node reached the script"}; stdout was ${JSON.stringify(stdout)} and stderr was ${JSON.stringify(stderr)}`,
+      )), 60_000);
       running.stdout!.setEncoding("utf8");
       running.stdout!.on("data", (chunk: string) => {
         stdout += chunk;

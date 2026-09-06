@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { SESSION_STATUS_EXECUTION_STATUSES } from "@anneal/db/session-filter-contract";
+
 import { storage } from "../lib/storage";
 import type { Session, SessionExecutionStatus } from "../lib/types";
 import {
-  ALL_SESSION_FILTER, filterAndGroupSessions, groupSessionsByDay, isSessionUnseen, localDayKey, sessionAgentOptions,
-  markSessionOpened, readSessionSeenState, sessionFinishTimestamp,
-  sessionSeenKey, sessionStatusMatches, sessionTimestamp,
+  ALL_SESSION_FILTER, EMPTY_SESSION_SELECTION, groupSessionsByDay, isLiveStatus, isSessionUnseen, localDayKey,
+  markSessionOpened, readSessionSeenState, readSessionSelection, sessionAgentOptions, sessionFinishTimestamp,
+  sessionListPath, sessionRangeWindow, sessionSeenKey, sessionSelectionFilters, sessionSelectionSearch,
+  sessionsFilterHref, sessionTimestamp, type SessionListSelection,
 } from "../lib/session-list";
 
 const atLocalDay = (offset: number, hour: number): string => {
@@ -147,21 +150,17 @@ test("seen state works through the storage wrapper's degraded path", () => {
   }
 });
 
-test("status filters map each lifecycle bucket without overlap", () => {
+test("the live bucket is read from the shared mapping, not restated here", () => {
   const statuses: SessionExecutionStatus[] = [
     "REQUESTED", "PROVISIONING", "RUNNING", "WAITING_INBOX", "SUCCEEDED", "FAILED", "TIMED_OUT", "LOST", "CANCELLED",
   ];
-  const expected = {
-    live: ["REQUESTED", "PROVISIONING", "RUNNING", "WAITING_INBOX"],
-    done: ["SUCCEEDED"],
-    failed: ["FAILED", "TIMED_OUT", "LOST"],
-    cancelled: ["CANCELLED"],
-  } as const;
-
-  for (const [bucket, matching] of Object.entries(expected)) {
-    for (const status of statuses) assert.equal(sessionStatusMatches(status, bucket as keyof typeof expected), matching.includes(status as never), `${bucket}/${status}`);
+  for (const status of statuses) {
+    assert.equal(
+      isLiveStatus(status),
+      SESSION_STATUS_EXECUTION_STATUSES.live.includes(status),
+      status,
+    );
   }
-  for (const status of statuses) assert.equal(sessionStatusMatches(status, ALL_SESSION_FILTER), true, `all/${status}`);
 });
 
 test("agent options are distinct, title-labelled, sorted, and include All", () => {
@@ -172,7 +171,7 @@ test("agent options are distinct, title-labelled, sorted, and include All", () =
     { ...row("c", atLocalDay(0, 11)), agentId: "agent-z", agent: { id: "agent-z", title: "Zed" } },
   ] as Session[];
 
-  assert.deepEqual(sessionAgentOptions(sessions, "All"), [
+  assert.deepEqual(sessionAgentOptions(sessions, [], "All"), [
     { value: ALL_SESSION_FILTER, label: "All" },
     { value: "agent-a", label: "Ada" },
     { value: "agent-1", label: "agent-1" },
@@ -180,16 +179,119 @@ test("agent options are distinct, title-labelled, sorted, and include All", () =
   ]);
 });
 
-test("filter composition happens before grouping and the day cap", () => {
-  const today = Array.from({ length: 7 }, (_, index) => ({
-    ...row(`match-${index}`, atLocalDay(0, 8 + index)),
-    agentId: index < 6 ? "agent-match" : "agent-other",
-  })) as Session[];
-  const groups = filterAndGroupSessions(today, { agentId: "agent-match", status: ALL_SESSION_FILTER });
+test("agent options keep a roster Agent that no loaded row names", () => {
+  const sessions = [{ ...row("a", atLocalDay(0, 9)), agentId: "agent-z", agent: { id: "agent-z", title: "Zed" } }] as Session[];
+  const roster = [{ id: "agent-a", title: "Ada" }, { id: "agent-z", title: "Zed" }];
 
-  assert.equal(groups.length, 1);
-  assert.equal(groups[0]?.sessions.length, 6, "heading count sees matching rows only");
-  assert.deepEqual(groups[0]?.sessions.slice(0, 5).map((session) => session.id), [
-    "match-5", "match-4", "match-3", "match-2", "match-1",
-  ], "the five-row cap is applied after filtering");
+  // Narrowing to one Agent must not leave that Agent as the only choice left,
+  // and an archived Agent that still owns history must not disappear either.
+  assert.deepEqual(sessionAgentOptions(sessions, roster, "All"), [
+    { value: ALL_SESSION_FILTER, label: "All" },
+    { value: "agent-a", label: "Ada" },
+    { value: "agent-z", label: "Zed" },
+  ]);
+  assert.deepEqual(sessionAgentOptions(sessions, [{ id: "agent-a", title: "Ada" }], "All").map((option) => option.value), [
+    ALL_SESSION_FILTER, "agent-a", "agent-z",
+  ]);
+});
+
+/* ------------------------------------------------------------- the filters */
+
+const selection = (overrides: Partial<SessionListSelection> = {}): SessionListSelection =>
+  ({ ...EMPTY_SESSION_SELECTION, ...overrides });
+
+test("a hash query round-trips through the selection, preserving invalid values", () => {
+  const search = "status=failed&agentId=agent-1&runner=CODEX&taskId=task-1&chainId=chain-1&q=login&range=custom&since=2026-08-01&until=2026-08-03";
+  const parsed = readSessionSelection(new URLSearchParams(search));
+  assert.deepEqual(parsed, selection({
+    status: "failed", agentId: "agent-1", runner: "CODEX", taskId: "task-1", chainId: "chain-1",
+    q: "login", range: "custom", since: "2026-08-01", until: "2026-08-03",
+  }));
+  assert.equal(sessionSelectionSearch(parsed), search);
+
+  const invalid = readSessionSelection(new URLSearchParams("status=running&runner=pi"));
+  assert.equal(invalid.status, "running");
+  assert.equal(invalid.runner, "pi");
+  assert.equal(sessionSelectionSearch(EMPTY_SESSION_SELECTION), "");
+  assert.equal(sessionSelectionSearch(selection({ range: "7d", since: "2026-08-01" })), "range=7d&since=2026-08-01");
+
+  // Retained dates are read back as an inferred custom range unless the hash
+  // spells the preset out, so `all` stays explicit while it remembers them.
+  const anyTime = selection({ range: "all", since: "2026-08-01", until: "2026-08-03" });
+  assert.equal(sessionSelectionSearch(anyTime), "range=all&since=2026-08-01&until=2026-08-03");
+  const restored = readSessionSelection(new URLSearchParams(sessionSelectionSearch(anyTime)));
+  assert.deepEqual(restored, anyTime);
+  assert.deepEqual(sessionRangeWindow(restored, new Date()), { since: null, until: null });
+});
+
+test("a range preset resolves to the window the route filters requestedAt on", () => {
+  const now = new Date(2026, 7, 16, 14, 30);
+  assert.deepEqual(sessionRangeWindow(selection(), now), { since: null, until: null });
+  assert.deepEqual(sessionRangeWindow(selection({ range: "today" }), now), {
+    since: new Date(2026, 7, 16).toISOString(), until: null,
+  });
+  assert.deepEqual(sessionRangeWindow(selection({ range: "7d" }), now), {
+    since: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1_000).toISOString(), until: null,
+  });
+  assert.deepEqual(sessionRangeWindow(selection({ range: "30d" }), now), {
+    since: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1_000).toISOString(), until: null,
+  });
+  // A custom `until` covers the whole day it names: an operator who typed one
+  // date meant that day's sessions, not the instant it began.
+  assert.deepEqual(sessionRangeWindow(selection({ range: "custom", since: "2026-08-01", until: "2026-08-03" }), now), {
+    since: new Date(2026, 7, 1).toISOString(),
+    until: new Date(new Date(2026, 7, 4).getTime() - 1).toISOString(),
+  });
+  assert.deepEqual(sessionRangeWindow(selection({ range: "custom", until: "not-a-day" }), now), {
+    since: null, until: "not-a-day",
+  });
+});
+
+test("the request carries every filter, the project scope and the cursor", () => {
+  const now = new Date(2026, 7, 16, 14, 30);
+  const filters = sessionSelectionFilters(selection({
+    status: "live", agentId: "agent-1", runner: "CLAUDE", chainId: "chain-1", q: "feat/x", range: "today",
+  }), now);
+  const path = sessionListPath("p 1", 50, filters, "2026-08-16T00:00:00.000Z");
+  const query = new URLSearchParams(path.slice(path.indexOf("?") + 1));
+
+  assert.ok(path.startsWith("/sessions?"));
+  assert.equal(query.get("projectId"), "p 1");
+  assert.equal(query.get("limit"), "50");
+  assert.equal(query.get("status"), "live");
+  assert.equal(query.get("agentId"), "agent-1");
+  assert.equal(query.get("runner"), "CLAUDE");
+  assert.equal(query.get("chainId"), "chain-1");
+  assert.equal(query.get("q"), "feat/x");
+  assert.equal(query.get("since"), new Date(2026, 7, 16).toISOString());
+  assert.equal(query.get("before"), "2026-08-16T00:00:00.000Z");
+  assert.equal(query.get("taskId"), null, "an unfiltered axis is absent, not empty");
+
+  // An unfiltered list asks for exactly what it asked for before this contract.
+  assert.equal(
+    sessionListPath("p1", 50, sessionSelectionFilters(EMPTY_SESSION_SELECTION, now)),
+    "/sessions?projectId=p1&limit=50",
+  );
+});
+
+test("a filter link opens the list narrowed to one axis only", () => {
+  assert.equal(sessionsFilterHref({ chainId: "chain-1" }), "/sessions?chainId=chain-1");
+  assert.equal(sessionsFilterHref({ taskId: "task-1" }), "/sessions?taskId=task-1");
+  assert.equal(sessionsFilterHref({}), "/sessions");
+});
+
+ test("custom end dates follow local midnight across DST", () => {
+  const previous = process.env.TZ;
+  process.env.TZ = "America/New_York";
+  try {
+    for (const [until, expected] of [["2026-03-08", "2026-03-09T03:59:59.999Z"], ["2026-11-01", "2026-11-02T04:59:59.999Z"]] as const) {
+      assert.equal(sessionRangeWindow(selection({ range: "custom", until }), new Date()).until, expected);
+    }
+  } finally { if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous; }
+});
+
+test("dates without a range infer custom and invalid calendar days reach refusal", () => {
+  const parsed = readSessionSelection(new URLSearchParams("until=2026-02-31"));
+  assert.equal(parsed.range, "custom");
+  assert.equal(sessionSelectionFilters(parsed, new Date()).until, "2026-02-31");
 });

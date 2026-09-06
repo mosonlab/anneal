@@ -66,6 +66,7 @@ export class DeploymentAttempt {
       ...(publication?.pointerTransition ? { pointerTransition: publication.pointerTransition } : {}),
       ...(verification?.activatedBuildStamp ? { activatedBuildStamp: verification.activatedBuildStamp } : {}),
       ...(this.fact("rollbackPointerOutcome") ? { rollbackPointerOutcome: this.fact("rollbackPointerOutcome") } : {}),
+      ...(this.fact("supersededEscalation") ? { supersededEscalation: this.fact("supersededEscalation") } : {}),
       ...metadata,
     };
   }

@@ -18,9 +18,6 @@
   },
   "include": [
     "prisma/preflight-goal-execution.ts",
-    "prisma/backfill-session-cache.ts",
-    "prisma/backfill-merge-stop-questions.ts",
-    "prisma/audit-post-delivery-disconnect.ts",
     "prisma/release-migrate.ts",
     "prisma/sync-canonical-prompts.ts",
     "prisma/verify-starter-onboarding.ts"
