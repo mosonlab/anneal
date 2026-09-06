@@ -215,7 +215,13 @@ test("uncached input dollars use the model input rate and stay unknown for absen
   assert.equal(unlisted?.uncachedInputUsd, null);
 });
 
-const chainTask = (id: string, index: number, outputKind: string, name: string): import("./costs.js").CostsTaskRow => ({
+const chainTask = (
+  id: string,
+  index: number,
+  outputKind: string,
+  name: string,
+  readiness: { readinessRequeues: number; readinessGrants: number } = { readinessRequeues: 0, readinessGrants: 0 },
+): import("./costs.js").CostsTaskRow => ({
   id,
   projectId: "project",
   name,
@@ -224,6 +230,7 @@ const chainTask = (id: string, index: number, outputKind: string, name: string):
   chainIndex: index,
   chainLayer: index,
   templateStep: { name: name.split(": ").at(-1)!, outputKind },
+  ...readiness,
 });
 
 const chainRun = (
@@ -260,6 +267,7 @@ test("chains include retries and bound repairs, partition cost by step role, and
   const repair: import("./costs.js").CostsTaskRow = {
     id: "repair", projectId: "project", name: "Autonomous merge tail: gate-fix", status: "DONE",
     chainId: null, chainIndex: null, chainLayer: null, repairKind: "gate-fix", repairChainId: "chain", templateStep: null,
+    readinessRequeues: 0, readinessGrants: 0,
   };
   const runs = [
     chainRun("run-1", implementation, "2026-08-01T00:00:00.000Z", "2026-08-01T00:05:00.000Z", "1", RunStatus.FAILED),
@@ -288,6 +296,48 @@ test("chains include retries and bound repairs, partition cost by step role, and
     documentation: "3", implementation: "3", regression: "4", repair: "5",
   });
   assert.equal(chain.costUsd?.toString(), "15");
+});
+
+test("chains sum the pre-authorization readiness requeues their members recorded", () => {
+  // Only the readiness Step records a requeue, so the chain total is that
+  // Step's; the assertion is here rather than on the Step so a future second
+  // recording site cannot silently stop being attributed to the chain.
+  const regression = chainTask("task-regression", 0, "regression-verification-v2", "Release: Verify");
+  const readiness = chainTask("task-readiness", 1, "merge-authorization", "Release: Authorize", {
+    readinessRequeues: 2,
+    readinessGrants: 2,
+  });
+  const runs = [
+    chainRun("run-1", regression, "2026-08-01T00:00:00.000Z", "2026-08-01T00:05:00.000Z", "1"),
+    chainRun("run-2", readiness, "2026-08-01T00:06:00.000Z", "2026-08-01T00:10:00.000Z", "2"),
+  ];
+  const report = aggregateCosts(
+    runs,
+    new Date("2026-08-01T00:00:00.000Z"),
+    30,
+    "UTC",
+    { tasks: [regression, readiness], runs, until: new Date("2026-08-31T00:00:00.000Z") },
+  );
+  const [chain] = report.chains;
+  assert.ok(chain);
+  assert.equal(chain.readinessRequeues, 2);
+  assert.equal(chain.readinessGrants, 2);
+});
+
+test("a chain that never requeued reports no readiness requeues", () => {
+  const implementation = chainTask("task-quiet", 0, "implementation", "Quiet: Implement");
+  const runs = [chainRun("run-quiet", implementation, "2026-08-01T00:00:00.000Z", "2026-08-01T00:05:00.000Z", "1")];
+  const report = aggregateCosts(
+    runs,
+    new Date("2026-08-01T00:00:00.000Z"),
+    30,
+    "UTC",
+    { tasks: [implementation], runs, until: new Date("2026-08-31T00:00:00.000Z") },
+  );
+  const [chain] = report.chains;
+  assert.ok(chain);
+  assert.equal(chain.readinessRequeues, 0);
+  assert.equal(chain.readinessGrants, 0);
 });
 
 test("chains retain priced spend when another run is unavailable", () => {
@@ -353,6 +403,7 @@ test("chains retain unassigned priced spend and seed roles represented only by u
   const repair: import("./costs.js").CostsTaskRow = {
     id: "unpriced-repair", projectId: "project", name: "Autonomous merge tail: review-fix", status: "DONE",
     chainId: null, chainIndex: null, chainLayer: null, repairKind: "review-fix", repairChainId: "chain", templateStep: null,
+    readinessRequeues: 0, readinessGrants: 0,
   };
   const pricedUnknown = chainRun(
     "unknown-role-run", unknown,

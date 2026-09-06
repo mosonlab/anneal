@@ -1,4 +1,5 @@
 import {
+  MERGE_READINESS_REQUEUE_KIND,
   MERGE_TAIL_KIND,
   MODEL_TOKEN_PRICES,
   Prisma,
@@ -87,6 +88,10 @@ export type CostsTaskRow = {
   /** The primary Chain id resolved from the repair marker. Detached repairs
    * intentionally keep `chainId` null in the persisted Task shape. */
   repairChainId?: string;
+  /** Pre-authorization merge-readiness requeues this Task recorded, and the
+   * extra Run attempts they granted. Only the readiness Step records any. */
+  readinessRequeues: number;
+  readinessGrants: number;
 };
 
 export type CostsChainData = {
@@ -439,6 +444,11 @@ const chainReport = (
       else if (repair.repairKind === "refresh-conflict") repairs.refreshConflict += 1;
       else if (repair.repairKind === "review-fix") repairs.reviewFix += 1;
     }
+    // Requeue spend is already inside `costUsd` — every granted attempt funded a
+    // Run this chain owns. These two say how much of it the readiness Step's
+    // base-drift requeues account for.
+    const readinessRequeues = members.reduce((sum, task) => sum + task.readinessRequeues, 0);
+    const readinessGrants = members.reduce((sum, task) => sum + task.readinessGrants, 0);
     reports.push({
       chainId: orderedPrimary[0]!.chainId!,
       detailTaskId: orderedPrimary[0]!.id,
@@ -448,6 +458,8 @@ const chainReport = (
       busyMinutes: minutes(busyMilliseconds),
       busyPct: lastEnded === firstStarted ? 0 : (busyMilliseconds / (lastEnded - firstStarted)) * 100,
       repairs,
+      readinessRequeues,
+      readinessGrants,
       costUsd: pricedRuns === 0 ? null : amount(total),
       costByRole: Object.fromEntries(Object.entries(costByRole).map(([role, value]) => [role, amount(value)])),
       costUnavailableRuns: unavailableRuns,
@@ -750,7 +762,21 @@ export const readProjectCosts = async (
           WHERE activity."taskId" = task."id"
             AND activity."actorType" = 'control-plane'
             AND activity."metadata"->>'kind' = ${MERGE_TAIL_KIND.repairAttempt}
-        ), '[]'::jsonb) AS "repairMarkers"
+        ), '[]'::jsonb) AS "repairMarkers",
+        (
+          SELECT COUNT(*)::int
+          FROM "TaskActivity" AS requeue
+          WHERE requeue."taskId" = task."id"
+            AND requeue."actorType" = 'control-plane'
+            AND requeue."metadata"->>'kind' = ${MERGE_READINESS_REQUEUE_KIND}
+        ) AS "readinessRequeues",
+        COALESCE((
+          SELECT SUM((requeue."metadata"->>'budgetGrant')::int)::int
+          FROM "TaskActivity" AS requeue
+          WHERE requeue."taskId" = task."id"
+            AND requeue."actorType" = 'control-plane'
+            AND requeue."metadata"->>'kind' = ${MERGE_READINESS_REQUEUE_KIND}
+        ), 0) AS "readinessGrants"
       FROM "Task" AS task
       JOIN candidate_tasks ON candidate_tasks."id" = task."id"
       LEFT JOIN "TaskTemplateStep" AS step ON step."id" = task."templateStepId"
@@ -768,6 +794,8 @@ export const readProjectCosts = async (
       templateStep: task.templateStepName === null || task.templateStepOutputKind === null
         ? null
         : { name: task.templateStepName, outputKind: task.templateStepOutputKind },
+      readinessRequeues: task.readinessRequeues,
+      readinessGrants: task.readinessGrants,
     }));
     const activityRows: RepairMarkerRow[] = rawTaskRows.flatMap((task) => (
       Array.isArray(task.repairMarkers)

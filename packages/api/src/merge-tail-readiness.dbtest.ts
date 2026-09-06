@@ -7,9 +7,11 @@ import {
   DependencyProvisioning,
   INTEGRATOR_SENTINEL_MODEL,
   MergeLeaseEventState,
+  MERGE_READINESS_REQUEUE_KIND,
   MERGE_TAIL_KIND,
   Prisma,
   PrismaClient,
+  readinessRequeueFromMetadata,
   RunStatus,
   TaskStatus,
 } from "@anneal/db";
@@ -26,6 +28,7 @@ import {
   type WithMergeLease,
 } from "./merge-lease.js";
 import type { MergeLeaseTarget } from "./merge-lease-hold.js";
+import { readBoard } from "./board.js";
 import { READINESS_CLAIM_LEASE_MS, readinessTick } from "./merge-readiness-worker.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createApp } from "./test-app.js";
@@ -510,6 +513,65 @@ test("ordinary base requeue authorizes the refreshed exact head", async () => {
     claimed: 1, authorized: 1, requeued: 0, stopped: 0,
   });
   assert.equal(await db.task.count({ where: { name: "Autonomous merge tail: independent review" } }), 0);
+});
+
+test("consecutive pre-authorization requeues are counted on the readiness card", async () => {
+  const seeded = await seedReadiness();
+  const firstDrift = "d".repeat(40);
+  const secondDrift = "e".repeat(40);
+  assert.equal(
+    (await readinessTick(db, reader([], snapshot({ baseSha: firstDrift })), new Date(), 5, releaseChainLease, runWithMergeLease)).requeued,
+    1,
+  );
+  // The requeued Regression run passes against the base that moved, which is
+  // what puts readiness back in front of a base that has moved again.
+  const rerun = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+  });
+  await db.run.update({ where: { id: rerun.id }, data: { status: "SUCCEEDED", headSha: HEAD } });
+  await db.taskStepOutput.update({ where: { taskId: seeded.regression.id }, data: {
+    runId: rerun.id,
+    body: JSON.stringify({
+      schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: firstDrift, gateVerdict: "PASS",
+    }),
+    commitSha: HEAD,
+  } });
+  await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.DONE } });
+  assert.equal(
+    (await readinessTick(db, reader([], snapshot({ baseSha: secondDrift })), new Date(), 5, releaseChainLease, runWithMergeLease)).requeued,
+    1,
+  );
+
+  const requeues = await db.taskActivity.findMany({
+    where: {
+      taskId: seeded.readiness.id,
+      metadata: { path: ["kind"], equals: MERGE_READINESS_REQUEUE_KIND },
+    },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  });
+  assert.equal(requeues.length, 2);
+  assert.deepEqual(
+    requeues.map((row) => readinessRequeueFromMetadata(row.metadata)),
+    [
+      { ordinal: 1, staleBaseSha: BASE, currentBaseSha: firstDrift, budgetGrant: 1 },
+      { ordinal: 2, staleBaseSha: firstDrift, currentBaseSha: secondDrift, budgetGrant: 1 },
+    ],
+  );
+  // Each grant funded one extra Regression attempt, so the counted grants and
+  // the runs the chain actually paid for agree.
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 3);
+
+  const cards = await readBoard(db, { projectId: seeded.project.id, archived: "false" });
+  const readinessCard = cards.find((card) => card.id === seeded.readiness.id);
+  assert.ok(readinessCard);
+  assert.equal(readinessCard.readinessRequeues, 2);
+  assert.equal(readinessCard.readinessGrants, 2);
+  // The counters belong to the readiness Step; no other card in the chain
+  // claims its chain's requeues.
+  const regressionCard = cards.find((card) => card.id === seeded.regression.id);
+  assert.ok(regressionCard);
+  assert.equal(regressionCard.readinessRequeues, 0);
+  assert.equal(regressionCard.readinessGrants, 0);
 });
 
 test("future readiness waits but the readiness role is claimed regardless of ordinal", async () => {
