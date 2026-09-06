@@ -11,6 +11,14 @@ and full-tail readiness contract are maintained in the
 [Tier 0 / Tier 1 onboarding runbook](../docs/runbooks/add-a-project.md).
 Follow its Tier 1 checklist when onboarding another Project.
 
+For an already-seeded canonical project, `senior-dev-opus-high` and
+`frontend-dev-opus-high` rely on adoption of pre-existing active project Agent
+rows by name when their `canonicalRole` is null. Neither role is in
+`SPECIAL_CANONICAL_AGENTS` in `packages/db/prisma/sync-canonical-prompts.ts`, so
+ordinary canonical sync does not recreate a missing or archived row for these
+roles and refuses an incomplete canonical inventory. Fresh seeds install both
+roles from the source inventory.
+
 ## Changing a canonical prompt
 
 Editing any file under `templates/`, or changing a canonical template's
@@ -142,11 +150,12 @@ contracts live in their Markdown directories under `templates/`.
 
 Provider-specific or temporary roles are not canonical defaults unless the
 cross-provider review contract explicitly requires separate identities.
-`senior-dev-sol-high` and `senior-dev-opus-medium` are canonical rather than experiments
+`senior-dev-sol-high`, `senior-dev-opus-medium` and `senior-dev-opus-high` are
+canonical rather than experiments
 because they are the explicit implementation tiers named by the
 implementation-assignee routing rules in `docs/governance/task-routing-v1.md`:
 the Sol fallback when the Astra model is unavailable, and the Claude
-Opus 5 medium route an operator names to spend Claude capacity.
+Opus 5 medium and high routes an operator names to spend Claude capacity.
 `senior-dev-astra-low` is canonical because every template binds it to the
 review-fix step; it is not an implementation route. Keep
 experiments out of `roles/`; create them as local overlays and archive them
