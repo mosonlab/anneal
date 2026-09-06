@@ -465,6 +465,24 @@ const childDiagnostic = (tracked: TrackedChild): string => [
   `output=${JSON.stringify(tracked.output)}`,
 ].join(" ");
 
+/**
+ * How long a spawned child may take to reach the behaviour a test waits for.
+ *
+ * Every child here is a full `node --import tsx` startup of a production
+ * entrypoint, and the merge gate runs one workspace suite per CPU while each
+ * suite runs its own files concurrently. On a host that saturated, a healthy
+ * loser entrypoint has been observed to still be printing its build line ten
+ * seconds after it was spawned — the whole of what these waits used to allow.
+ * The budget covers process startup under that oversubscription, not the
+ * behaviour: a child that is genuinely stuck still fails, with the same
+ * diagnostic, one minute later instead of ten seconds later.
+ */
+const CHILD_WAIT_BUDGET_MS = 60_000;
+
+/** A child being terminated has already started, so only signal delivery and
+ *  its own cleanup remain. Escalation to SIGKILL keeps the shorter budget. */
+const CHILD_TERMINATION_BUDGET_MS = 15_000;
+
 const isRunning = (child: ChildProcess): boolean => child.exitCode === null && child.signalCode === null;
 
 const processExists = (pid: number): boolean => {
@@ -477,7 +495,7 @@ const processExists = (pid: number): boolean => {
   }
 };
 
-const waitForProcessExit = async (pid: number, label: string, timeoutMs = 5_000): Promise<void> => {
+const waitForProcessExit = async (pid: number, label: string, timeoutMs = CHILD_TERMINATION_BUDGET_MS): Promise<void> => {
   const deadline = Date.now() + timeoutMs;
   while (processExists(pid)) {
     if (Date.now() >= deadline) throw new Error(`Timed out after ${timeoutMs}ms waiting for ${label} pid=${pid} to exit`);
@@ -485,7 +503,7 @@ const waitForProcessExit = async (pid: number, label: string, timeoutMs = 5_000)
   }
 };
 
-const waitForExit = (tracked: TrackedChild, timeoutMs = 10_000): Promise<ChildExit> => {
+const waitForExit = (tracked: TrackedChild, timeoutMs = CHILD_WAIT_BUDGET_MS): Promise<ChildExit> => {
   const { child } = tracked;
   if (!isRunning(child)) return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
   return new Promise((resolve, reject) => {
@@ -511,7 +529,7 @@ const waitForExit = (tracked: TrackedChild, timeoutMs = 10_000): Promise<ChildEx
   });
 };
 
-const waitForLine = (tracked: TrackedChild, pattern: RegExp, timeoutMs = 10_000): Promise<string> => new Promise((resolve, reject) => {
+const waitForLine = (tracked: TrackedChild, pattern: RegExp, timeoutMs = CHILD_WAIT_BUDGET_MS): Promise<string> => new Promise((resolve, reject) => {
   const { child } = tracked;
   const cleanup = (): void => {
     clearTimeout(timer);
@@ -550,11 +568,11 @@ const terminateChild = async (tracked: TrackedChild, signal: NodeJS.Signals = "S
   if (!isRunning(tracked.child)) return waitForExit(tracked);
   tracked.child.kill(signal);
   try {
-    return await waitForExit(tracked, 5_000);
+    return await waitForExit(tracked, CHILD_TERMINATION_BUDGET_MS);
   } catch (error) {
     if (signal === "SIGKILL" || !isRunning(tracked.child)) throw error;
     tracked.child.kill("SIGKILL");
-    return waitForExit(tracked, 5_000).catch((killError: unknown) => {
+    return waitForExit(tracked, CHILD_TERMINATION_BUDGET_MS).catch((killError: unknown) => {
       throw new AggregateError([error, killError], `Failed to terminate child: ${childDiagnostic(tracked)}`);
     });
   }
