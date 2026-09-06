@@ -1281,7 +1281,8 @@ test("RUNNER_GATE_FALLBACK_SERVER selects a runner-owned two-host environment", 
     assert.equal(launch.args.includes("AGENTOS_GATE_PRIMARY_SERVER=gate-self"), true);
     assert.equal(launch.args.includes("AGENTOS_GATE_FALLBACK_SERVER=agentos-gate"), true);
     assert.equal(launch.args.some((arg) => arg.startsWith("AGENTOS_GATE_SERVER=")), false);
-    const unconfigured = buildChildEnvironment({ ...config, gateServer: undefined }, { ...claim, secrets }, scratch, "/work");
+    const { gateServer: _gateServer, ...withoutGate } = config;
+    const unconfigured = buildChildEnvironment(withoutGate, { ...claim, secrets }, scratch, "/work");
     for (const name of ["AGENTOS_GATE_SERVER", "AGENTOS_GATE_PRIMARY_SERVER", "AGENTOS_GATE_FALLBACK_SERVER"]) {
       assert.equal(Object.hasOwn(unconfigured, name), false);
     }
