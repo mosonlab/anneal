@@ -1004,6 +1004,63 @@ test("repairs on every previously omitted legacy generation reopen the Librarian
   }
 });
 
+test("a repair on a seed-era template row reopens the Librarian Step", async () => {
+  // These markers were registered for identity alone: their retired graphs were
+  // never recorded, so routing through a registered shape skipped the Librarian
+  // in silence. The Step comes from the chain's own persisted template rows now.
+  for (const marker of ["10", "9", "human-12", "regression-first-13"]) {
+    const seeded = await exercise("review-fail", {
+      withLibrarian: true,
+      templateName: templateRolloverName(INTEGRATOR_TEMPLATE_NAME, marker, `template-${marker}`),
+    });
+    const repair = await repairFor(seeded, "review-fix");
+    await completeRepair(seeded, repair.id, `Closed ${marker} findings.`);
+    assert.ok(seeded.librarian, marker);
+    assert.equal(
+      (await db.task.findUniqueOrThrow({ where: { id: seeded.librarian.id } })).status,
+      TaskStatus.TODO,
+      marker,
+    );
+    assert.equal(await db.run.count({ where: { taskId: seeded.librarian.id } }), 1, marker);
+    assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1, marker);
+  }
+});
+
+test("repair selects the lowest-indexed Documentation role across versioned kinds", async () => {
+  const seeded = await exercise("review-fail", { withLibrarian: true });
+  assert.ok(seeded.librarian);
+  const step = await db.taskTemplateStep.create({ data: {
+    taskTemplateId: seeded.template.id, stepIndex: 7, layer: 7, name: "Earlier Documentation",
+    assigneeType: AssigneeType.AGENT, assigneeAgentId: seeded.librarian.assigneeAgentId,
+    prompt: "document", approvalGate: false, outputKind: "documentation-v2",
+  } });
+  const earlier = await db.task.create({ data: {
+    projectId: seeded.project.id, repoId: seeded.repo.id, templateId: seeded.template.id,
+    templateStepId: step.id, name: step.name, description: "document",
+    assigneeType: AssigneeType.AGENT, assigneeAgentId: seeded.librarian.assigneeAgentId,
+    status: TaskStatus.DONE, chainId: seeded.librarian.chainId, chainIndex: 7, chainLayer: 7, targetBranch: "main",
+  } });
+  const repair = await repairFor(seeded, "review-fix");
+  await completeRepair(seeded, repair.id, "Closed findings with two persisted Documentation roles.");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: earlier.id } })).status, TaskStatus.TODO);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.librarian.id } })).status, TaskStatus.DONE);
+  assert.equal(await db.run.count({ where: { taskId: earlier.id } }), 1);
+});
+
+test("a repair on a template with no Documentation Step says so rather than skipping in silence", async () => {
+  const seeded = await exercise("review-fail");
+  const repair = await repairFor(seeded, "review-fix");
+  await completeRepair(seeded, repair.id, "Closed MF-2 and reran its focused regression.");
+  const absence = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.regression.id,
+    actorType: "control-plane",
+    metadata: { path: ["kind"], equals: "mergeTail.documentationStepAbsent" },
+  } });
+  assert.match(absence.body, /has no Documentation Step/u);
+  // The tail still re-opens Regression directly, which is what it always did.
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
+});
+
 test("invalid Regression output opens a stop notice with no unusable operator choices", async () => {
   const seeded = await seedRegression();
   assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, {
