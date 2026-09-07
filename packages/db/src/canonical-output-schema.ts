@@ -101,7 +101,7 @@ export const canonicalOutputSchemas: Readonly<Partial<Record<StepRole, SchemaByG
       testsRun: stringList,
     }),
   },
-  "sol-findings": {
+  "review-findings": {
     v1: canonicalReviewArtifactSchema.extend({ commandsRun: stringList }),
   },
   "blind-findings": {

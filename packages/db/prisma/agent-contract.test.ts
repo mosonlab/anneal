@@ -223,7 +223,7 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
     assert.match(review, /revised slice set from\s+`\.chain\/<chain branch>\/slices\/`/u);
     assert.match(review, /only as the Anneal task output/u);
     assert.match(review, /the step prompt names/u);
-    assert.doesNotMatch(review, /reviews\/sol-findings\.md/u);
+    assert.doesNotMatch(review, /reviews\/review-findings\.md/u);
     assert.match(review, /quote the exact governing\s+specification text/u);
     assert.match(review, /one session, make two sequential explicit passes over the same reviewed range/u);
     assert.match(review, /first complete the Standards pass/u);
@@ -286,7 +286,7 @@ test("the canonical twelve-step layered template sources split review and preser
       { stepIndex: 3, layer: 3, agentName: "review-coordinator-astra-medium", outputKind: "plan-review" },
       { stepIndex: 4, layer: 4, agentName: "plan-reviser-opus-high", outputKind: "revised-plan" },
       { stepIndex: 5, layer: 5, agentName: "plan-executor-astra-medium", outputKind: "implementation" },
-      { stepIndex: 6, layer: 6, agentName: "code-reviewer-sol-high", outputKind: "sol-findings" },
+      { stepIndex: 6, layer: 6, agentName: "code-reviewer-sol-high", outputKind: "review-findings" },
       { stepIndex: 7, layer: 6, agentName: "code-reviewer-opus-high", outputKind: "blind-findings" },
       { stepIndex: 8, layer: 7, agentName: "senior-dev-astra-low", outputKind: "fixed-implementation" },
       { stepIndex: 9, layer: 8, agentName: "librarian-luna-xhigh", outputKind: "documentation" },
@@ -302,8 +302,8 @@ test("the canonical twelve-step layered template sources split review and preser
   assert.equal(templateSteps.find((step) => step.stepIndex === 8)?.attachmentsFromPrevious, true);
   assert.equal(templateSteps.find((step) => step.stepIndex === 10)?.attachmentsFromPrevious, true);
   const compoundFix = templateSteps.find((step) => step.stepIndex === 8)!.prompt;
-  assert.match(compoundFix, /Read the immutable `sol-findings` review output/u);
-  assert.match(compoundFix, /`sol-findings`[\s\S]*`blind-findings`/u);
+  assert.match(compoundFix, /Read the immutable `review-findings` review output/u);
+  assert.match(compoundFix, /`review-findings`[\s\S]*`blind-findings`/u);
   assert.match(compoundFix, /blind review may be absent/u);
   assert.match(compoundFix, /No adjudication step stands between the reviews and this one/u);
   assert.match(compoundFix, /ADOPTED[\s\S]*REJECTED[\s\S]*MERGED/u);
@@ -377,7 +377,7 @@ test("the direct template sources expose the layered review spine and mechanical
     [
       { stepIndex: 1, layer: 1, agentName: "spec-revalidator-luna-xhigh", outputKind: "revalidation" },
       { stepIndex: 2, layer: 2, agentName: "senior-dev-luna-max", outputKind: "implementation" },
-      { stepIndex: 3, layer: 3, agentName: "code-reviewer-sol-high", outputKind: "sol-findings" },
+      { stepIndex: 3, layer: 3, agentName: "code-reviewer-sol-high", outputKind: "review-findings" },
       { stepIndex: 4, layer: 3, agentName: "code-reviewer-opus-high", outputKind: "blind-findings" },
       { stepIndex: 5, layer: 4, agentName: "senior-dev-astra-low", outputKind: "fixed-implementation" },
       { stepIndex: 6, layer: 5, agentName: "regression-verifier-luna-xhigh", outputKind: "regression-verification-v2" },
@@ -395,7 +395,7 @@ test("the direct template sources expose the layered review spine and mechanical
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 5)?.attachmentsFromPrevious, true);
   assert.equal(directTemplateSteps.find((step) => step.stepIndex === 6)?.attachmentsFromPrevious, true);
   const directFix = directTemplateSteps.find((step) => step.stepIndex === 5)!.prompt;
-  assert.match(directFix, /Read the immutable `sol-findings` review output/u);
+  assert.match(directFix, /Read the immutable `review-findings` review output/u);
   assert.match(directFix, /blind review may be absent/u);
   assert.match(directFix, /No adjudication step stands between the reviews and this one/u);
   const directRegression = directTemplateSteps.find((step) => step.stepIndex === 6)!.prompt;

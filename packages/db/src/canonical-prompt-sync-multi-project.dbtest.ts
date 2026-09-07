@@ -261,7 +261,8 @@ const downgradeDirectToHistoricalSevenStep = async (projectId: string): Promise<
       where: { id: step.id },
       data: {
         // Historical generations retain their original review labels.
-        name: step.outputKind === "sol-findings" ? "Code review (Sol)"
+        outputKind: step.outputKind === "review-findings" ? "sol-findings" : step.outputKind,
+        name: step.outputKind === "review-findings" ? "Code review (Sol)"
           : step.outputKind === "blind-findings" ? "Code review (Opus blind)" : step.name,
         stepIndex: step.stepIndex - 1,
         layer: step.layer - 1,

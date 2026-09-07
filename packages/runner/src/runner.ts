@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   agentExitVerdict,
   PR_TEMPLATE_NAME,
+  canonicalTemplateIdentity,
   type BudgetGate,
   type PersistedRunOutput,
   type PrHandoffOutput,
@@ -933,7 +934,8 @@ export const executeClaim = async (
     }
     let prWorkflowOutputs: readonly PrHandoffOutput[] | undefined;
     const templateStep = claim.task.templateStep;
-    const canonicalPrDelivery = templateStep?.taskTemplate.name === PR_TEMPLATE_NAME
+    const canonicalPrDelivery = templateStep !== null && templateStep !== undefined
+      && canonicalTemplateIdentity(templateStep.taskTemplate.name)?.canonicalName === PR_TEMPLATE_NAME
       && (templateStep.outputKind === "implementation" || templateStep.outputKind === "fixed-implementation");
     if (canonicalPrDelivery && runLease.held) {
       try {

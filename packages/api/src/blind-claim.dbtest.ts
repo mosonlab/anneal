@@ -239,19 +239,19 @@ test("review claims carry the stored dependency-provisioning policy", async () =
   assert.equal(claimed.task.templateStep?.provisionDependencies, false);
 });
 
-const reviewReport = (kind: "sol-findings" | "blind-findings", headSha: string, baseSha = "b".repeat(40)) => JSON.stringify({
+const reviewReport = (kind: "review-findings" | "blind-findings", headSha: string, baseSha = "b".repeat(40)) => JSON.stringify({
   schemaVersion: 1,
   headSha,
   reviewedBase: baseSha,
   reviewedHead: headSha,
-  findings: kind === "sol-findings" ? [UNIQUE_PREDECESSOR_FINDING] : [UNIQUE_BLIND_FINDING],
-  ...(kind === "sol-findings" ? { commandsRun: ["git diff --check"] } : {}),
+  findings: kind === "review-findings" ? [UNIQUE_PREDECESSOR_FINDING] : [UNIQUE_BLIND_FINDING],
+  ...(kind === "review-findings" ? { commandsRun: ["git diff --check"] } : {}),
 });
 
 const prepareReviewReport = async (
   chain: Awaited<ReturnType<typeof queueCanonicalStep>>["chain"],
   stepIndex: number,
-  kind: "sol-findings" | "blind-findings",
+  kind: "review-findings" | "blind-findings",
   headSha: string,
   baseSha = "b".repeat(40),
 ) => {
@@ -282,7 +282,7 @@ const prepareReviewReport = async (
 const prepareFixedImplementation = async () => {
   const { template, repo } = await seedCanonicalTemplate();
   const fix = await queueCanonicalStep(template, repo.id, 8);
-  const sol = await prepareReviewReport(fix.chain, 6, "sol-findings", REVIEWED_HEAD);
+  const sol = await prepareReviewReport(fix.chain, 6, "review-findings", REVIEWED_HEAD);
   await prepareReviewReport(fix.chain, 7, "blind-findings", REVIEWED_HEAD);
   const claimed = await claim();
   assert.equal(claimed.run.id, fix.run.id);
@@ -445,7 +445,7 @@ test("the fix step claims both immutable reports and cannot rewrite either", asy
   const { template, repo } = await seedCanonicalTemplate();
   const fix = await queueCanonicalStep(template, repo.id, 8);
   const headSha = REVIEWED_HEAD;
-  await prepareReviewReport(fix.chain, 6, "sol-findings", headSha);
+  await prepareReviewReport(fix.chain, 6, "review-findings", headSha);
   await prepareReviewReport(fix.chain, 7, "blind-findings", headSha);
 
   const response = await createApp(db).request("/runner/tasks/claim", {
@@ -464,7 +464,7 @@ test("the fix step claims both immutable reports and cannot rewrite either", asy
   // this step has to commit the fixes on the chain branch.
   assert.equal(claimBody.run.implementationBaseSha, null);
   assert.equal(claimBody.run.implementationHeadSha, null);
-  assert.ok(claimBody.priorOutputs.some((output) => output.kind === "sol-findings"));
+  assert.ok(claimBody.priorOutputs.some((output) => output.kind === "review-findings"));
   assert.ok(claimBody.priorOutputs.some((output) => output.kind === "blind-findings"));
 
   const solTask = fix.chain.tasks.find((task) => task.chainIndex === 6)!;
@@ -472,7 +472,7 @@ test("the fix step claims both immutable reports and cannot rewrite either", asy
   const operatorRewrite = await createApp(db).request(`/tasks/${solTask.id}/output`, {
     method: "PUT",
     headers: { Authorization: `Bearer ${OPERATOR_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ kind: "sol-findings", body: reviewReport("sol-findings", "d".repeat(40)), commitSha: "d".repeat(40) }),
+    body: JSON.stringify({ kind: "review-findings", body: reviewReport("review-findings", "d".repeat(40)), commitSha: "d".repeat(40) }),
   });
   assert.equal(operatorRewrite.status, 409);
   assert.equal((await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: solTask.id } })).body, originalSol.body);
@@ -515,7 +515,7 @@ test("Direct and Full fix-step persistence requires exact union dispositions bou
     const { template, repo } = await seedCanonicalTemplate(shape.name);
     const fix = await queueCanonicalStep(template, repo.id, shape.fix);
     const headSha = REVIEWED_HEAD;
-    await prepareReviewReport(fix.chain, shape.sol, "sol-findings", headSha);
+    await prepareReviewReport(fix.chain, shape.sol, "review-findings", headSha);
     await prepareReviewReport(fix.chain, shape.blind, "blind-findings", headSha);
     const claimed = await claim();
     assert.equal(claimed.run.id, fix.run.id);

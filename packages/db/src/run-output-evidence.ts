@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { stepRole } from "./step-role.js";
+
 /**
  * Whether the deliverable a Run's Step requires exists, decided once.
  *
@@ -79,9 +81,10 @@ export const decideRunOutputSatisfaction = (
   return { case: "absent", outputKind, remediable: requirement.remediable };
 };
 
-/** The canonical PR workflow's four output kinds, in the order a chain authors them. */
+/** Accepted PR output kinds, including the immutable legacy review contract. */
 export const PR_HANDOFF_KINDS = [
   "implementation",
+  "review-findings",
   "sol-findings",
   "blind-findings",
   "fixed-implementation",
@@ -97,7 +100,7 @@ export type PrHandoffStage = "implementation" | "final";
 
 const PR_HANDOFF_SEQUENCE: Record<PrHandoffStage, readonly PrHandoffKind[]> = {
   implementation: ["implementation"],
-  final: PR_HANDOFF_KINDS,
+  final: ["implementation", "review-findings", "blind-findings", "fixed-implementation"],
 };
 
 export type PrHandoffOutput = {
@@ -149,7 +152,8 @@ export const decidePrHandoff = (
   const outputs: PrHandoffOutput[] = [];
   for (const [index, kind] of expected.entries()) {
     const candidate = candidates[index]!;
-    if (candidate.kind !== kind) {
+    if (!PR_HANDOFF_KINDS.some((accepted) => accepted === candidate.kind)
+      || stepRole({ outputKind: candidate.kind }) !== stepRole({ outputKind: kind })) {
       return { case: "incomplete", reason: `canonical PR handoff evidence is missing or out of order at ${kind}` };
     }
     if (candidate.taskId.trim().length === 0
@@ -159,7 +163,7 @@ export const decidePrHandoff = (
       || candidate.body.trim().length === 0
       || candidate.commitSha === null
       || !CANONICAL_COMMIT_SHA.test(candidate.commitSha)) {
-      return { case: "incomplete", reason: `malformed ${kind} canonical output evidence` };
+      return { case: "incomplete", reason: `malformed ${candidate.kind} canonical output evidence` };
     }
     const previous = outputs[index - 1];
     if (previous && candidate.chainIndex <= previous.chainIndex) {
@@ -171,7 +175,7 @@ export const decidePrHandoff = (
     outputs.push({
       taskId: candidate.taskId,
       chainIndex: candidate.chainIndex,
-      kind,
+      kind: candidate.kind as PrHandoffKind,
       body: candidate.body,
       commitSha: candidate.commitSha,
     });

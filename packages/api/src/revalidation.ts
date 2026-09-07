@@ -1,4 +1,6 @@
 import {
+  canonicalTemplateIdentity,
+  DIRECT_TEMPLATE_NAME,
   lockChainRows,
   lockRunRow,
   InboxStatus,
@@ -33,7 +35,7 @@ export const isRevalidationStep = (templateStep: {
   taskTemplate: { name: string };
 } | null | undefined): boolean => templateStep?.outputKind === "revalidation"
   && templateStep.stepIndex === 1
-  && templateStep.taskTemplate.name === "direct-engineer-workflow";
+  && canonicalTemplateIdentity(templateStep.taskTemplate.name)?.canonicalName === DIRECT_TEMPLATE_NAME;
 
 const revalidationTaskSelect = {
   id: true,
@@ -110,7 +112,7 @@ export const deriveBoundImplementationTask = (
   }
   const implementation = candidates[0]!;
   if (implementation.templateId !== caller.templateId
-    || implementation.templateStep?.taskTemplate.name !== "direct-engineer-workflow") {
+    || canonicalTemplateIdentity(implementation.templateStep?.taskTemplate.name ?? "")?.canonicalName !== DIRECT_TEMPLATE_NAME) {
     return boundTaskRefusal("The downstream implementation task does not share the canonical direct template");
   }
   const callerLayer = executionLayer(caller);
