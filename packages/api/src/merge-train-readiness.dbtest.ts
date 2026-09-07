@@ -1013,6 +1013,37 @@ test("an unapproved gated candidate stops alone and truncates the authorized pre
   assert.deepEqual(releasedChainIds, [seed.candidates[0]!.chainId]);
 });
 
+test("a gate refusal returns a later failing candidate to ready instead of repairing it", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "3";
+  const seed = await seedTrainCandidates(3);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await db.task.update({ where: { id: seed.candidates[1]!.readiness.id }, data: { approvalGate: true } });
+  const { train } = await finishTrainRun(seed, recordFor(seed, ["pass", "pass", "fail"], 2));
+
+  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  // Position 3's `fail` prefix was gated on top of the refused position 2, so
+  // it carries no verdict about the candidate itself: it returns to `ready`
+  // for a later train rather than entering the budgeted gate-fix repair.
+  assert.equal(settled.authorized, 1);
+  assert.equal(settled.stopped, 1);
+  assert.equal(settled.requeued, 0);
+
+  const trailing = seed.candidates[2]!;
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: trailing.readiness.id } })).status, TaskStatus.TODO);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: trailing.regression.id,
+    metadata: { path: ["kind"], equals: "mergeTail.repairAttempt" },
+  } }), 0);
+  assert.equal(await db.run.count({ where: { taskId: trailing.regression.id } }), 1);
+  const trailingMarker = (await trainMarkersFor(trailing.readiness.id)).at(-1)!.metadata as Record<string, unknown>;
+  assert.equal(trailingMarker.trainTaskId, train.id);
+  assert.equal(trailingMarker.position, 3);
+  assert.equal(trailingMarker.state, "settled");
+  assert.equal(trailingMarker.settlement, "fail");
+  assert.equal(trailingMarker.outcome, "ready");
+  assert.deepEqual(releasedChainIds, [seed.candidates[0]!.chainId]);
+});
+
 test("a settled train closes its own card while an aborted train keeps its review state", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);

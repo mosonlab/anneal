@@ -500,8 +500,15 @@ const settleTrain = async (
           summaries.push(`${index + 1}. ${read.readiness.id}: ${prefix?.verdict ?? "skipped"} → ${settlement}`);
           continue;
         } else {
-          const blocked = record.blocked.find((candidate) => candidate.taskId === read.readiness.id);
-          const firstFail = prefix?.verdict === "fail" && !failed;
+          // A gate refusal truncates the published prefix at its position, so
+          // every later prefix was gated against a predecessor this settlement
+          // no longer publishes: its verdict says nothing about the candidate
+          // and returns it to `ready` rather than charging a repair budget.
+          const truncated = gateRefusal !== null && index > gateRefusal.index;
+          const blocked = truncated
+            ? undefined
+            : record.blocked.find((candidate) => candidate.taskId === read.readiness.id);
+          const firstFail = !truncated && prefix?.verdict === "fail" && !failed;
           if (firstFail) failed = true;
           settlement = blocked ? "blocked" : firstFail ? "repairing" : "ready";
           const transition = await read.claim.settle(tx, { kind: "finish", at: now, apply: async (client) => {
