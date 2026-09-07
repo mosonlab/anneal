@@ -11,9 +11,10 @@ const ownership = await acquireControlPlaneOwnership({
 let descendant: ReturnType<typeof spawn> | undefined;
 const keepAlive = setInterval(() => undefined, 1_000);
 /** This probe is a test fixture that the gate runs, so its own cleanup carries
- *  the same rule as the suite spawning it: bounded, so a descendant that never
- *  dies is reported (the caller escalates to SIGKILL and then fails), but sized
- *  for the loaded gate worker rather than an idle host — signal delivery and
+ *  the same rule as the suite spawning it (CONTRIBUTING.md, "Test timing on the
+ *  gate worker"): bounded, so a descendant that never dies is reported (the
+ *  caller escalates to SIGKILL and then fails), but sized for the loaded gate
+ *  worker rather than an idle host — signal delivery and
  *  reaping queue behind whatever else the worker is carrying. The wait ends the
  *  moment the descendant exits, so a healthy run never pays this.
  *

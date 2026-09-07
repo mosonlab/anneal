@@ -69,9 +69,9 @@ test("timeout sends TERM then KILL and rejects with the step-specific DeployFail
   assert.equal(error.detail, "program-sh-timeout-40ms");
   assert.ok(elapsed >= 80, `expected the TERM grace to elapse, took ${elapsed}ms`);
   // The floor above is the property: the TERM grace really elapsed. This ceiling
-  // only catches a KILL that never settles, so it is sized for the loaded gate
-  // worker like the sibling budgets in this file, not for the ~420ms an idle
-  // host needs to spawn, signal and reap a real `sh`.
+  // only catches a KILL that never settles, so it stays bounded but is sized for
+  // the loaded gate worker (CONTRIBUTING.md, "Test timing on the gate worker"),
+  // not for an idle host.
   assert.ok(elapsed < 10_000, `expected KILL to settle, took ${elapsed}ms`);
   assert.deepEqual(terminations, [{ reason: "fixture-step-timeout", signal: "SIGTERM" }]);
 });

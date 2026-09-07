@@ -441,9 +441,11 @@ test("a bounded non-settling key read cannot reach a GitHub surface, activity, o
     executeDecision: (async () => { executeCalls += 1; return {}; }) as never,
   });
   // The bound under test is the 10ms githubAppAuthTimeoutMs above; this only
-  // proves the read was abandoned rather than waited on. It is a loaded-worker
-  // number: unwinding through three fetch doubles on a saturated host costs
-  // scheduler time the product is not responsible for.
+  // proves the read was abandoned rather than waited on. It stays bounded so a
+  // read that is never abandoned still fails the case, and it is sized for the
+  // loaded gate worker (CONTRIBUTING.md, "Test timing on the gate worker"):
+  // unwinding through three fetch doubles costs scheduler time the product is
+  // not responsible for.
   assert.ok(Date.now() - startedAt < 30_000);
   assert.equal(surfaceCalls, 0);
   assert.equal(executeCalls, 0);
