@@ -93,14 +93,29 @@ test("typed EXECUTE transience alone does not become a textual refund", () => {
   assert.equal(isTextMatchedTransientProviderFailure(evidence, verdict.failureClass), false);
 });
 
-test("the pi auth check failure is an authentication requirement", () => {
-  const verdict = classifyEnvelope(envelope({
-    phase: "PROVISION",
+test("the CLI auth vocabulary remains available throughout plumbing phases", () => {
+  const formerCliRefusals = [
+    "authentication_failed",
+    "401: authentication is required",
+    "Missing authentication for the provider",
+    "No API key found for the provider",
+    "the provider CLI is not logged in",
+    "not-authenticated: the CLI's own login check did not pass (exit 2)",
+  ];
+  for (const phase of ["PROVISION", "COMPLETE"] as const) {
+    for (const providerError of formerCliRefusals) {
+      const verdict = classifyEnvelope(envelope({ phase, providerError }));
+      assert.equal(verdict.failureClass, FailureClass.AUTH_REQUIRED, `${phase}: ${providerError}`);
+      assert.equal(verdict.retryable, false, `${phase}: ${providerError}`);
+      assert.equal(verdict.externalFailure, true, `${phase}: ${providerError}`);
+    }
+  }
+
+  const executeVerdict = classifyEnvelope(envelope({
     providerError: "not-authenticated: the CLI's own login check did not pass (exit 2)",
   }));
-  assert.equal(verdict.failureClass, FailureClass.AUTH_REQUIRED);
-  assert.equal(verdict.retryable, false);
-  assert.equal(verdict.externalFailure, true);
+  assert.equal(executeVerdict.failureClass, FailureClass.AUTH_REQUIRED);
+  assert.equal(executeVerdict.retryable, false);
 });
 
 test("gh's GraphQL transport EOF is retryable delivery transience", () => {
@@ -110,6 +125,28 @@ test("gh's GraphQL transport EOF is retryable delivery transience", () => {
   }));
   assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
   assert.equal(verdict.retryable, true);
+  assert.equal(verdict.externalFailure, true);
+});
+
+test("an unknown transport error in a plumbing phase is transient", () => {
+  const verdict = classifyEnvelope(envelope({
+    phase: "DELIVER",
+    terminalSuccess: true,
+    stderrSummary: "git failed (128): gnutls_handshake() failed: The TLS connection was non-properly terminated.",
+  }));
+  assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
+  assert.equal(verdict.retryable, true);
+  assert.equal(verdict.externalFailure, true);
+});
+
+test("an authentication refusal in a plumbing phase is final", () => {
+  const verdict = classifyEnvelope(envelope({
+    phase: "DELIVER",
+    terminalSuccess: true,
+    stderrSummary: "remote: authentication failed while pushing the branch",
+  }));
+  assert.equal(verdict.failureClass, FailureClass.AUTH_REQUIRED);
+  assert.equal(verdict.retryable, false);
   assert.equal(verdict.externalFailure, true);
 });
 
@@ -193,7 +230,46 @@ test("a failure outside the agent's own phase does not spend the task's budget",
   assert.equal(delivery.externalFailure, true, "the agent finished; the push is the runner's plumbing");
   const provisioning = classifyEnvelope(envelope({ phase: "PROVISION", agentExited: false, exitCode: 127 }));
   assert.equal(provisioning.failureClass, FailureClass.BINARY_NOT_FOUND);
+  assert.equal(provisioning.retryable, false);
   assert.equal(provisioning.externalFailure, true);
+});
+
+test("a missing provisioning binary is deterministic even without an agent exit", () => {
+  const verdict = classifyEnvelope(envelope({
+    phase: "PROVISION",
+    agentExited: false,
+    exitCode: 127,
+    terminationReason: "runner exception",
+    stderrSummary: "spawn git: no such file or directory",
+  }));
+  assert.equal(verdict.failureClass, FailureClass.BINARY_NOT_FOUND);
+  assert.equal(verdict.retryable, false);
+  assert.equal(verdict.externalFailure, true);
+});
+
+test("an unknown completion-phase runner exception is transient", () => {
+  const verdict = classifyEnvelope(envelope({
+    phase: "COMPLETE",
+    agentExited: false,
+    exitCode: 1,
+    terminationReason: "runner exception",
+    stderrSummary: "completion connection failed in an unknown provider adapter",
+  }));
+  assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
+  assert.equal(verdict.retryable, true);
+  assert.equal(verdict.externalFailure, true);
+});
+
+test("access refusals in every plumbing phase are final", () => {
+  for (const phase of ["PROVISION", "COMPLETE"] as const) {
+    const verdict = classifyEnvelope(envelope({
+      phase,
+      agentExited: false,
+      stderrSummary: "remote returned 403",
+    }));
+    assert.equal(verdict.failureClass, FailureClass.AUTH_REQUIRED, phase);
+    assert.equal(verdict.retryable, false, phase);
+  }
 });
 
 test("an exception in runner code is never charged to the agent", () => {
@@ -213,7 +289,7 @@ test("an exception in runner code is never charged to the agent", () => {
   assert.equal(verdict.retryable, false);
 });
 
-test("a clone that lost its connection is retried, and a clone that cannot succeed is not", () => {
+test("a plumbing-phase clone failure is retried unless it is a deterministic refusal", () => {
   // Both come out of `runner.ts`'s catch-all, so both carry the same
   // `"runner exception"`; the runner's typed network predicate is the only
   // thing that differs. `packages/runner/src/provision-failure.test.ts` proves
@@ -230,11 +306,11 @@ test("a clone that lost its connection is retried, and a clone that cannot succe
     phase: "PROVISION", agentExited: false, terminationReason: "runner exception", exitCode: 1,
     stderrSummary: "git failed (128): fatal: repository '/nonexistent/repo.git' does not exist",
   }));
-  // Refunded, because no agent decided anything — but not retried, because
-  // retrying a repository that is not there is the same failure again. The two
-  // questions are separate and this envelope answers them differently.
+  // Unknown repository/toolchain wording is deliberately not a second veto
+  // list, so an environment repair can be tried without spending this attempt.
   assert.equal(missingRepo.externalFailure, true);
-  assert.equal(missingRepo.retryable, false);
+  assert.equal(missingRepo.failureClass, FailureClass.TRANSIENT_PROVIDER);
+  assert.equal(missingRepo.retryable, true);
 });
 
 test("a budget kill still reads as a cancelled session, because there was one", () => {
@@ -364,13 +440,12 @@ for (const phrase of TRANSIENT_PHRASES) {
 /**
  * The veto half. These are deterministic access failures; a message that also
  * mentions a dropped connection must not be retried into a lockout. Each is
- * paired with the class it must land on instead — AUTH_REQUIRED where the
- * phase's auth vocabulary recognises it, and a plain non-retryable failure
- * where it does not.
+ * paired with the class it must land on instead. Plumbing access refusals are
+ * final even when their wording also contains a transport symptom.
  */
 const VETOED_PHRASES: Array<{ phrase: string; phase: FailureEnvelope["phase"]; expected: FailureClass }> = [
   { phrase: "remote: Authentication failed; connection reset by peer", phase: "DELIVER", expected: FailureClass.AUTH_REQUIRED },
-  { phrase: "could not read Username for 'https://github.com': connection timed out", phase: "DELIVER", expected: FailureClass.TASK_FAILED },
+  { phrase: "could not read Username for 'https://github.com': connection timed out", phase: "DELIVER", expected: FailureClass.AUTH_REQUIRED },
   { phrase: "remote: Permission denied; ECONNRESET", phase: "DELIVER", expected: FailureClass.AUTH_REQUIRED },
   { phrase: "403 Forbidden after ECONNRESET", phase: "DELIVER", expected: FailureClass.AUTH_REQUIRED },
   { phrase: "Bad credentials; connection closed", phase: "EXECUTE", expected: FailureClass.TASK_FAILED },
@@ -439,5 +514,17 @@ test("unrelated capacity verdict text is an ordinary task failure", () => {
       assert.equal(verdict.retryable, false);
       assert.equal(verdict.externalFailure, false);
     }
+  }
+});
+
+test("credential helper warnings do not veto plumbing transport retries", () => {
+  for (const phase of ["PROVISION", "DELIVER", "COMPLETE"] as const) {
+    const verdict = classifyEnvelope(envelope({
+      phase,
+      stderrSummary: "git failed (128): gnutls_handshake() failed; git: 'credential-osxkeychain' is not a git command.",
+    }));
+    assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER, phase);
+    assert.equal(verdict.retryable, true, phase);
+    assert.equal(verdict.externalFailure, true, phase);
   }
 });

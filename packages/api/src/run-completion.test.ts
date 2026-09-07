@@ -239,6 +239,7 @@ const statefulCompletionHarness = (
   persistedOutput: Record<string, unknown> | null = null,
 ) => {
   const activities: RecordedActivity[] = [];
+  const queuedRuns: Record<string, unknown>[] = [];
   const closedRuns = new Map<string, Record<string, unknown>>();
   const taskUpdates: Record<string, unknown>[] = [];
   const archivedAt = new Date("2026-08-16T06:00:00.000Z");
@@ -271,11 +272,12 @@ const statefulCompletionHarness = (
         closedRuns.set(currentRun.id, { ...currentRun });
         return { count: 1 };
       },
-      create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "unexpected-retry", ...data }),
+      create: async ({ data }: { data: Record<string, unknown> }) => { queuedRuns.push(data); return { id: "retry-run", ...data }; },
     },
     agent: { findUnique: async () => task.assigneeAgent },
     session: { update: async () => ({}) },
     task: {
+      update: async ({ data }: { data: Record<string, unknown> }) => { taskUpdates.push(data); return data; },
       updateMany: async ({ data }: { data: Record<string, unknown> }) => {
         taskUpdates.push(data);
         Object.assign(task, data);
@@ -298,7 +300,7 @@ const statefulCompletionHarness = (
       create: async ({ data }: { data: RecordedActivity }) => { activities.push(data); return data; },
     },
     runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }), update: async () => ({}) },
-    inboxMessage: { create: async () => ({}) },
+    inboxMessage: { create: async () => ({}), upsert: async () => ({}) },
   };
   const database = {
     $transaction: async (operation: (client: unknown) => Promise<unknown>) => operation(tx),
@@ -349,7 +351,7 @@ const statefulCompletionHarness = (
     return closedRuns.get(currentRun.id)!;
   };
 
-  return { activities, complete, taskUpdates };
+  return { activities, complete, taskUpdates, queuedRuns };
 };
 
 for (const state of ["settled", "aborted"]) {
@@ -421,6 +423,35 @@ test("completeRun persists three capped refunds and refuses the fourth", async (
   }
   assert.equal(harness.activities.filter(({ metadata }) => metadata?.kind === "externalFailureRefund.granted").length, 3);
   assert.match(harness.activities.find(({ metadata }) => metadata?.capReached === true)?.body ?? "", /refund cap was reached/i);
+});
+
+test("completeRun caps unknown plumbing-phase transport refunds without text evidence", async () => {
+  const harness = statefulCompletionHarness();
+  const reason = "git failed (128): gnutls_handshake() failed: The TLS connection was non-properly terminated.";
+  const outcome: RunOutcome = {
+    case: "provider-failure",
+    reason,
+    envelope: envelope({
+      phase: "DELIVER",
+      runnerClass: FailureClass.TOOL_FAILED,
+      terminalSuccess: true,
+      stderrSummary: reason,
+    }),
+  };
+  let budget = { maxRunsPerTask: 1, budgetGrants: 0 };
+  for (let runNumber = 1; runNumber <= EXTERNAL_FAILURE_REFUND_CAP + 1; runNumber += 1) {
+    const closed = await harness.complete({ runNumber, ...budget, outcome });
+    const expectedGrants = Math.min(runNumber, EXTERNAL_FAILURE_REFUND_CAP);
+    assert.equal(closed.failureClass, FailureClass.TRANSIENT_PROVIDER);
+    assert.equal(closed.budgetGrants, expectedGrants);
+    assert.equal(closed.maxRunsPerTask, 1 + expectedGrants);
+    budget = { maxRunsPerTask: Number(closed.maxRunsPerTask), budgetGrants: Number(closed.budgetGrants) };
+  }
+  assert.equal(
+    harness.activities.filter(({ metadata }) => metadata?.kind === "externalFailureRefund.granted").length,
+    EXTERNAL_FAILURE_REFUND_CAP,
+  );
+  assert.ok(harness.activities.some(({ metadata }) => metadata?.capReached === true));
 });
 
 test("completeRun refunds a target-fetch block and preserves its git diagnostic", async () => {
@@ -563,10 +594,10 @@ const outcomeRows: ReadonlyArray<{
       envelope: envelope({ phase: "PROVISION", agentExited: false, terminationReason: "runner exception" }),
     },
     succeeded: false,
-    failureClass: FailureClass.TASK_FAILED,
+    failureClass: FailureClass.TRANSIENT_PROVIDER,
     // The runner's plumbing failed, so the attempt buys the task one instead of
-    // spending one. `agentExited` says that, not a flag the runner asserts.
-    retryable: false, externalFailure: true, timedOut: false,
+    // spending one. The phase says that, not a phrase the runner asserts.
+    retryable: true, externalFailure: true, timedOut: false,
   },
   {
     name: "a hung push, which the envelope types as a timeout its text does not name",
@@ -623,7 +654,7 @@ test("a delivery failure is not read as an agent that exited without finishing",
       stderrSummary: "remote rejected the push",
     }),
   });
-  assert.equal(verdict.failureClass, FailureClass.TASK_FAILED);
+  assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
   assert.equal(verdict.externalFailure, true, "the agent finished; the push is the runner's plumbing");
 });
 
@@ -718,7 +749,7 @@ for (const outcome of ["review-fail", "refresh-conflict"]) {
         },
       });
       assert.equal(closed.headSha, accepted ? baseSha : reportedHead ?? null);
-      assert.equal(closed.failureClass, FailureClass.TASK_FAILED);
+      assert.equal(closed.failureClass, FailureClass.TRANSIENT_PROVIDER);
       assert.equal(harness.activities.some((activity) => activity.metadata?.failureReason === reason), accepted);
     });
   }
@@ -746,6 +777,55 @@ for (const outputKind of ["regression-verification", "regression-verification-v2
       });
       assert.equal(closed.failureClass, FailureClass.PROTOCOL_ERROR);
       assert.equal(harness.activities.some((activity) => activity.metadata?.failureReason === reason), reportHead);
+    });
+  }
+}
+
+for (const repairKind of ["refresh-conflict", "review-fix", "gate-fix"]) {
+  for (const scenario of ["remaining", "exhausted", "result", "prior-result", "result-marker", "long-history", "old-result-marker"] as const) {
+    test(`failed ${repairKind} repair session: ${scenario}`, async () => {
+      const harness = statefulCompletionHarness({
+        opensPullRequest: false, maxSessionsPerTask: 2, repo: { defaultBranch: "main" },
+        targetBranch: "fix/repair",
+        assigneeAgent: { id: "agent-1", name: "Repair agent", archivedAt: null },
+      }, scenario.endsWith("result") ? { runId: scenario === "result" ? "run-1" : "older-run", body: "result" } : null);
+      harness.activities.push({ taskId: "task-refunds", actorType: "control-plane", body: "Repair opened",
+        metadata: { kind: "mergeTail.repairAttempt", schemaVersion: 1, state: "opened",
+          regressionTaskId: "parent-regression", repairTaskId: "task-refunds", repairKind,
+          headSha: baseSha, baseHeadSha: "6".repeat(40) },
+      });
+      if (scenario === "result-marker" || scenario === "old-result-marker") {
+        harness.activities.push({ taskId: "task-refunds", actorType: "control-plane", body: "Repair result recorded",
+          metadata: { kind: "mergeTail.repairResult", schemaVersion: 1, runId: "run-1", repairKind },
+        });
+      }
+      if (scenario === "long-history" || scenario === "old-result-marker") {
+        for (let index = 0; index < 25; index++) {
+          harness.activities.push({ taskId: "task-refunds", actorType: "agent", body: `Progress ${index}` });
+        }
+      }
+      await harness.complete({
+        runNumber: scenario === "exhausted" ? 2 : 1, maxRunsPerTask: 2, budgetGrants: 0,
+        outcome: { case: "provider-failure", reason: "resolver crashed", envelope: {
+          version: 1, phase: "EXECUTE", agentExited: true, exitCode: 1, signal: null,
+          terminationReason: null, timedOut: false, timeoutMs: null, transient: false,
+          runnerClass: FailureClass.TASK_FAILED, providerError: null,
+          stderrSummary: "resolver crashed", stdoutSummary: null, terminalEventSeen: true, terminalSuccess: false,
+        } },
+      });
+      const retries = scenario === "remaining" || scenario === "prior-result" || scenario === "long-history";
+      assert.equal(harness.queuedRuns.length, retries ? 1 : 0);
+      assert.equal(harness.activities.some(({ body }) => body === "merge-tail repair Run 1 failed before a result; Run 2 queued"), retries);
+      if (retries) {
+        assert.equal(harness.queuedRuns[0]!.branch, "fix/repair");
+        assert.equal(harness.queuedRuns[0]!.targetBranch, "fix/repair");
+        assert.equal(harness.queuedRuns[0]!.maxRunsPerTask, 2);
+        assert.equal(harness.queuedRuns[0]!.budgetGrants, 0);
+        assert.equal(harness.queuedRuns[0]!.leaseLossRefunds, 0);
+        assert.equal(harness.taskUpdates.some((update) => update.status === "REVIEW"), false);
+      } else if (scenario !== "old-result-marker") {
+        assert.ok(harness.taskUpdates.some((update) => String(update.failureReason).includes("failed without closing the repair")));
+      }
     });
   }
 }

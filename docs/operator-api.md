@@ -2414,6 +2414,25 @@ failed: <message>` reason and no refusal code.
 
 ### Recovering a merge tail stopped after its repair budget
 
+An automatic merge-tail repair Run (`refresh-conflict`, `review-fix`, or
+`gate-fix`) that fails before recording its result consumes one session
+of that detached repair Task's `maxSessionsPerTask` budget. For a
+`task-failed` Run, when another session remains, the platform queues the next
+Run of the same repair Task automatically against the recorded start head and
+base pair with the same branch pinning. It records a TaskActivity reading
+`merge-tail repair Run N failed before a result; Run N+1 queued`; the
+Regression step stays in the repair loop. This is the same repair attempt, so
+the requeue spends neither `leaseLossRefunds` nor another per-kind automatic
+repair attempt.
+
+When the repair Task has spent its session budget, the platform keeps the
+existing stop behavior: `stopMergeTail` parks the Regression verification task
+in `REVIEW` with the existing `... repair ... failed without closing the
+repair ...` reason and writes the stop notice. The operator's
+`POST /tasks/:taskId/retry` remains the exit after that budget is spent; raising
+`maxSessionsPerTask` through `PATCH /tasks/:taskId` is required first when the
+retry would otherwise be refused for an exhausted Run budget.
+
 When a regression verdict fails after the automatic repair budget is exhausted,
 the Regression verification task remains parked in `REVIEW`, and a stop notice
 is written to the Inbox. Its `failureReason` is exactly one of these shapes:
@@ -3025,7 +3044,11 @@ the executor runner ids it checked. The next tick asks again.
 An offline observation does not change the ordinary outcome of `skip` or
 `defer` decisions.
 
-That wait is bounded by the 15 minutes after which the registry forgets a
+The executor-offline requeue (`metadata.state = "requeued-executor-offline"`)
+is its own settlement: it requeues only readiness, opens no new Run, and
+spends neither the `leaseLossRefunds` cap nor a Regression repair budget.
+
+The executor-offline wait is bounded by the 15 minutes after which the registry forgets a
 daemon altogether, and it is measured per outage: the wait starts at the first
 skipped authorization of the outage the chain is currently in, not at the first
 one this task ever recorded. An outage ends when readiness observes it ending --
@@ -3044,6 +3067,11 @@ follows the ordinary authorization path against the current base. The re-arm
 itself opens no new Regression Run and never bypasses
 the exact `(headSha, baseHeadSha)` check; existing base-drift requeue handling
 applies if the base has moved.
+
+As a manual fallback to automatic re-arm, an operator who will not wait for
+the executor to return can call `POST /tasks/:taskId/retry` on the Regression
+task (the readiness task has no Run to retry). That call opens a new
+Regression Run at full rerun cost.
 
 The operator's evidence-renewal path applies the same executor allowlist check
 before writing its `purpose: "confirmation"` authorization. During an outage
@@ -3490,6 +3518,34 @@ curl -X POST "$BASE_URL/runs/$RUN_ID/cancel" \
 ```sh
 curl "$BASE_URL/runs/$RUN_ID/events?afterSeq=0&limit=500" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
+
+### Run failure classes and retries
+
+The API classifies the runner's failure envelope by phase. `EXECUTE` is the
+agent's own process: its existing termination, exit and provider-text rules
+decide the failure class. `PROVISION`, `DELIVER` and `COMPLETE` are the runner's
+plumbing and default to `TRANSIENT_PROVIDER`, retryable and external, even
+when the transport error's wording is unknown. Deterministic refusals take
+precedence: authentication failures, 401/403 and permission denial produce
+`AUTH_REQUIRED` with no automatic retry. The existing `BUDGET_EXCEEDED`,
+`NO_CHANGES_PRODUCED` and missing dependency-provisioning manifest refusals
+also retain their handling. Exit code 127 remains `BINARY_NOT_FOUND` in every
+phase, with no automatic retry. Other advisory `runnerClass` values do not decide
+the API's verdict.
+
+Plumbing transient failures receive an attempt refund under
+`EXTERNAL_FAILURE_REFUND_CAP`; automatic retry remains bounded by the resulting
+`maxRunsPerTask`. No new refund counter or configuration is involved.
+
+During `DELIVER`, the branch-push loop retries any failure except a
+deterministic access refusal, using its existing backoff, attempt limit and
+Lease-bounded deadline. Each retry re-pushes the same commit without starting
+another agent session. If that local retry budget is exhausted, the runner
+reports the delivery failure to the API, which applies the classification,
+refund and retry-Run rules above. An API-level retry starts the Step again.
+This includes Regression: even with a persisted PASS or gate-fail verdict,
+a transient delivery failure queues another Run that reruns the merge gate,
+under the same caps. A durable verdict alone does not advance a failed Run.
 
 ### Task spend cap
 

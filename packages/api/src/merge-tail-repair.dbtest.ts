@@ -1480,10 +1480,11 @@ test("a completed repair permanently consumes its source Regression verdict", as
   }
 });
 
-test("a resolver process failure escalates instead of leaving regression silently parked", async () => {
-  const seeded = await exercise("refresh-conflict");
-  const repair = await repairFor(seeded, "refresh-conflict");
-  const run = await db.run.findFirstOrThrow({ where: { taskId: repair.id } });
+const failRepairRunWithoutResult = async (
+  seeded: Awaited<ReturnType<typeof exercise>>,
+  repair: Awaited<ReturnType<typeof repairFor>>,
+  run: Awaited<ReturnType<typeof db.run.findFirstOrThrow>>,
+) => {
   const runnerId = "merge-tail-repair-runner";
   const fencingToken = `repair:${run.id}:1`;
   await db.run.update({ where: { id: run.id }, data: {
@@ -1521,9 +1522,55 @@ test("a resolver process failure escalates instead of leaving regression silentl
     if (prior === undefined) delete process.env.RUNNER_TOKEN;
     else process.env.RUNNER_TOKEN = prior;
   }
+};
+
+test("a failed resolver Run without a result automatically uses its remaining session", async () => {
+  const seeded = await exercise("refresh-conflict");
+  const repair = await repairFor(seeded, "refresh-conflict");
+  assert.equal(repair.maxSessionsPerTask, 2);
+  const run = await db.run.findFirstOrThrow({ where: { taskId: repair.id } });
+  const before = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+  const markersBefore = await readMarkerHistory(db, seeded.regression.id);
+  // A partial salvage publication must not become the retry's starting tree.
+  await db.run.update({ where: { id: run.id }, data: { pushedBranch: "wip/failed-repair", headSha: "f".repeat(40) } });
+  await db.taskActivity.createMany({ data: Array.from({ length: 25 }, (_, index) => ({
+    taskId: repair.id, actorType: "agent", body: `Verification progress ${index}`,
+  })) });
+  await failRepairRunWithoutResult(seeded, repair, run);
+  const runs = await db.run.findMany({ where: { taskId: repair.id }, orderBy: { runNumber: "asc" } });
+  assert.equal(runs.length, 2);
+  assert.equal(runs[0]!.status, "FAILED");
+  assert.equal(runs[0]!.failureClass, "TASK_FAILED");
+  assert.equal(runs[1]!.status, "QUEUED");
+  assert.equal(runs[1]!.runNumber, 2);
+  assert.equal(runs[1]!.maxRunsPerTask, 2);
+  assert.equal(runs[1]!.budgetGrants, 0);
+  assert.equal(runs[1]!.leaseLossRefunds, 0);
+  assert.equal(runs[1]!.branch, run.branch);
+  assert.equal(runs[1]!.targetBranch, BRANCH);
+  const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+  assert.equal(regression.status, before.status);
+  assert.equal(regression.failureReason, before.failureReason);
+  assert.deepEqual(await readMarkerHistory(db, seeded.regression.id), markersBefore);
+  assert.equal(await repairCount(seeded), 1);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: repair.id, body: "merge-tail repair Run 1 failed before a result; Run 2 queued",
+  } }), 1);
+});
+
+test("a second resolver process failure stops the merge tail when its session budget is spent", async () => {
+  const seeded = await exercise("refresh-conflict");
+  const repair = await repairFor(seeded, "refresh-conflict");
+  const first = await db.run.findFirstOrThrow({ where: { taskId: repair.id } });
+  await failRepairRunWithoutResult(seeded, repair, first);
+  const second = await db.run.findFirstOrThrow({ where: { taskId: repair.id, runNumber: 2 } });
+  await failRepairRunWithoutResult(seeded, repair, second);
+  assert.equal(await db.run.count({ where: { taskId: repair.id } }), 2);
+  assert.equal(await db.run.count({ where: { taskId: repair.id, status: "QUEUED" } }), 0);
   const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
   assert.equal(regression.status, TaskStatus.REVIEW);
-  assert.match(regression.failureReason ?? "", /failed without closing/u);
+  assert.equal(regression.failureReason, `refresh-conflict repair ${repair.id} failed without closing the repair at ${HEAD}`);
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 1);
 });
 
@@ -1925,7 +1972,7 @@ const v2Verdict = (outcome: ExternalRegressionOutcome) => JSON.stringify(
 );
 
 /** Complete a Regression Run after its v2 verdict is already durable, while
- * the runner reports a non-retryable git delivery failure without a head. */
+ * the runner reports a plumbing-phase git delivery failure without a head. */
 const completeRegressionAfterExternalGitFailure = async (
   seeded: Awaited<ReturnType<typeof seedRegression>>,
   outcome: ExternalRegressionOutcome,
@@ -1933,6 +1980,7 @@ const completeRegressionAfterExternalGitFailure = async (
     completionHead?: string | null;
     recovery?: boolean;
     failureMode?: "task-failed-git" | "transient-provider";
+    expectedLeaseOutcome?: "release" | "handoff";
   } = {},
 ) => {
   await db.taskTemplateStep.update({
@@ -2003,7 +2051,23 @@ const completeRegressionAfterExternalGitFailure = async (
     claimantClass: "runner",
   }, release);
   assert.ok("taskId" in completion, JSON.stringify(completion));
-  assert.deepEqual(releasedChains, [seeded.regression.chainId]);
+  if (options.expectedLeaseOutcome === "handoff") {
+    assert.deepEqual(releasedChains, []);
+    const retry = await db.run.findFirstOrThrow({ where: {
+      taskId: seeded.regression.id,
+      runNumber: seeded.run.runNumber + 1,
+    } });
+    assert.equal(retry.status, "QUEUED");
+    const handoff = await db.mergeLeaseEvent.findFirstOrThrow({ where: {
+      projectId: seeded.project.id,
+      chainId: seeded.regression.chainId!,
+      handedOffRunId: retry.id,
+    } });
+    assert.equal(handoff.state, "HANDOFF_PENDING");
+    assert.equal(handoff.owningTaskId, seeded.regression.id);
+  } else {
+    assert.deepEqual(releasedChains, [seeded.regression.chainId]);
+  }
   return {
     completion,
     run: await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } }),
@@ -2011,12 +2075,12 @@ const completeRegressionAfterExternalGitFailure = async (
   };
 };
 
-test("a task-failed git delivery preserves review-fail and queues repair at the persisted head", async () => {
+test("a transient git delivery failure preserves review-fail and queues repair at the persisted head", async () => {
   const seeded = await seedRegression();
   const settled = await completeRegressionAfterExternalGitFailure(seeded, "review-fail");
 
   assert.equal(settled.run.status, "FAILED");
-  assert.equal(settled.run.failureClass, "TASK_FAILED");
+  assert.equal(settled.run.failureClass, "TRANSIENT_PROVIDER");
   assert.equal(settled.run.failureReason, "git delivery failed");
   assert.equal(settled.run.headSha, HEAD);
   assert.equal(settled.task.status, TaskStatus.REVIEW);
@@ -2043,12 +2107,12 @@ test("a task-failed git delivery preserves review-fail and queues repair at the 
   assert.equal((await db.run.findFirstOrThrow({ where: { taskId: repair.id, runNumber: 1 } })).status, "QUEUED");
 });
 
-test("a task-failed git delivery preserves refresh-conflict and queues its resolver at the persisted head", async () => {
+test("a transient git delivery failure preserves refresh-conflict and queues its resolver at the persisted head", async () => {
   const seeded = await seedRegression();
   const settled = await completeRegressionAfterExternalGitFailure(seeded, "refresh-conflict");
 
   assert.equal(settled.run.status, "FAILED");
-  assert.equal(settled.run.failureClass, "TASK_FAILED");
+  assert.equal(settled.run.failureClass, "TRANSIENT_PROVIDER");
   assert.equal(settled.run.headSha, HEAD);
   assert.equal(settled.task.status, TaskStatus.REVIEW);
   assert.equal(settled.completion.retryCreated, false);
@@ -2101,16 +2165,19 @@ test("a transient provider drop preserves review-fail instead of queueing a retr
   assert.equal((await db.run.findFirstOrThrow({ where: { taskId: repair.id, runNumber: 1 } })).status, "QUEUED");
 });
 
-test("a persisted PASS does not advance after an external git failure", async () => {
+test("a persisted PASS queues another Regression Run after a transient delivery failure", async () => {
   const seeded = await seedRegression();
-  const settled = await completeRegressionAfterExternalGitFailure(seeded, "pass", { completionHead: HEAD });
+  const settled = await completeRegressionAfterExternalGitFailure(seeded, "pass", {
+    completionHead: HEAD,
+    expectedLeaseOutcome: "handoff",
+  });
 
   assert.equal(settled.run.status, "FAILED");
-  assert.equal(settled.run.failureClass, "TASK_FAILED");
+  assert.equal(settled.run.failureClass, "TRANSIENT_PROVIDER");
   assert.equal(settled.run.headSha, HEAD);
-  assert.equal(settled.task.status, TaskStatus.REVIEW);
-  assert.equal(settled.completion.retryCreated, false);
-  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1);
+  assert.equal(settled.completion.retryCreated, true);
+  assert.equal(settled.task.status, TaskStatus.DOING);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
   assert.equal(await db.task.count({ where: {
     projectId: seeded.project.id,
     name: { startsWith: "Autonomous merge tail:" },
@@ -2119,14 +2186,18 @@ test("a persisted PASS does not advance after an external git failure", async ()
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
 });
 
-test("a persisted gate-fail keeps ordinary external git failure settlement", async () => {
+test("a persisted gate-fail queues another Regression Run after a transient delivery failure", async () => {
   const seeded = await seedRegression();
-  const settled = await completeRegressionAfterExternalGitFailure(seeded, "gate-fail");
+  const settled = await completeRegressionAfterExternalGitFailure(seeded, "gate-fail", {
+    expectedLeaseOutcome: "handoff",
+  });
 
   assert.equal(settled.run.status, "FAILED");
-  assert.equal(settled.run.failureClass, "TASK_FAILED");
+  assert.equal(settled.run.failureClass, "TRANSIENT_PROVIDER");
   assert.equal(settled.run.headSha, null);
-  assert.equal(settled.task.status, TaskStatus.REVIEW);
+  assert.equal(settled.task.status, TaskStatus.DOING);
+  assert.equal(settled.completion.retryCreated, true);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
   assert.equal(await db.task.count({ where: {
     projectId: seeded.project.id,
     name: { startsWith: "Autonomous merge tail:" },

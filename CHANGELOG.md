@@ -9,6 +9,11 @@ written.
 
 ## Unreleased
 
+- The readiness `merge-executor-offline` recovery guidance now tells operators
+  that the manual fallback to automatic re-arm is to retry the Regression
+  task, opening a new Regression Run at full rerun cost. It also records
+  that the executor-offline requeue is a separate settlement: it spends
+  neither the lease-loss refund cap nor a Regression repair budget.
 - Merge-tail repair staffing preserves webhook and manual-trigger profile provenance.
   Repair slots refuse the mechanical merge-integrator; profile edits preserve an
   omitted archived slot. Reset restores entries with warnings when its canonical

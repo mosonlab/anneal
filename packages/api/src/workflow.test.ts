@@ -827,3 +827,26 @@ test("a requeue keeps its own base snapshot unless that base is its unpushed hea
     "agentos/task-1/run-1-wip",
   );
 });
+
+test("a no-result repair retry reuses the repair card ref and ignores salvage", async () => {
+  const tx = branchTx([
+    { taskId: "repair", chainId: null, repoId: "repo-1", runNumber: 1, pushedBranch: "wip/repair" },
+  ]);
+  const task = {
+    id: "repair", projectId: "project-1", repoId: "repo-1", chainId: null, chainIndex: null,
+    templateId: null, targetBranch: "fix/chain", repo: { defaultBranch: "main" },
+  };
+  const birth = {
+    intent: "retry-after-completion", retryFailedRepair: true, runNumber: 2,
+    prior: { branch: "fix/chain", targetBranch: "fix/chain", runNumber: 1 },
+  } as const;
+  assert.deepEqual(await resolveRunBranches(tx, task, birth), {
+    branch: "fix/chain", targetBranch: "fix/chain",
+  });
+  assert.deepEqual(await resolveRunBranches(tx, { ...task, targetBranch: null }, {
+    ...birth, prior: { branch: null, targetBranch: null, runNumber: 1 },
+  }), { branch: "agentos/repair/run-2", targetBranch: null });
+  assert.deepEqual(await resolveRunBranches(tx, { ...task, repo: null }, birth), {
+    branch: "fix/chain", targetBranch: "fix/chain",
+  });
+});

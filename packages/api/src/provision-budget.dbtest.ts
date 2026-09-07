@@ -259,16 +259,19 @@ test("a failure the agent's own work produced still spends a session", async () 
   assert.equal(started.body.error, "Run budget exhausted", "the ceiling still closes when the agent is the one failing");
 });
 
-test("a deterministic TASK_FAILED clone neither refunds nor retries", async () => {
+test("an unknown clone failure is refunded and retried even with a runner exception", async () => {
   const context = await seedTask("provision-deterministic", 2);
   const closed = await failProvisioning(context, 1, unreachableRemoteEnvelope as unknown as FailureEnvelope);
-  // Deterministic TASK_FAILED outcomes cannot raise the ceiling, even when
-  // they happened before agent launch, and retrying cannot repair this one.
-  assert.equal(closed.maxRunsPerTask, 2, "TASK_FAILED never grants a refund");
-  assert.equal(closed.budgetGrants, 0);
-  assert.equal(closed.failureClass, "TASK_FAILED");
-  assert.equal(closed.retryable, false);
-  assert.equal(await db.run.count({ where: { taskId: context.task.id, runNumber: 2 } }), 0);
+  // A runner exception and an unknown clone error are both plumbing facts;
+  // neither is a deterministic access refusal, so the phase default refunds
+  // this attempt and queues the same task for another run.
+  assert.equal(closed.maxRunsPerTask, 3, "the pre-agent failure earns a refund");
+  assert.equal(closed.budgetGrants, 1);
+  assert.equal(closed.failureClass, "TRANSIENT_PROVIDER");
+  assert.equal(closed.retryable, true);
+  const retryRun = await db.run.findFirstOrThrow({ where: { taskId: context.task.id, runNumber: 2 } });
+  assert.equal(retryRun.status, "QUEUED");
+  assert.equal(retryRun.maxRunsPerTask, 3);
 });
 
 /** `PATCH /tasks/:id` — the route an operator uses to re-budget a task. */
