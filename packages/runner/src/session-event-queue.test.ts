@@ -505,3 +505,26 @@ test("push does not cost the length of the protected prefix ahead of the droppab
     `a 200x deeper protected prefix must not make the hot path 200x slower: ${shallow}ns shallow, ${deep}ns deep`,
   );
 });
+
+test("the bound holds again as soon as a rejection settles the batch that suspended it", () => {
+  // The bound is tight enough that the queue is at it when the batch forms, so
+  // the record of the rejection has to displace something to fit.
+  const queue = createSessionEventQueue({ nextSeq: 0, maxBytes: 2_530 });
+  for (let index = 0; index < 4; index += 1) queue.push(chunk("x".repeat(500)));
+  queue.push(chunk("t"));
+  const inFlight = queue.batch();
+  assert.equal(inFlight.length, 5, "the whole queue is in flight");
+
+  // The request settles by naming one of its events: nothing is in flight any
+  // more, so the exemption the batch held ends with the request.
+  assert.equal(queue.reject(inFlight[4]!.seq, "payload-too-large"), true);
+  assert.ok(
+    queue.bytes <= 2_530,
+    `a batch that has settled must not hold the queue over its byte bound, held ${queue.bytes}`,
+  );
+
+  const held = queue.batch();
+  const record = held.find((event) => event.type === EVENT_REJECTED_EVENT_TYPE);
+  assert.ok(record, "and the rejection is still recorded");
+  assert.equal((record.payload as { rejectedSeq: number }).rejectedSeq, inFlight[4]!.seq);
+});

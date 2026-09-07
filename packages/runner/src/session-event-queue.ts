@@ -162,6 +162,22 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
   };
 
   /**
+   * Give up every claim, because the request that held them has settled.
+   *
+   * At most one append is ever in flight, so anything that settles it — a batch
+   * being formed for the next attempt, or a refusal naming one of its events —
+   * is proof that the entries it held are no longer being delivered and are
+   * available to the bound again. Leaving them claimed after a refusal would
+   * leave the queue exempt from its own byte bound with nothing in flight to
+   * justify it, and with no later event able to bring it back under.
+   */
+  const unclaimAll = (): void => {
+    for (const entry of entries) entry.claimed = false;
+    // Unclaiming can expose a droppable entry anywhere in the queue.
+    oldestDroppable = 0;
+  };
+
+  /**
    * Envelope plus payload rather than one pass over the whole event: `push` is
    * the runner's hottest path — one call per streaming token — and the payload
    * is already serialized to test it against the per-event cap.
@@ -440,11 +456,9 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
     batch: () => {
       const batch: SessionEventPayload[] = [];
       let size = 0;
-      // At most one append is ever in flight, so forming a batch is also the
-      // proof that the previous one has settled and may be dropped again.
-      for (const entry of entries) entry.claimed = false;
-      // Unclaiming can expose a droppable entry anywhere in the queue.
-      oldestDroppable = 0;
+      // Forming a batch is one of the two proofs that the previous one has
+      // settled and may be dropped again.
+      unclaimAll();
       for (const entry of entries) {
         if (batch.length >= batchMaxEvents) break;
         if (batch.length > 0 && size + entry.bytes > batchMaxBytes) break;
@@ -468,6 +482,10 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
       }
     },
     reject: (seq_, reason) => {
+      // A refusal names an event of the batch that was in flight, so it is the
+      // other proof that batch has settled: the whole of it is the bound's to
+      // spend again, not just the event being lost.
+      unclaimAll();
       const index = entries.findIndex((entry) => entry.event.seq === seq_);
       if (index === -1) return false;
       const [removed] = entries.splice(index, 1) as [Entry];
@@ -478,6 +496,7 @@ export const createSessionEventQueue = (options: SessionEventQueueOptions): Sess
       // flush loop would never drain — the wedge this whole design exists to
       // rule out.
       if (removed.event.type === EVENT_REJECTED_EVENT_TYPE || removed.event.type === EVENTS_DROPPED_EVENT_TYPE) {
+        enforceBound();
         return true;
       }
       // A merged marker stands for events that are in no other entry, so the
