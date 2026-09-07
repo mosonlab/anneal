@@ -344,10 +344,13 @@ export const runMetrics = (input: {
       : round(tokens.output / (modelActiveMs / 1_000), 2),
     termination: terminationMetrics(session),
     // Measured against the same executing phase published above, so the
-    // comparison and the figure it compares can never disagree.
+    // comparison and the figure it compares can never disagree. A session that
+    // has not ended has no comparable duration: its executing phase is measured
+    // to now, while every baseline sample is a completed run, so the ratio
+    // would report "not finished yet" as "faster than usual". Null instead.
     vsBaseline: vsBaseline(input.baseline ?? null, {
       costUsd: reportedCost(session),
-      durationMs: phases.executingMs,
+      durationMs: session?.endedAt == null ? null : phases.executingMs,
     }),
   };
 };

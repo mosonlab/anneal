@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { RunnerKind } from "@anneal/db";
+import type { RunBaseline } from "@anneal/db/board-contract";
 
 import { runMetrics, type RunMetricsSession, type RunMetricsToolEvent } from "./run-metrics.js";
 
@@ -45,11 +46,19 @@ const metricsOf = (input: {
   toolEvents?: readonly RunMetricsToolEvent[];
   readyAt?: Date;
   now?: Date;
+  baseline?: RunBaseline | null;
 } = {}) => runMetrics({
   run: { readyAt: input.readyAt ?? READY },
   session: input.session === undefined ? session() : input.session,
   toolEvents: input.toolEvents ?? [],
   now: input.now ?? new Date(ENDED.getTime() + 60_000),
+  baseline: input.baseline ?? null,
+});
+
+const baseline = (): RunBaseline => ({
+  sampleSize: 6,
+  costUsd: { sampleSize: 6, p50: 2, p90: 4 },
+  durationMs: { sampleSize: 6, p50: 200_000, p90: 400_000 },
 });
 
 /* --------------------------------------------------------------- phases */
@@ -360,4 +369,18 @@ test("overlapping tool calls consume their union of wall time", () => {
 
 test("the public tools shape contains only the specified counters and breakdown", () => {
   assert.deepEqual(Object.keys(metricsOf().tools).sort(), ["byName", "calls", "failed", "totalToolMs", "unclassified"]);
+});
+
+/* ----------------------------------------------------------- baseline */
+
+test("a settled run is measured against its step baseline", () => {
+  const metrics = metricsOf({ session: session({ costUsd: "1" }), baseline: baseline() });
+  assert.deepEqual(metrics.vsBaseline, { costRatio: 0.5, durationRatio: 0.5 });
+});
+
+test("a live run has no durationRatio: its executing phase is still running", () => {
+  const live = session({ costUsd: "1", endedAt: null, executionStatus: "RUNNING" });
+  const metrics = metricsOf({ session: live, now: new Date(STARTED.getTime() + 20_000), baseline: baseline() });
+  assert.equal(metrics.phases.executingMs, 20_000);
+  assert.deepEqual(metrics.vsBaseline, { costRatio: 0.5, durationRatio: null });
 });

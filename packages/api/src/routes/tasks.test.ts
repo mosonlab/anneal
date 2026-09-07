@@ -1347,7 +1347,7 @@ test("task detail carries its step baseline and measures every run against it", 
     // One baseline statement for the whole task, whatever its run count.
     const baselineQueries = queries.filter((query) => /percentile_cont/u.test(query.sql ?? ""));
     assert.equal(baselineQueries.length, 1);
-    assert.deepEqual(baselineQueries[0]!.values, ["SUCCEEDED", "project-1", "step-1"]);
+    assert.deepEqual(baselineQueries[0]!.values, ["succeeded", "project-1", "step-1"]);
 
     // $6.00 against a $3.00 median, and 100s of executing against 50s.
     assert.deepEqual(body.runs.find((run) => run.runNumber === 2)!.metrics.vsBaseline, {

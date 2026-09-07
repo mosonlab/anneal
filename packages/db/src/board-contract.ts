@@ -371,6 +371,8 @@ export type RunBaseline = {
  *  unknown. Above 1 is slower or dearer than usual. */
 export type RunVsBaseline = {
   costRatio: number | null;
+  /** Null until the session has ended: an unfinished executing phase is not a
+   *  duration the completed runs in the baseline can be compared with. */
   durationRatio: number | null;
 };
 

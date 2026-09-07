@@ -1596,7 +1596,9 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
     duration p50. Each is `null` whenever the baseline metric or the run's own
     value is unknown; above `1` means dearer or slower than usual. Both use the
     raw values published beside them, so a ratio and its figures cannot
-    disagree.
+    disagree. `durationRatio` is also `null` while the session has not ended:
+    the executing phase of a live run is measured to now, and the baseline is
+    built from completed runs only.
 - The response carries a task-level `baseline`: what this task's template step
   usually costs and how long it usually takes, over the **terminally
   successful** (`SUCCEEDED`) runs of the same `templateStepId` in the same
