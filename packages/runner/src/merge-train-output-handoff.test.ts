@@ -142,3 +142,23 @@ test("a record the control plane could not authorize from never crosses the seam
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
+
+test("a detached train consumes its handoff through the control-plane claim metadata", async () => {
+  const fixture = await setup();
+  try {
+    await writeHandoff(fixture.path, handoff());
+    const detached: RegressionHandoffClaim = { run: { id: "run-1" }, task: {
+      templateStep: null,
+      mergeTrain: { schemaVersion: 1, baseSha: "a".repeat(40), width: 1, candidates: [{
+        taskId: "task-1", chainId: "00000000-0000-4000-8000-000000000001",
+        headSha: "b".repeat(40), branch: "feature",
+      }] },
+    } };
+    assert.equal((await readMergeTrainOutputHandoff(runnerConfig(fixture.root), detached, fixture.workspace))?.body, record());
+    assert.equal(await readMergeTrainOutputHandoff(runnerConfig(fixture.root), {
+      ...detached, task: { templateStep: null },
+    }, fixture.workspace), null);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});

@@ -32,6 +32,7 @@ export const MERGE_TAIL_KIND = {
   repairResult: "mergeTail.repairResult",
   requeue: "mergeTail.requeue",
   readiness: "mergeTail.readiness",
+  train: "mergeTail.train",
 } as const;
 
 /**
@@ -388,6 +389,19 @@ export const parseRegressionVerdict = (
 
 export type MergeTrainVerdict = "pass" | "fail" | "no-verdict";
 export type MergeTrainWidth = 1 | 2 | 3;
+
+/**
+ * The ordered candidate binding written into a merge-train Task marker and
+ * handed to the runtime tool through the claim contract. `taskId` is the
+ * candidate's merge-readiness Task; the Regression Task identity that staffs
+ * the detached train is carried separately by the train marker.
+ */
+export type MergeTrainCandidate = {
+  taskId: string;
+  chainId: string;
+  headSha: string;
+  branch: string;
+};
 
 export type MergeTrainPrefix = {
   index: number;

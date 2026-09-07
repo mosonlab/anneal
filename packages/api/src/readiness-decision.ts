@@ -36,6 +36,13 @@ export type ReadinessInput = ReadinessContext & (
   | {
       stage: "ready";
       regression: RegressionPass;
+      /**
+       * A previously validated merge-train base and candidate head. The train
+       * is the only path that may authorize a candidate whose head is not an
+       * ancestor of the live base; the caller remains responsible for proving
+       * the train record and its cumulative gates before supplying this input.
+       */
+      train?: { baseSha: string; candidateHeadSha: string };
       target:
         | { resolved: true; repository: string; prNumber: number }
         | { resolved: false; unresolvable: "none" | "ambiguous" | "repository" };
@@ -60,6 +67,12 @@ export type ReadinessDecision =
     }
   | {
       kind: "requeue-regression";
+      /**
+       * Why the requeue was decided, as a name callers may branch on. The
+       * prose `reason` is for operators and is never control flow: the merge
+       * train suppresses exactly the `base-advanced` condition.
+       */
+      condition: "stale-head" | "base-advanced" | "train-base-stale" | "ancestry-refused";
       reason: string;
       staleBaseSha: string;
       currentBaseSha: string;
@@ -125,6 +138,7 @@ export const evaluateReadiness = async (
     if (snapshot.headRefOid !== input.regression.headSha) {
       return {
         kind: "requeue-regression",
+        condition: "stale-head",
         staleBaseSha: input.regression.baseHeadSha,
         currentBaseSha: snapshot.baseSha ?? "missing",
         reason: `stale PASS head ${input.regression.headSha}; current PR head is ${snapshot.headRefOid ?? "missing"}`,
@@ -133,13 +147,23 @@ export const evaluateReadiness = async (
     if (!snapshot.baseSha || !snapshot.baseRefName) {
       return stop("pull-request-base-missing", "pull request base identity is unavailable");
     }
-    if (snapshot.baseSha !== input.regression.baseHeadSha) {
+    const expectedBaseSha = input.train?.baseSha ?? input.regression.baseHeadSha;
+    if (snapshot.baseSha !== expectedBaseSha) {
       return {
         kind: "requeue-regression",
+        condition: input.train ? "train-base-stale" : "base-advanced",
         staleBaseSha: input.regression.baseHeadSha,
         currentBaseSha: snapshot.baseSha,
-        reason: "target base advanced after regression PASS",
+        reason: input.train
+          ? `merge-train base ${input.train.baseSha} is stale; current base is ${snapshot.baseSha}`
+          : "target base advanced after regression PASS",
       };
+    }
+    if (input.train && input.train.candidateHeadSha !== input.regression.headSha) {
+      return stop(
+        "merge-train-evidence-invalid",
+        `train candidate head ${input.train.candidateHeadSha} does not match Regression PASS head ${input.regression.headSha}`,
+      );
     }
 
     const comparison = await facts.compareCommits(
@@ -154,10 +178,16 @@ export const evaluateReadiness = async (
         "GitHub comparison file list is truncated or completeness is unproven",
       );
     }
-    if ((comparison.status !== "ahead" && comparison.status !== "identical")
-      || comparison.behindBy !== 0) {
+    const normalAncestry = (comparison.status === "ahead" || comparison.status === "identical")
+      && comparison.behindBy === 0;
+    const validatedTrainDivergence = input.train !== undefined
+      && input.train.baseSha === snapshot.baseSha
+      && input.train.candidateHeadSha === input.regression.headSha
+      && comparison.status === "diverged";
+    if (!normalAncestry && !validatedTrainDivergence) {
       return {
         kind: "requeue-regression",
+        condition: "ancestry-refused",
         staleBaseSha: input.regression.baseHeadSha,
         currentBaseSha: snapshot.baseSha,
         reason: `server-side ancestry check refused ${comparison.status} comparison with behind_by=${comparison.behindBy}`,

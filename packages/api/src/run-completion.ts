@@ -32,6 +32,7 @@ import {
   Prisma,
   type PrismaClient,
   PushStatus,
+  readLatestMarker,
   readMarkers,
   recordIntegratorStop,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
@@ -790,6 +791,8 @@ export const completeRun = async (
       && (durableNegativeRegressionVerdict || !(retryable && run.runNumber < budgetCeiling));
     const documentationStepSucceeded = succeeded
       && isDocumentationStep(run.task?.templateStep);
+    // Train settlement is read separately below from control-plane activity;
+    // it does not widen repair marker reads for retryable detached failures.
     const tailMarkers = run.task && (failureIsFinal
       || (succeeded && !run.task.templateId && !run.task.chainId))
       ? await readMarkers(tx, run.task.id)
@@ -855,6 +858,19 @@ export const completeRun = async (
       : null;
     // An auxiliary task is one whose own marker names the Regression it serves.
     const mergeTailAuxiliary = Boolean(repairMarker?.regressionTaskId);
+    // A detached merge-train card the readiness tick has already settled. The
+    // train session persists its record before `session.finish`, so settlement
+    // commonly commits while this Run is still active; the card's terminal
+    // state is the tick's, not this completion's, in either direction.
+    // Agent activity can carry marker-shaped metadata but cannot settle a
+    // train. Read the control plane's latest state independently of the recent
+    // activity window so session chatter cannot hide an existing settlement.
+    const trainMarker = run.task && !run.task.templateId && !run.task.chainId
+      ? await readLatestMarker(tx, run.task.id, "train")
+      : null;
+    const mergeTrainSettled = Boolean(run.task
+      && trainMarker?.raw.trainTaskId === run.task.id
+      && (trainMarker.state === "settled" || trainMarker.state === "aborted"));
     const auxiliaryTargetTaskId = repairMarker?.regressionTaskId
       ? repairDocumentationTask?.id ?? repairMarker.regressionTaskId
       : null;
@@ -1180,6 +1196,7 @@ export const completeRun = async (
         outputRefusal: canonicalOutputFailure,
         mergeTailAuxiliary,
         mergeTailHandled: mergeTailCompletion.handled,
+        mergeTrainSettled,
         repairBindingRefusal: unboundRepair?.mismatch.reason ?? null,
         auxiliaryTargetTaskId,
         mergeTailRequeue: mergeTailSuccessorRequeue,
@@ -1217,6 +1234,9 @@ export const completeRun = async (
         case "mechanical-merge-already-recorded":
         case "stop-with-output-refusal":
         case "merge-tail-settled":
+        // The merge train settlement wrote this detached card's terminal state
+        // already; parking it here would undo it.
+        case "merge-train-control-plane-settled":
           break;
         case "settle-regression-verdict": {
           const result = await handleRegressionCompletion(tx, {

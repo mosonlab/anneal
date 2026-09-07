@@ -111,6 +111,18 @@ elapsed wait in `leaseWaitedMs`. After acquisition, unchanged `main` lets the
 already-gated prefixes publish without rerunning gates; moved `main` returns
 `stale-base` and publishes nothing.
 
+Chain publication follows the control-plane merge train when the API's
+`MERGE_TRAIN_WIDTH` is greater than zero. Merge readiness groups up to that
+width of ready candidates per Repo in FIFO order, acquires one Merge Lease
+under the first candidate's Chain target, and hands the detached `merge-train`
+Task a cumulative candidate list. The train authorizes the longest contiguous
+passing prefix, after which merge execution publishes the prefixes. A single
+non-drifted candidate continues through the single-candidate path; unset or
+`0` keeps the existing Chain delivery behavior. Base drift under enabled train
+readiness does not trigger a per-Chain Regression re-run: the train's Merge
+gate and readiness second read check the cumulative prefixes before
+authorization.
+
 Do not pre-acquire under the train's task id: it widens the lease hold across
 gating instead of publication only. Never pre-acquire with another task's id
 or steal a lease another window holds.
