@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ChainControlState, markerFromMetadata, Prisma, type PrismaClient } from "@anneal/db";
+import { MECHANICAL_CONTRACT_MISMATCH_CODE } from "@anneal/db/claim-contract";
 
 import {
   type BoardChainControl,
@@ -103,6 +104,7 @@ const boardReadDatabase = ({
   related = [],
   activities = [],
   controls = [],
+  activityQueries,
 }: {
   rows: BoardRow[];
   chainRows?: Array<Record<string, unknown>>;
@@ -113,8 +115,9 @@ const boardReadDatabase = ({
     projectId?: string;
     chainId?: string | null;
   }>;
-  activities?: Array<{ taskId: string; metadata: Record<string, unknown> }>;
+  activities?: Array<{ id?: string; taskId: string; metadata: Record<string, unknown>; createdAt?: Date }>;
   controls?: Array<BoardChainControl & { projectId: string; chainId: string }>;
+  activityQueries?: Array<Record<string, unknown>>;
 }): { db: PrismaClient; predecessorLookups: string[][]; controlLookups: string[][] } => {
   const predecessorLookups: string[][] = [];
   const controlLookups: string[][] = [];
@@ -131,7 +134,10 @@ const boardReadDatabase = ({
         return rows;
       },
     },
-    taskActivity: { findMany: async () => activities },
+    taskActivity: { findMany: async (args: Record<string, unknown>) => {
+      activityQueries?.push(args);
+      return activities;
+    } },
     chainControl: {
       findMany: async (args: { where?: { OR?: Array<{ projectId: string; chainId: string }> } }) => {
         const keys = args.where?.OR ?? [];
@@ -245,8 +251,8 @@ test("the projection derives stranded salvage only when a later Run kept the LOS
 test("a board card carries the stranded salvage branch and LOST Run number", () => {
   const baseSha = "a".repeat(40);
   const card = boardCard(row({ runs: [
-    { id: "run-2", runNumber: 2, status: "RUNNING", model: "claude", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null },
-    { id: "run-1", runNumber: 1, status: "LOST", model: "claude", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: "agentos/task-1/run-1", baseSha, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null },
+    { id: "run-2", runNumber: 2, status: "RUNNING", model: "claude", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null },
+    { id: "run-1", runNumber: 1, status: "LOST", model: "claude", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: "agentos/task-1/run-1", baseSha, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null },
   ]}), null, moveContext);
   assert.deepEqual(card.strandedSalvageBranches, [{ branch: "agentos/task-1/run-1", lostRunNumber: 1 }]);
 });
@@ -300,7 +306,7 @@ test("a standalone Agent task with an active Run does not offer Backlog", () => 
       id: "a1", name: "developer", title: "Developer", model: "gpt-5.6-sol", archivedAt: null,
     },
     runs: [{
-      id: "run-1", runNumber: 1, status: "RUNNING", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null,
+      id: "run-1", runNumber: 1, status: "RUNNING", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null,
     }],
   }), null, { hasRepoGrant: true, chainPredecessorsDone: true });
 
@@ -523,14 +529,14 @@ test("chainAggregate projects a held chain without changing active-run or column
 test("chainAggregate sums member usage and groups a detached repair without inflating steps", () => {
   const aggregate = chainAggregate("c1", "Release", [
     member({ id: "step-1", status: "DONE", chainIndex: 0, chainLayer: 0, runs: [
-      { id: "run-1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: "1.25" }) },
+      { id: "run-1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: "1.25" }) },
     ] }),
     member({ id: "step-2", status: "DONE", chainIndex: 1, chainLayer: 1 }),
   ], [
     member({
       id: "repair", name: "Merge-tail repair", displayName: "Merge-tail repair", chainId: null,
       chainIndex: null, chainLayer: null, status: "TODO", runs: [
-        { id: "run-2", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: "0.50" }) },
+        { id: "run-2", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: "0.50" }) },
       ],
     }),
   ]);
@@ -556,7 +562,7 @@ test("chainAggregate projects an active detached repair without moving the front
     member({
       id: "repair", name: "Merge-tail repair", displayName: "Merge-tail repair", chainId: null,
       chainIndex: null, chainLayer: null, status: "TODO", repairKind: "gate-fix", runs: [
-        { id: "repair-run", runNumber: 3, status: "RUNNING", model: "gpt-5.6-sol:high", codexServiceTier: "FAST", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ startedAt }) },
+        { id: "repair-run", runNumber: 3, status: "RUNNING", model: "gpt-5.6-sol:high", codexServiceTier: "FAST", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ startedAt }) },
       ],
     }),
   ]);
@@ -576,7 +582,7 @@ test("chainAggregate omits an inactive detached repair", () => {
   const aggregate = chainAggregate("c1", "Release", [member({ status: "REVIEW" })], [
     member({
       id: "repair", chainId: null, chainIndex: null, chainLayer: null, repairKind: "gate-fix",
-      runs: [{ id: "repair-run", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null }],
+      runs: [{ id: "repair-run", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null }],
     }),
   ]);
   assert.equal(aggregate.activeRepair, null);
@@ -586,7 +592,7 @@ test("the Chain frontier projects a stopped merge outcome only for the Run it sh
   const stopped = JSON.stringify({ outcome: "stopped", condition: "head-drift", evidence: "live head changed" });
   const frontierRun = {
     id: "run-2", runNumber: 2, status: "SUCCEEDED" as const,
-    model: "claude-opus-5", codexServiceTier: "DEFAULT" as const, budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null,
+    model: "claude-opus-5", codexServiceTier: "DEFAULT" as const, budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null,
   };
   const projection = (runId: string) => chainAggregate("c1", "Release", [member({
     status: "DONE",
@@ -652,7 +658,7 @@ test("blockedOn is projected from the resolved predecessor without storing its s
 
 test("the card's merge outcome is bound to the run it shows, and is null everywhere else", () => {
   const merged = JSON.stringify({ outcome: "merged", mergeCommitSha: "a".repeat(40) });
-  const run = { id: "r1", runNumber: 3, status: "SUCCEEDED" as const, model: "gpt-5.6-sol", codexServiceTier: "DEFAULT" as const, budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null };
+  const run = { id: "r1", runNumber: 3, status: "SUCCEEDED" as const, model: "gpt-5.6-sol", codexServiceTier: "DEFAULT" as const, budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null };
   // §SF-1: an ordinary step's output is not a malformed merge result, it is not
   // a merge result at all, and 112 board cards must not each carry a marker.
   assert.equal(boardCard(row({ runs: [run], stepOutput: { kind: "code-review", body: "fine", runId: "r1" } }), null, moveContext).mergeOutcome, null);
@@ -669,7 +675,7 @@ test("the projection drops the Run and Session columns the board never reads", (
   const card = boardCard(row({
     runs: [{
       id: "r1", runNumber: 3, status: "FAILED", model: "claude-opus-5", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null,
-      readyAt: RUN_READY, startedAt: null, endedAt: new Date("2026-08-16T00:02:01Z"), lastProgressEventAt: new Date("2026-08-16T00:01:30Z"), maxRunsPerTask: 5,
+      readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: new Date("2026-08-16T00:02:01Z"), lastProgressEventAt: new Date("2026-08-16T00:01:30Z"), maxRunsPerTask: 5,
       // The real row carries ~45 more columns; only these fields survive.
       session: session({ costUsd: "1.25", startedAt: new Date("2026-08-16T00:00:00Z"), endedAt: new Date("2026-08-16T00:02:00Z") }),
     }],
@@ -688,7 +694,7 @@ test("the latest run carries its own claimed model, not the assignee's current o
   // relabel a run that already happened.
   const card = boardCard(row({
     assigneeAgent: { id: "a1", title: "merge-resolver-opus-medium", model: "gpt-5.6-sol:high", archivedAt: null },
-    runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null }],
+    runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null }],
   }), null, moveContext);
   assert.equal(card.latestRun?.model, "claude-opus-5:medium");
   assert.equal(card.assigneeAgent?.model, "gpt-5.6-sol:high");
@@ -696,7 +702,7 @@ test("the latest run carries its own claimed model, not the assignee's current o
 
 test("the latest run carries its claimed Codex service tier", () => {
   const card = boardCard(row({ runs: [{
-    id: "r1", runNumber: 1, status: "RUNNING", model: "gpt-5.6-sol:high", codexServiceTier: "FAST", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5,
+    id: "r1", runNumber: 1, status: "RUNNING", model: "gpt-5.6-sol:high", codexServiceTier: "FAST", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5,
     session: null,
   }] }), null, moveContext);
   assert.equal(card.latestRun?.codexServiceTier, "FAST");
@@ -718,7 +724,7 @@ const phaseRun = (
 ): BoardRow["runs"][number] => ({
   id: "r1", runNumber: 1, status, model: "claude-opus-5", codexServiceTier: "DEFAULT",
   budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null,
-  readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5,
+  readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5,
   session: overrides === null ? null : session(overrides),
   ...runOverrides,
 });
@@ -778,6 +784,78 @@ test("readBoard dates current Inbox waits with one lookup of the exact question 
   assert.equal(wire[0].latestRun.phaseSince, SESSION_ENDED.toISOString());
   assert.equal(wire[1].latestRun.phaseSince, CLEANUP_STARTED.toISOString());
   assert.equal(wire[0].latestRun.phase, "waiting-inbox");
+});
+
+test("readBoard projects a queued mechanical claim refusal only from a current mismatch activity", async () => {
+  const runCreatedAt = new Date("2026-08-16T00:00:00.000Z");
+  const refusalAt = new Date("2026-08-16T00:00:01.000Z");
+  const run = (status: BoardRow["runs"][number]["status"], createdAt: Date) => ({
+    id: `${status.toLowerCase()}-run`, runNumber: 1, status, model: "merge-integrator", codexServiceTier: "DEFAULT" as const,
+    budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null,
+    readyAt: RUN_READY, createdAt, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5,
+    session: null,
+  });
+  const rows = [
+    row({ id: "current", runs: [run("QUEUED", runCreatedAt)] }),
+    row({ id: "old", runs: [run("QUEUED", runCreatedAt)] }),
+    row({ id: "claimed", runs: [run("CLAIMED", runCreatedAt)] }),
+    row({ id: "unversioned", runs: [run("QUEUED", runCreatedAt)] }),
+  ];
+  const activityQueries: Array<Record<string, unknown>> = [];
+  const { db } = boardReadDatabase({
+    rows,
+    activityQueries,
+    activities: [
+      {
+        id: "unversioned-refusal",
+        taskId: "unversioned",
+        createdAt: runCreatedAt,
+        metadata: { code: MECHANICAL_CONTRACT_MISMATCH_CODE, executorVersion: null, apiVersion: 2 },
+      },
+      {
+        id: "current-refusal",
+        taskId: "current",
+        createdAt: refusalAt,
+        metadata: { code: MECHANICAL_CONTRACT_MISMATCH_CODE, executorVersion: 1, apiVersion: 2 },
+      },
+      {
+        id: "old-refusal",
+        taskId: "old",
+        createdAt: new Date(runCreatedAt.getTime() - 1),
+        metadata: { code: MECHANICAL_CONTRACT_MISMATCH_CODE, executorVersion: 1, apiVersion: 2 },
+      },
+      {
+        id: "claimed-refusal",
+        taskId: "claimed",
+        createdAt: refusalAt,
+        metadata: { code: MECHANICAL_CONTRACT_MISMATCH_CODE, executorVersion: 1, apiVersion: 2 },
+      },
+    ],
+  });
+
+  const cards = await readBoard(db, { projectId: "p1", archived: "false" });
+  assert.deepEqual(cards.find((card) => card.id === "current")?.latestRun?.claimRefusal, {
+    code: MECHANICAL_CONTRACT_MISMATCH_CODE,
+    executorVersion: 1,
+    apiVersion: 2,
+    since: refusalAt,
+  });
+  assert.deepEqual(cards.find((card) => card.id === "unversioned")?.latestRun?.claimRefusal, {
+    code: MECHANICAL_CONTRACT_MISMATCH_CODE,
+    executorVersion: null,
+    apiVersion: 2,
+    since: runCreatedAt,
+  });
+  assert.equal(cards.find((card) => card.id === "old")?.latestRun?.claimRefusal, undefined);
+  assert.equal(cards.find((card) => card.id === "claimed")?.latestRun?.claimRefusal, undefined);
+  assert.equal(
+    activityQueries.filter((query) => {
+      const metadata = (query.where as Record<string, unknown> | undefined)?.metadata as { path?: string[] } | undefined;
+      return metadata?.path?.[0] === "code";
+    }).length,
+    1,
+    "claim refusals are read once for the page",
+  );
 });
 
 test("chain lead time retains the failed first attempt from complete primary history", async () => {
@@ -843,7 +921,7 @@ test("the latest run carries the pull request it published, and null when it pub
   const run = (pullRequestUrl: string | null) => ({
     id: "r1", runNumber: 1, status: "SUCCEEDED" as const, model: "gpt-5.6-sol:high",
     codexServiceTier: "DEFAULT" as const, budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl,
-    pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null,
+    pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null,
   });
   assert.equal(
     boardCard(row({ runs: [run("https://github.com/o/r/pull/39")] }), null, moveContext).latestRun?.pullRequestUrl,
@@ -858,7 +936,7 @@ test("a task with no runs reports no latest run rather than an empty one", () =>
 
 test("a run with no session reports a null cost, not a zero one", () => {
   // `0` would read as "this run spent nothing"; the runner simply never said.
-  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "RUNNING", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null }] }), null, moveContext);
+  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "RUNNING", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null }] }), null, moveContext);
   assert.equal(card.taskCost, null);
 });
 
@@ -866,7 +944,7 @@ test("a Decimal cost is serialised as the string the web client reads", () => {
   // Prisma hands back a Decimal instance, not a string, and `JSON.stringify`
   // of one is `{"s":1,"e":0,...}` unless it is stringified on the way out.
   const decimal = new Prisma.Decimal("0.42");
-  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: decimal }) }] }), null, moveContext);
+  const card = boardCard(row({ runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: decimal }) }] }), null, moveContext);
   assert.equal(card.taskCost?.costUsd, "0.42");
   assert.equal(card.latestRun?.costUsd, "0.42");
   assert.match(JSON.stringify(card), /"costUsd":"0\.42"/);
@@ -874,10 +952,10 @@ test("a Decimal cost is serialised as the string the web client reads", () => {
 
 test("task cost sums every run including failures and marks an estimated summand", () => {
   const card = boardCard(row({ runs: [
-    { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({
+    { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({
       inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 0,
     }) },
-    { id: "r1", runNumber: 1, status: "FAILED", model: "claude-opus-5:high", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: "1.25" }) },
+    { id: "r1", runNumber: 1, status: "FAILED", model: "claude-opus-5:high", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: "1.25" }) },
   ] }), null, moveContext);
   assert.deepEqual(card.latestRun, {
     id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", codexServiceTier: "DEFAULT",
@@ -890,8 +968,8 @@ test("task cost sums every run including failures and marks an estimated summand
 
 test("a capped task carries its cap beside what its runs have spent against it", () => {
   const runs = [
-    { id: "r2", runNumber: 2, status: "SUCCEEDED" as const, model: "claude-opus-5", codexServiceTier: "DEFAULT" as const, budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: new Prisma.Decimal("1.00") }) },
-    { id: "r1", runNumber: 1, status: "FAILED" as const, model: "claude-opus-5", codexServiceTier: "DEFAULT" as const, budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: new Prisma.Decimal("0.50") }) },
+    { id: "r2", runNumber: 2, status: "SUCCEEDED" as const, model: "claude-opus-5", codexServiceTier: "DEFAULT" as const, budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: new Prisma.Decimal("1.00") }) },
+    { id: "r1", runNumber: 1, status: "FAILED" as const, model: "claude-opus-5", codexServiceTier: "DEFAULT" as const, budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: new Prisma.Decimal("0.50") }) },
   ];
 
   const capped = boardCard(row({ spendCap: new Prisma.Decimal("1.00"), runs }), null, moveContext);
@@ -909,7 +987,7 @@ test("a capped task carries its cap beside what its runs have spent against it",
 
 test("board cost preserves its estimate when cache creation is split from cached input", () => {
   const card = boardCard(row({ runs: [{
-    id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-luna", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5,
+    id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-luna", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5,
     session: session({
       inputTokens: 160,
       cachedInputTokens: 100,
@@ -925,7 +1003,7 @@ test("board cost preserves its estimate when cache creation is split from cached
 
 test("an observed native-child Run is estimated at its own root model", () => {
   const cardFor = (model: string): ReturnType<typeof boardCard> => boardCard(row({ runs: [{
-    id: "r1", runNumber: 1, status: "SUCCEEDED", model, codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5,
+    id: "r1", runNumber: 1, status: "SUCCEEDED", model, codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5,
     subagentModel: "gpt-5.6-luna:max",
     session: session({ nativeChildUsed: true, inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 100_000 }),
   }] }), null, moveContext);
@@ -1047,7 +1125,7 @@ test("readBoard projects an active repair kind and latest Run without replacing 
     id: "repair", name: "Merge-tail repair", status: "TODO",
     runs: [{
       id: "repair-run", runNumber: 3, status: "RUNNING", model: "gpt-5.6-sol:high", codexServiceTier: "FAST",
-      budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ startedAt }),
+      budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ startedAt }),
     }],
   });
   const { db } = boardReadDatabase({
@@ -1105,12 +1183,12 @@ test("readBoard restores partly archived primary facts when only a detached repa
   const regression = row({
     id: "regression", chainId: "c1", chainIndex: 1, chainLayer: 1,
     name: "Release: Regression", templateStep: { name: "Regression" }, status: "DONE",
-    runs: [{ id: "run-regression", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: "1.25" }) }],
+    runs: [{ id: "run-regression", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: "1.25" }) }],
   });
   const implementation = row({
     id: "implementation", chainId: "c1", chainIndex: 0, chainLayer: 0,
     name: "Release: Implementation", templateStep: { name: "Implementation" }, status: "DONE", archivedAt,
-    runs: [{ id: "run-implementation", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: "0.75" }) }],
+    runs: [{ id: "run-implementation", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: "0.75" }) }],
   });
   const repair = row({ id: "repair", name: "Merge-tail repair", status: "TODO" });
   const { db } = boardReadDatabase({
@@ -1139,7 +1217,7 @@ test("readBoard keeps an archived repair bound when its primary chain remains li
   const implementation = row({
     id: "implementation", chainId: "c1", chainIndex: 0, chainLayer: 0,
     name: "Release: Implementation", templateStep: { name: "Implementation" }, status: "DONE",
-    runs: [{ id: "run-implementation", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: "0.75" }) }],
+    runs: [{ id: "run-implementation", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: "0.75" }) }],
   });
   const regression = row({
     id: "regression", chainId: "c1", chainIndex: 1, chainLayer: 1,
@@ -1184,7 +1262,7 @@ test("a board card is an order of magnitude smaller than the row it projects", (
   // less than that whenever the task did not fail.
   const card = boardCard(row({
     assigneeAgent: { id: "cmsuawxym0000mpoyd5ga82sm", title: "Implementation Plan Executioner", model: "gpt-5.6-sol:medium", archivedAt: null },
-    runs: [{ id: "cmsuawxym0001mpoyd5ga82sm", runNumber: 2, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: "0.42" }) }],
+    runs: [{ id: "cmsuawxym0001mpoyd5ga82sm", runNumber: 2, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: session({ costUsd: "0.42" }) }],
   }), null, moveContext);
   // The card carries both cost surfaces — the latest run's own cost and the
   // cross-run task total, ownership and the creation timestamp used for queue

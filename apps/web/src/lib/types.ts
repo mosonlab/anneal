@@ -8,6 +8,7 @@
 
 export type {
   AssigneeType,
+  BoardClaimRefusal,
   BoardCard,
   BoardChainActivationState,
   BoardLatestRun,
