@@ -3,7 +3,6 @@ import {
   MERGE_TAIL_KIND,
   Prisma,
   TaskStatus,
-  errorForOpenRunRefusal,
   openRun,
   openStopQuestion,
   stopStateFor,
@@ -123,36 +122,40 @@ export const settleFailedIntegratorRun = async (
   if (!stopped || stopped.stop.condition !== "base-drift") return { kind: "none" };
   const sourceStopId = stopped.stop.stopId;
 
-  if (input.external) {
-    const spent = await spentRequeues(tx, input.integratorTaskId, sourceStopId);
-    if (spent < MAX_INTEGRATOR_EXTERNAL_FAILURE_REQUEUES) {
-      const opened = await openRun(tx, input.integratorTaskId, {
-        kind: "integrator-authorized",
-        readyAt: input.now,
-      });
-      if (!opened.ok) throw errorForOpenRunRefusal(opened.refusal);
-      await tx.task.update({
-        where: { id: input.integratorTaskId },
-        data: { status: TaskStatus.TODO, failureReason: null },
-      });
-      await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", {
-        actorType: "control-plane",
-        body: `Merge integrator Run failed externally (${input.failureReason}); mechanical merge re-queued `
-          + `${String(spent + 1)} of ${String(MAX_INTEGRATOR_EXTERNAL_FAILURE_REQUEUES)}`,
-        metadata: {
-          state: "requeued-external-failure",
-          integratorTaskId: input.integratorTaskId,
-          sourceStopId,
-          failedRunId: input.runId,
-          runId: opened.run.id,
-          requeue: spent + 1,
-          limit: MAX_INTEGRATOR_EXTERNAL_FAILURE_REQUEUES,
-          reason: input.failureReason,
-        },
-      });
-      return { kind: "requeued", runId: opened.run.id };
-    }
+  // The re-queue, when the failure was external and the ceiling has room. A
+  // refused birth must not roll the completion back — the Run's terminal state
+  // and its failure evidence are the point of this transaction — so an operator
+  // Hold or a spent budget simply makes the question below the exit instead,
+  // and the refusal is recorded with it.
+  const spent = input.external
+    ? await spentRequeues(tx, input.integratorTaskId, sourceStopId)
+    : MAX_INTEGRATOR_EXTERNAL_FAILURE_REQUEUES;
+  const requeue = spent < MAX_INTEGRATOR_EXTERNAL_FAILURE_REQUEUES
+    ? await openRun(tx, input.integratorTaskId, { kind: "integrator-authorized", readyAt: input.now })
+    : null;
+  if (requeue?.ok) {
+    await tx.task.update({
+      where: { id: input.integratorTaskId },
+      data: { status: TaskStatus.TODO, failureReason: null },
+    });
+    await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", {
+      actorType: "control-plane",
+      body: `Merge integrator Run failed externally (${input.failureReason}); mechanical merge re-queued `
+        + `${String(spent + 1)} of ${String(MAX_INTEGRATOR_EXTERNAL_FAILURE_REQUEUES)}`,
+      metadata: {
+        state: "requeued-external-failure",
+        integratorTaskId: input.integratorTaskId,
+        sourceStopId,
+        failedRunId: input.runId,
+        runId: requeue.run.id,
+        requeue: spent + 1,
+        limit: MAX_INTEGRATOR_EXTERNAL_FAILURE_REQUEUES,
+        reason: input.failureReason,
+      },
+    });
+    return { kind: "requeued", runId: requeue.run.id };
   }
+  const requeueRefusal = requeue === null ? null : requeue.refusal.message;
 
   const question = await openDeferredStopQuestion(tx, {
     integratorTaskId: input.integratorTaskId,
@@ -171,6 +174,7 @@ export const settleFailedIntegratorRun = async (
       external: input.external,
       questionId: question?.id ?? null,
       reason: input.failureReason,
+      ...(requeueRefusal === null ? {} : { requeueRefusal }),
     },
   });
   return { kind: "question-opened", questionId: question?.id ?? null };
