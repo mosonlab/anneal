@@ -293,8 +293,8 @@ const selectEffort = async (page: PageHarness, effort: string): Promise<void> =>
 
 test("changing a canonical Agent's effort offers the matching slug and leaves the name editable", async () => {
   const executioner = agent({
-    id: "a5", name: "plan-executor-astra-medium", title: "Executioner",
-    model: "gpt-6-astra:medium", canonicalRole: "plan-executor-astra-medium",
+    id: "a5", name: "plan-executor-astra-low", title: "Executioner",
+    model: "gpt-6-astra:low", canonicalRole: "plan-executor-astra-low",
   });
   const page = await mountDetail(executioner, [executioner, ...ROSTER]);
   try {

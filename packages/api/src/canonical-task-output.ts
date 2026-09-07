@@ -20,6 +20,9 @@ import {
 } from "@anneal/db";
 import type { ClaimPreviousRunHandoff } from "@anneal/db/claim-contract";
 
+import { applyRevalidationRoute } from "./revalidation-routing.js";
+import { isRevalidationStep } from "./revalidation.js";
+
 import { chainStepPresence, type ChainStepPresenceIndex } from "./chain-step-omission.js";
 import {
   fenceRefusalResponse,
@@ -322,7 +325,7 @@ const fixedImplementationPersistenceRefusal = async (
   return null;
 };
 
-const canonicalBodyRefusal = (
+export const canonicalBodyRefusal = (
   step: TemplateStepIdentity,
   body: string,
   authoredHead: string | null,
@@ -354,7 +357,7 @@ const canonicalBodyRefusal = (
       : "";
     const schemaVersion = kind === REGRESSION_VERIFICATION_OUTPUT_KIND
       ? REGRESSION_VERIFICATION_SCHEMA_VERSION
-      : 1;
+      : kind === "revalidation" ? 2 : 1;
     return `${kind} task output body violates schemaVersion ${String(schemaVersion)} at ${first?.location ?? "body"}: ${first?.message ?? "invalid value"}${additional}`;
   }
   const bodyHead = (parsed.data as { headSha: string }).headSha;
@@ -554,6 +557,11 @@ export const persistSessionTaskOutput = async (
         },
       } });
     }
+  }
+
+  if (step && isRevalidationStep(step)) {
+    const artifact = JSON.parse(input.body) as { route: Parameters<typeof applyRevalidationRoute>[2] };
+    await applyRevalidationRoute(tx, task.id, artifact.route);
   }
 
   const output = await tx.taskStepOutput.upsert({

@@ -19,7 +19,7 @@ const profile = (
   entries: StaffingProfileCarrySource["entries"],
   isDefault = true,
   mergeTailRepairAgentId: string | null = null,
-): StaffingProfileCarrySource => ({ name, isDefault, mergeTailRepairAgentId, entries });
+): StaffingProfileCarrySource => ({ name, isDefault, mergeTailRepairAgentId, entries, tiers: [] });
 
 test("the base kind strips only a -vN output-protocol suffix", () => {
   assert.equal(staffingOutputKindBase("implementation"), "implementation");
@@ -49,6 +49,7 @@ test("exact output kinds carry unchanged, with names and default membership", ()
       name: "Default",
       isDefault: true,
       mergeTailRepairAgentId: null,
+      tiers: [],
       entries: [
         { outputKind: "spec", assigneeAgentId: "agent-spec", include: null },
         { outputKind: "implementation", assigneeAgentId: "agent-impl", include: null },
@@ -59,6 +60,7 @@ test("exact output kinds carry unchanged, with names and default membership", ()
       name: "Fast",
       isDefault: false,
       mergeTailRepairAgentId: null,
+      tiers: [],
       entries: [
         { outputKind: "spec", assigneeAgentId: "agent-other", include: null },
         // Named nothing about the optional step, so it carries the default.
@@ -199,4 +201,15 @@ test("canonical review rename carries staffing without mutating the retired prof
   ], required("review-findings"), { "sol-findings": "review-findings" });
   assert.equal(collision.profiles[0]!.entries[0]!.assigneeAgentId, "exact-agent");
   assert.equal(collision.dropped[0]!.reason, "ambiguous-kind");
+});
+
+test("rollover carries tier slots independently of output kinds and leaves repair staffing intact", () => {
+  const source = {
+    ...profile("Operator", [{ outputKind: "hard", assigneeAgentId: "step-agent", include: null }], true, "repair-agent"),
+    tiers: [{ tier: "hard", agentId: "tier-agent" }, { tier: "frontend", agentId: "frontend-agent" }],
+  };
+  const plan = planStaffingProfileCarry([source], required("hard"));
+  assert.deepEqual(plan.profiles[0]!.tiers, source.tiers);
+  assert.equal(plan.profiles[0]!.entries[0]!.assigneeAgentId, "step-agent");
+  assert.equal(plan.profiles[0]!.mergeTailRepairAgentId, "repair-agent");
 });

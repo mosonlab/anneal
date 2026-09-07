@@ -106,7 +106,7 @@ const seedCompoundImplementationApproval = async (validSuccessor = false) => {
   const executioner = await db.agent.create({ data: {
     projectId: project.id,
     environmentId: environment.id,
-    name: "plan-executor-astra-medium",
+    name: "plan-executor-astra-low",
     title: "Implementation Plan Executioner",
     model: "gpt-5.6-sol:high",
     foundationalPrompt: "foundation",
@@ -387,7 +387,7 @@ for (const route of ["patch", "inbox"] as const) {
     assert.equal(response.status, 409);
     assert.deepEqual(await response.json(), route === "patch"
       ? { error: "Chain task statuses are controlled by chain execution" }
-      : { error: "Task Implementation assignee plan-executor-astra-medium is archived; unarchive the agent to queue this step" });
+      : { error: "Task Implementation assignee plan-executor-astra-low is archived; unarchive the agent to queue this step" });
     assert.deepEqual(await compoundApprovalState(predecessor.id, successor.id, gate.id), before);
   });
 }

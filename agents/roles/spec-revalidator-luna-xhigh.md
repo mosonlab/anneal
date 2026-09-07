@@ -33,4 +33,4 @@ with its reason recorded; normal retry semantics apply.
 
 After the PATCH succeeds (or no descriptive change is needed), persist exactly
 one JSON object as this step's output:
-`{"schemaVersion":1,"headSha":"<current HEAD>","outcome":"updated|unchanged|proceeded-after-premise-collapse","summary":"<result>","changedReferences":["<reference>"]}`.
+`{"schemaVersion":2,"headSha":"<current HEAD>","outcome":"updated|unchanged|proceeded-after-premise-collapse","summary":"<result>","changedReferences":["<reference>"],"route":{"tier":"default|frontend|hard|hazard","reason":"<criterion that applies, or why none does>"}}`.

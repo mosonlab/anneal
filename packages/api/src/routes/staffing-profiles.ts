@@ -28,11 +28,18 @@ const entryInput = z.object({
   include: z.boolean().nullable().optional(),
 }).strict();
 const entriesInput = z.array(entryInput).max(64);
+const tiersInput = z.object({
+  default: id.nullable().optional(),
+  frontend: id.nullable().optional(),
+  hard: id.nullable().optional(),
+  hazard: id.nullable().optional(),
+}).strict();
 const profileName = z.string().trim().min(1).max(STAFFING_PROFILE_NAME_LIMIT);
 
 const createProfileInput = z.object({
   name: profileName,
   entries: entriesInput,
+  tiers: tiersInput.optional(),
   isDefault: z.boolean().optional(),
   mergeTailRepairAgentId: id.nullable().optional(),
   repoId: id.optional(),
@@ -40,6 +47,7 @@ const createProfileInput = z.object({
 const replaceProfileInput = z.object({
   name: profileName,
   entries: entriesInput,
+  tiers: tiersInput.optional(),
   mergeTailRepairAgentId: id.nullable().optional(),
   repoId: id.optional(),
 }).strict();

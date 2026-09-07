@@ -112,6 +112,12 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
   assert.ok(canonicalOutputSchema(direct[0]!) instanceof z.ZodObject);
   assert.match(direct[0]!.prompt, /minimal task-PATCH authorization/u);
   assert.match(direct[0]!.prompt, /inbox_ask/u);
+  assert.match(direct[0]!.prompt, /default is the answer unless one specific criterion/u);
+  assert.match(direct[0]!.prompt, /new page, a page redesign, or a new\s+interaction or visual scheme/u);
+  assert.match(direct[0]!.prompt, /neither the brief nor an existing test pins down/u);
+  assert.match(direct[0]!.prompt, /concurrency,\s+transaction boundaries, lock or lease windows/u);
+  assert.match(direct[0]!.prompt, /never edit the brief's `Route` line/u);
+  assert.match(direct[0]!.prompt, /"schemaVersion":2/u);
   assert.equal(full.length, 12);
   assert.deepEqual(full.map(({ layer }) => layer), [1, 2, 3, 4, 5, 6, 6, 7, 8, 9, 10, 11]);
   assert.deepEqual(full.map(({ optional }) => optional), [false, false, false, false, false, false, true, false, false, false, false, false]);
@@ -252,7 +258,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
         name: "Blind code review",
         stepIndex: 3,
         layer: 2,
-        agent: "code-reviewer-opus-high",
+        agent: "code-reviewer-opus-medium",
         approvalGate: false,
         optional: false,
         outputKind: "blind-findings",
@@ -351,6 +357,25 @@ test("the canonical Regression v2 schema preserves an optional gate failure exce
     "not ok 1 - example.test.ts",
   );
   assert.equal(schema.safeParse({ ...verdict, gateFailureExcerpt: 42 }).success, false);
+});
+
+test("the revalidation v2 schema requires an explained tier route", () => {
+  const schema = canonicalOutputSchemas.revalidation?.v2;
+  assert.ok(schema);
+  const base = {
+    schemaVersion: 2,
+    headSha: "a".repeat(40),
+    outcome: "unchanged",
+    summary: "the brief remains current",
+    changedReferences: [],
+  };
+  for (const tier of ["default", "frontend", "hard", "hazard"] as const) {
+    assert.equal(schema.safeParse({ ...base, route: { tier, reason: `criterion for ${tier}` } }).success, true);
+  }
+  assert.equal(schema.safeParse({ ...base, schemaVersion: 1, route: { tier: "default", reason: "none" } }).success, false);
+  assert.equal(schema.safeParse(base).success, false);
+  assert.equal(schema.safeParse({ ...base, route: { tier: "unknown", reason: "reason" } }).success, false);
+  assert.equal(schema.safeParse({ ...base, route: { tier: "default", reason: "  " } }).success, false);
 });
 
 test("nine authored Full Assurance output contracts match their canonical schemas", async () => {

@@ -1,7 +1,7 @@
 ---
 stepIndex: 6
 layer: 5
-agent: regression-verifier-luna-xhigh
+agent: regression-verifier-luna-max
 approvalGate: false
 optional: false
 outputKind: regression-verification-v2

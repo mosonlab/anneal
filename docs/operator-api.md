@@ -186,7 +186,7 @@ curl "$BASE_URL/projects" -H "Authorization: Bearer $OPERATOR_TOKEN"
 - A successful request creates the Project and, in the same transaction, one
   `local` Environment with `networking` `OPEN` and `allowedHosts` `[]`, four
   Agents (`senior-dev-luna-max`, `code-reviewer-sol-high`,
-  `code-reviewer-opus-high`, and `senior-dev-astra-low`) bound to that Environment, and
+  `code-reviewer-opus-medium`, and `senior-dev-astra-low`) bound to that Environment, and
   the canonical `pr-engineer-workflow` TaskTemplate with its four steps.
   The returned Project read shape includes `specGateDefault` and
   `mergeGateDefault`, both `false` for a newly created project.
@@ -1279,6 +1279,9 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   `implementation_route_conflicts_with_step_override`, and
   `implementation_route_agent_renamed`; `step_override_agent_not_found` is
   returned when the routed Agent name cannot be resolved in the project.
+  The routed implementation Agent requires a `GIT_WRITE` grant on the Chain
+  Repo, using the same check as judged-tier staffing; a missing or read-only
+  grant returns `step_override_missing_repo_grant`.
 - One predecessor task accepts several bound successor chains: binding a
   second chain to a predecessor that already has one is accepted, and the
   predecessor records one `Chain <id> bound to predecessor <name>` activity per
@@ -1311,6 +1314,18 @@ Entries key on the step's exact `outputKind`. `foo` and `foo-v2` are different
 steps of a custom graph and therefore different entries; nothing is normalised
 on this surface. `assigneeAgentId` null means the profile has no opinion and
 the canonical binding stands.
+
+A profile also carries a `tiers` object with exactly four independent,
+nullable Agent slots: `{ "default": <agentId|null>, "frontend":
+<agentId|null>, "hard": <agentId|null>, "hazard": <agentId|null> }`. These
+keys are tier names, not `outputKind` values: an entry whose output kind is
+`default`, `frontend`, `hard`, or `hazard` remains a step entry and is never
+read as a tier slot. The revalidation step judges a direct chain's tier, and a
+Route line or explicit implementation `stepOverrides` assignee overrides that
+judgement. When there is no override and the implementation has no Run, the
+selected profile's slot supplies its Agent; an empty slot leaves the current
+Agent in place. The resolved Agent must hold the chain Repo's `GIT_WRITE`
+grant, and no tier falls through to another slot.
 
 A profile also carries the nullable `mergeTailRepairAgentId` Agent slot. This
 profile-level slot staffs detached `review-fix` and `gate-fix` merge-tail repair
@@ -1378,8 +1393,9 @@ one Agent both implements and reviews under the saved plan.
 
 - Required path parameters: `projectId`, `templateId`.
 - Returns `200 OK` with the template's profiles, the default first and the rest
-  by name, each with its ordered `entries` and nullable
-  `mergeTailRepairAgentId`.
+  by name, each with its ordered `entries`, its `tiers` object, and nullable
+  `mergeTailRepairAgentId`. `tiers` always has the four keys `default`,
+  `frontend`, `hard`, and `hazard`; each value is an Agent id or `null`.
 - Refusal: `404 Not Found` with code `staffing_profile_template_not_found` when
   the template is not in the addressed project.
 
@@ -1396,12 +1412,16 @@ curl "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffing-profil
   each `{ "outputKind", "assigneeAgentId"?, "include"? }`). The saved entry list
   is the submitted one plus an `include: true` entry for every optional step it
   did not name.
-- Optional JSON fields: `isDefault`, `mergeTailRepairAgentId` (nullable), and
-  `repoId`. The first profile of a template is always its default regardless of
-  `isDefault`; setting it on a later profile clears the previous default in the
-  same transaction. A non-null merge-tail slot is validated against the Repo
-  selected by `repoId`, the template webhook Repo, or the project's sole Repo,
-  in that order.
+- Optional JSON fields: `isDefault`, `tiers`, `mergeTailRepairAgentId`
+  (nullable), and `repoId`. `tiers`, when supplied, is an object whose keys
+  are any subset of `default`, `frontend`, `hard`, and `hazard`, with each value
+  an Agent id or `null`; omitted tier keys are initially empty. Unknown tier
+  keys are refused. Each non-null tier Agent must be an unarchived Agent in the
+  profile's project. The first profile of a template is always its default
+  regardless of `isDefault`; setting it on a later profile clears the previous
+  default in the same transaction. A non-null merge-tail slot is validated
+  against the Repo selected by `repoId`, the template webhook Repo, or the
+  project's sole Repo, in that order.
 - Returns `201 Created` with `{ "profile": <profile>, "warnings": [...] }`.
 - Refusals: `404 Not Found` with code `staffing_profile_template_not_found`;
   `409 Conflict` with code `staffing_profile_name_taken` when the template
@@ -1410,7 +1430,7 @@ curl "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffing-profil
 ```sh
 curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffing-profiles" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"Fast lane","entries":[{"outputKind":"implementation","assigneeAgentId":"'$AGENT_ID'"},{"outputKind":"blind-findings","include":false}],"mergeTailRepairAgentId":"'$REPAIR_AGENT_ID'","repoId":"'$REPO_ID'"}'
+  -d '{"name":"Fast lane","entries":[{"outputKind":"implementation","assigneeAgentId":"'$AGENT_ID'"},{"outputKind":"blind-findings","include":false}],"tiers":{"default":"'$AGENT_ID'","frontend":null,"hard":null,"hazard":"'$HAZARD_AGENT_ID'"},"mergeTailRepairAgentId":"'$REPAIR_AGENT_ID'","repoId":"'$REPO_ID'"}'
 ```
 
 ### PUT `/staffing-profiles/:profileId`
@@ -1420,7 +1440,11 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffin
   stored one whole; an omitted output kind loses its opinion rather than
   keeping the previous one, except that every optional step of the template is
   still stored with a boolean `include`, defaulting to `true`.
-- Optional JSON fields: `mergeTailRepairAgentId`, a nullable Agent id for the
+- Optional JSON field `tiers` updates the named tier slots when supplied. Its
+  keys are any subset of `default`, `frontend`, `hard`, and `hazard`, each with
+  an Agent id or `null`; unknown keys are refused. Omitting `tiers` preserves
+  every stored tier slot, and omitting a key inside `tiers` preserves that slot.
+- Other optional JSON fields: `mergeTailRepairAgentId`, a nullable Agent id for the
   detached `review-fix` and `gate-fix` repair cards, and `repoId`, the optional
   Repo context used to validate a non-null slot. Omitting
   `mergeTailRepairAgentId` preserves the stored slot, even if its Agent has since
@@ -1437,7 +1461,7 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffin
 ```sh
 curl -X PUT "$BASE_URL/staffing-profiles/$PROFILE_ID" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"Fast lane","entries":[{"outputKind":"implementation","assigneeAgentId":"'$AGENT_ID'"}],"mergeTailRepairAgentId":"'$REPAIR_AGENT_ID'","repoId":"'$REPO_ID'"}'
+  -d '{"name":"Fast lane","entries":[{"outputKind":"implementation","assigneeAgentId":"'$AGENT_ID'"}],"tiers":{"default":"'$AGENT_ID'","frontend":null,"hard":null,"hazard":"'$HAZARD_AGENT_ID'"},"mergeTailRepairAgentId":"'$REPAIR_AGENT_ID'","repoId":"'$REPO_ID'"}'
 ```
 
 ### PATCH `/staffing-profiles/:profileId`
@@ -1481,8 +1505,12 @@ curl -X DELETE "$BASE_URL/staffing-profiles/$PROFILE_ID" \
   slot's grant check. An explicit foreign Repo or missing grant still refuses.
 - Replaces the profile's entries with the template's canonical plan: every
   step's own `assigneeAgentId`, and every optional step included. It also
-  restores the canonical `mergeTailRepairAgentId`; the active direct, PR, and
-  compound canonical profiles set that slot to `senior-dev-luna-max`.
+  restores the canonical `tiers` object and canonical
+  `mergeTailRepairAgentId`; the active direct, PR, and compound canonical
+  profiles set `tiers.default` to `senior-dev-luna-max`,
+  `tiers.frontend` to `frontend-dev-opus-medium`, `tiers.hard` to
+  `senior-dev-astra-low`, and `tiers.hazard` to `senior-dev-astra-medium`, and
+  set the repair slot to `senior-dev-luna-max`.
 - If the canonical repair Agent is missing or archived, reset restores the step
   entries, clears the repair slot, and returns a `merge_tail_repair_agent_unavailable`
   warning. Profile entry overrides pointing to that unavailable canonical Agent
@@ -2882,6 +2910,19 @@ curl "$BASE_URL/tasks/$TASK_ID/output" -H "Authorization: Bearer $OPERATOR_TOKEN
 - Required path parameter: `taskId`.
 - Required JSON fields: `kind`, `body`.
 - Optional JSON fields: `fencingToken`, `metadata`, `commitSha`.
+- When `kind` is `revalidation`, `body` must be the canonical version-2
+  revalidation object, including `schemaVersion`, `headSha`, `outcome`,
+  `summary`, `changedReferences`, and a `route` object with one of the four
+  tiers (`default`, `frontend`, `hard`, or `hazard`) and a non-empty reason.
+  Version-1 bodies, missing routes, unknown tiers, and empty reasons are
+  rejected; the output kind and body schema must agree.
+- For a direct Chain's Route-less implementation Task with no Run, storing a
+  valid revalidation output applies the selected staffing profile's tier slot
+  to that Task in the same transaction. A Route line or explicit implementation
+  `stepOverrides` assignee wins and is recorded as an override; an empty slot,
+  an existing Run, or a missing Repo `GIT_WRITE` grant is recorded in the Task's
+  activity and does not silently select another tier. Other output kinds retain
+  their existing storage behavior.
 
 ```sh
 curl -X PUT "$BASE_URL/tasks/$TASK_ID/output" \

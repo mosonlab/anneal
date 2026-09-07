@@ -81,6 +81,7 @@ test("agent archive and unarchive are idempotent and preserve the original archi
         // R6: archive also reads the staffing profiles naming this Agent. No
         // profile names it here, so the archive proceeds.
         staffingProfileEntry: { findMany: async () => [] },
+        staffingProfileTier: { findMany: async () => [] },
       }),
       run: {
         findMany: async () => archivedAt ? [{
@@ -300,8 +301,8 @@ const executorRow = (overrides: Record<string, unknown> = {}): Record<string, un
   id: "agent-executor",
   projectId: "project-1",
   environmentId: "environment-1",
-  name: "plan-executor-astra-medium",
-  canonicalRole: "plan-executor-astra-medium",
+  name: "plan-executor-astra-low",
+  canonicalRole: "plan-executor-astra-low",
   customizedFields: [],
   title: "Plan Executor",
   model: "gpt-5.6-sol:high",

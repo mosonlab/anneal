@@ -1,7 +1,7 @@
 ---
-name: regression-verifier-luna-xhigh
+name: regression-verifier-luna-max
 title: Regression Verifier
-model: gpt-5.6-luna:xhigh
+model: gpt-5.6-luna:max
 runner: codex
 inboxAccess: false
 collaborators: []

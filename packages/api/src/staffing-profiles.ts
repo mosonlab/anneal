@@ -17,6 +17,7 @@
 
 import {
   AssigneeType,
+  canonicalTierSlots,
   catalogRunnerForModel,
   canonicalMergeTailRepairAgentRole,
   canonicalStaffingEntries,
@@ -30,6 +31,7 @@ import {
   Prisma,
   RunnerKind,
   RunnerPreference,
+  STAFFING_PROFILE_TIERS,
   runnerFor,
   stepRole,
   type PrismaClient,
@@ -37,6 +39,9 @@ import {
 import type {
   StaffingProfile as StaffingProfileContract,
   StaffingProfileEntry as StaffingProfileEntryContract,
+  StaffingProfileTier,
+  StaffingProfileTiers,
+  StaffingProfileTiersInput,
   StaffingProfileWarning,
 } from "@anneal/db/console-contract";
 
@@ -59,6 +64,7 @@ export type StaffingProfileEntryInput = {
 export type CreateStaffingProfileInput = {
   name: string;
   entries: StaffingProfileEntryInput[];
+  tiers?: StaffingProfileTiersInput | undefined;
   isDefault?: boolean | undefined;
   mergeTailRepairAgentId?: string | null | undefined;
   repoId?: string | undefined;
@@ -67,6 +73,7 @@ export type CreateStaffingProfileInput = {
 export type ReplaceStaffingProfileInput = {
   name: string;
   entries: StaffingProfileEntryInput[];
+  tiers?: StaffingProfileTiersInput | undefined;
   mergeTailRepairAgentId?: string | null | undefined;
   repoId?: string | undefined;
 };
@@ -95,22 +102,49 @@ const profileSelect = {
     select: { outputKind: true, assigneeAgentId: true, include: true },
     orderBy: { outputKind: "asc" },
   },
+  tiers: {
+    select: { tier: true, agentId: true },
+    orderBy: { tier: "asc" },
+  },
 } as const satisfies Prisma.StaffingProfileSelect;
 
-type ProfileRow = {
-  id: string;
-  projectId: string;
-  taskTemplateId: string;
-  name: string;
-  isDefault: boolean;
-  mergeTailRepairAgentId: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-  entries: StaffingProfileEntryContract[];
+type ProfileTierRow = { tier: string; agentId: string };
+type ProfileQueryRow = Prisma.StaffingProfileGetPayload<{ select: typeof profileSelect }>;
+
+const emptyTierSlots = (): StaffingProfileTiers => ({
+  default: null,
+  frontend: null,
+  hard: null,
+  hazard: null,
+});
+
+const tierSlotsFromRows = (rows: readonly ProfileTierRow[]): StaffingProfileTiers => {
+  const slots = emptyTierSlots();
+  for (const row of rows) {
+    if ((STAFFING_PROFILE_TIERS as readonly string[]).includes(row.tier)) {
+      slots[row.tier as StaffingProfileTier] = row.agentId;
+    }
+  }
+  return slots;
 };
 
-const readProfile = async (tx: Tx, profileId: string): Promise<ProfileRow> =>
-  tx.staffingProfile.findUniqueOrThrow({ where: { id: profileId }, select: profileSelect });
+const profileContract = (row: ProfileQueryRow): StaffingProfileContract<Date> => ({
+  id: row.id,
+  projectId: row.projectId,
+  taskTemplateId: row.taskTemplateId,
+  name: row.name,
+  isDefault: row.isDefault,
+  mergeTailRepairAgentId: row.mergeTailRepairAgentId,
+  createdAt: row.createdAt,
+  updatedAt: row.updatedAt,
+  entries: row.entries,
+  tiers: tierSlotsFromRows(row.tiers),
+});
+
+const readProfile = async (tx: Tx, profileId: string): Promise<StaffingProfileContract<Date>> => {
+  const row = await tx.staffingProfile.findUniqueOrThrow({ where: { id: profileId }, select: profileSelect });
+  return profileContract(row);
+};
 
 /**
  * Validate the profile-level repair slot with the same ownership and lifecycle
@@ -540,6 +574,7 @@ const requireProfile = async (
   name: string;
   isDefault: boolean;
   mergeTailRepairAgentId: string | null;
+  tiers: StaffingProfileTiers;
 }> => {
   const profile = await tx.staffingProfile.findUnique({
     where: { id: profileId },
@@ -550,10 +585,17 @@ const requireProfile = async (
       name: true,
       isDefault: true,
       mergeTailRepairAgentId: true,
+      tiers: {
+        select: { tier: true, agentId: true },
+        orderBy: { tier: "asc" },
+      },
     },
   });
   if (!profile) throw refuse("staffing_profile_not_found", `Staffing profile ${profileId} was not found`);
-  return profile;
+  return {
+    ...profile,
+    tiers: tierSlotsFromRows(profile.tiers),
+  };
 };
 
 const assertNameFree = async (
@@ -595,6 +637,55 @@ const writeEntries = async (
   });
 };
 
+const writeTierSlots = async (
+  tx: Tx,
+  profileId: string,
+  slots: StaffingProfileTiers,
+): Promise<void> => {
+  await tx.staffingProfileTier.deleteMany({ where: { profileId } });
+  const data = STAFFING_PROFILE_TIERS.flatMap((tier) => {
+    const agentId = slots[tier];
+    return agentId === null ? [] : [{ profileId, tier, agentId }];
+  });
+  if (data.length > 0) await tx.staffingProfileTier.createMany({ data });
+};
+
+const mergeTierSlots = (
+  base: StaffingProfileTiers,
+  input: StaffingProfileTiersInput | undefined,
+): StaffingProfileTiers => {
+  const slots = { ...base };
+  if (input === undefined) return slots;
+  for (const tier of STAFFING_PROFILE_TIERS) {
+    if (Object.prototype.hasOwnProperty.call(input, tier)) slots[tier] = input[tier] ?? null;
+  }
+  return slots;
+};
+
+const validateTierSlots = (
+  slots: StaffingProfileTiers,
+  agents: ReadonlyMap<string, ValidationAgent>,
+  context: { projectId: string },
+): void => {
+  for (const tier of STAFFING_PROFILE_TIERS) {
+    const agentId = slots[tier];
+    if (agentId === null) continue;
+    const agent = agents.get(agentId);
+    if (!agent || agent.projectId !== context.projectId) {
+      throw refuse(
+        "staffing_profile_agent_not_found",
+        `Agent ${agentId} for ${tier} implementation tier was not found in this project`,
+      );
+    }
+    if (agent.archivedAt !== null) {
+      throw refuse(
+        "staffing_profile_agent_archived",
+        `Agent ${agent.name} for ${tier} implementation tier is archived`,
+      );
+    }
+  }
+};
+
 export const listStaffingProfiles = async (
   db: PrismaClient,
   projectId: string,
@@ -610,11 +701,12 @@ export const listStaffingProfiles = async (
       `Template ${templateId} is not in project ${projectId}`,
     );
   }
-  return db.staffingProfile.findMany({
+  const profiles = await db.staffingProfile.findMany({
     where: { taskTemplateId: templateId },
     orderBy: [{ isDefault: "desc" }, { name: "asc" }],
     select: profileSelect,
   });
+  return profiles.map(profileContract);
 };
 
 export const createStaffingProfile = async (
@@ -627,9 +719,11 @@ export const createStaffingProfile = async (
   const name = input.name.trim();
   await assertNameFree(tx, template.id, name);
   const steps = await readSteps(tx, template.id);
+  const tierSlots = mergeTierSlots(emptyTierSlots(), input.tiers);
   const agents = await lockedAgents(tx, [
     ...input.entries.flatMap((entry) => entry.assigneeAgentId ? [entry.assigneeAgentId] : []),
     ...(input.mergeTailRepairAgentId ? [input.mergeTailRepairAgentId] : []),
+    ...STAFFING_PROFILE_TIERS.flatMap((tier) => tierSlots[tier] === null ? [] : [tierSlots[tier]!]),
   ]);
   const repairAgentId = await resolveRepairSlot(tx, {
     projectId, taskTemplateId: template.id, agentId: input.mergeTailRepairAgentId ?? null,
@@ -639,6 +733,7 @@ export const createStaffingProfile = async (
     projectId,
     templateName: template.name,
   });
+  validateTierSlots(tierSlots, agents, { projectId });
 
   // The first profile of a template is always its default: a template with
   // profiles but no default would silently instantiate from canonical.
@@ -654,6 +749,7 @@ export const createStaffingProfile = async (
     select: { id: true, taskTemplateId: true },
   });
   await writeEntries(tx, created.id, validated.entries);
+  await writeTierSlots(tx, created.id, tierSlots);
   if (siblingCount === 0 || (input.isDefault ?? false)) await promoteDefault(tx, created);
   return { profile: await readProfile(tx, created.id), warnings: validated.warnings };
 });
@@ -668,12 +764,14 @@ export const replaceStaffingProfile = async (
   const name = input.name.trim();
   await assertNameFree(tx, template.id, name, existing.id);
   const steps = await readSteps(tx, template.id);
+  const tierSlots = mergeTierSlots(existing.tiers, input.tiers);
   const requestedRepairAgentId = input.mergeTailRepairAgentId === undefined
     ? existing.mergeTailRepairAgentId ?? null
     : input.mergeTailRepairAgentId;
   const agents = await lockedAgents(tx, [
     ...input.entries.flatMap((entry) => entry.assigneeAgentId ? [entry.assigneeAgentId] : []),
     ...(requestedRepairAgentId ? [requestedRepairAgentId] : []),
+    ...STAFFING_PROFILE_TIERS.flatMap((tier) => tierSlots[tier] === null ? [] : [tierSlots[tier]!]),
   ]);
   if (input.mergeTailRepairAgentId !== undefined) {
     await resolveRepairSlot(tx, {
@@ -685,11 +783,13 @@ export const replaceStaffingProfile = async (
     projectId: existing.projectId,
     templateName: template.name,
   });
+  validateTierSlots(tierSlots, agents, { projectId: existing.projectId });
   await tx.staffingProfile.update({
     where: { id: existing.id },
     data: { name, mergeTailRepairAgentId: requestedRepairAgentId },
   });
   await writeEntries(tx, existing.id, validated.entries);
+  await writeTierSlots(tx, existing.id, tierSlots);
   return { profile: await readProfile(tx, existing.id), warnings: validated.warnings };
 });
 
@@ -709,6 +809,7 @@ export const resetStaffingProfile = async (
     canonicalRole: resetRepairRole,
     activeOnly: false,
   });
+  const tierSlots = await canonicalTierSlots(tx, existing.projectId);
   const resetWarnings: StaffingProfileWarning[] = [];
   if (resetRepairRole !== null && defaultRepairAgent === null) {
     resetWarnings.push({ code: "merge_tail_repair_agent_unavailable",
@@ -717,7 +818,9 @@ export const resetStaffingProfile = async (
   const agents = await lockedAgents(tx, [
     ...entries.flatMap((entry) => entry.assigneeAgentId ? [entry.assigneeAgentId] : []),
     ...(defaultRepairAgent ? [defaultRepairAgent.id] : []),
+    ...STAFFING_PROFILE_TIERS.flatMap((tier) => tierSlots[tier] === null ? [] : [tierSlots[tier]!]),
   ]);
+  validateTierSlots(tierSlots, agents, { projectId: existing.projectId });
   const repairAgentId = await resolveRepairSlot(tx, {
     projectId: existing.projectId, taskTemplateId: template.id,
     agentId: defaultRepairAgent?.id ?? null, repoId, agents, resetWarnings,
@@ -735,6 +838,7 @@ export const resetStaffingProfile = async (
     templateName: template.name,
   });
   await writeEntries(tx, existing.id, validated.entries);
+  await writeTierSlots(tx, existing.id, tierSlots);
   await tx.staffingProfile.update({
     where: { id: existing.id },
     data: { mergeTailRepairAgentId: repairAgentId },
@@ -787,8 +891,13 @@ export const profilesReferencingAgent = async (
     select: { profile: { select: { id: true, name: true, taskTemplateId: true } } },
     orderBy: [{ profileId: "asc" }, { outputKind: "asc" }],
   });
-  const byId = new Map(entries.map(({ profile }) => [profile.id, profile]));
-  return [...byId.values()];
+  const tierEntries = await tx.staffingProfileTier.findMany({
+    where: { agentId },
+    select: { profile: { select: { id: true, name: true, taskTemplateId: true } } },
+    orderBy: [{ profileId: "asc" }, { tier: "asc" }],
+  });
+  const byId = new Map([...entries, ...tierEntries].map(({ profile }) => [profile.id, profile]));
+  return [...byId.values()].sort((left, right) => left.id.localeCompare(right.id));
 };
 
 /**
@@ -815,6 +924,7 @@ export const installDefaultStaffingProfile = async (
     canonicalRole: repairRole,
     activeOnly: true,
   });
+  const tierSlots = await canonicalTierSlots(tx, input.projectId);
   const profile = await tx.staffingProfile.create({
     data: {
       projectId: input.projectId,
@@ -826,6 +936,7 @@ export const installDefaultStaffingProfile = async (
     select: { id: true },
   });
   await writeEntries(tx, profile.id, canonicalStaffingEntries(steps));
+  await writeTierSlots(tx, profile.id, tierSlots);
 };
 
 
@@ -855,6 +966,7 @@ export const copyStaffingProfiles = async (
       select: { id: true },
     });
     await writeEntries(tx, created.id, source.entries);
+    await writeTierSlots(tx, created.id, tierSlotsFromRows(source.tiers));
   }
 };
 

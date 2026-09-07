@@ -16,6 +16,7 @@ import { after, before, test } from "node:test";
 
 import { AssigneeType, Prisma, PrismaClient, RepoPermission, RunnerPreference, TaskStatus } from "@prisma/client";
 
+import { restorePreOptionalReviewPrompt, restorePreTierRevalidationPrompt } from "./canonical-prompt-sync-fixtures.js";
 import { loadAgentSources } from "./agent-sources.js";
 import { parseCanonicalSyncSummary } from "./canonical-sync-report.js";
 import { isMergeReadinessStep } from "./merge-tail.js";
@@ -123,11 +124,6 @@ const ADJUDICATION_STEPS = {
   "compound-engineer-workflow": { stepIndex: 8, layer: 7, baseFromStepIndex: 5 },
 } as const;
 
-/**
- * Prompt-only rollover fixtures must restore every prompt byte from before
- * optional review omission, not just the older Regression script path. The
- * generation digest authenticates the whole template.
- */
 /** Every registered legacy generation still bound its review-fix step to
  * senior-dev-astra-medium; a fixture that rebuilds one from current rows restores that. */
 const rebindFixStepToRetiredSeniorDev = async (projectId: string, templateId: string): Promise<void> => {
@@ -161,28 +157,6 @@ const restoreRetiredReviewStepNames = async (templateId: string): Promise<void> 
     data: { name: "Code review (Opus blind)" },
   });
 };
-
-const restorePreOptionalReviewPrompt = (prompt: string): string => prompt
-  .replaceAll("review-findings", "sol-findings")
-  .replaceAll("the code review report", "the Sol report")
-  // Every registered generation predates the salvage-resume rollover, so the
-  // fix prompt drops that sentence pair before the older spellings are restored.
-  .replace(
-    " If that HEAD is a `WIP salvage` commit of a prior Run of this same task and its parent is the reviewed head, the salvaged changes are your own failed attempt's in-progress fixes: validate them against the reports, continue on top of them, and record the reviewed head — the salvage commit's parent — as `sourceHead`. Every other reviewed-head mismatch remains a stop.",
-    "",
-  )
-  .replace(
-    "Read the immutable `sol-findings` review output and, when present, the immutable `blind-findings` output through their Anneal step outputs. The blind review may be absent when its optional step was omitted; when it is absent, the Sol report is the sole report. Verify that every present report's reviewed head is the HEAD you are about to fix. When both reports are present, also verify that they report the same reviewed base and the same reviewed head.",
-    "Read both immutable review outputs from the preceding layer — `sol-findings` and `blind-findings` — through their Anneal step outputs, and verify both report the same reviewed base and the same reviewed head, and that the head they reviewed is the HEAD you are about to fix.",
-  )
-  .replace(
-    "Record exactly one disposition per finding id across every present report",
-    "Record exactly one disposition per finding id across both reports",
-  )
-  .replace(
-    "Otherwise read the implementation summary,\nevery present review report (`sol-findings` and, when instantiated,\n`blind-findings`), and the fixed implementation with its dispositions from\nAnneal. The blind review report may be absent when its optional step was\nomitted. Review the entire refreshed fix diff as one unit, account for every\nfinding id in every present report, rerun focused regressions, and verify that the approved",
-    "Otherwise read the implementation summary,\nboth review reports, and the fixed implementation with its dispositions from\nAnneal. Review the entire refreshed fix diff as one unit, account for every\nfinding id, rerun focused regressions, and verify that the approved",
-  );
 
 const downgradeDirectTemplateToHistoricalSevenStep = async (projectId: string): Promise<void> => {
   const template = await prisma.taskTemplate.findUniqueOrThrow({
@@ -231,7 +205,7 @@ test("sync creates the pull-request template when the pre-existing canonical ins
   });
   assert.deepEqual(created.variables, ["branchName"]);
   assert.deepEqual(created.steps.map(({ assigneeAgent }) => assigneeAgent?.name), [
-    "senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-high", "senior-dev-astra-low",
+    "senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-medium", "senior-dev-astra-low",
   ]);
   assert.equal(JSON.stringify(await prisma.taskTemplate.findMany({
     where: {
@@ -364,6 +338,12 @@ test("sync rolls the checkout Regression prompt generation once and preserves ch
       where: { taskTemplateId: template.id },
       data: { provisionDependencies: true, optional: false },
     });
+    const revalidation = template.steps.find(({ outputKind }) => outputKind === "revalidation");
+    if (revalidation) {
+      await prisma.taskTemplateStep.update({ where: { id: revalidation.id }, data: {
+        prompt: restorePreTierRevalidationPrompt(revalidation.prompt),
+      } });
+    }
     await restoreRetiredReviewStepNames(template.id);
     await rebindFixStepToRetiredSeniorDev(project.id, template.id);
     const regression = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
@@ -488,6 +468,12 @@ test("sync rolls the deployed pre-optional-review prompt generation once", async
       where: { taskTemplateId: template.id },
       data: { optional: false },
     });
+    const revalidation = template.steps.find(({ outputKind }) => outputKind === "revalidation");
+    if (revalidation) {
+      await prisma.taskTemplateStep.update({ where: { id: revalidation.id }, data: {
+        prompt: restorePreTierRevalidationPrompt(revalidation.prompt),
+      } });
+    }
     await restoreRetiredReviewStepNames(template.id);
     await rebindFixStepToRetiredSeniorDev(project.id, template.id);
     const fix = template.steps.find(({ outputKind }) => outputKind === "fixed-implementation");
@@ -688,7 +674,7 @@ test("sync rolls the exact adjudication-era graphs forward without touching inst
   // The direct adjudication generation predates the revalidation node too.
   await downgradeDirectTemplateToHistoricalSevenStep(project.id);
   const agents = new Map((await prisma.agent.findMany({ where: { projectId: project.id } })).map((agent) => [agent.name, agent]));
-  const source = agents.get("code-reviewer-opus-high")!;
+  const source = agents.get("code-reviewer-opus-medium")!;
   const adjudicator = await prisma.agent.create({ data: {
     projectId: project.id,
     environmentId: source.environmentId,
@@ -763,7 +749,7 @@ test("sync rolls the exact adjudication-era graphs forward without touching inst
       // the template-row preservation proof, so its historical evidence must
       // not hold a foreign key that would prevent the separate Agent-copy
       // fixture from removing the old verifier row.
-      const taskAssigneeId = step.assigneeAgentId === agents.get("regression-verifier-luna-xhigh")?.id ? source.id : step.assigneeAgentId;
+      const taskAssigneeId = step.assigneeAgentId === agents.get("regression-verifier-luna-max")?.id ? source.id : step.assigneeAgentId;
       const task = await prisma.task.create({ data: {
         projectId: project.id,
         templateId: template.id,
@@ -965,9 +951,9 @@ test("sync adopts any uncustomized canonical runtime drift", async () => {
 
 test("sync adopts uncustomized model-only runtime drift", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
-  const executionerSource = canonicalRuntime("plan-executor-astra-medium");
+  const executionerSource = canonicalRuntime("plan-executor-astra-low");
   await prisma.agent.update({
-    where: { projectId_name: { projectId: project.id, name: "plan-executor-astra-medium" } },
+    where: { projectId_name: { projectId: project.id, name: "plan-executor-astra-low" } },
     data: {
       model: "gpt-5.6-sol:medium",
       runnerPreference: RunnerPreference.CODEX,
@@ -984,7 +970,7 @@ test("sync adopts uncustomized model-only runtime drift", async () => {
   assert.match(synced.output, /"adoptedAgentDefaults":1/u);
 
   const executioner = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "plan-executor-astra-medium" } },
+    where: { projectId_name: { projectId: project.id, name: "plan-executor-astra-low" } },
     select: { model: true, runnerPreference: true, customizedFields: true, runtimeConfigDriftNoticeFingerprint: true },
   });
   assert.deepEqual(executioner, {
@@ -1001,9 +987,9 @@ test("sync notifies once per current customized runtime drift without overwritin
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const originalProduction = { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX };
   const changedProduction = { model: "gpt-5.6-sol:medium", runnerPreference: RunnerPreference.CODEX };
-  const mergeResolverSource = canonicalRuntime("merge-resolver-opus-medium");
+  const mergeResolverSource = canonicalRuntime("merge-resolver-luna-max");
   const mergeResolver = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "merge-resolver-opus-medium" } },
+    where: { projectId_name: { projectId: project.id, name: "merge-resolver-luna-max" } },
     select: {
       id: true,
       model: true,
@@ -1050,7 +1036,7 @@ test("sync notifies once per current customized runtime drift without overwritin
   assert.match(firstSync.output, /"runtimeDriftNotices":1/u);
 
   const afterFirstSync = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "merge-resolver-opus-medium" } },
+    where: { projectId_name: { projectId: project.id, name: "merge-resolver-luna-max" } },
     select: { model: true, runnerPreference: true, customizedFields: true },
   });
   assert.deepEqual(afterFirstSync, { ...originalProduction, customizedFields: ["model", "runnerPreference"] });
@@ -1066,7 +1052,7 @@ test("sync notifies once per current customized runtime drift without overwritin
   assert.equal((await prisma.inboxThread.findUniqueOrThrow({
     where: { id: firstNotice[0]!.threadId! },
   })).externalChatId, operatorChatId);
-  assert.match(firstNotice[0]!.body, /Agent: merge-resolver-opus-medium/u);
+  assert.match(firstNotice[0]!.body, /Agent: merge-resolver-luna-max/u);
   assert.match(firstNotice[0]!.body, new RegExp(
     `Canonical: model=${escapeRegex(mergeResolverSource.model)}, runner=${mergeResolverSource.runnerPreference}`,
     "u",
@@ -1183,12 +1169,12 @@ test("sync adopts uncustomized runtime drift without promoting it", async (t) =>
 
 test("sync recreates a missing regression verifier and restores canonical bindings", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
-  const verifierSource = canonicalRuntime("regression-verifier-luna-xhigh");
+  const verifierSource = canonicalRuntime("regression-verifier-luna-max");
   const source = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "code-reviewer-sol-high" } },
   });
   const existingVerifier = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "regression-verifier-luna-xhigh" } },
+    where: { projectId_name: { projectId: project.id, name: "regression-verifier-luna-max" } },
   });
   const regressionSteps = await prisma.taskTemplateStep.findMany({
     where: {
@@ -1214,7 +1200,7 @@ test("sync recreates a missing regression verifier and restores canonical bindin
   assert.match(synced.output, /"adoptedAssignees":2/u);
 
   const verifier = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "regression-verifier-luna-xhigh" } },
+    where: { projectId_name: { projectId: project.id, name: "regression-verifier-luna-max" } },
   });
   assert.equal(verifier.model, verifierSource.model);
   assert.equal(verifier.runnerPreference, verifierSource.runnerPreference);
@@ -1379,7 +1365,7 @@ test("canonical sync adopts the tolerated differences and refuses every other on
     where: { projectId_name: { projectId: project.id, name: "code-reviewer-sol-high" } },
   });
   const verifier = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "regression-verifier-luna-xhigh" } },
+    where: { projectId_name: { projectId: project.id, name: "regression-verifier-luna-max" } },
   });
   const provisioning = async (stepId: string): Promise<boolean> => (
     await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: stepId } })
@@ -1625,6 +1611,8 @@ test("sync rolls model-neutral review output across all canonical templates and 
         taskTemplateId: template.id,
         name: "Operator review staffing",
         isDefault: true,
+        mergeTailRepairAgentId: staffedAgent.id,
+        tiers: { create: [{ tier: "hard", agentId: staffedAgent.id }] },
         entries: {
           create: [
             { outputKind: "sol-findings", assigneeAgentId: staffedAgent.id, include: null },
@@ -1702,7 +1690,7 @@ test("sync rolls model-neutral review output across all canonical templates and 
 
     const current = await prisma.taskTemplate.findUniqueOrThrow({
       where: { projectId_name: { projectId: project.id, name: templateName } },
-      include: { steps: { orderBy: { stepIndex: "asc" } }, staffingProfiles: { include: { entries: { orderBy: { outputKind: "asc" } } } } },
+      include: { steps: { orderBy: { stepIndex: "asc" } }, staffingProfiles: { include: { entries: { orderBy: { outputKind: "asc" } }, tiers: true } } },
     });
     assert.notEqual(current.id, fixture.templateId);
     assert.equal(current.steps.find(({ outputKind }) => outputKind === "review-findings")?.name, "Code review");
@@ -1712,6 +1700,8 @@ test("sync rolls model-neutral review output across all canonical templates and 
     assert.ok(carried);
     assert.equal(carried.name, "Operator review staffing");
     assert.equal(carried.isDefault, true);
+    assert.equal(carried.mergeTailRepairAgentId, staffedAgent.id);
+    assert.deepEqual(carried.tiers.map(({ tier, agentId }) => ({ tier, agentId })), [{ tier: "hard", agentId: staffedAgent.id }]);
     assert.deepEqual(
       carried.entries.map(({ outputKind, assigneeAgentId, include }) => ({ outputKind, assigneeAgentId, include })),
       [
@@ -1756,7 +1746,7 @@ test("seed and sync preserve every seed-era legacy template identity", async () 
     agentId("review-coordinator-astra-medium"),
     agentId("merge-integrator"),
     agentId("librarian-luna-xhigh"),
-    agentId("regression-verifier-luna-xhigh"),
+    agentId("regression-verifier-luna-max"),
     agentId("senior-dev-astra-medium"),
   ]);
 

@@ -105,6 +105,14 @@ export type StaffingProfileEntry = {
   include: boolean | null;
 };
 
+/** Ordered tier vocabulary shared by persistence and the console. */
+export const STAFFING_PROFILE_TIERS = ["default", "frontend", "hard", "hazard"] as const;
+export type StaffingProfileTier = (typeof STAFFING_PROFILE_TIERS)[number];
+
+/** Agent IDs selected for the four implementation tiers. A null value leaves
+ * that tier unstaffed; the implementation step then keeps its current Agent. */
+export type StaffingProfileTiers = Record<StaffingProfileTier, string | null>;
+
 /** A named staffing plan for one TaskTemplate. Exactly one profile of a
  *  template is its default; a template may also have none, in which case
  *  instantiation uses the canonical step bindings. */
@@ -117,6 +125,7 @@ export type StaffingProfile<DateTime = string> = {
   /** Agent used for review-fix and gate-fix merge-tail repair cards. `null`
    * means those repairs fall back to the chain's fixed-implementation Agent. */
   mergeTailRepairAgentId: string | null;
+  tiers: StaffingProfileTiers;
   createdAt: DateTime;
   updatedAt: DateTime;
   entries: StaffingProfileEntry[];
@@ -134,11 +143,18 @@ export type StaffingProfileEntryInput = {
   include?: boolean | null;
 };
 
+/** Tier values accepted by profile create and replace. Missing keys preserve
+ * an existing slot on replacement and mean an empty slot on creation. */
+export type StaffingProfileTiersInput = {
+  [Tier in StaffingProfileTier]?: string | null | undefined;
+};
+
 /** `POST …/staffing-profiles`. `isDefault` defaults to false unless the
  *  template has no profile yet, where the first one is always the default. */
 export type StaffingProfileCreateInput = {
   name: string;
   entries: StaffingProfileEntryInput[];
+  tiers?: StaffingProfileTiersInput | undefined;
   isDefault?: boolean;
   mergeTailRepairAgentId?: string | null;
   /** Optional repository context used to validate a non-null repair slot. */
@@ -150,6 +166,7 @@ export type StaffingProfileCreateInput = {
 export type StaffingProfileReplaceInput = {
   name: string;
   entries: StaffingProfileEntryInput[];
+  tiers?: StaffingProfileTiersInput | undefined;
   /** Omission preserves the current slot; `null` explicitly clears it. */
   mergeTailRepairAgentId?: string | null;
   /** Optional repository context used to validate a non-null repair slot. */

@@ -71,7 +71,7 @@ let templateSources: Awaited<ReturnType<typeof loadAllTemplateStepSources>>;
 const partialRoleNames = [
   "senior-dev-luna-max",
   "code-reviewer-sol-high",
-  "code-reviewer-opus-high",
+  "code-reviewer-opus-medium",
   "senior-dev-astra-low",
 ] as const;
 

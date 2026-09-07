@@ -20,7 +20,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 
-import { RunnerPreference } from "@prisma/client";
+import { type Prisma, RunnerPreference } from "@prisma/client";
 
 import { assertCanonicalAgentSources } from "./agent-contract.js";
 import { parseInlineList, parsePromptDocument, requiredFrontmatter } from "./prompt-document.js";
@@ -44,6 +44,43 @@ export type RoleSource = {
   rolePrompt: string;
 };
 export type AgentSources = { foundationalPrompt: string; roles: RoleSource[] };
+
+/** Canonical role slugs aligned with the model/effort already running in production. */
+export const CANONICAL_ROLE_RENAMES = [
+  ["regression-verifier-luna-xhigh", "regression-verifier-luna-max"],
+  ["code-reviewer-opus-high", "code-reviewer-opus-medium"],
+  ["merge-resolver-opus-medium", "merge-resolver-luna-max"],
+  ["plan-reviser-opus-high", "plan-reviser-opus-medium"],
+  ["plan-executor-astra-medium", "plan-executor-astra-low"],
+] as const;
+
+/** Adopt renamed identities without replacing Agent rows. The caller owns
+ * transaction boundaries and decorates collisions with entrypoint context. */
+export const adoptRenamedCanonicalRoles = async (
+  tx: Prisma.TransactionClient,
+  projectId: string,
+  onCollision: (message: string) => Error,
+): Promise<void> => {
+  for (const [from, to] of CANONICAL_ROLE_RENAMES) {
+    const existingByRole = await tx.agent.findUnique({
+      where: { projectId_canonicalRole: { projectId, canonicalRole: from } },
+      select: { id: true },
+    });
+    const existing = existingByRole ?? await tx.agent.findFirst({
+      where: { projectId, canonicalRole: null, name: from },
+      select: { id: true },
+    });
+    if (!existing) continue;
+    const target = await tx.agent.findUnique({
+      where: { projectId_canonicalRole: { projectId, canonicalRole: to } },
+      select: { id: true, name: true },
+    });
+    if (target && target.id !== existing.id) {
+      throw onCollision(`Agent role rename ${from} -> ${to} would collide with Agent ${target.name} (${target.id})`);
+    }
+    await tx.agent.update({ where: { id: existing.id }, data: { canonicalRole: to } });
+  }
+};
 
 export type PersistedRoleStructure = {
   /**

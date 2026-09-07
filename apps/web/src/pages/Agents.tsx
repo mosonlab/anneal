@@ -741,7 +741,7 @@ export const AgentDetailPage = ({ agentId }: { agentId: string }): ReactNode => 
                     executes (`nativeImplementationSubagentRunConfig`), so this
                     note follows the canonical role and not a name the operator
                     is free to change. */}
-                {(view.canonicalRole ?? view.name) === "plan-executor-astra-medium" ? <div>{t("agents.executioner.outerHint")}</div> : null}
+                {(view.canonicalRole ?? view.name) === "plan-executor-astra-low" ? <div>{t("agents.executioner.outerHint")}</div> : null}
                 <div><Link to="/settings" className="text-[var(--accent)] hover:underline">{t("agents.model.settingsHint")}</Link></div>
                 <div className={ROW}>
                   <Toggle on={view.inboxAccess} onChange={(next) => patch({ inboxAccess: next })} label={t("agents.inbox.label")} />

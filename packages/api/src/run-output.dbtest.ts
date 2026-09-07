@@ -333,7 +333,7 @@ const negativeRegressionVerdict = (
 
 const addRepairAgent = async (
   seeded: Awaited<ReturnType<typeof seedTask>>,
-  agentName: "senior-dev-astra-medium" | "merge-resolver-opus-medium",
+  agentName: "senior-dev-astra-medium" | "merge-resolver-luna-max",
 ) => {
   const repairAgent = await db.agent.create({ data: {
     projectId: seeded.project.id,
@@ -351,7 +351,7 @@ const addRepairAgent = async (
     mountPath: "/repo",
     permissions: "GIT_WRITE",
   } });
-  if (agentName !== "merge-resolver-opus-medium") {
+  if (agentName !== "merge-resolver-luna-max") {
     // Implementation repairs use the chain's explicit staffing, not a role-name fallback.
     assert.ok(seeded.task.templateId);
     assert.ok(seeded.task.chainId);
@@ -539,7 +539,7 @@ test("a retryable protocol failure consumes its durable negative Regression verd
   for (const [outcome, repairKind, agentName] of [
     ["review-fail", "review-fix", "senior-dev-astra-medium"],
     ["gate-fail", "gate-fix", "senior-dev-astra-medium"],
-    ["refresh-conflict", "refresh-conflict", "merge-resolver-opus-medium"],
+    ["refresh-conflict", "refresh-conflict", "merge-resolver-luna-max"],
   ] as const) {
     await resetTestDb(db);
     const seeded = await seedTask(REGRESSION_STEP);
@@ -636,7 +636,7 @@ test("current v2 durable negative verdicts survive lease-loss reconciliation wit
   for (const [outcome, repairKind, agentName] of [
     ["review-fail", "review-fix", "senior-dev-astra-medium"],
     ["gate-fail", "gate-fix", "senior-dev-astra-medium"],
-    ["refresh-conflict", "refresh-conflict", "merge-resolver-opus-medium"],
+    ["refresh-conflict", "refresh-conflict", "merge-resolver-luna-max"],
   ] as const) {
     await resetTestDb(db);
     const seeded = await seedTask(REGRESSION_V2_STEP);

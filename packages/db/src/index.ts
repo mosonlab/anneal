@@ -32,6 +32,7 @@ export * from "./merge-lease-ledger.js";
 export {
   CHAIN_STRUCTURE_LOCK_CLASS,
   lockAgentRepoGrant,
+  lockAgentRepoWriteGrant,
   lockAgentRepoGrantForRevocation,
   lockAgentRow,
   lockAgentRows,

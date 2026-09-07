@@ -34,6 +34,7 @@ export type StaffingProfileCarrySource = Readonly<{
   /** The dedicated merge-tail repair Agent, if the profile names one. */
   mergeTailRepairAgentId?: string | null;
   entries: readonly StaffingProfileCarryEntry[];
+  tiers: readonly { tier: string; agentId: string }[];
 }>;
 
 export type StaffingProfileCarryDrop = Readonly<{
@@ -136,6 +137,7 @@ export const planStaffingProfileCarry = (
       isDefault: profile.isDefault,
       mergeTailRepairAgentId: profile.mergeTailRepairAgentId ?? null,
       entries,
+      tiers: profile.tiers,
     });
   }
 

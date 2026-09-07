@@ -9,7 +9,13 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
 import { catalogRunnerForModel } from "../src/agent-contract.js";
-import { loadAgentSources, roleSourceStructureDifferences, type AgentSources, type RoleSource } from "../src/agent-sources.js";
+import {
+  adoptRenamedCanonicalRoles,
+  loadAgentSources,
+  roleSourceStructureDifferences,
+  type AgentSources,
+  type RoleSource,
+} from "../src/agent-sources.js";
 import { findCanonicalAgent } from "../src/canonical-agent-lookup.js";
 import {
   canonicalStepAdoptions,
@@ -688,6 +694,7 @@ export const main = async (
             }
           }
 
+          await adoptRenamedCanonicalRoles(tx, project.id, (message) => projectError(project, message));
           if (project.id === canonicalProject.id) {
             await migrateSpecialCanonicalAgents(tx, canonicalProject, sources, rolesByRole, projectCounters);
           }

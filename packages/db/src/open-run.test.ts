@@ -1480,7 +1480,7 @@ for (const intent of reassignedRetryIntents) {
   test(`${intent.kind} derives runner, model, service tier and native subagent config from a new assignee`, async () => {
     const successor = agent({
       id: "agent-2",
-      name: "plan-executor-astra-medium",
+      name: "plan-executor-astra-low",
       model: "gpt-6-astra:medium",
       runnerPreference: RunnerPreference.CODEX,
       codexServiceTier: CodexServiceTier.FAST,

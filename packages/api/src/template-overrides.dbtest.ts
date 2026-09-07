@@ -314,7 +314,7 @@ test("integrator and pinned compound implementation bindings are checked after o
     // §R14: the compound root is a capability, so this canonical binding has to
     // be a Codex gpt-* Agent or the whole graph is refused before the override
     // cases this test is about are reached.
-    name: "plan-executor-astra-medium", title: "executioner", model: "gpt-5.6-sol:high",
+    name: "plan-executor-astra-low", title: "executioner", model: "gpt-5.6-sol:high",
     runnerPreference: RunnerPreference.CODEX,
     foundationalPrompt: "foundation", rolePrompt: "role",
   } });

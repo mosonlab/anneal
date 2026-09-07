@@ -141,7 +141,7 @@ test("the executioner Setup page has no legacy subprocess profile controls", asy
   const { dom, container } = installDom();
   const root = (await reactDom()).createRoot(container);
   const agent: Agent = {
-    id: "a", projectId: "p", environmentId: "e", name: "plan-executor-astra-medium", canonicalRole: "plan-executor-astra-medium", customizedFields: [], title: "Implementation Plan Executioner",
+    id: "a", projectId: "p", environmentId: "e", name: "plan-executor-astra-low", canonicalRole: "plan-executor-astra-low", customizedFields: [], title: "Implementation Plan Executioner",
     model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT", runnerPreference: "CODEX", inboxAccess: true, disabledTools: [],
     foundationalPrompt: "foundation", rolePrompt: "role", createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(), archivedAt: null,
@@ -166,7 +166,7 @@ test("the executioner Setup page has no legacy subprocess profile controls", asy
     // The name is the operator's own identifier, and the platform pins the
     // native children by the step a run executes rather than by this Agent's
     // name — so an effort change may be followed by the matching slug here.
-    const canonicalName = dom.window.document.querySelector('input[value="plan-executor-astra-medium"]') as HTMLInputElement | null;
+    const canonicalName = dom.window.document.querySelector('input[value="plan-executor-astra-low"]') as HTMLInputElement | null;
     assert.ok(canonicalName);
     assert.equal(canonicalName.disabled, false);
     // What is pinned is said, not enforced by a dead control.

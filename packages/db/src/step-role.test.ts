@@ -59,7 +59,10 @@ for (const templateName of ["compound-engineer-workflow", "direct-engineer-workf
     const steps = await loadTemplateStepSources(templateName as CanonicalTemplateName);
     for (const step of steps) {
       assert.equal(stepRole(step), EXPECTED_ROLES[step.outputKind]);
-      assert.equal(stepGeneration(step), step.outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND ? "v2" : "v1");
+      assert.equal(
+        stepGeneration(step),
+        step.outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND || step.outputKind === "revalidation" ? "v2" : "v1",
+      );
     }
   });
 }
@@ -67,6 +70,8 @@ for (const templateName of ["compound-engineer-workflow", "direct-engineer-workf
 test("role normalization is generation-independent and unknown output kinds have no role", () => {
   assert.equal(stepRole({ outputKind: "regression-verification-v3" }), "regression");
   assert.equal(stepGeneration({ outputKind: "regression-verification-v3" }), "v3");
+  assert.equal(stepRole({ outputKind: "revalidation-v99" }), "revalidation");
+  assert.equal(stepGeneration({ outputKind: "revalidation-v99" }), "v99");
   assert.equal(stepRole({ outputKind: "unregistered-v2" }), null);
   assert.equal(stepGeneration({ outputKind: "unregistered-v2" }), "v2");
 });

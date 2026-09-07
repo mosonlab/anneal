@@ -1,7 +1,7 @@
 import { AssigneeType, CodexServiceTier, PrismaClient } from "@prisma/client";
 
 import { DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME } from "../src/agent-contract.js";
-import { loadAgentSources } from "../src/agent-sources.js";
+import { adoptRenamedCanonicalRoles, loadAgentSources } from "../src/agent-sources.js";
 import { findCanonicalAgent } from "../src/canonical-agent-lookup.js";
 import {
   applyCanonicalInstallation,
@@ -35,8 +35,8 @@ const HISTORICAL_NINE_STEP_CONTRACT = [
   [1, "spec-opus-high", AssigneeType.AGENT, "spec", true],
   [2, "plan-fable-medium", AssigneeType.AGENT, "plan", false],
   [3, "review-coordinator-astra-medium", AssigneeType.AGENT, "plan-review", false],
-  [4, "plan-reviser-opus-high", AssigneeType.AGENT, "revised-plan", true],
-  [5, "plan-executor-astra-medium", AssigneeType.AGENT, "implementation", false],
+  [4, "plan-reviser-opus-medium", AssigneeType.AGENT, "revised-plan", true],
+  [5, "plan-executor-astra-low", AssigneeType.AGENT, "implementation", false],
   [6, "review-coordinator-astra-medium", AssigneeType.AGENT, "code-review", false],
   [7, "senior-dev-astra-medium", AssigneeType.AGENT, "fixed-implementation", false],
   [8, "librarian-luna-xhigh", AssigneeType.AGENT, "documentation", false],
@@ -92,7 +92,7 @@ const historicalSeedLegacyName = (
     && existing.steps[11]?.outputKind === INTEGRATOR_OUTPUT_KIND;
   const isRegressionFirstThirteenStepTemplate = existing.steps.length === 13
     && existing.steps.every((step, index) => step.stepIndex === index + 1)
-    && stepRoleName(existing.steps[9]) === "regression-verifier-luna-xhigh"
+    && stepRoleName(existing.steps[9]) === "regression-verifier-luna-max"
     && existing.steps[9]?.outputKind === "regression-verification"
     && stepRoleName(existing.steps[10]) === "librarian-luna-xhigh"
     && existing.steps[10]?.outputKind === "documentation"
@@ -129,6 +129,8 @@ const main = async (): Promise<void> => {
       allowedHosts: [],
     },
   });
+
+  await adoptRenamedCanonicalRoles(prisma, project.id, (message) => new Error(message));
 
   for (const role of sources.roles) {
     // Canonical identity is `canonicalRole`, not `name`: the operator may rename

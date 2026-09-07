@@ -60,6 +60,7 @@ export const PUBLISHED_PROMPT_GENERATIONS = {
     { digest: "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543" },
     { digest: "a1a15921c9a4592c05db1e0d6d42f95ab2aa8c0011102bd20bf4d3b67b1bd0a1", retiredByShape: "pre-model-neutral-review-output" },
     { digest: "04d473928d65443202bd68b6d865df61f26983fc35870cf43e5032279e1ed107" },
+    { digest: "79921b8f06e1abbfdcd3db7132e48816edb68deda47082b9c2508b1b74067ca1" },
   ],
   "compound-engineer-workflow": [
     { digest: "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9", retiredByShape: "model-neutral-review-step-names" },

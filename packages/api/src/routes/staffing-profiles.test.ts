@@ -14,6 +14,7 @@ test("PUT refuses a legacy control-plane assignment with 400 before any mutation
         $queryRaw: async () => [{ id: "template-1", projectId: "project-1", name: "Workflow" }],
         staffingProfile: {
           findUnique: async () => ({
+            tiers: [],
             id: "profile-1", projectId: "project-1", taskTemplateId: "template-1", name: "Legacy",
           }),
           update: async () => { assert.fail("refused PUT must not mutate the profile"); },
@@ -54,6 +55,7 @@ test("PUT refuses an archived merge-tail repair Agent before profile mutation", 
         $queryRaw: async () => [{ id: "template-1", projectId: "project-1", name: "Workflow" }],
         staffingProfile: {
           findUnique: async () => ({
+            tiers: [],
             id: "profile-1",
             projectId: "project-1",
             taskTemplateId: "template-1",
