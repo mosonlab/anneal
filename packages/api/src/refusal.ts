@@ -54,6 +54,11 @@ const localRefusalStatus = {
   // A repair completion whose recovery names another Run. The state is one the
   // platform produced, so it answers a named conflict rather than a 500.
   "merge-tail-repair-unbound": 409,
+  // The two refusals of a chain-binding PATCH. Immutability is a conflict:
+  // nothing about the request is malformed, the chain has simply started. An
+  // unusable predecessor is a bad request, exactly as it is at instantiation.
+  chain_binding_immutable_after_start: 409,
+  chain_binding_target_invalid: 400,
 } as const satisfies Record<string, RefusalStatus>;
 
 export type RefusalReason = WorkflowRefusalReason | keyof typeof localRefusalStatus;
