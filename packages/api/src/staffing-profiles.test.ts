@@ -64,7 +64,7 @@ test("merge-tail repair slot refuses a foreign or archived Agent", () => {
     runnerPreference: RunnerPreference.CODEX,
   };
   const archived = { ...active, id: "agent-archived", archivedAt: new Date() };
-  const agents = new Map([
+  const agents = new Map<string, typeof active | typeof archived>([
     [active.id, active],
     [archived.id, archived],
   ]);
