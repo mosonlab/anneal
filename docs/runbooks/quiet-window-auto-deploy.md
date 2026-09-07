@@ -76,9 +76,12 @@ deployed release, the job also checks the time of the last successful automatic
 deploy recorded in `.agentos-deploy/auto-deploy-state.json` as
 `lastSuccessfulAutomaticDeployAt`. `AUTO_DEPLOY_MIN_INTERVAL_MINUTES` in
 `shared/.env` sets the minimum interval and defaults to **240 minutes (four
-hours)**. Both host roles read the same positive whole-minute setting; a
+hours)**. Both host roles read the same non-negative whole-minute setting; a
 runner-only host retains its existing `/version` follow behavior. The cadence
-floor applies to control-plane automatic deploys, on Linux or macOS.
+floor applies to control-plane automatic deploys, on Linux or macOS. For an
+on-demand invocation of the existing script, set
+`AUTO_DEPLOY_MIN_INTERVAL_MINUTES=0` in that command's environment to bypass
+coalescing; the quiet window and deploy barrier still apply.
 
 If the interval has elapsed, the tick enters the normal artifact, quiet-window,
 and activation path. A tick may deploy earlier when its first quiet-window

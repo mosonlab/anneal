@@ -21,14 +21,14 @@ const invalidEnvironment = (value) => {
 };
 
 /** Read the one shared cadence setting used by both the control-plane and
- * runner hosts. The interval is a positive whole number of minutes; keeping
+ * runner hosts. The interval is a non-negative whole number of minutes; keeping
  * the parser here means a host cannot silently use a platform-specific
  * default. */
 export const autoDeployMinIntervalMs = (environment = process.env) => {
   const configured = environment?.AUTO_DEPLOY_MIN_INTERVAL_MINUTES;
   if (configured === undefined || configured === "") return DEFAULT_AUTO_DEPLOY_MIN_INTERVAL_MS;
   const text = String(configured);
-  if (!/^\d+$/u.test(text) || Number(text) < 1 || !Number.isSafeInteger(Number(text) * 60_000)) {
+  if (!/^\d+$/u.test(text) || Number(text) < 0 || !Number.isSafeInteger(Number(text) * 60_000)) {
     invalidEnvironment(text);
   }
   return Number(text) * 60_000;
@@ -91,7 +91,7 @@ export const automaticCadenceDecision = ({
   if (typeof deployedCommit !== "string" || typeof targetCommit !== "string") {
     throw new TypeError("automatic-cadence-commit-required");
   }
-  if (!Number.isSafeInteger(minIntervalMs) || minIntervalMs <= 0) {
+  if (!Number.isSafeInteger(minIntervalMs) || minIntervalMs < 0) {
     throw new TypeError("automatic-cadence-interval-invalid");
   }
   const current = dateFrom(now(), "automatic-cadence-now");

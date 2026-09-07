@@ -3603,7 +3603,7 @@ test("both host roles load the same automatic interval from shared .env", async 
     assert.equal(deploy.autoDeployMinIntervalMs(), 180 * 60_000);
   }
   assert.equal(deploy.autoDeployMinIntervalMs({}), 240 * 60_000);
-  for (const invalid of ["0", "-1", "1.5", "abc", String(Number.MAX_SAFE_INTEGER)]) {
+  for (const invalid of ["-1", "1.5", "abc", String(Number.MAX_SAFE_INTEGER)]) {
     assert.throws(() => deploy.autoDeployMinIntervalMs({ AUTO_DEPLOY_MIN_INTERVAL_MINUTES: invalid }), /environment-invalid/u);
   }
 });
@@ -3623,4 +3623,16 @@ test("a target reread failure releases the barrier and watchdog before returning
   assert.equal(result.failure.reason, "remote-main-unreadable");
   assert.deepEqual(released, ["watchdog", "barrier"]);
   assert.equal(run.state.serving, "previous");
+});
+
+test("a zero interval admits an on-demand invocation of the existing deploy script", async () => {
+  const deploy = await import("./quiet-window-deploy.mjs");
+  const now = new Date("2026-09-07T12:00:00Z");
+  const decision = await deploy.automaticCadenceForTick({ targetCommit: revisions.to,
+    readDeployed: () => revisions.from, readBlockingRuns: async () => [{ status: "running" }],
+    readLastSuccessful: () => now, now: () => now,
+    environment: { AUTO_DEPLOY_MIN_INTERVAL_MINUTES: "0" },
+  });
+  assert.equal(decision.coalesced, undefined);
+  assert.equal(decision.allowWait, true);
 });
