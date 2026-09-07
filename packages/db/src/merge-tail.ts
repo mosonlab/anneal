@@ -11,6 +11,8 @@ import { stepRole } from "./step-role.js";
 export const MERGE_TAIL_SCHEMA_VERSION = 1;
 export const REGRESSION_VERIFICATION_SCHEMA_VERSION = 2;
 export const REGRESSION_VERIFICATION_OUTPUT_KIND = "regression-verification-v2";
+export const MERGE_TRAIN_SCHEMA_VERSION = 1;
+export const MERGE_TRAIN_OUTPUT_KIND = "merge-train-v1";
 export const LEGACY_REGRESSION_VERIFICATION_OUTPUT_KIND = "regression-verification";
 export const REGRESSION_VERIFICATION_OUTPUT_KINDS = [
   REGRESSION_VERIFICATION_OUTPUT_KIND,
@@ -282,6 +284,7 @@ export const mergeRecoveryPhase = (status: MergeRecoveryStatus): MergeRecoveryPh
 );
 
 const SHA = /^[0-9a-f]{40}$/u;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const PASS_GATE_PROOF = /^MERGE GATE: PASS ([0-9a-f]{40})$/u;
 const FAIL_GATE_PROOF = /^MERGE GATE: FAIL \(.+\)$/u;
 
@@ -375,6 +378,169 @@ export const parseRegressionVerdict = (
   return { status: "invalid", reason: "regression outcome and gateVerdict disagree or required summary is absent" };
 };
 
+export type MergeTrainVerdict = "pass" | "fail" | "no-verdict";
+export type MergeTrainWidth = 1 | 2 | 3;
+
+export type MergeTrainPrefix = {
+  index: number;
+  taskId: string;
+  chainId: string;
+  candidateHeadSha: string;
+  predecessorOid: string;
+  prefixOid: string;
+  ref: string;
+  verdict: MergeTrainVerdict;
+  gateExcerpt: string;
+};
+
+export type MergeTrainBlockedCandidate = {
+  taskId: string;
+  chainId: string;
+  candidateHeadSha: string;
+  reason: string;
+};
+
+export type MergeTrainRecord = {
+  schemaVersion: typeof MERGE_TRAIN_SCHEMA_VERSION;
+  baseSha: string;
+  width: MergeTrainWidth;
+  prefixes: MergeTrainPrefix[];
+  blocked: MergeTrainBlockedCandidate[];
+  skipped: string[];
+  contiguousPassCount: number;
+};
+
+export type MergeTrainRecordParse =
+  | { status: "ok"; record: MergeTrainRecord }
+  | { status: "invalid"; reason: string };
+
+const nonEmptyString = (value: unknown): value is string => (
+  typeof value === "string" && value.trim().length > 0
+);
+
+/**
+ * A prefix is only ever `pass` when the gate printed `MERGE GATE: PASS
+ * <prefixOid>` exactly, so the record has to carry that line, bound to that
+ * prefix, as a standalone line of its gate excerpt. Without it the parser would
+ * hand the control plane a proofless authorization to merge.
+ */
+const carriesGatePassProof = (gateExcerpt: string, prefixOid: string): boolean =>
+  gateExcerpt.split(/\r?\n/u).includes(`MERGE GATE: PASS ${prefixOid}`);
+
+/**
+ * Parse the persisted output of the runtime merge-train tool. The control
+ * plane treats this record as an authorization input, so the parser validates
+ * both its wire shape and the relationships the tool promises between fields.
+ */
+export const parseMergeTrainRecord = (
+  body: string | null | undefined,
+): MergeTrainRecordParse => {
+  if (!body) return { status: "invalid", reason: "missing merge train output" };
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { return { status: "invalid", reason: "merge train output is not JSON" }; }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { status: "invalid", reason: "merge train output is not an object" };
+  }
+
+  const value = parsed as Record<string, unknown>;
+  const fail = (reason: string): MergeTrainRecordParse => ({ status: "invalid", reason });
+  if (value.schemaVersion !== MERGE_TRAIN_SCHEMA_VERSION) return fail("unsupported merge train schemaVersion");
+  if (typeof value.baseSha !== "string" || !SHA.test(value.baseSha)) return fail("invalid merge train baseSha");
+  if (typeof value.width !== "number" || !Number.isInteger(value.width) || value.width < 1 || value.width > 3) {
+    return fail("invalid merge train width");
+  }
+  if (!Array.isArray(value.prefixes)) return fail("merge train prefixes is not an array");
+  if (value.prefixes.length > value.width) return fail("merge train prefixes exceed width");
+
+  const prefixes: MergeTrainPrefix[] = [];
+  for (const [position, entry] of value.prefixes.entries()) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return fail("malformed merge train prefix");
+    const prefix = entry as Record<string, unknown>;
+    if (typeof prefix.index !== "number" || !Number.isInteger(prefix.index) || prefix.index !== position + 1) {
+      return fail("merge train prefix indexes are not one-based and ordered");
+    }
+    if (!nonEmptyString(prefix.taskId)) return fail("invalid merge train prefix taskId");
+    if (typeof prefix.chainId !== "string" || !UUID.test(prefix.chainId)) return fail("invalid merge train prefix chainId");
+    if (typeof prefix.candidateHeadSha !== "string" || !SHA.test(prefix.candidateHeadSha)) {
+      return fail("invalid merge train candidateHeadSha");
+    }
+    if (typeof prefix.predecessorOid !== "string" || !SHA.test(prefix.predecessorOid)) {
+      return fail("invalid merge train predecessorOid");
+    }
+    if (typeof prefix.prefixOid !== "string" || !SHA.test(prefix.prefixOid)) {
+      return fail("invalid merge train prefixOid");
+    }
+    const expectedPredecessor = prefixes.at(-1)?.prefixOid ?? value.baseSha;
+    if (prefix.predecessorOid !== expectedPredecessor) return fail("merge train prefix predecessor is not continuous");
+    if (prefix.ref !== `refs/anneal/train/${prefix.prefixOid}`) return fail("merge train prefix ref is not append-only train ref");
+    if (prefix.verdict !== "pass" && prefix.verdict !== "fail" && prefix.verdict !== "no-verdict") {
+      return fail("invalid merge train prefix verdict");
+    }
+    if (typeof prefix.gateExcerpt !== "string") return fail("invalid merge train gateExcerpt");
+    if (prefix.verdict === "pass" && !carriesGatePassProof(prefix.gateExcerpt, prefix.prefixOid)) {
+      return fail("merge train pass prefix carries no gate PASS proof for its prefixOid");
+    }
+    prefixes.push({
+      index: prefix.index,
+      taskId: prefix.taskId,
+      chainId: prefix.chainId,
+      candidateHeadSha: prefix.candidateHeadSha,
+      predecessorOid: prefix.predecessorOid,
+      prefixOid: prefix.prefixOid,
+      ref: prefix.ref,
+      verdict: prefix.verdict,
+      gateExcerpt: prefix.gateExcerpt,
+    });
+  }
+
+  if (!Array.isArray(value.blocked)) return fail("merge train blocked is not an array");
+  const blocked: MergeTrainBlockedCandidate[] = [];
+  for (const entry of value.blocked) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return fail("malformed merge train blocked candidate");
+    const candidate = entry as Record<string, unknown>;
+    if (!nonEmptyString(candidate.taskId)
+      || typeof candidate.chainId !== "string" || !UUID.test(candidate.chainId)
+      || typeof candidate.candidateHeadSha !== "string" || !SHA.test(candidate.candidateHeadSha)
+      || !nonEmptyString(candidate.reason)) {
+      return fail("malformed merge train blocked candidate");
+    }
+    blocked.push({
+      taskId: candidate.taskId,
+      chainId: candidate.chainId,
+      candidateHeadSha: candidate.candidateHeadSha,
+      reason: candidate.reason,
+    });
+  }
+  if (blocked.length > 1) return fail("merge train has more than one blocked candidate");
+
+  if (!Array.isArray(value.skipped) || !value.skipped.every(nonEmptyString)) return fail("merge train skipped is malformed");
+  if (blocked.length === 0 && value.skipped.length > 0) return fail("merge train skipped candidates require a blocked candidate");
+  if (prefixes.length + blocked.length + value.skipped.length > value.width) return fail("merge train candidates exceed width");
+  if (typeof value.contiguousPassCount !== "number"
+    || !Number.isInteger(value.contiguousPassCount)
+    || value.contiguousPassCount < 0) {
+    return fail("invalid merge train contiguousPassCount");
+  }
+  let leadingPassCount = 0;
+  while (leadingPassCount < prefixes.length && prefixes[leadingPassCount]!.verdict === "pass") leadingPassCount += 1;
+  if (value.contiguousPassCount !== leadingPassCount) {
+    return fail("merge train contiguousPassCount does not match leading pass prefixes");
+  }
+
+  return {
+    status: "ok",
+    record: {
+      schemaVersion: MERGE_TRAIN_SCHEMA_VERSION,
+      baseSha: value.baseSha,
+      width: value.width as MergeTrainWidth,
+      prefixes,
+      blocked,
+      skipped: [...value.skipped],
+      contiguousPassCount: value.contiguousPassCount,
+    },
+  };
+};
+
 export const parseResolverResult = (
   body: string | null | undefined,
 ): { status: "ok"; result: ResolverResult } | { status: "invalid"; reason: string } => {
@@ -437,6 +603,7 @@ const DEFENSE_EXACT = new Set([
   "packages/db/src/merge-recovery-revalidate.ts",
   "packages/db/src/merge-tail.ts",
   "packages/db/src/merge-tail-markers.ts",
+  "packages/db/src/readiness-requeue.ts",
   "packages/db/src/canonical-output-schema.ts",
   "packages/db/src/template-sources.ts",
   "packages/db/src/agent-contract.ts",

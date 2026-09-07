@@ -56,6 +56,11 @@ const localRefusalStatus = {
   "merge-tail-repair-unbound": 409,
   "event-payload-too-large": 413,
   "events-request-too-large": 413,
+  // The two refusals of a chain-binding PATCH. Immutability is a conflict:
+  // nothing about the request is malformed, the chain has simply started. An
+  // unusable predecessor is a bad request, exactly as it is at instantiation.
+  chain_binding_immutable_after_start: 409,
+  chain_binding_target_invalid: 400,
 } as const satisfies Record<string, RefusalStatus>;
 
 export type RefusalReason = WorkflowRefusalReason | keyof typeof localRefusalStatus;

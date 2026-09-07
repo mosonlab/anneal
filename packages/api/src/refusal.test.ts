@@ -65,6 +65,14 @@ const refusalByReason = {
     reason: "approval-gate-rejection-target-missing",
     message: "missing rejection target",
   },
+  chain_binding_immutable_after_start: {
+    reason: "chain_binding_immutable_after_start",
+    message: "chain already started",
+  },
+  chain_binding_target_invalid: {
+    reason: "chain_binding_target_invalid",
+    message: "predecessor unusable",
+  },
 } as const satisfies Record<RefusalReason, Refusal>;
 
 const families: readonly RefusalStatus[] = [400, 403, 404, 409, 413, 422];
