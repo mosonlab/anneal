@@ -30,6 +30,7 @@ import {
   ScheduleKind,
   stopStateFor,
   sumUsageCosts,
+  stepRole,
   TaskStatus,
   taskIsIntegratorStep,
   type ChainControlAddress,
@@ -626,6 +627,10 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
       if (admission.facts.active) {
         return refusal("conflict", "Task already has an active run");
       }
+      const resetLeaseLossRefunds = task.status === TaskStatus.REVIEW
+        && task.failureReason?.includes("Lease-loss refunds exhausted") === true
+        && task.templateStep !== null
+        && stepRole(task.templateStep) === "regression";
       const opened = await openRun(tx, taskId, { kind: "retry", readyAt: now });
       if (!opened.ok) {
         // Retry has no park of its own — a refused retry ordinarily leaves the
@@ -638,6 +643,17 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         return opened.refusal;
       }
       const run = opened.run;
+      if (resetLeaseLossRefunds && run.leaseLossRefunds > 0) {
+        const previous = run.leaseLossRefunds;
+        await tx.run.update({ where: { id: run.id }, data: { leaseLossRefunds: 0 } });
+        run.leaseLossRefunds = 0;
+        await tx.taskActivity.create({ data: {
+          taskId,
+          actorType: "operator",
+          body: `Lease-loss refund counter reset from ${previous} to 0 by operator retry`,
+          metadata: { kind: "lease-loss-refunds-reset", previous, current: 0 },
+        } });
+      }
       await tx.task.update({ where: { id: taskId }, data: { status: TaskStatus.TODO, failureReason: null } });
       await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: `Run ${run.runNumber} queued by operator retry` } });
       return { run };
