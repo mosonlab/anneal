@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { type PrismaClient, RunnerPreference } from "@anneal/db";
+import { AssigneeType, type PrismaClient, RunnerPreference } from "@anneal/db";
 import { replaceStaffingProfile, resetStaffingProfile } from "./staffing-profiles.js";
 
-const fixture = (options: { archived?: boolean; missing?: boolean } = {}) => {
+const fixture = (options: { archived?: boolean; missing?: boolean; implementation?: boolean } = {}) => {
   const agent = {
     id: "repair", name: "senior-dev-luna-max", projectId: "project",
     archivedAt: options.archived ? new Date() : null,
@@ -14,6 +14,11 @@ const fixture = (options: { archived?: boolean; missing?: boolean } = {}) => {
     name: "Default", isDefault: true, mergeTailRepairAgentId: agent.id as string | null,
   };
   let entriesWritten = false;
+  let savedEntries: unknown[] = [];
+  const steps = options.implementation ? [{
+    stepIndex: 0, name: "Implementation", outputKind: "implementation",
+    optional: false, assigneeType: AssigneeType.AGENT, assigneeAgentId: agent.id, runner: null,
+  }] : [];
   const tx = {
     $queryRaw: async (query: TemplateStringsArray) => query.join("").includes('"TaskTemplate"')
       ? [{ id: "template", projectId: "project", name: "direct-engineer-workflow" }]
@@ -23,7 +28,7 @@ const fixture = (options: { archived?: boolean; missing?: boolean } = {}) => {
       findUniqueOrThrow: async () => profile,
       update: async ({ data }: { data: Partial<typeof profile> }) => Object.assign(profile, data),
     },
-    taskTemplateStep: { findMany: async () => [] },
+    taskTemplateStep: { findMany: async () => steps },
     taskTemplate: { findUnique: async () => ({ webhookRepoId: null }) },
     agent: {
       findUnique: async () => options.missing ? null : agent,
@@ -31,10 +36,13 @@ const fixture = (options: { archived?: boolean; missing?: boolean } = {}) => {
       findMany: async () => options.missing ? [] : [agent],
     },
     repo: { findMany: async () => [{ id: "one", name: "One" }, { id: "two", name: "Two" }] },
-    staffingProfileEntry: { deleteMany: async () => { entriesWritten = true; } },
+    staffingProfileEntry: {
+      deleteMany: async () => { entriesWritten = true; },
+      createMany: async ({ data }: { data: unknown[] }) => { savedEntries = data; },
+    },
   };
   const db = { $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx) } as unknown as PrismaClient;
-  return { db, profile, entriesWritten: () => entriesWritten };
+  return { db, profile, entriesWritten: () => entriesWritten, savedEntries: () => savedEntries };
 };
 
 test("PUT omitting an archived slot preserves it and replaces entries", async () => {
@@ -70,3 +78,21 @@ for (const state of ["archived", "missing"] as const) {
     assert.equal(result.warnings[0]?.code, "merge_tail_repair_agent_unavailable");
   });
 }
+
+test("reset clears the archived canonical repair Agent's implementation override", async () => {
+  const observed = fixture({ archived: true, implementation: true });
+  const result = await resetStaffingProfile(observed.db, "profile");
+  assert.equal(result.profile.mergeTailRepairAgentId, null);
+  assert.deepEqual(observed.savedEntries(), [{
+    profileId: "profile", outputKind: "implementation", assigneeAgentId: null, include: null,
+  }]);
+  assert.equal(result.warnings[0]?.code, "merge_tail_repair_agent_unavailable");
+});
+
+test("PUT explicitly naming an archived implementation Agent still refuses", async () => {
+  const observed = fixture({ archived: true, implementation: true });
+  await assert.rejects(replaceStaffingProfile(observed.db, "profile", {
+    name: "Renamed", entries: [{ outputKind: "implementation", assigneeAgentId: "repair" }],
+  }), { code: "staffing_profile_agent_archived" });
+  assert.equal(observed.entriesWritten(), false);
+});

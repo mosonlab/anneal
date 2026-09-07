@@ -626,11 +626,26 @@ test("reset restores the canonical Luna repair slot and warns for unavailable de
   assert.equal(ambiguousReset.body.profile.mergeTailRepairAgentId, fixture.repairAgent.id);
   assert.ok(ambiguousReset.body.warnings.some((warning: { code: string }) => warning.code === "merge_tail_repair_repo_unresolved"));
 
+  await db.taskTemplateStep.updateMany({
+    where: { taskTemplateId: fixture.template.id, outputKind: "implementation" },
+    data: { assigneeAgentId: fixture.repairAgent.id },
+  });
   await db.agent.update({ where: { id: fixture.repairAgent.id }, data: { archivedAt: new Date() } });
   const archivedReset = await call("POST", resetPath, { repoId: fixture.repo.id });
   assert.equal(archivedReset.status, 200, JSON.stringify(archivedReset.body));
   assert.equal(archivedReset.body.profile.mergeTailRepairAgentId, null);
   assert.ok(archivedReset.body.warnings.some((warning: { code: string }) => warning.code === "merge_tail_repair_agent_unavailable"));
+  assert.equal(archivedReset.body.profile.entries.find(
+    (entry: { outputKind: string }) => entry.outputKind === "implementation",
+  ).assigneeAgentId, null);
+  const implementationStep = await db.taskTemplateStep.findFirstOrThrow({
+    where: { taskTemplateId: fixture.template.id, outputKind: "implementation" },
+  });
+  assert.equal(implementationStep.assigneeAgentId, fixture.repairAgent.id);
+  // Restore a valid binding before testing the separate missing-slot case.
+  await db.taskTemplateStep.update({
+    where: { id: implementationStep.id }, data: { assigneeAgentId: fixture.implementer.id },
+  });
   await db.agent.update({ where: { id: fixture.repairAgent.id },
     data: { name: "former-repair-agent", canonicalRole: null } });
   await db.agent.update({ where: { id: fixture.archivedAgent.id }, data: { name: "former-legacy-repair-agent" } });

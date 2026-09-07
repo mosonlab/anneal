@@ -722,6 +722,14 @@ export const resetStaffingProfile = async (
     projectId: existing.projectId, taskTemplateId: template.id,
     agentId: defaultRepairAgent?.id ?? null, repoId, agents, resetWarnings,
   });
+  // An unavailable canonical repair Agent may also own implementation steps.
+  // Leave those profile overrides empty, just like the repair slot, rather
+  // than rejecting reset while validating the template's archived binding.
+  if (defaultRepairAgent && repairAgentId === null) {
+    for (const entry of entries) {
+      if (entry.assigneeAgentId === defaultRepairAgent.id) entry.assigneeAgentId = null;
+    }
+  }
   const validated = validateStaffingEntries(entries, steps, agents, {
     projectId: existing.projectId,
     templateName: template.name,

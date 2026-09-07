@@ -1457,7 +1457,9 @@ curl -X DELETE "$BASE_URL/staffing-profiles/$PROFILE_ID" \
   compound canonical profiles set that slot to `senior-dev-luna-max`.
 - If the canonical repair Agent is missing or archived, reset restores the step
   entries, clears the repair slot, and returns a `merge_tail_repair_agent_unavailable`
-  warning. Explicit create/PUT slot assignments still refuse unavailable Agents.
+  warning. Profile entry overrides pointing to that unavailable canonical Agent
+  are also cleared to null; template step bindings remain unchanged. Explicit
+  create/PUT assignments still refuse unavailable Agents.
 - Returns `200 OK` with `{ "profile": <profile>, "warnings": [...] }`.
 - Refusal: `404 Not Found` with code `staffing_profile_not_found`.
 
