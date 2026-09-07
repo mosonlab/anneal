@@ -100,6 +100,20 @@ export const durationMs = (value: number | null | undefined): string => {
   return formatT("format.minutesSeconds", { m: Math.floor(seconds / 60), s: seconds % 60 });
 };
 
+/** A long span, in the largest two units that carry information.
+ *  `durationMs` is right for one run's phase and wrong for a chain's lead time:
+ *  it would report three days as "4320m 0s". Null is the em dash for the same
+ *  reason it is there — an unmeasured span is not a zero one. */
+export const spanMs = (value: number | null | undefined): string => {
+  if (!measured(value)) return UNKNOWN;
+  const minutes = Math.floor(value / 60_000);
+  if (minutes < 60) return durationMs(value);
+  const hours = Math.floor(minutes / 60);
+  return hours < 24
+    ? formatT("format.hoursMinutes", { h: hours, m: minutes % 60 })
+    : formatT("format.daysHours", { d: Math.floor(hours / 24), h: hours % 24 });
+};
+
 /** A `0..1` ratio as a percentage, or `null` when the ratio was never measured
  *  — the caller drops its clause rather than claiming `0%`. A measured `0` is
  *  still `0%`, because a run really can read nothing from cache. */
