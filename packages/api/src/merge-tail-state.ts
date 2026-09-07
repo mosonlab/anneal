@@ -8,6 +8,7 @@ import {
   MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
   openRun,
+  runBirthRefusalMetadata,
   Prisma,
   TaskStatus,
   transitionMergeRecovery,
@@ -207,7 +208,7 @@ export const requeueMergeTailRun = async (tx: DbTx, taskId: string, now: Date) =
     await tx.taskActivity.create({ data: {
       taskId, actorType: "control-plane",
       body: `Merge-tail target was not queued: ${refusal.message}`,
-      metadata: { refusal: refusal.code },
+      metadata: runBirthRefusalMetadata(refusal),
     } });
   }
   return attempt;

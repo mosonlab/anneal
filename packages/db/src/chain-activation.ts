@@ -32,6 +32,7 @@ import {
   gateQuestion,
   isCompoundImplementationStep,
   parksInsteadOfRaising,
+  runBirthRefusalMetadata,
 } from "./run-open.js";
 
 type Tx = Prisma.TransactionClient;
@@ -373,9 +374,8 @@ const dispatchBoundSuccessor = async (
       // exactly as any other fault: the successor is parked for an operator.
       case "stopped":
       case "fault":
-        await parkBoundSuccessor(tx, predecessor, successor, refusal.message, {
-          refusal: refusal.code,
-        });
+        await parkBoundSuccessor(tx, predecessor, successor, refusal.message,
+          runBirthRefusalMetadata(refusal));
         return;
       default: {
         const unhandled: never = refusal.disposition;
@@ -863,7 +863,7 @@ const activateChainSuccessorInternal = async (
         taskId: successor.id,
         actorType: "control-plane",
         body: `Predecessor layer completed but Run birth was refused: ${refusal.message}`,
-        metadata: { refusal: refusal.code },
+        metadata: runBirthRefusalMetadata(refusal),
       } });
       continue;
     }

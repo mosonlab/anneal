@@ -2452,7 +2452,8 @@ after-completion and after-lease-loss retries — is measured against it. When
 the cap is set and the task's accumulated spend is at or above it, no Run is
 opened: the Task moves to `REVIEW` with a `failureReason` beginning
 `Spend cap $<cap> reached`, and a TaskActivity carrying
-`metadata.refusal = "spend-cap-exhausted"`. That park is the caller's write and
+`metadata.refusal = "spend-cap-exhausted"` alongside the `spendCapUsd` and
+`spentUsd` the refusal measured. That park is the caller's write and
 is made on a path that commits, so it survives on every intent above: the
 callers that raise other Run-birth refusals out of their transaction park this
 one instead, because rolling it back would delete the record naming the cap the

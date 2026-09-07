@@ -70,6 +70,7 @@ export {
   errorForOpenRunRefusal,
   parksInsteadOfRaising,
   recordRunBirthRefusal,
+  runBirthRefusalMetadata,
   EXTERNAL_FAILURE_REFUND_CAP,
   gateQuestion,
   isArchivedAssigneeError,

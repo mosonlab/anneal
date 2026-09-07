@@ -1347,6 +1347,20 @@ export const attemptRunBirth = async (
 };
 
 /**
+ * What a park says about the refusal it records, for every caller that writes
+ * one. The code is what an operator filters a REVIEW by, and the refusal's own
+ * detail travels with it — for a spend cap that is the formatted `spendCapUsd`
+ * and `spentUsd` the handbook promises an operator reading the park, which the
+ * message states in prose and nothing else recorded. Callers add their own keys
+ * around it; those win, because a caller naming a task or a schedule of its own
+ * knows which row it meant.
+ */
+export const runBirthRefusalMetadata = (
+  refusal: OpenRunRefusal,
+): Record<string, string | number | boolean | null> =>
+  ({ ...refusal.detail, refusal: refusal.code });
+
+/**
  * The park a Run-birth refusal leaves behind, for the callers that have none of
  * their own. `reconcile`, `workspace-reclaim`, `scheduler` and the chain
  * activation paths each write their own REVIEW and named activity, shaped by
@@ -1370,12 +1384,7 @@ export const recordRunBirthRefusal = async (
       taskId,
       actorType: "control-plane",
       body: `Run birth refused: ${refusal.message}`,
-      // Named, not merely prose, for the same reason as the lease-loss refusal:
-      // this is what an operator filters the REVIEW by. The refusal's own
-      // detail travels with it — for a spend cap that is the formatted
-      // `spendCapUsd` and `spentUsd` the handbook promises an operator reading
-      // the park, which the message states in prose and nothing else recorded.
-      metadata: { ...refusal.detail, refusal: refusal.code },
+      metadata: runBirthRefusalMetadata(refusal),
     },
   });
 };

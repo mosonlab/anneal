@@ -26,6 +26,7 @@ import {
   parksInsteadOfRaising,
   pinnedImplementationRange,
   recordRunBirthRefusal,
+  runBirthRefusalMetadata,
   runBudgetCeiling,
 } from "./run-open.js";
 import { runOwnedHead } from "./run-head.js";
@@ -1586,6 +1587,12 @@ test("the park a raising caller owes a spend-cap refusal names the cap and the t
     spentUsd: "1.50",
     runs: 1,
   });
+  // The callers that write a park of their own — the automatic lease-loss and
+  // after-completion retries, the chain activations, the merge-tail requeue,
+  // the claim-invalidation replacement and the scheduler — name the refusal
+  // through the same builder, so an operator reads the same cap and total
+  // whichever intent was refused.
+  assert.deepEqual(runBirthRefusalMetadata(opened.refusal), activities[0]?.metadata);
 });
 
 test("the spend basis counts reported and estimated run cost, and a raised cap queues again", async () => {

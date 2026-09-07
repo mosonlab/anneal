@@ -117,7 +117,9 @@ for (const withRecovery of [false, true]) {
     }
     if (withRecovery) assert.equal(recoveryUpdates.at(-1)?.data.status, "BLOCKED_DOWNSTREAM");
     assert.equal(activities.length, 1);
-    assert.deepEqual(activities[0]?.metadata, { refusal: "lease-loss-refunds-exhausted" });
+    assert.deepEqual(activities[0]?.metadata, {
+      refusal: "lease-loss-refunds-exhausted", leaseLossRefunds: 3, cap: 3,
+    });
   });
 
 }
