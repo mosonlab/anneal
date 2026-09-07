@@ -1,0 +1,20 @@
+Merge readiness: the executor-offline episode observes liveness on every tick, closes under the readiness claim, and its ceiling stop exits by itself once the executor is back
+
+Goal: an executor outage costs a chain at most the outage itself; no chain stops on a stale episode from a previous outage, and a chain stopped at the 15-minute ceiling resumes without an operator once a live executor is observed.
+
+Background: independent review of PR #560 + a3734e90 on 2026-09-07 (`records/anneal/reviews/REVIEW-pr560-readiness-executor-online-opus-medium-20260907.md`, origin/main 96f1a570). Findings: (2) liveness is read only when `decision.kind === "authorize"` (`packages/api/src/merge-readiness-worker.ts` ~1208-1210 and ~1274-1276) and the exception stop path (~1379-1409) does not close the episode, so an episode opened during outage A survives a hold or a parked Step; when the Step resumes during a later restart the first offline tick inherits the stale `episodeStartedAt`, computes `waitedMs` in days (~654-655) and stops the tail immediately. (4) `closeExecutorOfflineEpisode` (~627-638, called at ~657 and ~1226) is a bare read-modify-write of the marker, not fenced by the readiness claim, unlike `clearLeaseContention` (`merge-lease-contention.ts` ~179-202); a tick that lost its claim still closes the episode. (checklist 3) the ceiling stop (`merge-tail-actions.ts` ~593-638, `failureReason` naming `merge-executor-offline`) carries no verdict and no recovery aggregate, so `POST /tasks/:taskId/merge-tail/repair` refuses it (`merge-tail-repair-reentry.ts` ~159-164, ~232-234); an executor restart longer than 15 minutes turns every ready chain into a manual REVIEW. (3, low) the operator renewal path (`packages/db/src/merge-authorization.ts` ~141-160, `purpose === "confirmation"`) writes an authorization with no liveness check.
+
+Changes:
+1. Every readiness tick, whatever the decision kind, reads `executorsBlockingAuthorization(daemons)`; when it returns empty and an episode is open, the episode is closed with a TaskActivity naming the observation. The exception stop path closes the episode the same way.
+2. `closeExecutorOfflineEpisode` runs inside `claim.settle({ kind: "keep" })` so a tick that lost its claim cannot close the episode.
+3. A readiness Step stopped at the ceiling with `merge-executor-offline` is re-armed by the worker itself: a later tick that observes a live executor returns the readiness Step (and the Regression Step it parked) from REVIEW to TODO, records the exit as a TaskActivity, closes the `merge-tail-stop:` Inbox notice, and proceeds through the ordinary authorization path against the current base (base drift is handled by the existing requeue). No new Regression Run is opened by the re-arm itself.
+4. The operator renewal path applies the same liveness allowlist check and defers with the same marker when no executor is live.
+5. `docs/operator-api.md` readiness section documents the per-tick observation, the self re-arm and the renewal check; the wrong recovery sentence (see the companion docs card) is replaced there.
+
+Out of scope: the 15-minute ceiling value (`RUNNER_FORGET_MS`); drain semantics; the lease-loss refund cap (chain b9b6b7a8); merge train (chain 73607a7a).
+
+Constraints: nothing is authorized while no executor is live; the re-arm never bypasses the exact-base check; single-instance control plane assumed as today.
+
+Acceptance: dbtests: an episode opened in outage A and a `skip` tick with a live executor closes it; a resumed Step after a hold with a stale marker waits the full ceiling of the new outage instead of stopping at once; a ceiling stop followed by a live-executor tick returns both Steps to TODO and closes the notice; a lost-claim tick does not close the episode; a renewal during an outage defers. `npm run test -w @anneal/api` green; `npm run lint` clean.
+
+Route: implementation=senior-dev-astra-medium - it changes when merge authorization may be written and how a merge-tail stop exits; a wrong observation authorizes into a dead executor
