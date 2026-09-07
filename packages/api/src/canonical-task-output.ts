@@ -77,8 +77,8 @@ export const isCanonicalFixStep = (step: TemplateStepIdentity | null | undefined
   step !== null && step !== undefined && stepRole(step) === "fixed-implementation"
 );
 
-export const isCanonicalSolFindingsStep = (step: TemplateStepIdentity | null | undefined): boolean => (
-  step !== null && step !== undefined && stepRole(step) === "sol-findings"
+export const isCanonicalReviewFindingsStep = (step: TemplateStepIdentity | null | undefined): boolean => (
+  step !== null && step !== undefined && stepRole(step) === "review-findings"
 );
 
 const metadataPhase = (metadata: Prisma.JsonValue | Prisma.InputJsonValue | undefined): string | null => {
@@ -260,10 +260,10 @@ const fixedImplementationPersistenceRefusal = async (
   }
   const reports: ReviewArtifact[] = [];
   let presence: ChainStepPresenceIndex | null = null;
-  for (const kind of ["sol-findings", "blind-findings"] as const) {
+  for (const kind of ["review-findings", "blind-findings"] as const) {
     const matches = reviewTasks.filter((candidate) => (
-      kind === "sol-findings"
-        ? isCanonicalSolFindingsStep(candidate.templateStep)
+      kind === "review-findings"
+        ? isCanonicalReviewFindingsStep(candidate.templateStep)
         : isCanonicalBlindFindingsStep(candidate.templateStep)
     ));
     if (matches.length === 0) {
@@ -280,7 +280,7 @@ const fixedImplementationPersistenceRefusal = async (
       }
       continue;
     }
-    if (matches.length !== 1 || !matches[0]!.stepOutput || matches[0]!.stepOutput!.kind !== kind) {
+    if (matches.length !== 1 || !matches[0]!.stepOutput || matches[0]!.stepOutput!.kind !== matches[0]!.templateStep?.outputKind) {
       return `fixed-implementation requires exactly one immutable ${kind} sibling output`;
     }
     const output = matches[0]!.stepOutput!;
@@ -427,7 +427,7 @@ export const canonicalImplementationOutputRefusal = (
  * persisted therefore has nothing left to author, whoever wrote it.
  */
 export const outputIsImmutableOncePersisted = (step: TemplateStepIdentity | null | undefined): boolean => (
-  isCanonicalSolFindingsStep(step) || isCanonicalBlindFindingsStep(step)
+  isCanonicalReviewFindingsStep(step) || isCanonicalBlindFindingsStep(step)
 );
 
 /**

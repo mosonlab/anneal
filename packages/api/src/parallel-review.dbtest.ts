@@ -49,8 +49,8 @@ test("the HTTP join stays closed after the first review and creates one fix-step
   const fixture = await instantiateDirect();
   await completeImplementation(fixture);
   const { first, second } = await reviewClaims(fixture);
-  const firstKind = first.run.taskId === fixture.solTaskId ? "sol-findings" : "blind-findings";
-  const secondKind = second.run.taskId === fixture.solTaskId ? "sol-findings" : "blind-findings";
+  const firstKind = first.run.taskId === fixture.solTaskId ? "review-findings" : "blind-findings";
+  const secondKind = second.run.taskId === fixture.solTaskId ? "review-findings" : "blind-findings";
 
   await completeReview(first, first.run.taskId === fixture.solTaskId ? "sol-runner" : "blind-runner", firstKind);
   assert.equal(await db.run.count({ where: { taskId: fixture.fixTaskId } }), 0);
@@ -65,8 +65,8 @@ test("simultaneous review completions serialize the join to exactly one fix-step
   const { first, second } = await reviewClaims(fixture, "simultaneous-sol", "simultaneous-blind");
   const firstIsSol = first.run.taskId === fixture.solTaskId;
   await Promise.all([
-    completeReview(first, firstIsSol ? "simultaneous-sol" : "simultaneous-blind", firstIsSol ? "sol-findings" : "blind-findings"),
-    completeReview(second, firstIsSol ? "simultaneous-blind" : "simultaneous-sol", firstIsSol ? "blind-findings" : "sol-findings"),
+    completeReview(first, firstIsSol ? "simultaneous-sol" : "simultaneous-blind", firstIsSol ? "review-findings" : "blind-findings"),
+    completeReview(second, firstIsSol ? "simultaneous-blind" : "simultaneous-sol", firstIsSol ? "blind-findings" : "review-findings"),
   ]);
   assert.equal(await db.run.count({ where: { taskId: fixture.fixTaskId } }), 1);
 });
@@ -98,7 +98,7 @@ test("failed, parked, and archived-Agent review siblings fail-stop the join unti
     await completeImplementation(fixture, `${mode}-implementation`);
     const solClaim = await claim(`${mode}-sol`);
     assert.equal(solClaim.run.taskId, fixture.solTaskId);
-    await completeReview(solClaim, `${mode}-sol`, "sol-findings");
+    await completeReview(solClaim, `${mode}-sol`, "review-findings");
     assert.equal(await db.run.count({ where: { taskId: fixture.fixTaskId } }), 0, mode);
 
     let repairedClaim: Claim;
@@ -159,8 +159,8 @@ test("Full Assurance reaches its layer-6 review pair and one runner can claim bo
   assert.equal(second.run.implementationHeadSha, IMPLEMENTATION_HEAD);
 
   const firstIsSol = first.run.taskId === fixture.solTaskId;
-  await completeReview(first, "single-runner", firstIsSol ? "sol-findings" : "blind-findings");
+  await completeReview(first, "single-runner", firstIsSol ? "review-findings" : "blind-findings");
   assert.equal(await db.run.count({ where: { taskId: { in: [fixture.solTaskId, fixture.blindTaskId] }, status: RunStatus.QUEUED } }), 0);
-  await completeReview(second, "single-runner", firstIsSol ? "blind-findings" : "sol-findings");
+  await completeReview(second, "single-runner", firstIsSol ? "blind-findings" : "review-findings");
   assert.equal(await db.run.count({ where: { task: { chainId: fixture.chainId, chainIndex: 8 } } }), 1);
 });

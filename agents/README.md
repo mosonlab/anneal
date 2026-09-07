@@ -170,3 +170,11 @@ including the archived `review-adjudicator-opus` node and renamed
 `regression-verification` v1 rows — remain database history so chains
 instantiated under them keep the prompts and assignees they were dispatched
 with; archived roles are never assigned to new tasks or templates.
+
+New canonical Chains use the model-neutral `review-findings` output kind.
+The `pre-model-neutral-review-output` rollover retains old template, Step, Task,
+and output rows with their original `sol-findings` contract; only the new
+template receives remapped staffing profile entries. This compatibility is
+transitional: retire execution support only after legacy continuation and retry
+obligations end, and retire upgrade mappings only when supported installations
+no longer need them. Historical reports retain their original kind.

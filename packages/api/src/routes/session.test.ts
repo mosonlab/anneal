@@ -135,105 +135,119 @@ test("GET /session/runs/:runId/status projects the decided output evidence", asy
   });
 });
 
-test("PR workflow status projects same-chain canonical output bodies through the current step", async () => {
-  await withTokens(async () => {
-    const outputs = [
-      {
-        id: "task-implementation",
-        chainIndex: 1,
-        templateStep: { outputKind: "implementation" },
-        stepOutput: { kind: "implementation", body: "implementation body", commitSha: "1".repeat(40) },
-      },
-      {
-        id: "task-sol",
-        chainIndex: 2,
-        templateStep: { outputKind: "sol-findings" },
-        stepOutput: { kind: "sol-findings", body: "sol body", commitSha: "2".repeat(40) },
-      },
-      {
-        id: "task-blind",
-        chainIndex: 3,
-        templateStep: { outputKind: "blind-findings" },
-        stepOutput: { kind: "blind-findings", body: "blind body", commitSha: "3".repeat(40) },
-      },
-      {
-        id: "task-fixed",
-        chainIndex: 4,
-        templateStep: { outputKind: "fixed-implementation" },
-        stepOutput: { kind: "fixed-implementation", body: "fixed body", commitSha: "4".repeat(40) },
-      },
-    ];
-    const calls: Array<Record<string, unknown>> = [];
-    const database = {
-      run: {
-        findFirst: async () => ({ id: "run-1", leaseGeneration: 1 }),
-        findUnique: async () => ({
-          id: "run-1",
-          runNumber: 1,
-          maxRunsPerTask: 5,
-          status: "RUNNING",
-          startedAt: new Date("2026-08-31T00:00:00.000Z"),
-          maxDurationMin: 240,
-          stallTimeoutMin: 10,
-          branch: "feature/pr-workflow",
-          targetBranch: "main",
-          agent: { name: "agent" },
-          task: {
-            id: "task-fixed",
-            projectId: "project-1",
-            chainId: "chain-1",
-            name: "Task",
-            status: "DOING",
-            approvalGate: false,
-            chainIndex: 4,
-            templateStep: {
-              outputKind: "fixed-implementation",
-              taskTemplate: { name: "pr-engineer-workflow" },
-            },
-            stepOutput: outputs[3]!.stepOutput,
-          },
-        }),
-      },
-      task: {
-        findMany: async (args: Record<string, unknown>) => {
-          calls.push(args);
-          return outputs;
+for (const [templateName, reviewKind, persistedKind] of [
+  ["pr-engineer-workflow", "review-findings", "review-findings"],
+  ["pr-engineer-workflow-legacy-pre-model-neutral-review-output-row", "sol-findings", "sol-findings"],
+  ["pr-engineer-workflow", "review-findings", "sol-findings"],
+  ["pr-engineer-workflow-legacy-pre-model-neutral-review-output-row", "sol-findings", "review-findings"],
+] as const) {
+  test(`PR workflow ${templateName} checks ${persistedKind} against ${reviewKind} handoff through the current step`, async () => {
+    await withTokens(async () => {
+      const outputs = [
+        {
+          id: "task-implementation",
+          chainIndex: 1,
+          templateStep: { outputKind: "implementation" },
+          stepOutput: { kind: "implementation", body: "implementation body", commitSha: "1".repeat(40) },
         },
-      },
-    } as unknown as PrismaClient;
+        {
+          id: "task-sol",
+          chainIndex: 2,
+          templateStep: { outputKind: reviewKind },
+          stepOutput: { kind: persistedKind, body: "sol body", commitSha: "2".repeat(40) },
+        },
+        {
+          id: "task-blind",
+          chainIndex: 3,
+          templateStep: { outputKind: "blind-findings" },
+          stepOutput: { kind: "blind-findings", body: "blind body", commitSha: "3".repeat(40) },
+        },
+        {
+          id: "task-fixed",
+          chainIndex: 4,
+          templateStep: { outputKind: "fixed-implementation" },
+          stepOutput: { kind: "fixed-implementation", body: "fixed body", commitSha: "4".repeat(40) },
+        },
+      ];
+      const calls: Array<Record<string, unknown>> = [];
+      const database = {
+        run: {
+          findFirst: async () => ({ id: "run-1", leaseGeneration: 1 }),
+          findUnique: async () => ({
+            id: "run-1",
+            runNumber: 1,
+            maxRunsPerTask: 5,
+            status: "RUNNING",
+            startedAt: new Date("2026-08-31T00:00:00.000Z"),
+            maxDurationMin: 240,
+            stallTimeoutMin: 10,
+            branch: "feature/pr-workflow",
+            targetBranch: "main",
+            agent: { name: "agent" },
+            task: {
+              id: "task-fixed",
+              projectId: "project-1",
+              chainId: "chain-1",
+              name: "Task",
+              status: "DOING",
+              approvalGate: false,
+              chainIndex: 4,
+              templateStep: {
+                outputKind: "fixed-implementation",
+                taskTemplate: { name: templateName },
+              },
+              stepOutput: outputs[3]!.stepOutput,
+            },
+          }),
+        },
+        task: {
+          findMany: async (args: Record<string, unknown>) => {
+            calls.push(args);
+            return outputs;
+          },
+        },
+      } as unknown as PrismaClient;
 
-    const response = await createApp(database).request("/session/runs/run-1/status", {
-      headers: { Authorization: "Bearer agos_session_current" },
+      const response = await createApp(database).request("/session/runs/run-1/status", {
+        headers: { Authorization: "Bearer agos_session_current" },
+      });
+      assert.equal(response.status, 200);
+      const body = await response.json() as {
+        task: { outputEvidence: { prHandoff: unknown } };
+      };
+      if (persistedKind !== reviewKind) {
+        assert.deepEqual(body.task.outputEvidence.prHandoff, {
+          case: "incomplete", reason: "canonical PR output kind does not match the producing Step for Task task-sol",
+        });
+        return;
+      }
+      assert.deepEqual(body.task.outputEvidence.prHandoff, {
+        case: "complete",
+        outputs: outputs.map(({ id, chainIndex, stepOutput }) => ({
+          taskId: id,
+          chainIndex,
+          kind: stepOutput.kind,
+          body: stepOutput.body,
+          commitSha: stepOutput.commitSha,
+        })),
+      });
+      const where = (calls[0] as { where: Record<string, unknown> }).where;
+      assert.equal(where.projectId, "project-1");
+      assert.equal(where.chainId, "chain-1");
+      assert.deepEqual(where.chainIndex, { lte: 4 });
+      assert.deepEqual(where.templateStep, {
+        outputKind: { in: ["implementation", "review-findings", "sol-findings", "blind-findings", "fixed-implementation"] },
+        taskTemplate: { name: templateName },
+      });
+      assert.deepEqual(where.stepOutput, { isNot: null });
+      assert.deepEqual(where.OR, [
+        { id: { not: "task-fixed" } },
+        { id: "task-fixed", stepOutput: { is: { runId: "run-1" } } },
+      ]);
     });
-    assert.equal(response.status, 200);
-    const body = await response.json() as {
-      task: { outputEvidence: { prHandoff: unknown } };
-    };
-    assert.deepEqual(body.task.outputEvidence.prHandoff, {
-      case: "complete",
-      outputs: outputs.map(({ id, chainIndex, stepOutput }) => ({
-        taskId: id,
-        chainIndex,
-        kind: stepOutput.kind,
-        body: stepOutput.body,
-        commitSha: stepOutput.commitSha,
-      })),
-    });
-    const where = (calls[0] as { where: Record<string, unknown> }).where;
-    assert.equal(where.projectId, "project-1");
-    assert.equal(where.chainId, "chain-1");
-    assert.deepEqual(where.chainIndex, { lte: 4 });
-    assert.deepEqual(where.templateStep, {
-      outputKind: { in: ["implementation", "sol-findings", "blind-findings", "fixed-implementation"] },
-      taskTemplate: { name: "pr-engineer-workflow" },
-    });
-    assert.deepEqual(where.stepOutput, { isNot: null });
-    assert.deepEqual(where.OR, [
-      { id: { not: "task-fixed" } },
-      { id: "task-fixed", stepOutput: { is: { runId: "run-1" } } },
-    ]);
   });
-});
+
+}
 
 test("PR implementation status projects only the current Run's implementation evidence", async () => {
   await withTokens(async () => {

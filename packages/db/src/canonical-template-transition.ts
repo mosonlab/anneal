@@ -49,6 +49,8 @@ import type { PersistedTemplateStepStructure } from "./template-sources.js";
  * structural match.
  * `model-neutral-review-step-names`: the graphs whose review labels named
  * their default models, before staffing-independent display names.
+ * `pre-model-neutral-review-output`: the model-neutral review labels with the
+ * historical `sol-findings` output contract, before new Chains use `review-findings`.
  * `pre-salvage-resume`: the graphs whose review-fix prompts still stopped at
  * every reviewed-head mismatch, before a Run that starts on the `WIP salvage`
  * commit of its own prior failed attempt was told to continue from it.
@@ -288,6 +290,19 @@ const legacyTemplateGenerations = {
         { name: "Merge execution", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
       ],
     },
+    {
+      marker: "pre-model-neutral-review-output",
+      shape: [
+        { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Code review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null, provisionDependencies: false },
+        { name: "Blind code review", assigneeType: AssigneeType.AGENT, approvalGate: false, optional: true, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null, provisionDependencies: false },
+        { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Regression verification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Merge authorization", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 6, spawnPolicy: null },
+        { name: "Merge execution", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
+      ],
+    },
   ],
   "compound-engineer-workflow": [
     {
@@ -516,6 +531,23 @@ const legacyTemplateGenerations = {
         { name: "Merge execution", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 11, spawnPolicy: null },
       ],
     },
+    {
+      marker: "pre-model-neutral-review-output",
+      shape: [
+        { name: "Write a spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+        { name: "Revise plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Code review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null, provisionDependencies: false },
+        { name: "Blind code review", assigneeType: AssigneeType.AGENT, approvalGate: false, optional: true, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null, provisionDependencies: false },
+        { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
+        { name: "Librarian", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "documentation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 8, spawnPolicy: null },
+        { name: "Regression verification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 9, spawnPolicy: null },
+        { name: "Merge authorization", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 10, spawnPolicy: null },
+        { name: "Merge execution", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 11, spawnPolicy: null },
+      ],
+    },
   ],
   [PR_TEMPLATE_NAME]: [
     {
@@ -582,6 +614,15 @@ const legacyTemplateGenerations = {
         { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
       ],
     },
+    {
+      marker: "pre-model-neutral-review-output",
+      shape: [
+        { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Code review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "sol-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null, provisionDependencies: false },
+        { name: "Blind code review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null, provisionDependencies: false },
+        { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+      ],
+    },
   ],
 } as const satisfies Readonly<Record<string, readonly LegacyTemplateGeneration[]>>;
 
@@ -616,9 +657,9 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<
  * `agents/templates/` and fails on a mismatch.
  */
 export const CANONICAL_SOURCE_PROMPT_GENERATIONS = {
-  [DIRECT_TEMPLATE_NAME]: "a1a15921c9a4592c05db1e0d6d42f95ab2aa8c0011102bd20bf4d3b67b1bd0a1",
-  "compound-engineer-workflow": "be4428549ef4c428fd82ea9e6315bee040bd7874561f2fcc362a49216497bb66",
-  [PR_TEMPLATE_NAME]: "e1bbe7b7e56d287f1f4e7ea85beeef29bc84ab8c162882f1c4050540ca46f734",
+  [DIRECT_TEMPLATE_NAME]: "04d473928d65443202bd68b6d865df61f26983fc35870cf43e5032279e1ed107",
+  "compound-engineer-workflow": "6d0e84947f79d3c1307727d4d0cdfae7827828e488dc6a05c2a9366480791142",
+  [PR_TEMPLATE_NAME]: "93a909a5d88b6aa158f9f86155853d7aed7762b61bd56dc9a1b17b6e7051281f",
 } as const satisfies Readonly<Record<CanonicalTemplateRegistryName, string>>;
 
 export type CanonicalTemplateIdentity = Readonly<{
