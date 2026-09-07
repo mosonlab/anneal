@@ -183,6 +183,12 @@ test("profiles are created, listed, replaced, reset and deleted", async () => {
       { outputKind: "implementation", assigneeAgentId: fixture.implementer.id },
       { outputKind: "blind-findings", include: false },
     ],
+    tiers: {
+      default: fixture.repairAgent.id,
+      frontend: fixture.claudeAgent.id,
+      hard: null,
+      hazard: fixture.implementer.id,
+    },
   });
   assert.equal(created.status, 201, JSON.stringify(created.body));
   // The first profile of a template is its default even without asking.
@@ -192,10 +198,22 @@ test("profiles are created, listed, replaced, reset and deleted", async () => {
     { outputKind: "blind-findings", assigneeAgentId: null, include: false },
     { outputKind: "implementation", assigneeAgentId: fixture.implementer.id, include: null },
   ]);
+  assert.deepEqual(created.body.profile.tiers, {
+    default: fixture.repairAgent.id,
+    frontend: fixture.claudeAgent.id,
+    hard: null,
+    hazard: fixture.implementer.id,
+  });
 
   const replaced = await call("PUT", `/staffing-profiles/${created.body.profile.id}`, {
     name: "Renamed",
     entries: [{ outputKind: "review-findings", assigneeAgentId: fixture.reviewer.id }],
+    tiers: {
+      default: fixture.claudeAgent.id,
+      frontend: null,
+      hard: null,
+      hazard: fixture.repairAgent.id,
+    },
   });
   assert.equal(replaced.status, 200, JSON.stringify(replaced.body));
   assert.equal(replaced.body.profile.name, "Renamed");
@@ -205,6 +223,12 @@ test("profiles are created, listed, replaced, reset and deleted", async () => {
     { outputKind: "blind-findings", assigneeAgentId: null, include: true },
     { outputKind: "review-findings", assigneeAgentId: fixture.reviewer.id, include: null },
   ]);
+  assert.deepEqual(replaced.body.profile.tiers, {
+    default: fixture.claudeAgent.id,
+    frontend: null,
+    hard: null,
+    hazard: fixture.repairAgent.id,
+  });
 
   const reset = await call("POST", `/staffing-profiles/${created.body.profile.id}/reset`);
   assert.equal(reset.status, 200, JSON.stringify(reset.body));
@@ -215,6 +239,12 @@ test("profiles are created, listed, replaced, reset and deleted", async () => {
     { outputKind: "merge-result", assigneeAgentId: fixture.integrator.id, include: null },
     { outputKind: "review-findings", assigneeAgentId: fixture.reviewer.id, include: null },
   ]);
+  assert.deepEqual(reset.body.profile.tiers, {
+    default: fixture.repairAgent.id,
+    frontend: fixture.claudeAgent.id,
+    hard: null,
+    hazard: fixture.implementer.id,
+  });
 
   const listed = await call("GET", profilesPath(fixture));
   assert.equal(listed.status, 200);
