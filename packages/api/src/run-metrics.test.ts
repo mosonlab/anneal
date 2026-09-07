@@ -130,7 +130,7 @@ test("the phase a run is named by is the phase its executing clock is measured t
   const liveRun = { readyAt: READY, status: "RUNNING" as RunStatus, endedAt: null };
   assert.deepEqual(runPhase(liveRun, live), { phase: "executing", phaseSince: STARTED });
   assert.equal(
-    runMetrics({ run: liveRun, session: live, toolEvents: [], now: new Date(STARTED.getTime() + 42_000) }).phases.executingMs,
+    runMetrics({ run: liveRun, session: live, toolEvents: [], ttftEvents: [], now: new Date(STARTED.getTime() + 42_000) }).phases.executingMs,
     42_000,
   );
 

@@ -7,6 +7,7 @@ import type { AgentScratch } from "../workspace.js";
 import {
   asRecord,
   capturePreflight,
+  carriesTextPayload,
   consumeTurnTtft,
   createAdapterState,
   emitAdapterEvent,
@@ -105,11 +106,8 @@ const isPiMessageChunk = (event: Record<string, unknown>): boolean => {
   const messageEvent = asRecord(event.assistantMessageEvent);
   if (!messageEvent) return false;
   const type = stringField(messageEvent, "type");
-  if (type === "text_delta" || type === "thinking_delta" || type === "reasoning_delta") {
-    return Object.entries(messageEvent).some(([key, value]) => key !== "type" && typeof value === "string" && value.length > 0);
-  }
   return type?.endsWith("_delta") === true
-    && Object.entries(messageEvent).some(([key, value]) => key !== "type" && typeof value === "string" && value.length > 0);
+    && carriesTextPayload(messageEvent);
 };
 
 const piState = (state: AdapterState): PiState => state.providerState as PiState;

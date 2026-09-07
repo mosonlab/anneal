@@ -433,7 +433,7 @@ export const runMetrics = (input: {
   run: RunMetricsRun;
   session: RunMetricsSession | null;
   toolEvents: readonly RunMetricsToolEvent[];
-  ttftEvents?: readonly RunMetricsTtftEvent[];
+  ttftEvents: readonly RunMetricsTtftEvent[];
   baseline?: RunBaseline | null;
   now?: Date;
 }): RunMetrics => {
@@ -461,7 +461,7 @@ export const runMetrics = (input: {
     outputTokensPerSecond: tokens.output === null || modelActiveMs === null || modelActiveMs === 0
       ? null
       : round(tokens.output / (modelActiveMs / 1_000), 2),
-    ttft: ttftMetrics(input.ttftEvents ?? []),
+    ttft: ttftMetrics(input.ttftEvents),
     termination: terminationMetrics(session),
     // Measured against the same executing phase published above, so the
     // comparison and the figure it compares can never disagree. A session that

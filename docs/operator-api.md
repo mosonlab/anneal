@@ -1678,7 +1678,9 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
     Percentiles use the continuous sample distribution and `samples` counts
     completion events carrying a numeric `anneal.ttftMs` value. It is `null`
     when no completion event has a measurement, including every run recorded
-    before TTFT persistence was deployed.
+    before TTFT persistence was deployed. A CLI transcript exposing only a
+    completed message (as in the captured Codex output) has no first-chunk
+    measurement; its completion time is not substituted for TTFT.
   - `metrics.termination` carries the Session's own account of how the run
     ended: `reason`, `exitCode` and `signal`.
   - `metrics.vsBaseline` measures the run against the task-level `baseline`

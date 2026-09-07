@@ -296,8 +296,8 @@ const taskDetailDatabase = (
     assert.match(query.sql, /jsonb_build_object/u);
     assert.doesNotMatch(query.sql, /SELECT[\s\S]*?,\s*"payload"\s*(?:,|FROM)/u);
     const keys = [...query.sql.matchAll(/'([^']+)',/gu)].map((match) => match[1]!);
-    assert.deepEqual(keys, ["type", "name", "toolName", "is_error", "isError", "exit_code", "error", "anneal", "ttftMs", "completion"]);
-    return (events.rows ?? []).map((row) => {
+    assert.deepEqual(keys, ["type", "name", "toolName", "is_error", "isError", "exit_code", "error", "anneal", "ttftMs"]);
+    return (events.rows ?? []).flatMap((row) => {
       const payload = row.payload as Record<string, unknown>;
       const item = payload.item as Record<string, unknown> | undefined;
       const message = payload.message as Record<string, unknown> | undefined;
@@ -305,13 +305,11 @@ const taskDetailDatabase = (
         payload.type === "assistant"
         || (payload.type === "item.completed" && item?.type === "agent_message")
       ) || row.type === "MODEL_COMPLETED" && payload.type === "message_end" && message?.role === "assistant";
-      return {
+      if (!completion && row.type !== "TOOL_STARTED" && row.type !== "TOOL_COMPLETED") return [];
+      return [{
         ...row,
-        payload: {
-          ...Object.fromEntries(Object.entries(payload).filter(([key]) => keys.includes(key))),
-          completion,
-        },
-      };
+        payload: Object.fromEntries(Object.entries(payload).filter(([key]) => keys.includes(key))),
+      }];
     });
   },
   sessionEvent: {
@@ -1529,7 +1527,7 @@ test("task detail attaches read-time diagnostics to every run from one metric-ev
     const toolQueries = queries.filter((query) => query.sql !== undefined);
     assert.equal(toolQueries.length, 1);
     assert.match(toolQueries[0]!.sql!, /FROM "SessionEvent"/u);
-    assert.deepEqual(toolQueries[0]!.values, ["session-2", "session-1", "TOOL_STARTED", "TOOL_COMPLETED", "MODEL_DELTA", "MODEL_COMPLETED"]);
+    assert.deepEqual(toolQueries[0]!.values, ["session-2", "session-1", "TOOL_STARTED", "TOOL_COMPLETED"]);
     assert.doesNotMatch(JSON.stringify(body), /large-tool-output/u);
 
     assert.equal(body.runs.length, 2);
@@ -1569,9 +1567,10 @@ test("task detail computes TTFT from completion rows and excludes non-completion
 
     const metricQuery = queries.find((query) => query.sql !== undefined && /FROM "SessionEvent"/u.test(query.sql));
     assert.ok(metricQuery);
-    assert.deepEqual(metricQuery.values, ["session-2", "session-1", "TOOL_STARTED", "TOOL_COMPLETED", "MODEL_DELTA", "MODEL_COMPLETED"]);
+    assert.deepEqual(metricQuery.values, ["session-2", "session-1", "TOOL_STARTED", "TOOL_COMPLETED"]);
     assert.match(metricQuery.sql!, /'anneal'/u);
-    assert.match(metricQuery.sql!, /'completion'/u);
+    assert.match(metricQuery.sql!, /WHERE[\s\S]*OR[\s\S]*'item.completed'[\s\S]*'message_end'/u);
+    assert.doesNotMatch(metricQuery.sql!, /'completion'/u);
     assert.doesNotMatch(metricQuery.sql!, /PROVIDER_RAW/u);
   });
 });

@@ -179,10 +179,11 @@ const observedNativeChild = (item: Record<string, unknown> | null): boolean => {
     && receiverThreadIds.some((value) => typeof value === "string" && value.length > 0);
 };
 
-/** Codex tool items complete the input for the next model turn. */
+/** Tool results and applied file changes complete the next model input.
+ * Reasoning and todo updates are model output, not completed tool input. */
 const CODEX_TOOL_ITEM_TYPES = new Set([
-  "command_execution", "mcp_tool_call", "collab_agent_tool_call", "collabAgentToolCall",
-  "web_search_call", "file_search_call", "function_call", "custom_tool_call", "computer_call",
+  "command_execution", "mcp_tool_call", "collab_agent_tool_call",
+  "file_change",
 ]);
 
 const isCodexToolItem = (item: Record<string, unknown> | null): boolean => {
@@ -215,8 +216,9 @@ export const parseCodexEvent = (
       state.inFlightTool = { id: toolId, name: "command_execution", startedAt: now, lastProgressAt: now };
       emitAdapterEvent(state, sink, "TOOL_STARTED", item ?? {}, toolId);
     } else {
-      // item.started is the earliest agent-message output Codex currently
-      // exposes; a future delta event follows the same first-chunk rule.
+      // Use agent-message item.started when exposed. The checked-in Codex
+      // capture emits only item.completed, so it correctly has no TTFT:
+      // completion time cannot stand in for an unobserved first chunk.
       if (isCodexAgentMessage(item)) markFirstChunk(state);
       emitAdapterEvent(state, sink, "MODEL_DELTA", event);
     }
@@ -263,12 +265,6 @@ export const parseCodexEvent = (
     state.terminalSuccess = !state.sawError;
     emitAdapterEvent(state, sink, "FINAL_OUTPUT", event);
   } else {
-    // Some Codex releases expose a text delta instead of item.started. Keep
-    // the existing provider status event shape while using that delta only as
-    // a liveness/TTFT boundary when it carries an agent-message item.
-    const item = asRecord(event.item);
-    if ((type === "response.output_text.delta" || type === "output_text.delta" || type === "item.delta")
-      && isCodexAgentMessage(item)) markFirstChunk(state);
     emitAdapterEvent(state, sink, "PROVIDER_STATUS", event);
   }
 };

@@ -1,39 +1,14 @@
+import { replayTranscriptAt, type RecordedEvent, type TimedProviderEvent } from "./timed-transcript.js";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { parsePiEvent, parsePiTranscript, providerEventPersistence } from "./pi.js";
-import { processProviderEvent } from "./runtime.js";
 
 const CAPTURE = new URL("../../../../spikes/cli-capabilities/samples/pi-openai-codex-gpt-5.6-luna-20260828T214948Z.jsonl", import.meta.url);
 
-type RecordedEvent = { type: string; payload: Record<string, unknown> };
-
-type TimedProviderEvent = { at: number; event: Record<string, unknown> };
-
-const replayPiAt = (transcript: readonly TimedProviderEvent[]): RecordedEvent[] => {
-  const state = parsePiTranscript([]);
-  const events: RecordedEvent[] = [];
-  for (const { at, event } of transcript) {
-    const nativeDate = globalThis.Date;
-    class FixedDate extends nativeDate {
-      constructor(value?: string | number | Date) {
-        super(value === undefined ? at : value);
-      }
-
-      static override now(): number {
-        return at;
-      }
-    }
-    globalThis.Date = FixedDate as unknown as DateConstructor;
-    try {
-      processProviderEvent(state, event, (recorded) => { events.push(recorded); }, parsePiEvent, providerEventPersistence);
-    } finally {
-      globalThis.Date = nativeDate;
-    }
-  }
-  return events;
-};
+const replayPiAt = (transcript: readonly TimedProviderEvent[]): RecordedEvent[] =>
+  replayTranscriptAt(parsePiTranscript([]), transcript, parsePiEvent, providerEventPersistence);
 
 const CHUNK_TYPES = new Set(["message_update", "tool_execution_update"]);
 const UNCLASSIFIED_PROVIDER_TYPE = Symbol("unclassified-provider-type");

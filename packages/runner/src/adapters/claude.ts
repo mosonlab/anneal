@@ -7,6 +7,7 @@ import type { AgentScratch } from "../workspace.js";
 import {
   asRecord,
   capturePreflight,
+  carriesTextPayload,
   consumeTurnTtft,
   createAdapterState,
   emitAdapterEvent,
@@ -83,7 +84,7 @@ const isClaudeOutputChunk = (event: Record<string, unknown>): boolean => {
   const streamType = stringField(stream, "type");
   if (streamType === "content_block_delta") {
     const delta = asRecord(stream?.delta);
-    return Object.entries(delta ?? {}).some(([key, value]) => key !== "type" && typeof value === "string" && value.length > 0);
+    return carriesTextPayload(delta);
   }
   if (streamType === "content_block_start") {
     const block = asRecord(stream?.content_block);
@@ -129,10 +130,9 @@ export const parseClaudeEvent = (
   } else if (type === "user") {
     const message = asRecord(event.message);
     const content = Array.isArray(message?.content) ? message.content : [];
-    const inputCompleted = content.some((item) => stringField(asRecord(item), "type") === "tool_result");
     // Stamp at provider-event arrival, before any synchronous SessionEvent
     // sink work, so TTFT measures the provider boundary itself.
-    if (inputCompleted || message !== null) markTurnRequested(state);
+    if (message !== null) markTurnRequested(state);
     for (const item of content) {
       const part = asRecord(item);
       if (stringField(part, "type") === "tool_result") {

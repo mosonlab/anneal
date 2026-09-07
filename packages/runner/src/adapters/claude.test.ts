@@ -1,36 +1,12 @@
+import { replayTranscriptAt, type RecordedEvent, type TimedProviderEvent } from "./timed-transcript.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parseClaudeEvent, parseClaudeTranscript, providerEventPersistence } from "./claude.js";
-import { createAdapterState, processProviderEvent } from "./runtime.js";
+import { createAdapterState } from "./runtime.js";
 
-type RecordedEvent = { type: string; payload: Record<string, unknown> };
-
-type TimedProviderEvent = { at: number; event: Record<string, unknown> };
-
-const replayClaudeAt = (transcript: readonly TimedProviderEvent[]): RecordedEvent[] => {
-  const state = createAdapterState("CLAUDE", "transcript", undefined, new Date(0));
-  const events: RecordedEvent[] = [];
-  for (const { at, event } of transcript) {
-    const nativeDate = globalThis.Date;
-    class FixedDate extends nativeDate {
-      constructor(value?: string | number | Date) {
-        super(value === undefined ? at : value);
-      }
-
-      static override now(): number {
-        return at;
-      }
-    }
-    globalThis.Date = FixedDate as unknown as DateConstructor;
-    try {
-      processProviderEvent(state, event, (recorded) => { events.push(recorded); }, parseClaudeEvent, providerEventPersistence);
-    } finally {
-      globalThis.Date = nativeDate;
-    }
-  }
-  return events;
-};
+const replayClaudeAt = (transcript: readonly TimedProviderEvent[]): RecordedEvent[] =>
+  replayTranscriptAt(createAdapterState("CLAUDE", "transcript", undefined, new Date(0)), transcript, parseClaudeEvent, providerEventPersistence);
 
 test("Claude drops partial stream rows while using the first partial chunk for TTFT", () => {
   const events = replayClaudeAt([

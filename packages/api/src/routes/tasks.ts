@@ -376,8 +376,11 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
           'anneal', CASE WHEN jsonb_typeof("payload"->'anneal') = 'object' THEN jsonb_build_object(
             'ttftMs', CASE WHEN jsonb_typeof("payload"->'anneal'->'ttftMs') = 'number'
               THEN "payload"->'anneal'->'ttftMs' END
-          ) END,
-          'completion', CASE WHEN (
+          ) END
+        ) AS "payload"
+      FROM "SessionEvent"
+      WHERE "sessionId" IN (${Prisma.join(metricsSessionIds)})
+        AND ("type"::text IN (${Prisma.join(TOOL_METRIC_EVENT_TYPES)}) OR (
             ("type"::text = 'MODEL_DELTA' AND (
               "payload"->>'type' = 'assistant'
               OR ("payload"->>'type' = 'item.completed' AND "payload"->'item'->>'type' = 'agent_message')
@@ -385,11 +388,7 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
             OR ("type"::text = 'MODEL_COMPLETED'
               AND "payload"->>'type' = 'message_end'
               AND "payload"->'message'->>'role' = 'assistant')
-          ) THEN true ELSE false END
-        ) AS "payload"
-      FROM "SessionEvent"
-      WHERE "sessionId" IN (${Prisma.join(metricsSessionIds)})
-        AND "type"::text IN (${Prisma.join([...TOOL_METRIC_EVENT_TYPES, ...TTFT_METRIC_EVENT_TYPES])})
+        ))
       ORDER BY "sessionId" ASC, "seq" ASC
     `);
     const toolEventsBySession = new Map<string, RunMetricsToolEvent[]>();
@@ -400,10 +399,6 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         if (events) events.push(event);
         else toolEventsBySession.set(event.sessionId, [event]);
       } else if ((TTFT_METRIC_EVENT_TYPES as readonly string[]).includes(event.type)) {
-        const payload = event.payload;
-        const completion = typeof payload === "object" && payload !== null && !Array.isArray(payload)
-          && (payload as Record<string, unknown>).completion === true;
-        if (!completion) continue;
         const events = ttftEventsBySession.get(event.sessionId);
         if (events) events.push(event);
         else ttftEventsBySession.set(event.sessionId, [event]);

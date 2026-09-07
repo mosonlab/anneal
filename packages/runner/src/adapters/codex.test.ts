@@ -1,36 +1,13 @@
+import { replayTranscriptAt, type RecordedEvent, type TimedProviderEvent } from "./timed-transcript.js";
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
 
 import { parseCodexEvent, parseCodexTranscript } from "./codex.js";
-import { createAdapterState, processProviderEvent } from "./runtime.js";
+import { createAdapterState } from "./runtime.js";
 
-type RecordedEvent = { type: string; payload: Record<string, unknown> };
-
-type TimedProviderEvent = { at: number; event: Record<string, unknown> };
-
-const replayCodexAt = (transcript: readonly TimedProviderEvent[]): RecordedEvent[] => {
-  const state = createAdapterState("CODEX", "transcript", undefined, new Date(0));
-  const events: RecordedEvent[] = [];
-  for (const { at, event } of transcript) {
-    const nativeDate = globalThis.Date;
-    class FixedDate extends nativeDate {
-      constructor(value?: string | number | Date) {
-        super(value === undefined ? at : value);
-      }
-
-      static override now(): number {
-        return at;
-      }
-    }
-    globalThis.Date = FixedDate as unknown as DateConstructor;
-    try {
-      processProviderEvent(state, event, (recorded) => { events.push(recorded); }, parseCodexEvent, () => true);
-    } finally {
-      globalThis.Date = nativeDate;
-    }
-  }
-  return events;
-};
+const replayCodexAt = (transcript: readonly TimedProviderEvent[]): RecordedEvent[] =>
+  replayTranscriptAt(createAdapterState("CODEX", "transcript", undefined, new Date(0)), transcript, parseCodexEvent, () => true);
 
 test("Codex records TTFT on the completed agent message", () => {
   const events = replayCodexAt([
@@ -50,17 +27,19 @@ test("Codex records TTFT on the completed agent message", () => {
   ]);
 });
 
-test("Codex omits TTFT when no agent output chunk was exposed", () => {
+test("Codex captured CLI output omits TTFT when no agent output chunk was exposed", async () => {
+  const capture = await readFile(new URL("../../../../spikes/cli-capabilities/samples/codex-gpt-5.6-luna-max-20260828.stdout", import.meta.url), "utf8");
   const events: RecordedEvent[] = [];
-  parseCodexTranscript([
-    { type: "thread.started", thread_id: "thread-1" },
-    { type: "item.completed", item: { id: "message-1", type: "agent_message", text: "hello" } },
-    { type: "turn.completed" },
-  ], (event) => { events.push(event); });
+  parseCodexTranscript(capture.trim().split("\n").map((line) => JSON.parse(line) as unknown),
+    (event) => { events.push(event); });
 
   const message = events.find((event) => event.type === "MODEL_DELTA" && event.payload.type === "item.completed");
   assert.ok(message);
   assert.equal(message.payload.anneal, undefined);
+  assert.deepEqual(events.map((event) => event.type), [
+    "PROVIDER_RAW", "MODEL_STARTED", "PROVIDER_RAW", "PROVIDER_STATUS",
+    "PROVIDER_RAW", "MODEL_DELTA", "PROVIDER_RAW", "FINAL_OUTPUT",
+  ]);
 });
 
 test("Codex uses the latest completed tool boundary for the next turn", () => {
@@ -69,7 +48,7 @@ test("Codex uses the latest completed tool boundary for the next turn", () => {
     { at: 1_100, event: { type: "item.started", item: { id: "message-1", type: "agent_message", text: "one" } } },
     { at: 1_200, event: { type: "item.completed", item: { id: "message-1", type: "agent_message", text: "one" } } },
     { at: 2_000, event: { type: "item.completed", item: { id: "tool-1", type: "mcp_tool_call", status: "completed" } } },
-    { at: 2_100, event: { type: "item.completed", item: { id: "tool-2", type: "collab_agent_tool_call", status: "completed" } } },
+    { at: 2_100, event: { type: "item.completed", item: { id: "tool-2", type: "file_change", changes: [], status: "completed" } } },
     { at: 2_500, event: { type: "item.started", item: { id: "message-2", type: "agent_message", text: "two" } } },
     { at: 2_600, event: { type: "item.completed", item: { id: "message-2", type: "agent_message", text: "two" } } },
   ]);

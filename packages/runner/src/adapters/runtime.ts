@@ -247,7 +247,7 @@ export const markFirstChunk = (state: AdapterState, at = new Date()): void => {
 };
 
 /** Add the derived timing namespace without changing an existing payload. */
-export const withTurnTtft = (state: AdapterState, payload: Record<string, unknown>): Record<string, unknown> => {
+const withTurnTtft = (state: AdapterState, payload: Record<string, unknown>): Record<string, unknown> => {
   if (state.turnRequestedAt === null || state.firstChunkAt === null) return payload;
   const anneal = asRecord(payload.anneal) ?? {};
   return {
@@ -643,3 +643,7 @@ export const mcpServerArgs = (credentialsPath: string): string[] => [mcpServerPa
 export const mcpConfig = (credentialsPath: string): { mcpServers: Record<string, { type: string; command: string; args: string[] }> } => ({
   mcpServers: { agentos: { type: "stdio", command: nodeBinaryPath(), args: mcpServerArgs(credentialsPath) } },
 });
+
+/** Whether a delta record carries non-empty output text beyond its type tag. */
+export const carriesTextPayload = (record: Record<string, unknown> | null): boolean =>
+  Object.entries(record ?? {}).some(([key, value]) => key !== "type" && typeof value === "string" && value.length > 0);
