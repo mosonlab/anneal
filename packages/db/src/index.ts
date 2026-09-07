@@ -138,6 +138,7 @@ export * from "./template-sources.js";
 export * from "./canonical-agent-lookup.js";
 export * from "./canonical-template-transition.js";
 export * from "./canonical-template-installation.js";
+export * from "./staffing-profile-canonical.js";
 export * from "./canonical-output-schema.js";
 export * from "./verify-starter-onboarding.js";
 export * from "./chain-control.js";

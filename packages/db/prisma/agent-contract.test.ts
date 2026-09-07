@@ -142,6 +142,27 @@ test("canonical profiles start at Default and native child capability replaces A
   assert.match(nativeMigration, /DROP COLUMN "elevatedSubprocessModel"/u);
 });
 
+test("canonical staffing profiles carry the dedicated merge-tail repair role", async () => {
+  const [schema, migration, seed, sync] = await Promise.all([
+    readFile(`${prismaRoot}schema.prisma`, "utf8"),
+    readFile(`${prismaRoot}migrations/20260907120000_merge_tail_repair_staffing_slot/migration.sql`, "utf8"),
+    readFile(`${prismaRoot}seed.ts`, "utf8"),
+    readFile(`${prismaRoot}sync-canonical-prompts.ts`, "utf8"),
+  ]);
+  assert.match(schema, /mergeTailRepairAgentId\s+String\?/u);
+  assert.match(schema, /mergeTailRepairAgent\s+Agent\?/u);
+  assert.match(migration, /ADD COLUMN "mergeTailRepairAgentId" TEXT/u);
+  assert.match(migration, /ON DELETE RESTRICT/u);
+  assert.match(migration, /senior-dev-luna-max/u);
+  for (const templateName of [
+    "compound-engineer-workflow",
+    "direct-engineer-workflow",
+    "pr-engineer-workflow",
+  ]) assert.match(migration, new RegExp(templateName, "u"));
+  assert.match(seed, /installCanonicalDefaultStaffingProfiles/u);
+  assert.match(sync, /installCanonicalDefaultStaffingProfiles/u);
+});
+
 test("template-step dependency provisioning is a non-null true-default migration", async () => {
   const schema = await readFile(`${prismaRoot}schema.prisma`, "utf8");
   const migration = await readFile(`${prismaRoot}migrations/20260901010000_task_template_step_dependency_provisioning/migration.sql`, "utf8");
