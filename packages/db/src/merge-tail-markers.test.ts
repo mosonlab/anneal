@@ -7,7 +7,9 @@ import { MERGE_TAIL_KIND } from "./merge-tail.js";
 import {
   MERGE_TAIL_MARKER_SCAN,
   latestMarker,
+  mergeTrainClaimMetadata,
   markerFromMetadata,
+  parseMergeTrainMarker,
   readMarkerHistory,
   readMarkers,
   recoveryContext,
@@ -109,6 +111,42 @@ test("markerFromMetadata narrows both sides of a repair binding", () => {
   assert.equal(repairSide?.repairTaskId, null);
   assert.equal(chainSide?.regressionTaskId, null);
   assert.equal(chainSide?.repairTaskId, "repair-1");
+});
+
+test("merge-train markers qualify the full claim payload and sparse readiness markers", () => {
+  const candidate = {
+    taskId: "readiness-1",
+    chainId: "00000000-0000-4000-8000-000000000001",
+    headSha: "a".repeat(40),
+    branch: "agentos/chain-1",
+  };
+  const full = markerFromMetadata({
+    kind: MERGE_TAIL_KIND.train,
+    schemaVersion: 1,
+    state: "queued",
+    trainTaskId: "train-1",
+    regressionTaskId: "regression-1",
+    baseSha: "b".repeat(40),
+    width: 1,
+    candidates: [candidate],
+  });
+  assert.equal(parseMergeTrainMarker(full?.raw).status, "ok");
+  assert.deepEqual(mergeTrainClaimMetadata(full), {
+    schemaVersion: 1,
+    baseSha: "b".repeat(40),
+    width: 1,
+    candidates: [candidate],
+  });
+
+  const sparse = markerFromMetadata({
+    kind: MERGE_TAIL_KIND.train,
+    schemaVersion: 1,
+    state: "queued",
+    trainTaskId: "train-1",
+    position: 1,
+  });
+  assert.equal(parseMergeTrainMarker(sparse?.raw).status, "ok");
+  assert.equal(mergeTrainClaimMetadata(sparse), null);
 });
 
 test("latestMarker selects from the newest end", () => {
