@@ -213,7 +213,12 @@ curl -X DELETE "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERA
   spend; failed spend is further partitioned by failure class.
 - `chains` contains terminal chains whose last run ended in the window, with
   lead/busy time, repair counts, longest idle gap, priced spend by step role,
-  and an unpriced-run count. The `unassigned` role is used when persisted step
+  and an unpriced-run count. Each chain row also carries `readinessRequeues`
+  and `readinessGrants`: how many times merge readiness returned that chain's
+  candidate to Regression because its base moved before authorization, and how
+  many extra Run attempts those requeues granted. The grants funded Runs that
+  are already inside `costUsd`; the two counts make that share attributable.
+  The `unassigned` role is used when persisted step
   metadata cannot classify priced spend. Unknown cache splits are counted and
   excluded from cache metrics; unpriced chain runs never receive a fabricated
   cost.
@@ -1504,6 +1509,14 @@ ordinal of the highest execution layer admitted when the Chain was held (or
 `holdReason` is the optional operator reason. It is non-null whenever the
 Chain's persisted `ChainControl.state` is `HELD`.
 
+Every card carries `readinessRequeues` and `readinessGrants`. They are non-zero
+only on a Chain's merge-readiness Step (`outputKind: merge-authorization`), and
+report how many times readiness returned the candidate to Regression because
+its base moved before authorization and how many extra Run attempts those
+requeues granted. Both are derived from the Step's
+`mergeReadiness.requeue` activities, described under `GET
+/tasks/:taskId/activity`.
+
 An active member keeps `activation.state` as `running` even when
 `activation.hold` is non-null: the hold lets the current Run finish and starts
 nothing after that layer. Once no member is active, a held Chain reports
@@ -2201,6 +2214,22 @@ curl "$BASE_URL/tasks/$TASK_ID/recurring-fires?take=10" -H "Authorization: Beare
 ### GET `/tasks/:taskId/activity`
 
 - Required path parameter: `taskId`.
+- Control-plane rows carry a `metadata.kind`. On a merge-readiness Step,
+  `mergeReadiness.requeue` records one pre-authorization requeue: readiness
+  returned the chain's candidate to Regression because the pull request's base
+  moved under the authorized head. Its metadata carries `ordinal` (one-based,
+  oldest first within the chain), `staleBaseSha` and `currentBaseSha` (the base
+  it moved from and to), `budgetGrant` (extra Run attempts the settlement
+  granted, which fund the replacement Regression Run), `regressionTaskId`, and
+  `reason`. The row is written in the settlement's own transaction, so the
+  counts and the grants cannot disagree. `readinessRequeues` and
+  `readinessGrants` on the board card and on a costs chain row are folds over
+  these rows: over control-plane rows of this kind that carry a numeric
+  `ordinal`, and over those only. The next requeue's `ordinal` is drawn from
+  exactly that row set, so a row the two views cannot count never shifts the
+  numbering: a row of this kind posted by any other actor through
+  `POST /tasks/:taskId/activity` is an ordinary note, and neither it nor an
+  unnumbered row is counted or consumes an `ordinal`.
 
 ```sh
 curl "$BASE_URL/tasks/$TASK_ID/activity" -H "Authorization: Bearer $OPERATOR_TOKEN"
