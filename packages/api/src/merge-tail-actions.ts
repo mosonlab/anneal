@@ -1052,7 +1052,7 @@ export const mergeTailRepairAssignee = async (
     });
     const slot = profile?.mergeTailRepairAgent;
     if (slot && !slot.archivedAt) return { kind: "agent", agentId: slot.id, label: slot.name };
-    if (slot?.archivedAt && root) {
+    if (slot?.archivedAt && root && profile) {
       await tx.taskActivity.create({ data: {
         taskId: root.id,
         actorType: "control-plane",
