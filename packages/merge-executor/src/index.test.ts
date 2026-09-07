@@ -154,7 +154,6 @@ test("a mismatched daemon rechecks on its own interval, logs each state change o
 
 test("shutdown interrupts a real pending contract recheck", async () => {
   const controller = new AbortController();
-  const started = performance.now();
   const polling = pollClaims({
     signal: controller.signal,
     pollIntervalMs: 5_000,
@@ -165,15 +164,21 @@ test("shutdown interrupts a real pending contract recheck", async () => {
       return { kind: "contract-mismatch", executorVersion: 1, apiVersion: 2 };
     },
   });
+  // The property is that shutdown interrupts the recheck rather than waiting
+  // out contractRecheckMs, which is 60s above. This bound has to stay well
+  // under that to mean anything, and well over what a loaded event loop costs
+  // a setImmediate-driven abort (CONTRIBUTING.md, "Test timing on the gate
+  // worker"). This deadline is the whole bound: an elapsed-time assertion
+  // after the race could only restate what the race already decided.
+  const INTERRUPT_BUDGET_MS = 15_000;
   let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
       polling,
       new Promise<never>((_resolve, reject) => {
-        deadline = setTimeout(() => reject(new Error("shutdown did not interrupt the recheck")), 900);
+        deadline = setTimeout(() => reject(new Error("shutdown did not interrupt the recheck")), INTERRUPT_BUDGET_MS);
       }),
     ]);
-    assert.ok(performance.now() - started < 1_000);
   } finally {
     clearTimeout(deadline);
   }
@@ -230,16 +235,26 @@ await pollClaims({
     const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) => {
       running.on("exit", (code, signal) => resolve({ code, signal }));
     });
-    // Reaching readiness is a cold node + tsx + import-graph start on whatever
-    // host runs the gate, and this test asserts the park, never a startup
-    // latency. The budget is therefore generous rather than tuned: it exists
-    // only so a child that never starts fails with its output instead of
-    // hanging the suite.
+    // Readiness is scaffolding, not the proof: it only says the child has
+    // reached the parked state, and everything asserted below happens after it.
+    // Reaching it is a cold node + tsx + import-graph start on whatever host
+    // runs the gate, so the budget has to bound a genuine hang rather than a
+    // slow machine. Spawning this child costs ~150ms on an idle host and
+    // ~230ms at 3x CPU oversubscription, but the merge gate runs the unit lanes
+    // alongside the database wave and its in-RAM PostgreSQL, where the cost is
+    // paid in memory pressure rather than processor time; 10s lost that race on
+    // a gate worker with an empty child stderr, i.e. a child that was still
+    // starting. A minute is two orders of magnitude over the measured cost and
+    // still fails a child that never parks.
+    const readinessBudgetMs = 60_000;
+    const spawnedAt = performance.now();
     let stdout = "";
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error(
-        `child readiness timed out ${stdout.includes("BOOT\n") ? "while importing the daemon" : "before node reached the script"}; stdout was ${JSON.stringify(stdout)} and stderr was ${JSON.stringify(stderr)}`,
-      )), 60_000);
+        `child readiness timed out ${stdout.includes("BOOT\n") ? "while importing the daemon" : "before node reached the script"}`
+        + ` after ${Math.round(performance.now() - spawnedAt)}ms;`
+        + ` stdout was ${JSON.stringify(stdout)} and stderr was ${JSON.stringify(stderr)}`,
+      )), readinessBudgetMs);
       running.stdout!.setEncoding("utf8");
       running.stdout!.on("data", (chunk: string) => {
         stdout += chunk;
@@ -425,7 +440,13 @@ test("a bounded non-settling key read cannot reach a GitHub surface, activity, o
     makeGitHub: (() => { surfaceCalls += 1; return {}; }) as never,
     executeDecision: (async () => { executeCalls += 1; return {}; }) as never,
   });
-  assert.ok(Date.now() - startedAt < 500);
+  // The bound under test is the 10ms githubAppAuthTimeoutMs above; this only
+  // proves the read was abandoned rather than waited on. It stays bounded so a
+  // read that is never abandoned still fails the case, and it is sized for the
+  // loaded gate worker (CONTRIBUTING.md, "Test timing on the gate worker"):
+  // unwinding through three fetch doubles costs scheduler time the product is
+  // not responsible for.
+  assert.ok(Date.now() - startedAt < 30_000);
   assert.equal(surfaceCalls, 0);
   assert.equal(executeCalls, 0);
   assert.deepEqual(requests.map((request) => request.url), [
@@ -634,8 +655,20 @@ test("the daemon still starts when it is reached through a symlinked release dir
         cwd: scratch,
         env: { PATH: process.env.PATH ?? "" },
         encoding: "utf8",
+        // A refusal this child never prints would otherwise hang the suite for
+        // as long as the gate lets it run. Bounded so it fails instead, and
+        // sized for a full `node --import tsx` startup on the loaded worker
+        // (CONTRIBUTING.md, "Test timing on the gate worker").
+        timeout: 120_000,
       },
     );
+    // The bound above kills a child that never refuses, and spawnSync reports
+    // that as an ETIMEDOUT error with a null status. Check the exit first, or a
+    // daemon that printed the refusal and then stayed alive forever would be
+    // killed at 120s and still pass the very test standing in front of it.
+    assert.equal(started.error, undefined, `spawn failed: ${String(started.error)}`);
+    assert.equal(started.signal, null, `child was signalled: ${String(started.signal)}`);
+    assert.equal(started.status, 1, `expected a refusal exit, got ${String(started.status)}`);
     assert.match(started.stderr, /merge-executor startup refused:/u, `stderr was ${JSON.stringify(started.stderr)}`);
   } finally {
     rmSync(scratch, { recursive: true, force: true });

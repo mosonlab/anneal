@@ -9,6 +9,16 @@ const BRIEF_HEADER_PREFIX = "\n<!-- agentos:task-brief:v1 length=";
 const BRIEF_HEADER_SUFFIX = " -->\n";
 const BRIEF_FOOTER = "\n<!-- /agentos:task-brief:v1 -->";
 
+/**
+ * The operator `TaskActivity` note a brief edit leaves.
+ *
+ * `PATCH /tasks/:id` writes it, and the review claim reads it back to date an
+ * amendment that landed after the Specification of record was materialized —
+ * that row is the only record of when the brief changed. The two must not
+ * drift, so the text lives here rather than in either of them.
+ */
+export const BRIEF_EDIT_ACTIVITY_NOTE = "Prompt edited";
+
 export type TaskBrief = {
   prompt: string;
   brief: string;

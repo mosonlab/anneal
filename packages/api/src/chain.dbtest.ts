@@ -1262,10 +1262,10 @@ test("a pinned successor fails explicitly without canonical source output and ad
 
   // The range is pinned from the platform's own Run records, so an output body
   // alone cannot activate the successor: the implementation Run must have
-  // recorded where it started.
+  // published where it started.
   await assert.rejects(
     () => db.$transaction((tx) => activateChainSuccessor(tx, predecessor)),
-    new RegExp(`implementation task ${predecessor.id} has no Run with a recorded baseSha`, "u"),
+    new RegExp(`implementation task ${predecessor.id} has no Run that published a baseSha`, "u"),
   );
   assert.equal(await db.run.count({ where: { taskId: chain.tasks[1]!.id } }), 0);
 

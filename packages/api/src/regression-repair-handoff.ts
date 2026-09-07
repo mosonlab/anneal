@@ -85,11 +85,14 @@ export const regressionRepairHandoffForClaim = async (
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: 20,
   });
-  const result = resultRows.map((row) => asJsonObject(row.metadata)).find((metadata) => (
+  const resultMetadata = resultRows.map((row) => asJsonObject(row.metadata));
+  const boundToThisVerdict = (metadata: Record<string, unknown> | null): boolean => (
     metadata?.repairKind === repairKind
     && metadata.startHeadSha === expectedHeadSha
     && metadata.targetHeadSha === expectedBaseHeadSha
-    && metadata.state === undefined
+  );
+  const result = resultMetadata.find((metadata) => (
+    boundToThisVerdict(metadata) && metadata?.state === undefined
   ));
   if (!result) {
     const orphanedNoChangesOutput = priorOutput.run?.status === RunStatus.FAILED
@@ -117,7 +120,17 @@ export const regressionRepairHandoffForClaim = async (
       // output is audit evidence only and a fresh verifier must run.
       if (!consumedAttempt) return { status: "none" };
     }
-    return invalid(`no successful ${repairKind} result binds ${expectedHeadSha} to ${expectedBaseHeadSha}`);
+    // A rejected resolver output is the common reason there is no successful
+    // result, and the refusal is read on the Regression card: name the repair
+    // task that produced it so the operator can open it directly.
+    const rejected = resultMetadata.find((metadata) => (
+      boundToThisVerdict(metadata) && metadata?.state === "invalid-output"
+    ));
+    const rejectedTaskId = typeof rejected?.repairTaskId === "string" ? rejected.repairTaskId : null;
+    const rejection = rejectedTaskId
+      ? `; repair task ${rejectedTaskId} returned invalid output: ${typeof rejected?.reason === "string" ? rejected.reason : "reason not recorded"}`
+      : "";
+    return invalid(`no successful ${repairKind} result binds ${expectedHeadSha} to ${expectedBaseHeadSha}${rejection}`);
   }
   const repairTaskId = typeof result.repairTaskId === "string" ? result.repairTaskId : null;
   const resolvedHeadSha = typeof result.resolvedHeadSha === "string" ? result.resolvedHeadSha : null;
