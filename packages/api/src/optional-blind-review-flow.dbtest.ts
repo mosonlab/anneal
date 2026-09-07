@@ -3,17 +3,29 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { RunStatus, TaskStatus } from "@anneal/db";
+import { mergeExecutorRunnerIds, RunStatus, TaskStatus } from "@anneal/db";
 
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import { withMergeLease, type ReleaseMergeLease, type WithMergeLease } from "./merge-lease.js";
-import { readinessTick } from "./merge-readiness-worker.js";
+import { readinessTick, type DaemonSnapshotReader } from "./merge-readiness-worker.js";
 import {
   IMPLEMENTATION_BASE,
   IMPLEMENTATION_HEAD,
   installParallelReviewLifecycle,
 } from "./parallel-review-fixture.js";
 import { createApp } from "./test-app.js";
+
+/** Every configured merge executor reported online, which is what readiness requires before it authorizes. */
+const executorsOnline: DaemonSnapshotReader = (now) => mergeExecutorRunnerIds().map((runnerId) => ({
+  runnerId,
+  online: true,
+  lastSeenAt: now,
+  daemonVersion: null,
+  diskFreeBytes: null,
+  pollIntervalMs: null,
+  workspaceRoot: null,
+}));
+
 
 const {
   db,
@@ -147,7 +159,7 @@ test("a direct chain without blind review advances through fixes and regression 
   assert.equal(regressionResult.status, 200, JSON.stringify(regressionResult.body));
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: fixture.regressionTaskId } })).status, TaskStatus.DONE);
 
-  const readiness = await readinessTick(db, reader, new Date(), 5, releaseLease, runWithMergeLease);
+  const readiness = await readinessTick(db, reader, new Date(), 5, releaseLease, runWithMergeLease, executorsOnline);
   assert.deepEqual(readiness, { claimed: 1, authorized: 1, requeued: 0, stopped: 0 });
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: fixture.readinessTaskId } })).status, TaskStatus.DONE);
   assert.equal(await db.run.count({ where: { taskId: fixture.mergeTaskId, status: RunStatus.QUEUED } }), 1);

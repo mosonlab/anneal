@@ -9,6 +9,7 @@ import {
   applyInboxDecisionTx,
   authorizationMetadata,
   MERGE_INTEGRATOR_KIND,
+  mergeExecutorRunnerIds,
   MergeRecoveryRefusalCode,
   Prisma,
   PrismaClient,
@@ -33,11 +34,22 @@ import {
   type ReleaseMergeLease,
   type WithMergeLease,
 } from "./merge-lease.js";
-import { readinessTick, reopenRecoveryHeadAdoptionFailures } from "./merge-readiness-worker.js";
+import { readinessTick, reopenRecoveryHeadAdoptionFailures, type DaemonSnapshotReader } from "./merge-readiness-worker.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
+
+/** Every configured merge executor reported online, which is what readiness requires before it authorizes. */
+const executorsOnline: DaemonSnapshotReader = (now) => mergeExecutorRunnerIds().map((runnerId) => ({
+  runnerId,
+  online: true,
+  lastSeenAt: now,
+  daemonVersion: null,
+  diskFreeBytes: null,
+  pollIntervalMs: null,
+  workspaceRoot: null,
+}));
 
 const HEAD = "a".repeat(40);
 const HEAD_2 = "f".repeat(40);
@@ -725,6 +737,7 @@ test("readiness records and reopens a head-adoption refusal by code, independent
     5,
     releaseChainLease,
     mutateBeforeLeaseCallback,
+    executorsOnline,
   ), { claimed: 1, authorized: 0, requeued: 0, stopped: 1 });
   const stopped = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } });
   assert.equal(stopped.status, "BLOCKED_DOWNSTREAM");

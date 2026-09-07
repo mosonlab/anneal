@@ -4,10 +4,54 @@ import test from "node:test";
 import type { PrismaClient } from "@anneal/db";
 
 import {
+  MERGE_EXECUTOR_OFFLINE_WAIT_MS,
+  offlineMergeExecutors,
   READINESS_CLAIM_LEASE_MS,
   READINESS_READ_BUDGET_MS,
   startReadinessWorker,
 } from "./merge-readiness-worker.js";
+import { createRunnerRegistry, RUNNER_FORGET_MS } from "./runners.js";
+
+const withExecutorAllowlist = (runnerIds: string | undefined, body: () => void): void => {
+  const previous = process.env.MERGE_EXECUTOR_RUNNER_IDS;
+  if (runnerIds === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;
+  else process.env.MERGE_EXECUTOR_RUNNER_IDS = runnerIds;
+  try {
+    body();
+  } finally {
+    if (previous === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;
+    else process.env.MERGE_EXECUTOR_RUNNER_IDS = previous;
+  }
+};
+
+test("readiness reads merge executor liveness from the registry GET /runners reports", () => {
+  const seenAt = new Date("2026-09-06T12:00:00.000Z");
+  const registry = createRunnerRegistry();
+  registry.note("merge-executor-1", {}, seenAt);
+  const offline = new Date(seenAt.getTime() + 31_000);
+  const online = new Date(seenAt.getTime() + 5_000);
+
+  withExecutorAllowlist("merge-executor-1", () => {
+    assert.deepEqual(offlineMergeExecutors(registry.snapshot, online), []);
+    assert.deepEqual(offlineMergeExecutors(registry.snapshot, offline), ["merge-executor-1"]);
+    // A daemon that never reported at all is not online either.
+    assert.deepEqual(offlineMergeExecutors(() => [], online), ["merge-executor-1"]);
+  });
+
+  // A second, unrelated daemon does not stand in for the executor.
+  withExecutorAllowlist("merge-executor-2", () => {
+    assert.deepEqual(offlineMergeExecutors(registry.snapshot, online), ["merge-executor-2"]);
+  });
+
+  // No allowlist, no check: authorization proceeds as it did before.
+  withExecutorAllowlist(undefined, () => {
+    assert.deepEqual(offlineMergeExecutors(() => [], offline), []);
+  });
+});
+
+test("the executor-offline wait reuses the window after which the registry forgets a daemon", () => {
+  assert.equal(MERGE_EXECUTOR_OFFLINE_WAIT_MS, RUNNER_FORGET_MS);
+});
 
 const wait = (milliseconds: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -46,7 +90,7 @@ test("the readiness worker never overlaps ticks in one process", async () => {
   } as unknown as PrismaClient;
   const timer = startReadinessWorker(db, {
     readPullRequest: async () => { throw new Error("unexpected GitHub read"); },
-  });
+  }, () => []);
   try {
     await waitUntil(() => calls >= 2);
   } finally {

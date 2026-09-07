@@ -7,6 +7,7 @@ import {
   EVIDENCE_PLACEHOLDER_BODY,
   MERGE_INTEGRATOR_KIND,
   MERGE_TAIL_KIND,
+  mergeExecutorRunnerIds,
   PrismaClient,
   TaskStatus,
   parseEvidence,
@@ -17,10 +18,21 @@ import {
   type ReleaseMergeLease,
   type WithMergeLease,
 } from "./merge-lease.js";
-import { readinessTick } from "./merge-readiness-worker.js";
+import { readinessTick, type DaemonSnapshotReader } from "./merge-readiness-worker.js";
 import { evidenceTick } from "./merge-evidence-worker.js";
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
+
+/** Every configured merge executor reported online, which is what readiness requires before it authorizes. */
+const executorsOnline: DaemonSnapshotReader = (now) => mergeExecutorRunnerIds().map((runnerId) => ({
+  runnerId,
+  online: true,
+  lastSeenAt: now,
+  daemonVersion: null,
+  diskFreeBytes: null,
+  pollIntervalMs: null,
+  workspaceRoot: null,
+}));
 
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
@@ -183,6 +195,7 @@ test("the evidence worker fills a gated readiness card and the readiness worker 
     5,
     releaseLease,
     claimLease,
+    executorsOnline,
   );
   assert.deepEqual(tick, { claimed: 0, authorized: 0, requeued: 0, stopped: 0 });
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.REVIEW);

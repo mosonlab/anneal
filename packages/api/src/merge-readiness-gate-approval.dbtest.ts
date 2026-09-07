@@ -5,6 +5,7 @@ import {
   CleanupStatus,
   MERGE_INTEGRATOR_KIND,
   MERGE_TAIL_KIND,
+  mergeExecutorRunnerIds,
   PrismaClient,
   PushStatus,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
@@ -23,12 +24,23 @@ import {
   type WithMergeLease,
 } from "./merge-lease.js";
 import { evidenceTick } from "./merge-evidence-worker.js";
-import { readinessTick } from "./merge-readiness-worker.js";
+import { readinessTick, type DaemonSnapshotReader } from "./merge-readiness-worker.js";
 import { claimRun } from "./run-claim.js";
 import { completeRun, completionInput } from "./run-completion.js";
 import { patchTask } from "./task-patch.js";
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
+
+/** Every configured merge executor reported online, which is what readiness requires before it authorizes. */
+const executorsOnline: DaemonSnapshotReader = (now) => mergeExecutorRunnerIds().map((runnerId) => ({
+  runnerId,
+  online: true,
+  lastSeenAt: now,
+  daemonVersion: null,
+  diskFreeBytes: null,
+  pollIntervalMs: null,
+  workspaceRoot: null,
+}));
 
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
@@ -251,6 +263,7 @@ test("Inbox approval releases gated readiness only after exact-head authorizatio
     5,
     releaseLease,
     runWithMergeLease,
+    executorsOnline,
   );
   assert.deepEqual(tick, { claimed: 1, authorized: 1, requeued: 0, stopped: 0 });
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.DONE);
@@ -348,6 +361,7 @@ test("task PATCH approval shares the Inbox disposition and leaves readiness work
     5,
     releaseLease,
     runWithMergeLease,
+    executorsOnline,
   );
   assert.equal(tick.authorized, 1);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.DONE);
@@ -381,6 +395,7 @@ test("head and base drift after approval requeues regression and opens a fresh e
       5,
       releaseLease,
       runWithMergeLease,
+      executorsOnline,
     );
     assert.deepEqual(drifted, { claimed: 1, authorized: 0, requeued: 1, stopped: 0 });
     assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.TODO);
@@ -483,6 +498,7 @@ test("an old gate authorization cannot release a fresh gate after the state is r
     5,
     releaseLease,
     runWithMergeLease,
+    executorsOnline,
   );
   assert.equal(tick.stopped, 1);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.REVIEW);
@@ -511,6 +527,7 @@ test("a hard-stopped gated readiness tail reopens a fresh gate after regression 
     5,
     releaseLease,
     runWithMergeLease,
+    executorsOnline,
   );
   assert.deepEqual(stopped, { claimed: 1, authorized: 0, requeued: 0, stopped: 1 });
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.REVIEW);
@@ -580,6 +597,7 @@ test("missing or mismatched operator approval stops a gated readiness settlement
       5,
       releaseLease,
       runWithMergeLease,
+      executorsOnline,
     );
     assert.equal(tick.stopped, 1, label);
     const [readiness, regression] = await Promise.all([
