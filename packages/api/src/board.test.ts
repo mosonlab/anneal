@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { ChainControlState, markerFromMetadata, Prisma, type PrismaClient } from "@anneal/db";
+import { MECHANICAL_CONTRACT_MISMATCH_CODE } from "@anneal/db/claim-contract";
 
 import {
   type BoardChainControl,
@@ -103,6 +104,7 @@ const boardReadDatabase = ({
   related = [],
   activities = [],
   controls = [],
+  activityQueries,
 }: {
   rows: BoardRow[];
   chainRows?: Array<Record<string, unknown>>;
@@ -113,8 +115,9 @@ const boardReadDatabase = ({
     projectId?: string;
     chainId?: string | null;
   }>;
-  activities?: Array<{ taskId: string; metadata: Record<string, unknown> }>;
+  activities?: Array<{ id?: string; taskId: string; metadata: Record<string, unknown>; createdAt?: Date }>;
   controls?: Array<BoardChainControl & { projectId: string; chainId: string }>;
+  activityQueries?: Array<Record<string, unknown>>;
 }): { db: PrismaClient; predecessorLookups: string[][]; controlLookups: string[][] } => {
   const predecessorLookups: string[][] = [];
   const controlLookups: string[][] = [];
@@ -131,7 +134,10 @@ const boardReadDatabase = ({
         return rows;
       },
     },
-    taskActivity: { findMany: async () => activities },
+    taskActivity: { findMany: async (args: Record<string, unknown>) => {
+      activityQueries?.push(args);
+      return activities;
+    } },
     chainControl: {
       findMany: async (args: { where?: { OR?: Array<{ projectId: string; chainId: string }> } }) => {
         const keys = args.where?.OR ?? [];
@@ -778,6 +784,65 @@ test("readBoard dates current Inbox waits with one lookup of the exact question 
   assert.equal(wire[0].latestRun.phaseSince, SESSION_ENDED.toISOString());
   assert.equal(wire[1].latestRun.phaseSince, CLEANUP_STARTED.toISOString());
   assert.equal(wire[0].latestRun.phase, "waiting-inbox");
+});
+
+test("readBoard projects a queued mechanical claim refusal only from a current mismatch activity", async () => {
+  const runCreatedAt = new Date("2026-08-16T00:00:00.000Z");
+  const refusalAt = new Date("2026-08-16T00:00:01.000Z");
+  const run = (status: BoardRow["runs"][number]["status"], createdAt: Date) => ({
+    id: `${status.toLowerCase()}-run`, runNumber: 1, status, model: "merge-integrator", codexServiceTier: "DEFAULT" as const,
+    budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null,
+    readyAt: RUN_READY, createdAt, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5,
+    session: null,
+  });
+  const rows = [
+    row({ id: "current", runs: [run("QUEUED", runCreatedAt)] }),
+    row({ id: "old", runs: [run("QUEUED", runCreatedAt)] }),
+    row({ id: "claimed", runs: [run("CLAIMED", runCreatedAt)] }),
+  ];
+  const activityQueries: Array<Record<string, unknown>> = [];
+  const { db } = boardReadDatabase({
+    rows,
+    activityQueries,
+    activities: [
+      {
+        id: "current-refusal",
+        taskId: "current",
+        createdAt: refusalAt,
+        metadata: { code: MECHANICAL_CONTRACT_MISMATCH_CODE, executorVersion: 1, apiVersion: 2 },
+      },
+      {
+        id: "old-refusal",
+        taskId: "old",
+        createdAt: new Date(runCreatedAt.getTime() - 1),
+        metadata: { code: MECHANICAL_CONTRACT_MISMATCH_CODE, executorVersion: 1, apiVersion: 2 },
+      },
+      {
+        id: "claimed-refusal",
+        taskId: "claimed",
+        createdAt: refusalAt,
+        metadata: { code: MECHANICAL_CONTRACT_MISMATCH_CODE, executorVersion: 1, apiVersion: 2 },
+      },
+    ],
+  });
+
+  const cards = await readBoard(db, { projectId: "p1", archived: "false" });
+  assert.deepEqual(cards.find((card) => card.id === "current")?.latestRun?.claimRefusal, {
+    code: MECHANICAL_CONTRACT_MISMATCH_CODE,
+    executorVersion: 1,
+    apiVersion: 2,
+    since: refusalAt,
+  });
+  assert.equal(cards.find((card) => card.id === "old")?.latestRun?.claimRefusal, undefined);
+  assert.equal(cards.find((card) => card.id === "claimed")?.latestRun?.claimRefusal, undefined);
+  assert.equal(
+    activityQueries.filter((query) => {
+      const metadata = (query.where as Record<string, unknown> | undefined)?.metadata as { path?: string[] } | undefined;
+      return metadata?.path?.[0] === "code";
+    }).length,
+    1,
+    "claim refusals are read once for the page",
+  );
 });
 
 test("chain lead time retains the failed first attempt from complete primary history", async () => {

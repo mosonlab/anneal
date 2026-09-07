@@ -32,6 +32,7 @@ import {
 } from "@anneal/db";
 import type {
   BoardCard as BoardContractCard,
+  BoardClaimRefusal as BoardContractClaimRefusal,
   RunBaseline as BoardContractRunBaseline,
   BoardChainActivationState as BoardContractChainActivationState,
   BoardLatestRun as BoardContractLatestRun,
@@ -44,6 +45,7 @@ import type {
   TaskList as TaskListContract,
   UsageCost as BoardUsageCost,
 } from "@anneal/db/board-contract";
+import { MECHANICAL_CONTRACT_MISMATCH_CODE } from "@anneal/db/claim-contract";
 import { compare } from "@anneal/db/chain-order";
 import type { SerializesTo } from "@anneal/db/wire-serialization";
 
@@ -148,6 +150,9 @@ export type BoardRow = {
      *  forgets one has to fail to compile rather than project a run that is
      *  permanently queued. */
     readyAt: Date;
+    /** Read only to qualify a claim-refusal activity; it never reaches the
+     *  browser projection. Optional keeps pure board-card fixtures narrow. */
+    createdAt?: Date;
     /** Run start, retained across all attempts for the Chain lead-time origin. */
     startedAt: Date | null;
     endedAt: Date | null;
@@ -169,6 +174,9 @@ export type BoardRow = {
       cleanupStartedAt: Date | null;
       cleanupEndedAt: Date | null;
     } | null;
+    /** Internal read-model annotation; `latestRunProjectionFromRun` emits it
+     *  only on the latest queued Run. */
+    claimRefusal?: BoardContractClaimRefusal<Date>;
   }>;
   stepOutput?: { kind: string; body: string; runId: string | null } | null;
 };
@@ -345,6 +353,7 @@ const latestRunProjectionFromRun = (run: BoardRow["runs"][number]): BoardLatestR
     phaseSince: phase.phaseSince,
     lastProgressEventAt: run.lastProgressEventAt,
     maxRunsPerTask: run.maxRunsPerTask,
+    ...(run.status === "QUEUED" && run.claimRefusal !== undefined ? { claimRefusal: run.claimRefusal } : {}),
   };
 };
 
@@ -945,7 +954,7 @@ const boardChainRows = async (
           pullRequestUrl: true,
           pushedBranch: true,
           baseSha: true,
-          readyAt: true, startedAt: true,
+          readyAt: true, createdAt: true, startedAt: true,
           endedAt: true,
           lastProgressEventAt: true,
           maxRunsPerTask: true,
@@ -1004,6 +1013,58 @@ const readReadinessRequeueTotals = async (
   return totals;
 };
 
+/** Read the mechanical claim refusals for all queued latest Runs on a page.
+ *
+ * The activity is a durable Task fact, while the refusal is only relevant to
+ * the Run that was queued when it happened. Query the page's task IDs once,
+ * then join and time-bound the rows in memory; Prisma cannot express a
+ * different activity lower-bound timestamp for each task in one predicate.
+ */
+const readClaimRefusals = async (
+  db: PrismaClient,
+  rows: readonly Pick<BoardRow, "id" | "runs">[],
+): Promise<Map<string, BoardContractClaimRefusal<Date>>> => {
+  const runCreatedAtByTask = new Map<string, Date>();
+  for (const row of rows) {
+    const run = row.runs?.[0];
+    if (run?.status !== "QUEUED" || !(run.createdAt instanceof Date) || Number.isNaN(run.createdAt.getTime())) continue;
+    if (!runCreatedAtByTask.has(row.id)) runCreatedAtByTask.set(row.id, run.createdAt);
+  }
+  if (runCreatedAtByTask.size === 0) return new Map();
+
+  const activities = await db.taskActivity.findMany({
+    where: {
+      taskId: { in: [...runCreatedAtByTask.keys()] },
+      actorType: "control-plane",
+      metadata: { path: ["code"], equals: MECHANICAL_CONTRACT_MISMATCH_CODE },
+    },
+    select: { id: true, taskId: true, metadata: true, createdAt: true },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  const refusals = new Map<string, BoardContractClaimRefusal<Date>>();
+  for (const activity of activities) {
+    if (refusals.has(activity.taskId)) continue;
+    const runCreatedAt = runCreatedAtByTask.get(activity.taskId);
+    if (runCreatedAt === undefined || !(activity.createdAt instanceof Date) || Number.isNaN(activity.createdAt.getTime()) || activity.createdAt < runCreatedAt) continue;
+    const metadata = activity.metadata;
+    if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) continue;
+    const raw = metadata as Record<string, unknown>;
+    if (raw.code !== MECHANICAL_CONTRACT_MISMATCH_CODE
+      || typeof raw.apiVersion !== "number"
+      || !Number.isInteger(raw.apiVersion)
+      || (raw.executorVersion !== null
+        && (typeof raw.executorVersion !== "number" || !Number.isInteger(raw.executorVersion)))) continue;
+    const executorVersion = raw.executorVersion === null ? null : raw.executorVersion as number;
+    refusals.set(activity.taskId, {
+      code: MECHANICAL_CONTRACT_MISMATCH_CODE,
+      executorVersion,
+      apiVersion: raw.apiVersion,
+      since: activity.createdAt,
+    });
+  }
+  return refusals;
+};
+
 /** Read the complete board card model, including every lookup needed to project it. */
 export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise<BoardCard[]> => {
   const rows: BoardRow[] = await db.task.findMany({
@@ -1030,7 +1091,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
         select: {
           id: true, runNumber: true, status: true, model: true, subagentModel: true, budgetGrants: true,
           leaseLossRefunds: true, codexServiceTier: true, pullRequestUrl: true, pushedBranch: true, baseSha: true,
-          readyAt: true, startedAt: true, endedAt: true, lastProgressEventAt: true, maxRunsPerTask: true,
+          readyAt: true, createdAt: true, startedAt: true, endedAt: true, lastProgressEventAt: true, maxRunsPerTask: true,
           session: {
             select: {
               nativeChildUsed: true, costUsd: true, inputTokens: true, cachedInputTokens: true,
@@ -1068,6 +1129,16 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
       const byId = new Map([...primaryRows, ...supplemental].map((row) => [row.id, row]));
       primaryRows = [...byId.values()];
     }
+  }
+
+  // The complete Chain lookup may have added archived or detached-regression
+  // members, so enrich only after every member that can reach the aggregate is
+  // present. This remains one page-wide activity query, never one per card.
+  const claimRefusalByTask = await readClaimRefusals(db, [...rows, ...primaryRows]);
+  for (const row of [...rows, ...primaryRows]) {
+    const run = row.runs?.[0];
+    const claimRefusal = claimRefusalByTask.get(row.id);
+    if (run !== undefined && claimRefusal !== undefined) run.claimRefusal = claimRefusal;
   }
 
   // Resolve the current wait by its exact question ID, in one page-wide query.
