@@ -177,7 +177,7 @@ export const RECOVERY_TRANSITIONS: Record<MergeRecoveryStatus, ReadonlySet<Merge
     MergeRecoveryStatus.SUCCEEDED,
   ]),
   [MergeRecoveryStatus.BLOCKED_DOWNSTREAM]: new Set([MergeRecoveryStatus.REPAIRING]),
-  [MergeRecoveryStatus.SUCCEEDED]: new Set(),
+  [MergeRecoveryStatus.SUCCEEDED]: new Set([MergeRecoveryStatus.AWAITING_AUTHORIZATION]),
   [MergeRecoveryStatus.FAILED]: new Set([MergeRecoveryStatus.VALIDATING]),
 };
 
@@ -670,6 +670,7 @@ const DEFENSE_EXACT = new Set([
   "packages/db/src/gate-attestation.ts",
   "packages/db/src/merge-integrator-db.ts",
   "packages/db/src/merge-recovery-revalidate.ts",
+  "packages/db/src/merge-recovery-intent.ts",
   "packages/db/src/merge-tail.ts",
   "packages/db/src/merge-tail-markers.ts",
   "packages/db/src/readiness-requeue.ts",
