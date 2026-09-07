@@ -714,9 +714,9 @@ export const completeRun = async (
       || (missingOutputReason ? false : failureClass !== null && reported.externalFailure);
     const cappedExternalFailure = outputFailurePolicy.cappedExternalFailure
       || (body.outcome.case === "provider-failure"
-        && body.outcome.envelope.phase === "EXECUTE"
-        && failureClass !== null
-        && isTextMatchedTransientProviderFailure(body.outcome.envelope, failureClass));
+        && failureClass === FailureClass.TRANSIENT_PROVIDER
+        && (body.outcome.envelope.phase !== "EXECUTE"
+          || isTextMatchedTransientProviderFailure(body.outcome.envelope, failureClass)));
     const retryAt = failureClass && retryable ? new Date(now.getTime() + retryDelayMs(run.runNumber, failureClass)) : null;
     // A negative Regression verdict survives a later external failure, including
     // delivery or salvage failure before completion can report a head. Keep the
@@ -1468,10 +1468,13 @@ export const completeRun = async (
       // the completion itself answers a named 409 rather than 500.
       value: repairBindingRejection
         ?? { taskId: run.taskId, succeeded, retryCreated, failureClass },
-      // An ordinary successor inherits the handoff. Otherwise this completion
-      // releases the ended Run's Lease and settles its event before a recovery
-      // worker can acquire the next Lease and create a replacement.
-      leaseOutcome: mechanical && retryRunId
+      // A merge-tail Step successor inherits the handoff. Otherwise this
+      // completion releases the ended Run's Lease and settles its event before
+      // a recovery worker can acquire the next Lease and create a replacement.
+      // Regression and mechanical Steps are the direct Lease consumers here.
+      leaseOutcome: retryRunId
+        && (mechanical
+          || isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind))
         ? { kind: "hand-off", taskId: run.taskId, handoffRunId: retryRunId, at: now, fromRunId: run.id }
         : leaseOutcome === "stop" || strandedHandoff
         ? {

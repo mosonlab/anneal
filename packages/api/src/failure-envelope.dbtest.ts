@@ -206,6 +206,50 @@ test("a real hung push is retried transience, and buys the task an attempt inste
   assert.equal(retry.maxRunsPerTask, 6);
 });
 
+test("an unknown delivery transport failure is refunded and retried", async () => {
+  const { task, run, runnerId, fencingToken } = await seedRunningRun();
+  const reason = "git failed (128): gnutls_handshake() failed: The TLS connection was non-properly terminated.";
+  const response = await complete(run.id, {
+    runnerId,
+    fencingToken,
+    exitCode: 1,
+    signal: null,
+    pushStatus: "FAILED",
+    cleanupStatus: "SUCCEEDED",
+    outcome: {
+      case: "provider-failure",
+      reason,
+      envelope: {
+        version: FAILURE_ENVELOPE_VERSION,
+        phase: "DELIVER",
+        runnerClass: "TOOL_FAILED",
+        exitCode: 1,
+        signal: null,
+        terminationReason: null,
+        terminalEventSeen: true,
+        terminalSuccess: true,
+        agentExited: true,
+        providerError: null,
+        stderrSummary: reason,
+        stdoutSummary: null,
+        timedOut: false,
+        transient: false,
+        timeoutMs: null,
+      },
+    },
+  });
+  assert.equal(response.status, 200);
+  const closed = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+  assert.equal(closed.failureClass, "TRANSIENT_PROVIDER");
+  assert.equal(closed.retryable, true);
+  assert.equal(closed.budgetGrants, 1);
+  assert.equal(closed.maxRunsPerTask, 6);
+  const retry = await db.run.findFirstOrThrow({ where: { taskId: task.id, runNumber: 2 } });
+  assert.equal(retry.status, "QUEUED");
+  assert.equal(retry.maxRunsPerTask, 6);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: task.id } })).status, "DOING");
+});
+
 test("an agent stderr that only says ECONNRESET stays retryable, as it was before the authority moved", async () => {
   const { task, run, runnerId, fencingToken } = await seedRunningRun();
   await complete(run.id, misclassifiedBody(runnerId, fencingToken, {

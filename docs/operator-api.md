@@ -3459,6 +3459,34 @@ curl -X POST "$BASE_URL/runs/$RUN_ID/cancel" \
 curl "$BASE_URL/runs/$RUN_ID/events?afterSeq=0&limit=500" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
 
+### Run failure classes and retries
+
+The API classifies the runner's failure envelope by phase. `EXECUTE` is the
+agent's own process: its existing termination, exit and provider-text rules
+decide the failure class. `PROVISION`, `DELIVER` and `COMPLETE` are the runner's
+plumbing and default to `TRANSIENT_PROVIDER`, retryable and external, even
+when the transport error's wording is unknown. Deterministic refusals take
+precedence: authentication failures, 401/403 and permission denial produce
+`AUTH_REQUIRED` with no automatic retry. The existing `BUDGET_EXCEEDED`,
+`NO_CHANGES_PRODUCED` and missing dependency-provisioning manifest refusals
+also retain their handling. Exit code 127 remains `BINARY_NOT_FOUND` in every
+phase, with no automatic retry. Other advisory `runnerClass` values do not decide
+the API's verdict.
+
+Plumbing transient failures receive an attempt refund under
+`EXTERNAL_FAILURE_REFUND_CAP`; automatic retry remains bounded by the resulting
+`maxRunsPerTask`. No new refund counter or configuration is involved.
+
+During `DELIVER`, the branch-push loop retries any failure except a
+deterministic access refusal, using its existing backoff, attempt limit and
+Lease-bounded deadline. Each retry re-pushes the same commit without starting
+another agent session. If that local retry budget is exhausted, the runner
+reports the delivery failure to the API, which applies the classification,
+refund and retry-Run rules above. An API-level retry starts the Step again.
+This includes Regression: even with a persisted PASS or gate-fail verdict,
+a transient delivery failure queues another Run that reruns the merge gate,
+under the same caps. A durable verdict alone does not advance a failed Run.
+
 ### Task spend cap
 
 `Task.spendCap` is a per-task limit in USD, or `null` for no limit. It is
