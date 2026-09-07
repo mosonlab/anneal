@@ -591,7 +591,11 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
       accept: "application/vnd.github+json",
       body: JSON.stringify({ sha: publishHead, force: false }),
     });
-    if (response.status === 409 || response.status === 422 || classifyHttpStatus(response.status) === "refused") {
+    // Only GitHub's two ref-update refusals establish that the update itself
+    // was rejected. 401/403/404 and every other deterministic 4xx are access
+    // or addressing failures, and reporting them as a non-fast-forward would
+    // send the operator to re-authorize a condition no authorization changes.
+    if (response.status === 409 || response.status === 422) {
       return { status: "rejected", reason: responseReason(response) };
     }
     if (classifyHttpStatus(response.status) === "applied") {

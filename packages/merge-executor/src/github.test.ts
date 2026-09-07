@@ -320,9 +320,10 @@ test("train publication is a non-forced PATCH and only 409/422 are deterministic
     assert.equal(result.status, "rejected");
     assert.match(result.status === "rejected" ? result.reason : "", new RegExp(`HTTP ${status}`, "u"));
   }
-  for (const status of [403, 404]) {
-    const rejected = clientWith([{ status, body: "ref refused" }]);
-    assert.equal((await rejected.client.publishTrain(repositoryReference, "main", trainHead)).status, "rejected");
+  // An access or addressing failure is not evidence of a non-fast-forward.
+  for (const status of [401, 403, 404]) {
+    const denied = clientWith([{ status, body: "ref refused" }]);
+    assert.equal((await denied.client.publishTrain(repositoryReference, "main", trainHead)).status, "unknown");
   }
 
   const ambiguous = clientWith([{ status: 503, body: "upstream" }]);

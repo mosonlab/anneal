@@ -429,14 +429,36 @@ ancestor of `publishHead` at later positions. A failed check records the
 `train-precondition-failed` stop with the failing check and makes no GitHub
 write.
 
+These checks are additional to the pre-merge defense list, not a replacement
+for it. Publishing a prefix moves the default branch, so a train candidate
+still has to clear required status checks, the open and non-draft state, clean
+mergeability, and the positive synchronous-execution determination with its
+disarm, and it stops with the same conditions an ordinary candidate would —
+`check-failure-or-absence`, `non-clean-mergeability`, `unresolved-mergeability`
+or `deferred-merge-machinery`. The single relaxation is the base check above:
+at a later position the live base is the prefix commit the predecessor already
+published, and that commit is accepted in place of `baseSha`.
+
+A GitHub read that does not answer is never reported as drift. An unreadable
+pull request, default branch, train ref, ancestry comparison or commit records
+`api-error` with the failing phase; `train-precondition-failed` and
+`changed-underneath-me` are reserved for state the executor positively observed.
+
 Once those checks pass, the executor publishes the prefix by updating
 `refs/heads/<default branch>` to `publishHead` through GitHub's git-refs API
 with the App installation token. The update is never forced and must be a
-fast-forward. The send is bounded by `GUARDED_MERGE_SENDS`, uses the same
-idempotency key and `confirmedWrite` read-back discipline as the ordinary merge
-path, and rechecks `superseded-authorization` at the same points. If the
-default branch already equals `publishHead` or contains it, the update is
-skipped. A GitHub non-fast-forward refusal records `train-publish-rejected`.
+fast-forward. The send is bounded by `GUARDED_MERGE_SENDS`, records the intent
+under the same idempotency key, follows the same `confirmedWrite` read-back
+discipline as the ordinary merge path, and rechecks `superseded-authorization`
+at the same points. Replay acceptance differs from the ordinary path in one
+respect: it is governed by the prefix lineage below rather than by finding a
+prior intent of this run, because a peer candidate of the same prefix may have
+performed the publication. If the default branch already equals `publishHead`
+or contains it, the update is skipped. A GitHub non-fast-forward refusal — a
+409 or 422 on the ref update — records `train-publish-rejected`. A 401, 403 or
+404 is an access or addressing failure, not a refused fast-forward, and records
+`api-error`; check the App installation's `contents: write` permission and any
+branch protection that forbids the App from updating the default branch.
 
 After publication, and on replay when the ref update already happened, the
 executor reads the candidate pull request again. It reports `merged` only when
@@ -444,7 +466,9 @@ the pull request is merged and its merge commit is the prefix commit for this
 candidate: the commit reachable from `publishHead` whose second parent is the
 authorized `headSha`, with parents exactly `(predecessor, headSha)`. The
 predecessor is `baseSha` at position 1 and the previous prefix commit at later
-positions. The GitHub `mergedByLogin` value need not be the executor identity
+positions, verified by walking exactly `position - 1` first-parent merge steps
+from the predecessor down to `baseSha`, so the check costs `position` commit
+reads and never crawls a chain of unknown length. The GitHub `mergedByLogin` value need not be the executor identity
 for this path; the prefix lineage supplies the authorization check. A merged
 pull request with another shape still records `changed-underneath-me`.
 

@@ -9,7 +9,7 @@
 import type { AuthorizationPayload } from "@anneal/db/merge-integrator";
 
 import type { ChainEnvelope, Deps, IntentRecord } from "./decision-table.js";
-import type { DisarmResult, MergeResponse, ReadResult, RepositorySnapshot } from "./github.js";
+import type { DisarmResult, MergeResponse, ReadResult, RepositorySnapshot, TrainGitHub } from "./github.js";
 
 export const AUTHORIZED_HEAD = "a".repeat(40);
 export const AUTHORIZED_BASE = "b".repeat(40);
@@ -122,7 +122,21 @@ export const makeFake = (options: FakeOptions = {}) => {
   };
   const written: Array<Omit<IntentRecord, "activityId">> = [];
 
+  // The train surface is a required binding, so a missing one is a wiring bug
+  // rather than a live-state condition. Every non-train test gets a surface
+  // that refuses to answer, which is what an unused binding should do.
+  const unusedTrain: TrainGitHub = {
+    readDefaultBranch: async () => ({ status: "api-error", reason: "the train surface is not used by this test" }),
+    readRef: async () => ({ status: "api-error", reason: "the train surface is not used by this test" }),
+    isAncestor: async () => ({ status: "api-error", reason: "the train surface is not used by this test" }),
+    readCommit: async () => ({ status: "api-error", reason: "the train surface is not used by this test" }),
+    publishTrain: async () => ({ status: "unknown", reason: "the train surface is not used by this test" }),
+    deleteTrainRef: async () => ({ ok: false, reason: "the train surface is not used by this test" }),
+  };
+
   const deps: Deps = {
+    train: unusedTrain,
+    logTrainCleanupFailure: (reason) => { trace.push({ call: "logTrainCleanupFailure", detail: { reason } }); },
     readChain: async () => {
       chainReads += 1;
       trace.push({ call: "readChain", detail: { nth: chainReads } });

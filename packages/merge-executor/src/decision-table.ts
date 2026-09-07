@@ -17,7 +17,7 @@ import {
   type StopCondition,
 } from "@anneal/db/merge-integrator";
 
-import type { BranchProtectionRule, MergeResponse, PullRequestSnapshot, ReadResult, RepositorySnapshot, TrainGitHub } from "./github.js";
+import type { BranchProtectionRule, MergeResponse, PullRequestRef, PullRequestSnapshot, ReadResult, RepositorySnapshot, TrainGitHub } from "./github.js";
 import { executeTrain } from "./train.js";
 
 export type ChainTarget =
@@ -42,15 +42,15 @@ export type IntentRecord = {
 };
 
 export type Deps = {
-  train?: TrainGitHub;
-  logTrainCleanupFailure?: (reason: string) => void;
+  train: TrainGitHub;
+  logTrainCleanupFailure: (reason: string) => void;
   /** The chain read route at `chainIndex - 1`. Called twice: once to select the
    *  authorization, and once immediately before the merge to catch supersession
    *  that landed while the world was being verified (SPEC 4.6). */
   readChain: () => Promise<ChainEnvelope>;
   /** This task's own `mergeIntegrator.intent` history, newest last. */
   readOwnIntents: () => Promise<IntentRecord[]>;
-  readPullRequest: (reference: { owner: string; name: string; number: number; baseRef: string }) => Promise<ReadResult>;
+  readPullRequest: (reference: PullRequestRef) => Promise<ReadResult>;
   merge: (
     reference: { owner: string; name: string; number: number },
     expectedHeadSha: string,
@@ -215,9 +215,9 @@ export const classifyMerged = (
 
 /** §11.4 — disarm, then read back. A readback that still shows an armed state is
  *  recorded INSIDE the 4.15 stop as an incident demanding immediate action. */
-const disarmAndReadBack = async (
+export const disarmAndReadBack = async (
   deps: Deps,
-  reference: { owner: string; name: string; number: number; baseRef: string },
+  reference: PullRequestRef,
   snapshot: RepositorySnapshot,
   reason: string,
 ): Promise<MergeOutcome> => {
@@ -257,7 +257,7 @@ const disarmAndReadBack = async (
  */
 const refuseResend = async (
   deps: Deps,
-  reference: { owner: string; name: string; number: number; baseRef: string },
+  reference: PullRequestRef,
   authorization: AuthorizationPayload & { activityId: string },
   snapshot: RepositorySnapshot | null,
 ): Promise<MergeOutcome | null> => {
@@ -590,6 +590,11 @@ type PreMergeVerdict =
 export const classifyPreMerge = (
   snapshot: RepositorySnapshot,
   authorization: AuthorizationPayload,
+  /** Change 2's train relaxation, and nothing else: the base a train candidate
+   *  at a later position sees has already advanced to the prefix commit its
+   *  predecessor published. Absent for every non-train authorization, whose
+   *  base check stays the strict equality. */
+  acceptsBase?: (baseRefOid: string) => boolean,
 ): PreMergeVerdict => {
   const pr = snapshot.pullRequest;
   if (pr.headRefOid !== authorization.headSha) {
@@ -601,7 +606,7 @@ export const classifyPreMerge = (
   if (snapshot.baseRefOid === null) {
     return { kind: "stop", outcome: stop("api-error", JSON.stringify({ reason: "the base ref resolved to null" })) };
   }
-  if (snapshot.baseRefOid !== authorization.baseSha) {
+  if (snapshot.baseRefOid !== authorization.baseSha && !(acceptsBase?.(snapshot.baseRefOid) ?? false)) {
     return { kind: "stop", outcome: stop("base-drift", JSON.stringify({ observed: snapshot.baseRefOid, authorized: authorization.baseSha })) };
   }
   if (pr.state !== "OPEN") {

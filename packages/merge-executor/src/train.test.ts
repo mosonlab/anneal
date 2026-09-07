@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execute } from "./decision-table.js";
 import { AUTHORIZED_BASE as BASE, AUTHORIZED_HEAD as C1, authorization, cleanSnapshot, makeFake } from "./fake-pr-surface.js";
-import type { TrainGitHub } from "./github.js";
+import type { ReadResult, RepositorySnapshot, TrainGitHub } from "./github.js";
 
 const C2 = "d".repeat(40);
 const P1 = "e".repeat(40);
@@ -14,12 +14,20 @@ const fixture = (position = 1) => {
   const predecessor = position === 1 ? BASE : P1;
   const auth = authorization({ headSha: head, train: { publishHead: P2, predecessorOid: predecessor, ref: `refs/anneal/train/${P2}`, position, trainTaskId: "train-task" } });
   const fake = makeFake({ envelope: { authorization: auth } });
-  const state = { base: BASE, merged: false, sends: 0, deletes: 0, logs: [] as string[], wrongParents: false, ref: P2 as string | null, head, reject: false, lose: false, land: true };
+  const state = {
+    base: BASE, merged: false, sends: 0, deletes: 0, commitReads: 0, logs: [] as string[], wrongParents: false,
+    ref: P2 as string | null, head, reject: false, lose: false, land: true,
+    pr: {} as Partial<RepositorySnapshot["pullRequest"]>,
+    read: null as ReadResult | null,
+  };
   const train: TrainGitHub = {
     readDefaultBranch: async () => ({ status: "ok", name: "master", oid: state.base }),
     readRef: async () => ({ status: "ok", oid: state.ref }),
     isAncestor: async (_ref, ancestor, descendant) => ({ status: "ok", ancestor: ancestor === descendant || (descendant === P2 && [BASE, C1, C2, P1].includes(ancestor)) }),
-    readCommit: async (_ref, oid) => ({ status: "ok", commit: { oid, parents: oid === P2 ? [P1, C2] : oid === P1 ? [BASE, C1] : [] } }),
+    readCommit: async (_ref, oid) => {
+      state.commitReads++;
+      return { status: "ok", commit: { oid, parents: oid === P2 ? [P1, C2] : oid === P1 ? [BASE, C1] : [] } };
+    },
     publishTrain: async () => {
       state.sends++;
       if (state.reject) return { status: "rejected", reason: "non-fast-forward" };
@@ -30,9 +38,10 @@ const fixture = (position = 1) => {
   };
   fake.deps.train = train;
   fake.deps.logTrainCleanupFailure = (reason) => { state.logs.push(reason); };
-  fake.deps.readPullRequest = async () => ({ status: "ok", snapshot: cleanSnapshot({ repository: { baseRefOid: state.base }, pullRequest: {
-    headRefOid: state.head, merged: state.merged, state: state.merged ? "MERGED" : "OPEN", mergedByLogin: "some-ref-updater",
+  fake.deps.readPullRequest = async () => state.read ?? ({ status: "ok", snapshot: cleanSnapshot({ repository: { baseRefOid: state.base }, pullRequest: {
+    headRefOid: state.head, rollupCommitOid: state.head, merged: state.merged, state: state.merged ? "MERGED" : "OPEN", mergedByLogin: "some-ref-updater",
     mergeCommit: state.merged ? { oid: candidate, parents: [predecessor, state.wrongParents ? BASE : head] } : null,
+    ...state.pr,
   } }) });
   return { ...fake, state, train, auth };
 };
@@ -189,4 +198,102 @@ test("executor train authorization parser retains the descriptor and rejects eve
     { ref: `refs/heads/${P2}` }, { ref: `refs/anneal/train/${P1}` },
     { position: 0 }, { position: -1 }, { position: 1.5 }, { position: "1" },
   ]) assert.equal(parseAuthorizationMetadata({ ...metadata, train: { ...auth.train, ...patch } }).status, "malformed");
+});
+
+// The train checks are additive to the pre-merge defense list, not a
+// replacement for it: publishing a prefix moves the default branch, so a
+// candidate that would be refused an ordinary merge is refused a publication.
+for (const [name, defect, condition] of [
+  ["a failing required check", { checks: [{ kind: "CheckRun" as const, name: "ci", conclusion: "FAILURE" as const, status: "COMPLETED" as const }] }, "check-failure-or-absence"],
+  ["a check rollup for another commit", { rollupCommitOid: BASE }, "check-failure-or-absence"],
+  ["a draft pull request", { isDraft: true }, "non-clean-mergeability"],
+  ["a closed pull request", { state: "CLOSED" as const }, "non-clean-mergeability"],
+  ["a conflicting pull request", { mergeable: "CONFLICTING" as const }, "non-clean-mergeability"],
+  ["a non-clean merge state", { mergeStateStatus: "BLOCKED" as const }, "non-clean-mergeability"],
+  ["armed auto-merge", { autoMergeRequest: { enabledAt: "2026-08-18T00:00:00.000Z" } }, "deferred-merge-machinery"],
+  ["a queued pull request", { mergeQueueEntry: { id: "MQE_1" } }, "deferred-merge-machinery"],
+] as const) test(`train publication refuses ${name} before any write`, async () => {
+  const f = fixture();
+  Object.assign(f.state.pr, defect);
+  const result = await execute(f.deps);
+  assert.equal(result.outcome === "stopped" && result.condition, condition);
+  assert.equal(f.state.sends, 0);
+  assert.equal(f.calls().includes("writeIntent"), false);
+});
+
+test("train publication defers when synchronous execution cannot be determined", async () => {
+  const f = fixture();
+  f.state.read = { status: "sync-unknown", reason: "mergeQueue could not be read" };
+  const result = await execute(f.deps);
+  assert.equal(result.outcome === "stopped" && result.condition, "deferred-merge-machinery");
+  assert.equal(f.state.sends, 0);
+});
+
+test("train publication polls an unknown mergeability within its bound", async () => {
+  const f = fixture();
+  Object.assign(f.state.pr, { mergeable: "UNKNOWN" as const });
+  const result = await execute(f.deps);
+  assert.equal(result.outcome === "stopped" && result.condition, "unresolved-mergeability");
+  assert.equal(f.state.sends, 0);
+});
+
+// An unreadable world is not an observed mismatch. Each of these would
+// otherwise be reported as authorization drift or a foreign merge.
+for (const [phase, breaks] of [
+  ["pull request", (f: ReturnType<typeof fixture>) => { f.state.read = { status: "api-error", reason: "502" }; }],
+  ["default branch", (f: ReturnType<typeof fixture>) => { f.train.readDefaultBranch = async () => ({ status: "api-error", reason: "502" }); }],
+  ["publication ancestry", (f: ReturnType<typeof fixture>) => { f.train.isAncestor = async () => ({ status: "api-error", reason: "502" }); }],
+  ["train ref", (f: ReturnType<typeof fixture>) => { f.train.readRef = async () => ({ status: "api-error", reason: "502" }); }],
+] as const) test(`train ${phase} read failure is an api error, not a precondition mismatch`, async () => {
+  const f = fixture();
+  breaks(f);
+  const result = await execute(f.deps);
+  assert.equal(result.outcome === "stopped" && result.condition, "api-error");
+  assert.equal(f.state.sends, 0);
+});
+
+test("train base ancestry read failure at a later position is an api error", async () => {
+  const f = fixture(2);
+  f.state.base = P1;
+  f.train.isAncestor = async (_ref, ancestor, descendant) => ancestor === P1
+    ? { status: "api-error", reason: "502" }
+    : { status: "ok", ancestor: ancestor === descendant || descendant === P2 };
+  const result = await execute(f.deps);
+  assert.equal(result.outcome === "stopped" && result.condition, "api-error");
+  assert.equal(f.state.sends, 0);
+});
+
+test("train lineage read failure is an api error, not a foreign merge", async () => {
+  const f = fixture();
+  f.state.base = P2; f.state.merged = true;
+  f.train.readCommit = async () => ({ status: "api-error", reason: "502" });
+  const result = await execute(f.deps);
+  assert.equal(result.outcome === "stopped" && result.condition, "api-error");
+});
+
+test("a publication refused for access reasons is an api error, never train-publish-rejected", async () => {
+  const f = fixture();
+  f.train.publishTrain = async () => { f.state.sends++; return { status: "unknown", reason: "HTTP 403 forbidden" }; };
+  const result = await execute(f.deps);
+  assert.equal(result.outcome === "stopped" && result.condition, "api-error");
+});
+
+test("a publication confirmed by read-back outranks a guard that refused a redundant send", async () => {
+  const f = fixture();
+  f.state.lose = true;
+  // The peer candidate publishes and deletes the staging ref while this run is
+  // inside `confirmedWrite`; its guard refuses, but the prefix has landed.
+  const publish = f.train.publishTrain;
+  f.train.publishTrain = async (...args) => { const response = await publish(...args); f.state.ref = null; return response; };
+  assert.deepEqual(await execute(f.deps), { outcome: "merged", mergeCommitSha: P1 });
+  assert.equal(f.state.sends, 1);
+});
+
+test("train lineage walks a bounded number of commits when the base is off the prefix", async () => {
+  const f = fixture(2);
+  f.state.base = P2; f.state.merged = true;
+  f.auth.train!.position = 3;
+  const result = await execute(f.deps);
+  assert.equal(result.outcome === "stopped" && result.condition, "changed-underneath-me");
+  assert.ok(f.state.commitReads <= 3, `bounded by position: ${f.state.commitReads}`);
 });
