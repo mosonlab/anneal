@@ -31,7 +31,8 @@ export const readMergeTrainOutputHandoff = async (
   claim: RegressionHandoffClaim,
   workspace: Workspace,
 ): Promise<MergeTrainOutputHandoff | null> => {
-  if (claim.task.templateStep?.outputKind !== MERGE_TRAIN_OUTPUT_KIND) return null;
+  if (claim.task.templateStep?.outputKind !== MERGE_TRAIN_OUTPUT_KIND
+    && claim.task.mergeTrain == null) return null;
   const raw = await readWorkspaceHandoffFile(config, workspace, "merge-train-output.json", "Merge train output");
   if (raw === null) return null;
 
