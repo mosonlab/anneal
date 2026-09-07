@@ -18,7 +18,7 @@ import {
   type Marker,
 } from "./merge-tail-markers.js";
 
-type Row = { metadata: unknown };
+type Row = { actorType?: string; metadata: unknown };
 type FindManyArgs = { where: unknown; select: unknown; orderBy: unknown; take?: number };
 
 /**
@@ -263,4 +263,27 @@ test("train ownership reads select only control-plane markers", async () => {
   assert.deepEqual((observed as { where: unknown }).where, {
     taskId: "train-1", actorType: "control-plane", metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.train },
   });
+});
+
+test("agent-authored settled and aborted train markers are ignored by every marker reader", async () => {
+  const rows = [
+    { actorType: "agent", ...marker("train", { state: "settled", trainTaskId: "train-1" }) },
+    { actorType: "agent", ...marker("train", { state: "aborted", trainTaskId: "train-1" }) },
+  ];
+  const { tx } = recordingTx(rows);
+
+  assert.deepEqual(await readMarkers(tx, "train-1"), []);
+  assert.deepEqual(await readMarkerHistory(tx, "train-1"), []);
+
+  let observed: { where: Record<string, unknown> } | undefined;
+  const latestTx = {
+    taskActivity: {
+      findFirst: async (input: { where: Record<string, unknown> }) => {
+        observed = input;
+        return input.where.actorType === "control-plane" ? null : { metadata: rows[0]!.metadata };
+      },
+    },
+  } as unknown as Prisma.TransactionClient;
+  assert.equal(await readLatestMarker(latestTx, "train-1", "train"), null);
+  assert.equal(observed?.where.actorType, "control-plane");
 });

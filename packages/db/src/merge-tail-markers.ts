@@ -236,13 +236,16 @@ export const mergeTrainClaimMetadata = (
 const scan = async (tx: Tx, taskId: string, take?: number): Promise<Marker[]> => {
   const rows = await tx.taskActivity.findMany({
     where: { taskId },
-    select: { metadata: true },
+    select: { actorType: true, metadata: true },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     ...(take === undefined ? {} : { take }),
   });
   return rows.flatMap((row) => {
     const marker = markerFromMetadata(row.metadata);
-    return marker ? [marker] : [];
+    // Train ownership is a control-plane fact. Other merge-tail markers keep
+    // their existing reader behavior because some are intentionally written by
+    // actors outside the control plane.
+    return marker && (marker.kind !== "train" || row.actorType === "control-plane") ? [marker] : [];
   });
 };
 
@@ -273,8 +276,17 @@ export const readLatestMarker = async (
   kind: MarkerKind,
   actorType?: "control-plane",
 ): Promise<Marker | null> => {
+  const actorFilter = kind === "train"
+    ? { actorType: "control-plane" as const }
+    : actorType === undefined
+      ? {}
+      : { actorType };
   const row = await tx.taskActivity.findFirst({
-    where: { taskId, ...(actorType ? { actorType } : {}), metadata: { path: ["kind"], equals: MERGE_TAIL_KIND[kind] } },
+    where: {
+      taskId,
+      ...actorFilter,
+      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND[kind] },
+    },
     select: { metadata: true },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
   });
