@@ -14,6 +14,7 @@ const CLEANUP_ENDED = new Date("2026-09-01T10:02:04.000Z");
 
 const session = (overrides: Partial<RunMetricsSession> = {}): RunMetricsSession => ({
   runner: "CLAUDE",
+  costUsd: null,
   executionStatus: "SUCCEEDED",
   resumeAttempt: 0,
   provisionedAt: PROVISIONED,

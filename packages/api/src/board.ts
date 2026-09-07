@@ -23,6 +23,7 @@ import {
 } from "@anneal/db";
 import type {
   BoardCard as BoardContractCard,
+  RunBaseline as BoardContractRunBaseline,
   BoardChainActivationState as BoardContractChainActivationState,
   BoardLatestRun as BoardContractLatestRun,
   BoardMoveTarget as BoardContractMoveTarget,
@@ -45,6 +46,7 @@ import {
   taskStartability,
   type ChainProgress,
 } from "./chain.js";
+import { baselineKey, readRunBaselines } from "./run-baseline.js";
 import { taskMoveAuthority } from "./task-move-authority.js";
 
 /**
@@ -99,6 +101,9 @@ export type BoardRow = {
   chainIndex: number | null;
   chainLayer: number | null;
   dispatchAfterTaskId: string | null;
+  /** The card's baseline population key. Not projected itself — it is what the
+   *  one grouped baseline query for the page is keyed by. */
+  templateStepId: string | null;
   createdAt: Date;
   updatedAt: Date;
   assigneeAgent: { id: string; name?: string; title: string; model: string; archivedAt: Date | null } | null;
@@ -526,6 +531,7 @@ export const boardCard = (
   display: ChainDisplay = { chainName: taskChainName(row), displayName: row.name },
   predecessor: BoardBlockedOnTask | null = null,
   repairOf: RepairBinding | null = null,
+  baseline: BoardContractRunBaseline | null = null,
 ): BoardCard => {
   const taskCost = sumUsageCosts(row.runs.flatMap((item) => item.session === null
     ? []
@@ -594,6 +600,7 @@ export const boardCard = (
     budgetRemaining: startability.checklist.budgetRemaining,
     leaseLossRefunds,
     chainAggregate: null,
+    baseline,
   } satisfies BoardCard;
 };
 
@@ -907,7 +914,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
       assigneeAgentId: true, repoId: true, archivedAt: true, maxSessionsPerTask: true, failureReason: true,
       scheduleKind: true, runAt: true, cron: true, timezone: true, approvalGate: true,
       templateId: true, source: true, chainId: true, chainIndex: true, chainLayer: true, createdAt: true, updatedAt: true,
-      dispatchAfterTaskId: true,
+      dispatchAfterTaskId: true, templateStepId: true,
       assigneeAgent: { select: { id: true, name: true, title: true, model: true, archivedAt: true } },
       templateStep: {
         select: {
@@ -1090,6 +1097,14 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     ));
   }
 
+  // One grouped statement for every template step on the page, whatever the
+  // page size: the board's query count must not grow with the number of cards.
+  const baselines = await readRunBaselines(db, rows.flatMap((row) => (
+    row.templateStepId === null
+      ? []
+      : [{ projectId: row.projectId, templateStepId: row.templateStepId }]
+  )));
+
   const emittedAggregates = new Set<string>();
   return rows.map((row) => {
     const repairKey = row.chainId === null ? repairChainKeyByTask.get(row.id) : undefined;
@@ -1119,6 +1134,9 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
       displayByTask.get(row.id),
       row.dispatchAfterTaskId === null ? null : predecessorById.get(row.dispatchAfterTaskId) ?? null,
       repairByTask.get(row.id) ?? null,
+      row.templateStepId === null
+        ? null
+        : baselines.get(baselineKey({ projectId: row.projectId, templateStepId: row.templateStepId })) ?? null,
     );
     const aggregate = key === undefined || emittedAggregates.has(key)
       ? null

@@ -93,6 +93,7 @@ type NativeTaskDetail = TaskDetail<Date, Prisma.Decimal>;
 
 const nativeBoardCard = (): NativeBoardCard => ({
   id: "task-1",
+  baseline: null,
   name: "Repair the board",
   displayName: "Repair the board",
   status: "TODO",
@@ -216,6 +217,7 @@ const nativeTaskList = (): NativeTaskList => ({
 
 const nativeTaskDetail = (): NativeTaskDetail => ({
   ...nativeTaskBase,
+  baseline: null,
   moveTargets: [],
   taskCost: null,
   mergeOutcome: null,
