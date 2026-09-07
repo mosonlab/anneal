@@ -44,6 +44,43 @@ test("connection lost is classified transient", async () => {
   assert.equal(calls, 2);
 });
 
+test("git push retries an unknown transport failure until its existing budget is exhausted", async () => {
+  let calls = 0;
+  await assert.rejects(runWithNetworkRetry("git", ["push"], async () => {
+    calls += 1;
+    throw new Error("fatal: unable to access remote: gnutls_handshake() failed");
+  }, { wait: async () => undefined }));
+  assert.equal(calls, 6);
+});
+
+test("git push does not retry a deterministic access refusal", async () => {
+  let calls = 0;
+  await assert.rejects(runWithNetworkRetry("git", ["push"], async () => {
+    calls += 1;
+    throw new Error("fatal: unable to access remote: requested URL returned error: 403");
+  }, { wait: async () => undefined }));
+  assert.equal(calls, 1);
+});
+
+test("git push vetoes the common access refusal vocabulary", async () => {
+  for (const message of [
+    "authentication failed",
+    "authorization failed",
+    "unauthorized",
+    "invalid credentials",
+    "remote: HTTP 403 Forbidden",
+    "remote: could not read Username for 'https://github.com': terminal prompts disabled",
+    "fatal: requested URL returned error: 401",
+  ]) {
+    let calls = 0;
+    await assert.rejects(runWithNetworkRetry("git", ["push"], async () => {
+      calls += 1;
+      throw new Error(message);
+    }, { wait: async () => undefined }));
+    assert.equal(calls, 1, message);
+  }
+});
+
 test("commands outside the delivery network allowlist are never retried", async () => {
   let calls = 0;
   await assert.rejects(runWithNetworkRetry("git", ["commit"], async () => {
