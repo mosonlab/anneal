@@ -54,8 +54,8 @@ acquiring the deploy barrier, the runner reads `/version` again and refuses to
 publish if the control plane advanced. An unreachable or dirty control-plane
 build, an unreadable source remote, or an unavailable commit stops preflight.
 
-Quiet-window blockers on this host are active Runs whose `runnerId` is in this
-host's generated inventory. After restart, every local runner must be online,
+Quiet-window blockers on this host are active agent Runs whose `runnerId` is in
+this host's generated inventory. After restart, every local runner must be online,
 register again with a newer observation, and report the deployed build commit
 through `GET /runners`. A missing, stale, offline, or mismatched registration
 fails verification; the job points `current` back to `previous`, restarts the
@@ -67,6 +67,41 @@ including the control-plane VM, which reads its own loopback API at
 `http://127.0.0.1:${API_PORT}` (default port 3000) with the `OPERATOR_TOKEN`
 from the deployment's `.env`. A control-plane host with local runners and no
 `OPERATOR_TOKEN` fails preflight; the check is never skipped.
+
+## Automatic deploy cadence
+
+The scheduler still wakes the auto-deploy job every five minutes. A wake-up is
+only a tick: on the control-plane role, when `origin/main` has moved beyond the
+deployed release, the job also checks the time of the last successful automatic
+deploy recorded in `.agentos-deploy/auto-deploy-state.json` as
+`lastSuccessfulAutomaticDeployAt`. `AUTO_DEPLOY_MIN_INTERVAL_MINUTES` in
+`shared/.env` sets the minimum interval and defaults to **240 minutes (four
+hours)**. Both host roles read the same non-negative whole-minute setting; a
+runner-only host retains its existing `/version` follow behavior. The cadence
+floor applies to control-plane automatic deploys, on Linux or macOS. For an
+on-demand invocation of the existing script, pass `--now` to bypass
+coalescing; the quiet window and deploy barrier still apply. Manual deploys
+do not advance the automatic success timestamp.
+
+If the interval has elapsed, the tick enters the normal artifact, quiet-window,
+and activation path. A tick may deploy earlier when its first quiet-window
+query is already open (`blockers=0`); this natural quiet window is the one
+early-deploy exception to the interval floor. When the control-plane `main`
+target has moved but the interval has not elapsed and blockers remain, the tick does no build, wait, or
+dispatch drain. It logs
+`NOOP coalescing next-eligible=<time>` and exits; `next-eligible` is the last
+successful automatic deploy time plus the configured interval. A host with no
+recorded successful automatic deploy is eligible for its first attempt.
+
+For control-plane deploys, the wait budget and its dispatch drain are entered
+only after the interval is eligible. A natural quiet window found at tick time
+proceeds without either one. If blockers appear or the barrier is contended
+before that early window is secured, the tick coalesces instead of waiting.
+The success timestamp is written after verification, notification, and resource
+cleanup succeed, while the deploy process lock is still held. Failed attempts
+and coalesced ticks do not advance it. If recording the timestamp fails after
+a successful deploy, the job logs `cadence-marker-unrecorded` and retains its
+success verdict; the interval cannot be enforced from an unrecorded success.
 
 ## Runtime layout
 
@@ -388,16 +423,26 @@ launchctl print "gui/$(id -u)/com.agentos.auto-deploy"
 
 The macOS plist runs `current/scripts/deploy/quiet-window-deploy.mjs` with the
 source remote and absolute toolchain recorded, logs under
-`~/Library/Logs/Anneal`, runs at load, and repeats every five minutes. The
+`~/Library/Logs/Anneal`, runs at load, and wakes every five minutes. Each wake
+on the control-plane role is subject to the [automatic deploy cadence](#automatic-deploy-cadence), so
+the timer is not a promise to build or deploy every five minutes. The
 installer refuses to overwrite a different existing definition. A runner-only
 host does not need database backup arguments because its backup phase is
-omitted.
+omitted; it still reads `AUTO_DEPLOY_MIN_INTERVAL_MINUTES` from
+`shared/.env`.
 
 ## Activation sequence
 
-For a new target commit, the job records `STARTED`, invokes the explicit
+For an eligible target commit, the job records `STARTED`, invokes the explicit
 builder, and performs this order. Linux systemd services are `<label>.service`
-units; macOS launchd services are labels.
+units; macOS launchd services are labels. On the control-plane role, the first
+target is the `main` head read at the tick. After the quiet window and
+exclusive deploy barrier are obtained, the control plane reads `origin/main`
+again. If it has advanced, it logs `target-advanced from=<old> to=<new>`,
+builds and verifies an artifact for the new head, and uses that head for every
+remaining phase. The stale tick target is never published. A runner-only host
+continues to take its target from the control plane's `/version` and performs
+the existing post-barrier `/version` check described in [Runner-only host](#runner-only-host).
 
 1. After `ARTIFACT_PREPARED`, verify release name, exact commit stamp, manifest
    inventory, content digest, excluded-path record, and read-only permissions;
@@ -405,7 +450,11 @@ units; macOS launchd services are labels.
    `FAILED` before quiet-window acquisition.
 2. Query for zero blockers, acquire the exclusive PostgreSQL deploy barrier,
    and query again. Hold the barrier through activation, verification, or
-   recovery.
+   recovery. On the control-plane role, re-read `origin/main` after the quiet
+   window/barrier is obtained; if it differs from the target read at the tick,
+   emit `target-advanced from=<old> to=<new>` and rebuild and verify the
+   artifact for the new target before continuing. A runner-only host keeps its
+   control-plane `/version` target check.
 3. Copy the verified release to a disposable writable operation workspace. It
    is not a Git checkout and is never published.
 4. Prove every configured Linux systemd `<label>.service` unit or macOS launchd
@@ -437,9 +486,9 @@ units; macOS launchd services are labels.
     before recording `VERIFIED` and `SUCCEEDED`, then write the success Inbox
     record.
 
-The sequence has no install, compile, source-checkout mutation, or
-multi-directory publication. The activation unit is the verified release
-directory selected by the pointer.
+Artifact construction, including a refreshed target's rebuild, uses the
+disposable builder directory. Service activation uses the verified release
+directory selected by the pointer and never mutates the source checkout.
 
 ### Post-restart observation window
 
@@ -462,10 +511,16 @@ The `VERIFIED` ledger entry records what the check actually proved:
 
 ### Quiet-window wait budget and alert
 
-Step 2 of the activation sequence polls for zero blocking Runs every
+Step 2 of the activation sequence polls for zero blocking agent Runs every
 `QUIET_WINDOW_POLL_SECONDS` (60 by default) and has no deadline: the deploy
-waits until the platform is quiet. The wait is measured, and crossing a budget
-tells the operator without changing when the deploy proceeds.
+waits until the platform is quiet for agent work. Mechanical merge execution
+and readiness evaluation are not blockers. The wait is measured, and crossing
+a budget tells the operator without changing when the deploy proceeds.
+
+On the control-plane role, this step is reached after the cadence gate admits
+an interval-eligible attempt. A tick that is coalesced exits before the wait, and a tick whose first
+query finds a natural quiet window proceeds early without opening the wait
+budget or a dispatch drain.
 
 The budget is **45 minutes** by default. Override it by setting
 `QUIET_WINDOW_WAIT_BUDGET_MINUTES` in **`shared/.env`** on the deploying host,
@@ -484,30 +539,39 @@ On crossing the budget the deploy, still waiting:
   `quiet_window_wait_peak_blocking_runs`, the target commit, and
   `quiet_window_blocking_runs_by_runner` — the blocking Run count keyed by the
   runner that owns each Run;
-- sends one operator notification through the same Inbox notifier as an
-  escalation, with `reason=quiet-window-wait-exceeded` and
-  `detail=still-waiting-elapsed-<seconds>s-budget-<seconds>s`. The notice is
-  scoped to the deployment attempt, so a later attempt with the same revisions
-  and the same timing raises its own message rather than reusing this one.
+- sends one informational Inbox notice with the text
+  `自动部署等待超时，已开始排空派发`. This is the normal notification that a
+  dispatch drain has begun, not a deploy failure; the failure kind remains for
+  real deployment failures. The notice is scoped to the deployment attempt,
+  so a later attempt with the same revisions and the same timing raises its
+  own message rather than reusing this one.
 
 It also opens a **dispatch drain**: one `DispatchDrain` row naming this host,
-its deploy role and the two commits. While that row is unexpired the control
-plane refuses every claim — agent and mechanical — with `409 Conflict` and code
-`dispatch-draining`, so the Runs already executing finish and no new ones start.
-Running Runs are never interrupted, no chain is held, and the runners keep
-polling and reporting themselves, so `GET /runners` shows them online with
-`dispatchDrain` set rather than lost. The deploy deletes the row on every exit
-path it has — success, failure, escalation and interruption — and a delete that
-fails is logged as `STOP dispatch-drain-delete-failed` and written to the
-escalation record. `expiresAt` is the fail-safe for a deploy process that dies
-mid-wait: the claim route treats an expired row as absent, so the fleet resumes
-by itself **120 minutes** after the deploy last reported itself even if nothing
-deleted it. A wait that is still running pushes that deadline out on each hourly
-alert, so the bound measures silence rather than capping how long one wait may
-drain dispatch. Override it with `DISPATCH_DRAIN_DEADLINE_MINUTES` in
-**`shared/.env`** (an integer from 1 through 1440, validated like the wait budget
-above). A deploy that finds its quiet window inside the budget opens no drain at
-all.
+its deploy role and the two commits. While that row is unexpired, the control
+plane refuses only claims that would start an agent session. The claim route
+decides this from the candidate Run's template Step kind, not from runner
+identity: agent Runs such as `implementation` receive `409 Conflict` with code
+`dispatch-draining`, while mechanical merge execution (`merge-result`) and
+readiness evaluation (`merge-authorization`) continue to be admitted. The
+mechanical flow remains safe because the deploy barrier is the exclusive half
+taken when the deploy actually starts. Already claimed Runs are never
+interrupted, no chain is held, and runners keep polling and reporting
+themselves, so `GET /runners` shows them online with `dispatchDrain` set rather
+than lost. The quiet-window `blockingRuns` count continues to include active
+agent Runs only; mechanical merge/readiness work does not make the deploy wait.
+
+The deploy deletes the row on every exit path it has — success, failure,
+escalation and interruption — and a delete that fails is logged as
+`STOP dispatch-drain-delete-failed` and written to the escalation record.
+`expiresAt` is the fail-safe for a deploy process that dies mid-wait: the claim
+route treats an expired row as absent, so the fleet resumes by itself **120
+minutes** after the deploy last reported itself even if nothing deleted it. A
+wait that is still running pushes that deadline out on each hourly alert, so the
+bound measures silence rather than capping how long one wait may drain
+dispatch. Override it with `DISPATCH_DRAIN_DEADLINE_MINUTES` in
+**`shared/.env`** (an integer from 1 through 1440, validated like the wait
+budget above). A deploy that finds its quiet window inside the budget opens no
+drain at all.
 
 The drain's own lines name the row, so an operator reading the log can match a
 refused claim to the deploy that caused it, to each renewal, and to the moment
@@ -518,13 +582,11 @@ HOLD dispatch-draining id=cmt0drain0001 expires=2026-09-07T04:00:00.000Z
 PASS dispatch-drain-cleared id=cmt0drain0001 rows=1
 ```
 
-Two things read differently from the outside while a drain is open. The merge
-executor does not recognise the refusal, so it logs `claim loop error` once per
-poll interval for as long as the drain lasts; that noise is expected and stops
-with the drain. And once the deploy holds the deploy barrier the refusal ends —
-the runners log `Runner claim drain refusal ended` and claims answer `204` —
-while `dispatchDrain` stays set in `GET /runners` until the release has landed
-and the deploy deletes its row. If a deploy process was killed before it could
+Mechanical merge execution and readiness evaluation continue while the drain
+is open. Ordinary agent runners log `Runner claim drain refusal ended` and
+claims answer `204` once the deploy holds the deploy barrier, while
+`dispatchDrain` stays set in `GET /runners` until the release has landed and
+the deploy deletes its row. If a deploy process was killed before it could
 delete its row and the fleet must claim again before the deadline, delete that
 one row by the id in its `HOLD dispatch-draining` line:
 `DELETE FROM "DispatchDrain" WHERE id = '<id>';`.
@@ -537,12 +599,14 @@ Delivery runs beside the polling loop, so a stalled notifier never delays
 acquiring the window. A wait that crosses the budget and then finds its window
 on the next poll still alerts and still records its event.
 
-The control-plane quiet-window query is **database-wide**: it counts every
-`claimed`, `provisioning`, or `running` Run in the platform database,
-including Runs on runner-only hosts that this deploy does not touch. A
-control-plane deploy therefore waits for the Mac runners' Runs as well as its
-own, which is what `quiet_window_blocking_runs_by_runner` makes visible. Only
-the runner role scopes the query to its own local runner ids.
+The control-plane quiet-window query is **database-wide for active agent Runs**:
+it counts every `claimed`, `provisioning`, or `running` agent Run in the
+platform database, including Runs on runner-only hosts that this deploy does
+not touch. Mechanical merge/readiness work is admitted during a drain and does
+not enter this blocker count. A control-plane deploy therefore waits for the
+Mac runners' agent Runs as well as its own, which is what
+`quiet_window_blocking_runs_by_runner` makes visible. Only the runner role
+scopes the query to its own local runner ids.
 
 Every `HOLD quiet-window` line names both facts:
 
@@ -581,8 +645,9 @@ preflight, migration, Prisma Client generation, prompt sync, backup, and
 service control are budgeted independently. A deadline sends `SIGTERM`, then
 `SIGKILL` if needed, and becomes a `DeployFailure`.
 
-The deploy barrier has an independent watchdog beginning at acquisition. It
-covers hangs outside a child command; expiry is logged, written to
+The deploy barrier has an independent watchdog beginning at acquisition. Its
+control-plane budget includes the post-barrier target read and possible artifact
+rebuild; the runner-role budget is unchanged. It covers hangs outside a child command; expiry is logged, written to
 `.agentos-deploy/escalated.json`, and sent to the operator Inbox through the
 same escalation path as other failures.
 
@@ -767,7 +832,8 @@ the serving state. This fact also protects runner hosts without a migration.
 ### Supersession by a newer commit
 
 When a commit-scoped marker is latched and `origin/main` has moved to a
-different commit, the tick reads the new target and proceeds with it, logging
+different commit, the tick reads the new target and proceeds with it regardless
+of the cadence floor, logging
 
 ```text
 SUPERSEDE escalation reason=<reason> failed-commit=<oid> target=<oid>

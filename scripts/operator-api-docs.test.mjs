@@ -7,6 +7,7 @@ const handbook = readFileSync("docs/operator-api.md", "utf8");
 const installDocument = readFileSync("docs/install.md", "utf8");
 const readme = readFileSync("README.md", "utf8");
 const addProjectRunbook = readFileSync("docs/runbooks/add-a-project.md", "utf8");
+const quietWindowRunbook = readFileSync("docs/runbooks/quiet-window-auto-deploy.md", "utf8");
 const snapshotManifest = JSON.parse(readFileSync("public-snapshot.json", "utf8"));
 const routeSourceDirectory = "packages/api/src/routes";
 const routeSourcePaths = [
@@ -67,6 +68,8 @@ const templates = section("## Task templates");
 const projects = section("## Projects and environments");
 const repositories = section("## Repositories");
 const inbox = section("## Inbox");
+const serviceStatus = section("## Service, status, and onboarding");
+const sessions = section("## Sessions and runs");
 
 const routeIn = (source, method, path) => {
   const marker = `### ${method} \`${path}\``;
@@ -80,6 +83,29 @@ const routeSection = (method, path) => routeIn(tasks, method, path);
 const templateRouteSection = (method, path) => routeIn(templates, method, path);
 const repositoryRouteSection = (method, path) => routeIn(repositories, method, path);
 const inboxRouteSection = (method, path) => routeIn(inbox, method, path);
+
+test("auto-deploy docs describe cadence, scoped draining, and target refresh", () => {
+  const runners = routeIn(serviceStatus, "GET", "/runners").text;
+  const claims = sessions;
+
+  for (const source of [serviceStatus, quietWindowRunbook]) {
+    assert.match(source, /AUTO_DEPLOY_MIN_INTERVAL_MINUTES[\s\S]*240 minutes/u);
+    assert.match(source, /shared\/\.env/u);
+    assert.match(source, /NOOP coalescing next-eligible=/u);
+    assert.match(source, /blockers=0[\s\S]*early/u);
+  }
+  assert.match(quietWindowRunbook, /wait budget[\s\S]*dispatch drain[\s\S]*only after the interval/u);
+  assert.match(quietWindowRunbook, /自动部署等待超时，已开始排空派发/u);
+  assert.match(quietWindowRunbook, /lastSuccessfulAutomaticDeployAt/u);
+  assert.match(quietWindowRunbook, /runner-only host retains its existing `\/version` follow behavior/u);
+  assert.match(serviceStatus, /runner-only deployment retains its existing `\/version`\s+follow behavior/u);
+  assert.match(serviceStatus, /control-plane[\s\S]*re-reads\s*`origin\/main`[\s\S]*target-advanced/u);
+  assert.match(runners, /only claims that would start an agent session[\s\S]*mechanical merge/u);
+  assert.match(claims, /only a[\s\S]*candidate agent Run[\s\S]*agent session/u);
+  assert.match(claims, /template[\s\S]*Step kind, not from runner identity/u);
+  assert.match(claims, /merge-result[\s\S]*merge-authorization/u);
+  assert.match(claims, /dispatch-draining/u);
+});
 
 test("POST /projects documents bootstrap rows, canonical roles/template, and slug refusal", () => {
   const { text } = routeIn(projects, "POST", "/projects");

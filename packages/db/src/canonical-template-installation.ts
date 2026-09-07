@@ -279,6 +279,7 @@ export const applyCanonicalInstallation = async (
           select: {
             name: true,
             isDefault: true,
+            mergeTailRepairAgentId: true,
             entries: {
               select: { outputKind: true, assigneeAgentId: true, include: true },
               orderBy: { outputKind: "asc" },
@@ -305,6 +306,7 @@ export const applyCanonicalInstallation = async (
             taskTemplateId: installedTemplateId,
             name: profile.name,
             isDefault: profile.isDefault,
+            mergeTailRepairAgentId: profile.mergeTailRepairAgentId ?? null,
           },
           select: { id: true },
         });

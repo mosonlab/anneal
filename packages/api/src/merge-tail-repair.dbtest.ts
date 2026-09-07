@@ -66,6 +66,7 @@ type RegressionSeedOptions = {
   gateFailureExcerpt?: string;
   /** Give the canonical conflict resolver an operator-chosen name, as R9 allows. */
   renamedResolver?: boolean;
+  repairProfile?: "recorded" | "default" | "empty" | "archived" | "operator" | "webhook";
 };
 
 const seedRegression = async (options: RegressionSeedOptions = {}) => {
@@ -206,7 +207,41 @@ const seedRegression = async (options: RegressionSeedOptions = {}) => {
     runId: run.id, projectId: project.id, agentId: regressionAgent.id, taskId: regression.id,
     runner: "CODEX", executionStatus: "SUCCEEDED",
   } });
-  return { project, template, repo, regressionAgent, resolverAgent, reviewAgent, readinessStep, regression, librarian, fix, run, session };
+  const repairAgent = options.repairProfile ? await makeAgent("senior-dev-luna-max") : null;
+  if (repairAgent) {
+    await db.agentRepoAccess.create({ data: {
+      projectId: project.id, agentId: repairAgent.id, repoId: repo.id, mountPath: "/repo", permissions: "GIT_WRITE",
+    } });
+    const profile = await db.staffingProfile.create({ data: {
+      projectId: project.id, taskTemplateId: template.id, name: "Repair staffing",
+      isDefault: options.repairProfile === "default",
+      mergeTailRepairAgentId: options.repairProfile === "empty" ? null : repairAgent.id,
+    } });
+    if (options.repairProfile === "default") {
+      const root = await db.task.findFirstOrThrow({ where: { chainId }, orderBy: { chainIndex: "asc" } });
+      await db.taskActivity.create({ data: {
+        taskId: root.id, actorType: "operator", body: "ordinary note with colliding metadata",
+        metadata: { staffingProfileId: "not-instantiation-provenance" },
+      } });
+    }
+    if (options.repairProfile !== "default") {
+      // A different current default must not override the recorded profile.
+      await db.staffingProfile.create({ data: {
+        projectId: project.id, taskTemplateId: template.id, name: "Other default", isDefault: true,
+        mergeTailRepairAgentId: reviewAgent.id,
+      } });
+      const root = await db.task.findFirstOrThrow({ where: { chainId }, orderBy: { chainIndex: "asc" } });
+      await db.taskActivity.create({ data: {
+        taskId: root.id, actorType: options.repairProfile === "operator" || options.repairProfile === "webhook"
+          ? options.repairProfile : "control-plane", body: "Template instantiated",
+        metadata: { staffingProfileId: profile.id },
+      } });
+    }
+    if (options.repairProfile === "archived") {
+      await db.agent.update({ where: { id: repairAgent.id }, data: { archivedAt: new Date() } });
+    }
+  }
+  return { project, template, repo, regressionAgent, resolverAgent, reviewAgent, repairAgent, readinessStep, regression, librarian, fix, run, session };
 };
 
 const verdict = (outcome: RegressionOutcome, headSha: string = HEAD, gateFailureExcerpt?: string) => JSON.stringify(outcome === "refresh-conflict"
@@ -1839,6 +1874,32 @@ test("a rejected repair leaves a recovery that is still running alone", async ()
   assert.equal(await db.inboxMessage.count({
     where: { taskId: seeded.regression.id, body: { startsWith: "Autonomous merge tail stopped:" } },
   }), 1);
+});
+
+for (const [outcome, repairKind] of [["review-fail", "review-fix"], ["gate-fail", "gate-fix"]] as const) {
+  for (const repairProfile of ["recorded", "default", "empty", "archived", "operator", "webhook"] as const) {
+    test(`${repairKind} honors ${repairProfile} profile repair staffing`, async () => {
+      const seeded = await exercise(outcome, { repairProfile });
+      const repair = await repairFor(seeded, repairKind);
+      const fallback = repairProfile === "empty" || repairProfile === "archived";
+      assert.equal(repair.assigneeAgentId, fallback ? seeded.fix.assigneeAgentId : seeded.repairAgent!.id);
+      if (repairProfile === "archived") {
+        const activity = await db.taskActivity.findFirstOrThrow({ where: {
+          task: { chainId: seeded.regression.chainId },
+          metadata: { path: ["reason"], equals: "merge_tail_repair_agent_archived" },
+        } });
+        assert.match(activity.body, /archived; falling back.*fixed-implementation/u);
+      }
+      // Changing a slot only affects future repairs, not an existing repair card.
+      await db.staffingProfile.updateMany({ where: { taskTemplateId: seeded.template.id }, data: { mergeTailRepairAgentId: seeded.reviewAgent.id } });
+      assert.equal((await db.task.findUniqueOrThrow({ where: { id: repair.id } })).assigneeAgentId, repair.assigneeAgentId);
+    });
+  }
+}
+
+test("refresh-conflict ignores a staffed repair slot and keeps the resolver role", async () => {
+  const seeded = await exercise("refresh-conflict", { repairProfile: "recorded", renamedResolver: true });
+  assert.equal((await repairFor(seeded, "refresh-conflict")).assigneeAgentId, seeded.resolverAgent.id);
 });
 
 type ExternalRegressionOutcome = "review-fail" | "refresh-conflict" | "gate-fail" | "pass";

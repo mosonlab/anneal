@@ -695,6 +695,7 @@ const DEFENSE_EXACT = new Set([
   "packages/db/src/readiness-requeue.ts",
   "packages/db/src/canonical-output-schema.ts",
   "packages/db/src/template-sources.ts",
+  "packages/db/src/staffing-profile-canonical.ts",
   "packages/db/src/agent-contract.ts",
   "packages/db/prisma/seed.ts",
   "packages/db/prisma/sync-canonical-prompts.ts",
