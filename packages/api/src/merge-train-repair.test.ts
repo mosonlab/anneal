@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { type Prisma } from "@anneal/db";
+import { MergeRecoveryStatus, type Prisma } from "@anneal/db";
 
 import {
   noticeMergeTrainAbort,
@@ -37,7 +37,10 @@ const sourceRun = {
   session: { id: "regression-session" },
 };
 
-const makeTx = (markerTaskId: string | null = "repair-task") => ({
+const makeTx = (
+  markerTaskId: string | null = "repair-task",
+  recoveryRow: Record<string, unknown> | null = null,
+) => ({
   task: {
     findUniqueOrThrow: async ({ where }: { where: { id: string } }) => (
       where.id === regressionTask.id
@@ -57,6 +60,7 @@ const makeTx = (markerTaskId: string | null = "repair-task") => ({
     findUnique: async () => sourceRun,
     findFirst: async () => sourceRun,
   },
+  mergeRecoveryAttempt: { findFirst: async () => recoveryRow },
   taskActivity: {
     findFirst: (() => {
       let reads = 0;
@@ -80,6 +84,7 @@ test("a train gate failure delegates the candidate to the existing gate-fix path
     },
     stopTail: async () => assert.fail("a source Run is available"),
     openStopNotice: async (_tx, input) => { calls.notice = input; },
+    transitionRecovery: (async () => null) as unknown as MergeTrainRepairDependencies["transitionRecovery"],
   };
 
   const result = await settleMergeTrainFailure(makeTx(), {
@@ -101,6 +106,69 @@ test("a train gate failure delegates the candidate to the existing gate-fix path
   assert.match(String(calls.notice?.reason), /train-task/u);
 });
 
+test("a train gate repair moves an awaiting recovery back to REPAIRING at the prefix base", async () => {
+  const recoveryRow = {
+    id: "recovery-1",
+    status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
+    attempt: 1,
+    sourceStopId: "stop-1",
+    boundSourceRunId: "source-run",
+    authorizationActivityId: "authorization-1",
+    recoveryRunId: sourceRun.id,
+    readinessTaskId: "readiness-task",
+    regressionTaskId: regressionTask.id,
+    integratorTaskId: "integrator-task",
+    repository: "acme/widgets",
+    prNumber: 42,
+    targetBranch: "main",
+    authorizedHeadSha: HEAD,
+    authorizedBaseSha: "c".repeat(40),
+    observedBaseSha: "d".repeat(40),
+    currentBaseSha: "e".repeat(40),
+  };
+  let transition: Record<string, unknown> | undefined;
+  const dependencies: MergeTrainRepairDependencies = {
+    handleRegression: async () => "handled",
+    stopTail: async () => assert.fail("a source Run is available"),
+    openStopNotice: async () => {},
+    transitionRecovery: (async (
+      _tx: Prisma.TransactionClient,
+      aggregateId: string,
+      target: MergeRecoveryStatus,
+      data: Record<string, unknown>,
+      expected: Record<string, unknown>,
+    ) => {
+      transition = { aggregateId, target, data, expected };
+      return recoveryRow as never;
+    }) as unknown as MergeTrainRepairDependencies["transitionRecovery"],
+  };
+
+  const result = await settleMergeTrainFailure(makeTx("repair-task", recoveryRow), {
+    regressionTaskId: regressionTask.id,
+    readinessTaskId: "readiness-task",
+    headSha: HEAD,
+    predecessorOid: PREFIX,
+    trainTaskId: "train-task",
+    now: new Date("2026-09-07T00:00:00Z"),
+    kind: "fail",
+    gateExcerpt: "MERGE GATE: FAIL (test failure)",
+  }, dependencies);
+
+  assert.equal(result.kind, "repair-opened");
+  assert.equal(transition?.aggregateId, recoveryRow.id);
+  assert.equal(transition?.target, MergeRecoveryStatus.REPAIRING);
+  assert.deepEqual(transition?.data, {
+    currentBaseSha: PREFIX,
+    failureReason: null,
+    endedAt: null,
+  });
+  assert.deepEqual(transition?.expected, {
+    status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
+    regressionTaskId: regressionTask.id,
+    recoveryRunId: sourceRun.id,
+  });
+});
+
 test("a blocked train candidate uses the existing readiness stop path", async () => {
   let stopInput: Record<string, unknown> | undefined;
   const dependencies: MergeTrainRepairDependencies = {
@@ -110,9 +178,33 @@ test("a blocked train candidate uses the existing readiness stop path", async ()
       return { leaseOutcome: { kind: "stop", taskId: regressionTask.id } };
     }) as MergeTrainRepairDependencies["stopTail"],
     openStopNotice: async () => assert.fail("readiness stop owns the notice"),
+    transitionRecovery: (async () => null) as unknown as MergeTrainRepairDependencies["transitionRecovery"],
   };
 
-  const result = await settleMergeTrainFailure(makeTx(), {
+  const recoveryRow = {
+    id: "recovery-1",
+    status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
+    attempt: 1,
+    sourceStopId: "stop-1",
+    boundSourceRunId: "source-run",
+    authorizationActivityId: "authorization-1",
+    // A blocked prefix has no current Regression Run identity. Keep this
+    // aggregate bound to an earlier recovery Run to prove the stop resolves
+    // it by candidate task rather than accidentally passing a source Run
+    // filter.
+    recoveryRunId: "prior-recovery-run",
+    readinessTaskId: "readiness-task",
+    regressionTaskId: regressionTask.id,
+    integratorTaskId: "integrator-task",
+    repository: "acme/widgets",
+    prNumber: 42,
+    targetBranch: "main",
+    authorizedHeadSha: HEAD,
+    authorizedBaseSha: "c".repeat(40),
+    observedBaseSha: "d".repeat(40),
+    currentBaseSha: "e".repeat(40),
+  };
+  const result = await settleMergeTrainFailure(makeTx("repair-task", recoveryRow), {
     regressionTaskId: regressionTask.id,
     readinessTaskId: "readiness-task",
     headSha: HEAD,
@@ -125,6 +217,7 @@ test("a blocked train candidate uses the existing readiness stop path", async ()
 
   assert.equal(result.kind, "stopped");
   assert.equal(stopInput?.phase, "readiness");
+  assert.equal((stopInput?.recovery as { aggregateId?: string } | null)?.aggregateId, recoveryRow.id);
   assert.match(String(stopInput?.reason), /runtime could not inspect candidate/u);
 });
 

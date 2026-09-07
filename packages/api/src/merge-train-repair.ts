@@ -1,4 +1,7 @@
 import {
+  MergeRecoveryStatus,
+  recoveryContext,
+  transitionMergeRecovery,
   type Prisma,
   type RegressionVerdict,
   TaskStatus,
@@ -34,12 +37,14 @@ export type MergeTrainRepairDependencies = {
   handleRegression: typeof handleRegressionCompletion;
   stopTail: typeof stopMergeTail;
   openStopNotice: typeof openMergeTailStopNotice;
+  transitionRecovery: typeof transitionMergeRecovery;
 };
 
 const defaultDependencies: MergeTrainRepairDependencies = {
   handleRegression: handleRegressionCompletion,
   stopTail: stopMergeTail,
   openStopNotice: openMergeTailStopNotice,
+  transitionRecovery: transitionMergeRecovery,
 };
 
 type TrainRegressionTask = {
@@ -65,6 +70,22 @@ type TrainSourceRun = {
   branch: string | null;
   headSha: string | null;
   session: { id: string } | null;
+};
+
+const readActiveRecovery = async (
+  tx: DbTx,
+  regressionTaskId: string,
+  sourceRunId: string | null,
+) => {
+  const row = await tx.mergeRecoveryAttempt.findFirst({
+    where: {
+      regressionTaskId,
+      status: { in: [MergeRecoveryStatus.REPAIRING, MergeRecoveryStatus.AWAITING_AUTHORIZATION] },
+      ...(sourceRunId ? { recoveryRunId: sourceRunId } : {}),
+    },
+    orderBy: [{ attempt: "desc" }, { id: "desc" }],
+  });
+  return { row, context: recoveryContext(row) };
 };
 
 const readRegressionTask = async (
@@ -164,6 +185,15 @@ export const settleMergeTrainFailure = async (
 ): Promise<MergeTrainCandidateSettlementResult> => {
   const regressionTask = await readRegressionTask(tx, input.regressionTaskId);
   const sourceRun = await readSourceRun(tx, input.regressionTaskId);
+  // A blocked prefix has no source Run that can identify its recovery: the
+  // runtime stopped before producing a Regression verdict. Resolve the
+  // candidate's active aggregate by task alone so the readiness stop can move
+  // that same recovery into BLOCKED_DOWNSTREAM.
+  const activeRecovery = await readActiveRecovery(
+    tx,
+    input.regressionTaskId,
+    input.kind === "blocked" ? null : sourceRun?.id ?? null,
+  );
   const reason = trainFailureReason(input);
 
   if (input.kind === "blocked") {
@@ -172,7 +202,7 @@ export const settleMergeTrainFailure = async (
       readinessTaskId: input.readinessTaskId,
       regressionTaskId: input.regressionTaskId,
       reason,
-      recovery: null,
+      recovery: activeRecovery.context,
       at: input.now,
     });
     return { kind: "stopped", reason };
@@ -185,7 +215,7 @@ export const settleMergeTrainFailure = async (
       readinessTaskId: input.readinessTaskId,
       regressionTaskId: input.regressionTaskId,
       reason: missing,
-      recovery: null,
+      recovery: activeRecovery.context,
       at: input.now,
     });
     return { kind: "stopped", reason: missing };
@@ -233,7 +263,10 @@ export const settleMergeTrainFailure = async (
       sessionId: sourceRun.session?.id ?? "",
     },
     qualifiedVerdict: verdict,
-    ignoreRecovery: true,
+    mergeTrainFailure: {
+      trainTaskId: input.trainTaskId,
+      predecessorOid: input.predecessorOid,
+    },
     now: input.now,
   });
 
@@ -244,7 +277,7 @@ export const settleMergeTrainFailure = async (
       readinessTaskId: input.readinessTaskId,
       regressionTaskId: input.regressionTaskId,
       reason: unexpected,
-      recovery: null,
+      recovery: activeRecovery.context,
       at: input.now,
     });
     return { kind: "stopped", reason: unexpected };
@@ -265,6 +298,26 @@ export const settleMergeTrainFailure = async (
     : null;
   const newlyOpened = priorRepairAttempt === null && repairTaskId !== null;
   if (newlyOpened && repairTaskId) {
+    if (activeRecovery.row && activeRecovery.context) {
+      const transitioned = await dependencies.transitionRecovery(
+        tx,
+        activeRecovery.row.id,
+        MergeRecoveryStatus.REPAIRING,
+        {
+          currentBaseSha: input.predecessorOid,
+          failureReason: null,
+          endedAt: null,
+        },
+        {
+          status: activeRecovery.row.status,
+          regressionTaskId: input.regressionTaskId,
+          recoveryRunId: sourceRun.id,
+        },
+      );
+      if (!transitioned) {
+        throw new Error(`Merge train ${input.trainTaskId} could not move recovery ${activeRecovery.row.id} into REPAIRING`);
+      }
+    }
     // The train worker's readiness claim may have left this Task DOING while
     // it settled the detached train Run. Return it to the ordinary tail queue
     // beside the Regression REVIEW state created by the repair path.
