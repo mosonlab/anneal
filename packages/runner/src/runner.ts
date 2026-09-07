@@ -67,6 +67,7 @@ import {
 import { createRunLease, deliverUnderLease, type RunLease, type RunLeaseClock } from "./run-lease.js";
 import { createSessionEventQueue } from "./session-event-queue.js";
 import { openSessionConfig, type SessionConfigLease } from "./session-config-lease.js";
+import { readMergeTrainOutputHandoff } from "./merge-train-output-handoff.js";
 import { readRegressionOutputHandoff, type RegressionOutputHandoffBlock } from "./regression-output-handoff.js";
 import { readTaskOutputReceipt } from "./task-output-receipt.js";
 import {
@@ -85,7 +86,7 @@ const serializeTool = (tool: RuntimeHandle["inFlightTool"]): Record<string, unkn
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
-const persistRegressionOutputHandoff = async (
+const persistMechanicalOutputHandoff = async (
   session: RunSession,
   handoff: SessionTaskOutput,
   sink: (event: AdapterEvent) => void,
@@ -144,30 +145,42 @@ const exitEvidencePayload = (evidence: ExitEvidence): Record<string, unknown> =>
   stderrTail: summarizeEvidence(evidence.stderr),
 });
 
-type RegressionHandoff = Awaited<ReturnType<typeof readRegressionOutputHandoff>>;
+type MechanicalHandoff =
+  | Awaited<ReturnType<typeof readRegressionOutputHandoff>>
+  | Awaited<ReturnType<typeof readMergeTrainOutputHandoff>>;
+
+/** Read whichever mechanical deliverable this step's runtime tool authors. A
+ * script never holds session credentials; the Runner publishes its handoff
+ * through the fenced control-plane transport. */
+const readMechanicalOutputHandoff = async (
+  config: RunnerConfig,
+  claim: ClaimedTask,
+  workspace: Workspace,
+): Promise<MechanicalHandoff> => await readRegressionOutputHandoff(config, claim, workspace)
+  ?? await readMergeTrainOutputHandoff(config, claim, workspace);
 
 type AbsentTerminalProduct = { case: "absent"; reason: "none" | "wrong-output-kind" | "output-head-mismatch" };
-type RegressionTerminalProduct = { case: "regression-handoff"; handoff: SessionTaskOutput };
+type MechanicalTerminalProduct = { case: "mechanical-handoff"; handoff: SessionTaskOutput };
 type DeliveredTerminalProduct = { case: "delivered-output"; output: PersistedRunOutput };
 
 /** The shared, side-effect-free detection used by both established settling paths. */
 function detectDurableTerminalProduct(input: {
-  regressionHandoff: Exclude<RegressionHandoff, null>;
+  mechanicalHandoff: Exclude<MechanicalHandoff, null>;
   outputEvidence: null;
   capturedHeadSha: undefined;
-}): RegressionTerminalProduct | AbsentTerminalProduct;
+}): MechanicalTerminalProduct | AbsentTerminalProduct;
 function detectDurableTerminalProduct(input: {
-  regressionHandoff: null;
+  mechanicalHandoff: null;
   outputEvidence: RunOutputEvidence | null;
   capturedHeadSha: string | undefined;
 }): DeliveredTerminalProduct | AbsentTerminalProduct;
 function detectDurableTerminalProduct(input: {
-  regressionHandoff: RegressionHandoff;
+  mechanicalHandoff: MechanicalHandoff;
   outputEvidence: RunOutputEvidence | null;
   capturedHeadSha: string | undefined;
-}): RegressionTerminalProduct | DeliveredTerminalProduct | AbsentTerminalProduct {
-  if (input.regressionHandoff !== null && !("reason" in input.regressionHandoff)) {
-    return { case: "regression-handoff", handoff: input.regressionHandoff };
+}): MechanicalTerminalProduct | DeliveredTerminalProduct | AbsentTerminalProduct {
+  if (input.mechanicalHandoff !== null && !("reason" in input.mechanicalHandoff)) {
+    return { case: "mechanical-handoff", handoff: input.mechanicalHandoff };
   }
   const satisfaction = input.outputEvidence?.satisfaction;
   if (satisfaction?.case !== "delivered") return { case: "absent", reason: "none" };
@@ -381,12 +394,12 @@ export const executeClaim = async (
 
   const probeDurableTerminalProduct = async (): Promise<"present" | "absent" | "inconclusive"> => {
     if (!workspace) return "inconclusive";
-    let regressionHandoff: RegressionHandoff = null;
+    let mechanicalHandoff: MechanicalHandoff = null;
     try {
-      regressionHandoff = await readRegressionOutputHandoff(config, claim, workspace);
-      if (regressionHandoff !== null
-        && detectDurableTerminalProduct({ regressionHandoff, outputEvidence: null, capturedHeadSha: undefined }).case
-          === "regression-handoff") {
+      mechanicalHandoff = await readMechanicalOutputHandoff(config, claim, workspace);
+      if (mechanicalHandoff !== null
+        && detectDurableTerminalProduct({ mechanicalHandoff, outputEvidence: null, capturedHeadSha: undefined }).case
+          === "mechanical-handoff") {
         return "present";
       }
     } catch {
@@ -397,7 +410,7 @@ export const executeClaim = async (
     try {
       const capturedHeadSha = (await captureWorkspaceResult(config, workspace)).headSha;
       const outputEvidence = await session.outputStatus();
-      return detectDurableTerminalProduct({ regressionHandoff: null, outputEvidence, capturedHeadSha }).case
+      return detectDurableTerminalProduct({ mechanicalHandoff: null, outputEvidence, capturedHeadSha }).case
         === "delivered-output" ? "present" : "absent";
     } catch {
       // An inconclusive status read is not evidence that no product exists.
@@ -675,19 +688,19 @@ export const executeClaim = async (
     // on. Every question the rest of this function asks about how the agent
     // process ended is one case of this verdict.
     const exitVerdict = agentExitVerdict(evidence);
-    let regressionHandoffPersisted = false;
+    let mechanicalHandoffPersisted = false;
     if (runLease.held) {
       try {
-        const handoff = await readRegressionOutputHandoff(config, claim, workspace);
+        const handoff = await readMechanicalOutputHandoff(config, claim, workspace);
         if (handoff) {
           const product = detectDurableTerminalProduct({
-            regressionHandoff: handoff,
+            mechanicalHandoff: handoff,
             outputEvidence: null,
             capturedHeadSha: undefined,
           });
-          if (product.case === "regression-handoff") {
-            await persistRegressionOutputHandoff(session, product.handoff, sink);
-            regressionHandoffPersisted = true;
+          if (product.case === "mechanical-handoff") {
+            await persistMechanicalOutputHandoff(session, product.handoff, sink);
+            mechanicalHandoffPersisted = true;
             sink({
               source: "RUNNER",
               type: "REGRESSION_OUTPUT_HANDOFF_PERSISTED",
@@ -698,7 +711,7 @@ export const executeClaim = async (
           }
         }
       } catch (error: unknown) {
-        terminalFailureReason = `Regression output handoff failed for Run ${claim.run.id}: ${errorMessage(error)}`;
+        terminalFailureReason = `Mechanical output handoff failed for Run ${claim.run.id}: ${errorMessage(error)}`;
         sink({
           source: "RUNNER",
           type: "REGRESSION_OUTPUT_HANDOFF_FAILED",
@@ -765,7 +778,7 @@ export const executeClaim = async (
               providerConversationIdAvailable: providerConversationId !== null,
               ...(regressionHandoffBlock
                 ? { reason: regressionHandoffBlock.reason, stderr: regressionHandoffBlock.stderr }
-                : { reason: regressionHandoffPersisted ? "mechanical-output-not-visible" : "mechanical-handoff-absent" }),
+                : { reason: mechanicalHandoffPersisted ? "mechanical-output-not-visible" : "mechanical-handoff-absent" }),
             },
           });
         } else if (relaunch.allowed) {
@@ -889,7 +902,7 @@ export const executeClaim = async (
         // "this Run delivered it" is the control plane's decision, not a
         // predicate to re-run here. What remains is the one fact only this
         // process knows: the commit the workspace actually ends on.
-        const product = detectDurableTerminalProduct({ regressionHandoff: null, outputEvidence, capturedHeadSha });
+        const product = detectDurableTerminalProduct({ mechanicalHandoff: null, outputEvidence, capturedHeadSha });
         if (product.case === "absent") {
           if (product.reason === "wrong-output-kind" && satisfaction?.case === "delivered") {
             throw new Error(`Persisted output kind ${satisfaction.output.kind} is not ${expectedKind}`);
@@ -968,7 +981,7 @@ export const executeClaim = async (
       });
       return;
     }
-    const regressionMechanicallySettled = regressionHandoffPersisted
+    const mechanicallySettled = mechanicalHandoffPersisted
       // A validated, fenced Regression handoff is the step's terminal product
       // only when the provider did not explicitly reject the session. Transport
       // loss remains recoverable, but a terminal failure keeps its authority.
@@ -976,7 +989,7 @@ export const executeClaim = async (
       && terminalFailureReason === null
       && budget.refusal === null;
     const executionSucceeded = (exitVerdict.case === "succeeded"
-      || regressionMechanicallySettled
+      || mechanicallySettled
       || postDeliveryDisconnectTolerated)
       && terminalFailureReason === null
       && budget.refusal === null;
@@ -1076,7 +1089,7 @@ export const executeClaim = async (
     // the success predicate would agree with the verdict already reached here.
     const successOutcome: RunOutcome = exitVerdict.case === "succeeded"
       ? { case: "succeeded" }
-      : regressionMechanicallySettled
+      : mechanicallySettled
         ? { case: "regression-mechanically-settled" }
         : { case: "delivered-then-disconnected" };
     // A salvage push failure must not mask why the run itself failed.
