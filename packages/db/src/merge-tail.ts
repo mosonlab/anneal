@@ -37,10 +37,10 @@ export const MERGE_TAIL_KIND = {
 /**
  * How many automatic repairs one chain gets per repair kind before the tail
  * stops. A semantic or gate FAIL after a repair is a different verdict against
- * a different tree, so one more attempt is progress rather than a loop; a
+ * a different tree, so another attempt is progress rather than a loop; a
  * refresh conflict is not covered by this and stays at one attempt per head.
  */
-export const MAX_MERGE_TAIL_REPAIR_ATTEMPTS = 2;
+export const MAX_MERGE_TAIL_REPAIR_ATTEMPTS = 3;
 
 export const MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES = 2;
 
