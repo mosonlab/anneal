@@ -2,11 +2,38 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { parsePiEvent, parsePiTranscript } from "./pi.js";
+import { parsePiEvent, parsePiTranscript, providerEventPersistence } from "./pi.js";
+import { processProviderEvent } from "./runtime.js";
 
 const CAPTURE = new URL("../../../../spikes/cli-capabilities/samples/pi-openai-codex-gpt-5.6-luna-20260828T214948Z.jsonl", import.meta.url);
 
 type RecordedEvent = { type: string; payload: Record<string, unknown> };
+
+type TimedProviderEvent = { at: number; event: Record<string, unknown> };
+
+const replayPiAt = (transcript: readonly TimedProviderEvent[]): RecordedEvent[] => {
+  const state = parsePiTranscript([]);
+  const events: RecordedEvent[] = [];
+  for (const { at, event } of transcript) {
+    const nativeDate = globalThis.Date;
+    class FixedDate extends nativeDate {
+      constructor(value?: string | number | Date) {
+        super(value === undefined ? at : value);
+      }
+
+      static override now(): number {
+        return at;
+      }
+    }
+    globalThis.Date = FixedDate as unknown as DateConstructor;
+    try {
+      processProviderEvent(state, event, (recorded) => { events.push(recorded); }, parsePiEvent, providerEventPersistence);
+    } finally {
+      globalThis.Date = nativeDate;
+    }
+  }
+  return events;
+};
 
 const CHUNK_TYPES = new Set(["message_update", "tool_execution_update"]);
 const UNCLASSIFIED_PROVIDER_TYPE = Symbol("unclassified-provider-type");
@@ -183,4 +210,58 @@ test("PI treats cache-only usage as tokens when diagnosing a missing cost", () =
   const errors = events.filter((event) => event.type === "ADAPTER_ERROR");
   assert.equal(errors.length, 1);
   assert.match(String(errors[0]!.payload.error), /^Session cost is incomplete: PI reported no cost$/u);
+});
+
+test("PI records TTFT on the assistant message_end while preserving the event histogram", () => {
+  const events = replayPiAt([
+    { at: 1_000, event: { type: "session", id: "session-1" } },
+    { at: 1_125, event: { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "hello" } } },
+    { at: 1_400, event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "hello" }] } } },
+    { at: 1_500, event: { type: "turn_end", message: { role: "assistant", content: [{ type: "text", text: "hello" }] } } },
+  ]);
+
+  const assistantMessageEnd = events.find((event) => event.type === "MODEL_COMPLETED"
+    && event.payload.type === "message_end");
+  assert.ok(assistantMessageEnd);
+  assert.equal((assistantMessageEnd.payload.anneal as { ttftMs?: unknown }).ttftMs, 125);
+  const turnEnd = events.find((event) => event.type === "MODEL_COMPLETED" && event.payload.type === "turn_end");
+  assert.ok(turnEnd);
+  assert.equal(turnEnd.payload.anneal, undefined);
+  assert.deepEqual(events.map((event) => event.type), [
+    "PROVIDER_RAW", "MODEL_STARTED", "PROVIDER_RAW", "MODEL_COMPLETED", "PROVIDER_RAW", "MODEL_COMPLETED",
+  ]);
+});
+
+test("PI omits TTFT when a turn has no observed message chunk", () => {
+  const events: RecordedEvent[] = [];
+  parsePiTranscript([
+    { type: "session", id: "session-1" },
+    { type: "message_update", assistantMessageEvent: { type: "text_start", contentIndex: 0 } },
+    { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "hello" }] } },
+  ], (event) => { events.push(event); });
+
+  const assistantMessageEnd = events.find((event) => event.type === "MODEL_COMPLETED");
+  assert.ok(assistantMessageEnd);
+  assert.equal(assistantMessageEnd.payload.anneal, undefined);
+});
+
+test("PI consumes one turn timing and starts the next after user input", () => {
+  const events = replayPiAt([
+    { at: 1_000, event: { type: "session", id: "session-1" } },
+    { at: 1_100, event: { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "one" } } },
+    { at: 1_200, event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "one" }] } } },
+    { at: 1_300, event: { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "stale" } } },
+    { at: 1_400, event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "stale" }] } } },
+    { at: 2_000, event: { type: "message_end", message: { role: "user", content: [{ type: "text", text: "next" }] } } },
+    { at: 2_200, event: { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "two" } } },
+    { at: 2_500, event: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "two" }] } } },
+  ]);
+
+  const assistants = events.filter((event) => event.type === "MODEL_COMPLETED"
+    && event.payload.type === "message_end"
+    && (event.payload.message as { role?: unknown } | undefined)?.role === "assistant");
+  assert.equal(assistants.length, 3);
+  assert.equal((assistants[0]!.payload.anneal as { ttftMs?: unknown }).ttftMs, 100);
+  assert.equal(assistants[1]!.payload.anneal, undefined);
+  assert.equal((assistants[2]!.payload.anneal as { ttftMs?: unknown }).ttftMs, 200);
 });

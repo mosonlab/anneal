@@ -54,6 +54,17 @@ export type AdapterState = {
   startedAt: Date;
   lastProcessAliveAt: Date;
   lastProgressEventAt: Date;
+  /**
+   * In-memory provider-boundary timing for the currently requested model turn.
+   * The provider parsers stamp the first turn at their MODEL_STARTED event,
+   * then stamp later turns at the tool completion or user-input event that
+   * completes the next model input. These values never become standalone
+   * SessionEvent rows; only the completion payload receives the derived TTFT.
+   */
+  turnRequestedAt: Date | null;
+  firstChunkAt: Date | null;
+  /** Guards the provider's one-time first-turn MODEL_STARTED boundary. */
+  turnRequestSeen: boolean;
   inFlightTool: InFlightTool | null;
   providerConversationId: string | null;
   terminalEventSeen: boolean;
@@ -162,6 +173,8 @@ export type AdapterDeclaration = {
   ): Promise<void>;
   initialProviderState(): unknown;
   providerEventPersistence: ProviderEventPersistencePredicate;
+  /** Optional filter for provider lines retained in exit evidence stdout. */
+  stdoutPersistence?: ProviderEventPersistencePredicate;
   parseEvent: AdapterEventParser;
   preflight(spec: PreflightSpec): Promise<PreflightResult>;
   /** Optional provider-owned reading of a dropped exit, see `CliAdapter`. */
@@ -179,6 +192,9 @@ export const createAdapterState = (
   startedAt,
   lastProcessAliveAt: startedAt,
   lastProgressEventAt: startedAt,
+  turnRequestedAt: null,
+  firstChunkAt: null,
+  turnRequestSeen: false,
   inFlightTool: null,
   providerConversationId: null,
   terminalEventSeen: false,
@@ -209,6 +225,46 @@ export const eventErrorMessage = (event: Record<string, unknown>): string | null
 export const emitAdapterEvent = (state: AdapterState, sink: SessionEventSink, type: string, payload: Record<string, unknown>, toolCallId?: string | null): void => {
   state.lastProgressEventAt = new Date();
   sink({ source: sourceFor(state.runner), type, payload, ...(toolCallId !== undefined ? { toolCallId } : {}) });
+};
+
+/**
+ * Stamp the completion of the current model input and begin a new turn.
+ * Provider boundary choices are intentionally narrow: Claude uses its first
+ * system event, then each user/tool-result event; Codex uses thread.started,
+ * then each completed command or non-command tool item; PI uses session, then
+ * each completed tool or user message. A later boundary replaces an earlier
+ * one when a provider reports several tool completions separately.
+ */
+export const markTurnRequested = (state: AdapterState, at = new Date()): void => {
+  state.turnRequestedAt = at;
+  state.firstChunkAt = null;
+  state.turnRequestSeen = true;
+};
+
+/** Record only the first provider output chunk observed for the current turn. */
+export const markFirstChunk = (state: AdapterState, at = new Date()): void => {
+  if (state.turnRequestedAt !== null && state.firstChunkAt === null) state.firstChunkAt = at;
+};
+
+/** Add the derived timing namespace without changing an existing payload. */
+export const withTurnTtft = (state: AdapterState, payload: Record<string, unknown>): Record<string, unknown> => {
+  if (state.turnRequestedAt === null || state.firstChunkAt === null) return payload;
+  const anneal = asRecord(payload.anneal) ?? {};
+  return {
+    ...payload,
+    anneal: {
+      ...anneal,
+      ttftMs: Math.max(0, state.firstChunkAt.getTime() - state.turnRequestedAt.getTime()),
+    },
+  };
+};
+
+/** Add TTFT to one completion payload, then consume its first-chunk stamp. */
+export const consumeTurnTtft = (state: AdapterState, payload: Record<string, unknown>): Record<string, unknown> => {
+  const completed = withTurnTtft(state, payload);
+  state.turnRequestedAt = null;
+  state.firstChunkAt = null;
+  return completed;
 };
 
 export const markInFlightToolProgress = (state: AdapterState): void => {
@@ -247,6 +303,21 @@ const processLine = (
     return;
   }
   processProviderEvent(state, event, sink, parseEvent, providerEventPersistence);
+};
+
+const retainStdoutLine = (
+  line: string,
+  persistence: ProviderEventPersistencePredicate | undefined,
+): boolean => {
+  if (!persistence) return true;
+  try {
+    const parsed = JSON.parse(line) as unknown;
+    return persistence(asRecord(parsed) ?? { value: parsed });
+  } catch {
+    // Preserve non-JSON diagnostics. A valid partial provider event is always
+    // line-delimited JSON, so malformed text cannot be classified as one.
+    return true;
+  }
 };
 
 // Run.model carries an optional reasoning-effort suffix: "<model>[:<effort>]".
@@ -337,14 +408,18 @@ export const spawnAdapterRuntime = (
     exit: Promise.resolve({} as ExitEvidence),
   };
   let buffer = "";
+  const stdoutPersistence = declaration.stdoutPersistence;
   child.stdout!.setEncoding("utf8");
   child.stderr!.setEncoding("utf8");
   child.stdout!.on("data", (chunk: string) => {
-    handle.stdout = cap(handle.stdout + chunk);
+    if (!stdoutPersistence) handle.stdout = cap(handle.stdout + chunk);
     buffer += chunk;
     const lines = buffer.split(/\r?\n/u);
     buffer = lines.pop() ?? "";
-    for (const line of lines) processLine(handle, line, sink, declaration.parseEvent, declaration.providerEventPersistence);
+    for (const line of lines) {
+      if (stdoutPersistence && retainStdoutLine(line, stdoutPersistence)) handle.stdout = cap(handle.stdout + `${line}\n`);
+      processLine(handle, line, sink, declaration.parseEvent, declaration.providerEventPersistence);
+    }
   });
   child.stderr!.on("data", (chunk: string) => {
     handle.stderr = cap(handle.stderr + chunk);
@@ -355,7 +430,10 @@ export const spawnAdapterRuntime = (
     const finish = (exitCode: number | null, signal: string | null): void => {
       if (settled) return;
       settled = true;
-      if (buffer.trim()) processLine(handle, buffer, sink, declaration.parseEvent, declaration.providerEventPersistence);
+      if (buffer.trim()) {
+        if (stdoutPersistence && retainStdoutLine(buffer, stdoutPersistence)) handle.stdout = cap(handle.stdout + buffer);
+        processLine(handle, buffer, sink, declaration.parseEvent, declaration.providerEventPersistence);
+      }
       resolvePromise({
         exitCode,
         signal,

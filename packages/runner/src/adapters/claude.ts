@@ -7,8 +7,11 @@ import type { AgentScratch } from "../workspace.js";
 import {
   asRecord,
   capturePreflight,
+  consumeTurnTtft,
   createAdapterState,
   emitAdapterEvent,
+  markFirstChunk,
+  markTurnRequested,
   mcpConfig,
   mcpServerPath,
   modelSpec,
@@ -50,7 +53,7 @@ const denyArgs = (disabledTools: string[]): string[] => {
 export const claudeArgs = (spec: RunSpec, resume?: ResumeSpec): string[] => {
   const { model, effort } = modelSpec(spec.claim.run.model);
   return [
-    "-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose",
+    "-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
     // Model must be pinned explicitly; the CLI otherwise inherits the
     // operator's personal default, which is reserved quota.
     "--model", model, "--effort", effort ?? "high",
@@ -71,6 +74,28 @@ export const claudeArgs = (spec: RunSpec, resume?: ResumeSpec): string[] => {
   ];
 };
 
+/** Partial stream rows are liveness and TTFT signals only. */
+export const providerEventPersistence = (event: Record<string, unknown>): boolean =>
+  stringField(event, "type") !== "stream_event";
+
+const isClaudeOutputChunk = (event: Record<string, unknown>): boolean => {
+  const stream = asRecord(event.event);
+  const streamType = stringField(stream, "type");
+  if (streamType === "content_block_delta") {
+    const delta = asRecord(stream?.delta);
+    return Object.entries(delta ?? {}).some(([key, value]) => key !== "type" && typeof value === "string" && value.length > 0);
+  }
+  if (streamType === "content_block_start") {
+    const block = asRecord(stream?.content_block);
+    // Tool-use block starts carry the tool name before input deltas arrive;
+    // message_start/content_block_stop/message_delta/message_stop are headers
+    // or completion metadata and cannot establish first output.
+    return stringField(block, "type") === "tool_use"
+      || (typeof block?.text === "string" && block.text.length > 0);
+  }
+  return false;
+};
+
 export const parseClaudeEvent = (
   state: AdapterState,
   event: Record<string, unknown>,
@@ -79,7 +104,15 @@ export const parseClaudeEvent = (
   const type = stringField(event, "type");
   if (type === "system") {
     state.providerConversationId = stringField(event, "session_id") ?? state.providerConversationId;
+    // Claude's first system event closes the initial prompt boundary. Later
+    // system notifications describe the same turn and must not reset TTFT.
+    if (!state.turnRequestSeen) markTurnRequested(state);
     emitAdapterEvent(state, sink, "MODEL_STARTED", event);
+  } else if (type === "stream_event") {
+    // The parser still runs for suppressed rows, so this renews liveness and
+    // records the first provider output without persisting partial payloads.
+    if (isClaudeOutputChunk(event)) markFirstChunk(state);
+    emitAdapterEvent(state, sink, "MODEL_DELTA", event);
   } else if (type === "assistant") {
     const message = asRecord(event.message);
     const content = Array.isArray(message?.content) ? message.content : [];
@@ -92,10 +125,14 @@ export const parseClaudeEvent = (
         emitAdapterEvent(state, sink, "TOOL_STARTED", part ?? {}, toolId);
       }
     }
-    emitAdapterEvent(state, sink, "MODEL_DELTA", event);
+    emitAdapterEvent(state, sink, "MODEL_DELTA", consumeTurnTtft(state, event));
   } else if (type === "user") {
     const message = asRecord(event.message);
     const content = Array.isArray(message?.content) ? message.content : [];
+    const inputCompleted = content.some((item) => stringField(asRecord(item), "type") === "tool_result");
+    // Stamp at provider-event arrival, before any synchronous SessionEvent
+    // sink work, so TTFT measures the provider boundary itself.
+    if (inputCompleted || message !== null) markTurnRequested(state);
     for (const item of content) {
       const part = asRecord(item);
       if (stringField(part, "type") === "tool_result") {
@@ -104,6 +141,9 @@ export const parseClaudeEvent = (
         emitAdapterEvent(state, sink, "TOOL_COMPLETED", part ?? {}, toolId);
       }
     }
+    // A user message (including a tool result) is the provider-visible end of
+    // Claude's next model input. If several tool results arrive separately,
+    // the latest event is the boundary used for the next turn.
   } else if (type === "result") {
     state.terminalEventSeen = true;
     state.terminalSuccess = event.is_error === false && event.terminal_reason === "completed";
@@ -121,7 +161,7 @@ export const parseClaudeTranscript = (
   sink: SessionEventSink = () => undefined,
 ): AdapterState => {
   const state = createAdapterState("CLAUDE", "transcript");
-  for (const value of transcript) processProviderEvent(state, asRecord(value) ?? { value }, sink, parseClaudeEvent, () => true);
+  for (const value of transcript) processProviderEvent(state, asRecord(value) ?? { value }, sink, parseClaudeEvent, providerEventPersistence);
   return state;
 };
 
@@ -195,7 +235,8 @@ export const claudeDeclaration: AdapterDeclaration = Object.freeze({
   childEnvironment: claudeChildEnvironment,
   provisionSessionConfig: provisionClaudeSessionConfig,
   initialProviderState: () => undefined,
-  providerEventPersistence: () => true,
+  providerEventPersistence,
+  stdoutPersistence: providerEventPersistence,
   parseEvent: parseClaudeEvent,
   preflight,
 });

@@ -676,7 +676,7 @@ test("the interpreter the CLI is told to run the MCP server with is overridable 
 test("an empty denied set keeps every runner argv byte-identical", () => {
   const spec = runSpec();
   assert.deepEqual(stableArgv(argsForRunner("CLAUDE", spec)), [
-    "-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose",
+    "-p", "--dangerously-skip-permissions", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
     "--model", "codex", "--effort", "high",
     "--setting-sources", "project,local", "--settings", "<CLAUDE_SETTINGS>",
     "--mcp-config", "{\"mcpServers\":{\"agentos\":{\"type\":\"stdio\",\"command\":\"<NODE>\",\"args\":[\"<MCP_SERVER>\",\"--credentials\",\"/work/.agentos/session.json\"]}}}",
@@ -1015,6 +1015,11 @@ test("every runner is handed the prompt and the resume input byte-exact at the p
     assert.equal(started.evidence.exitCode, 0);
     assert.equal(started.report.bytes, Buffer.byteLength(prompt));
     assert.equal(started.report.sha256, sha256(prompt), `${runner} altered the prompt on the way to stdin`);
+    assert.equal(
+      started.evidence.stdout,
+      `${JSON.stringify({ type: "turn.completed", ...started.report })}\n`,
+      `${runner} changed the provider stdout evidence while capturing it`,
+    );
     const processStarted = started.events.find((event) => event.type === "PROCESS_STARTED");
     assert.equal(processStarted?.payload.promptTransport, "stdin");
     assert.equal(processStarted?.payload.promptBytes, Buffer.byteLength(prompt));
@@ -1027,6 +1032,58 @@ test("every runner is handed the prompt and the resume input byte-exact at the p
     assert.equal(resumed.report.sha256, sha256(resumeInput), `${runner} altered the resume input on the way to stdin`);
     const resumedProcessStarted = resumed.events.find((event) => event.type === "PROCESS_STARTED");
     assert.equal(resumedProcessStarted?.payload.promptHash, sha256(resumeInput));
+  }
+});
+
+test("Claude partial stream stdout is excluded from exit evidence", { timeout: SPAWNING_TEST_TIMEOUT_MS }, async () => {
+  const fixture = await mkdtemp(join(tmpdir(), "agentos-claude-partial-evidence-"));
+  const binary = join(fixture, "claude-stub.sh");
+  const partial = JSON.stringify({
+    type: "stream_event",
+    event: { type: "content_block_delta", delta: { type: "text_delta", text: "partial" } },
+  });
+  const splitPartial = JSON.stringify({
+    type: "stream_event",
+    event: { type: "content_block_delta", delta: { type: "text_delta", text: "split" } },
+  });
+  const finalPartial = JSON.stringify({
+    type: "stream_event",
+    event: { type: "message_stop" },
+  });
+  const splitAt = Math.floor(splitPartial.length / 2);
+  const assistant = JSON.stringify({
+    type: "assistant",
+    message: { role: "assistant", content: [{ type: "text", text: "complete" }] },
+  });
+  await writeFile(binary, [
+    "#!/bin/sh",
+    "cat >/dev/null",
+    `printf '%s\\n' ${JSON.stringify(partial)}`,
+    `printf '%s' ${JSON.stringify(splitPartial.slice(0, splitAt))}`,
+    "sleep 0.01",
+    `printf '%s\\n' ${JSON.stringify(splitPartial.slice(splitAt))}`,
+    `printf '%s\\n' ${JSON.stringify(assistant)}`,
+    `printf '%s' ${JSON.stringify(finalPartial)}`,
+    "exit 1",
+    "",
+  ].join("\n"));
+  await chmod(binary, 0o755);
+  try {
+    const spec = runSpec();
+    spec.config = { ...spec.config, binaries: { CLAUDE: binary, CODEX: binary, PI: binary } };
+    spec.claim = { ...spec.claim, runner: "CLAUDE" };
+    spec.workingDirectory = fixture;
+    spec.env = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const handle = await adapters.CLAUDE.start(spec, (event) => { events.push(event); });
+    const evidence = await handle.exit;
+
+    assert.equal(evidence.exitCode, 1);
+    assert.doesNotMatch(evidence.stdout, /stream_event/u);
+    assert.match(evidence.stdout, /assistant/u);
+    assert.equal(events.some((event) => event.payload.type === "stream_event"), false);
+  } finally {
+    await rm(fixture, { recursive: true, force: true });
   }
 });
 
