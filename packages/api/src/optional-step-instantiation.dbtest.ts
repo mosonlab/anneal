@@ -182,7 +182,12 @@ test("compound omission preserves exact-ordinal merge predecessors and retained 
   // the pinned base comes from the implementation Run, and the body's own
   // (here deliberately wrong) value is informational.
   const implementationRun = await db.$transaction((tx) => enqueueTaskRun(tx as never, implementation.id));
-  await db.run.update({ where: { id: implementationRun.id }, data: { baseSha } });
+  // The base has to be published as well as recorded: a range is only pinned
+  // to a commit some Run's push carried to the remote.
+  await db.run.update({
+    where: { id: implementationRun.id },
+    data: { baseSha, pushedBranch: `pinned-${implementationRun.id}`, basePublishedAt: new Date() },
+  });
   await db.taskStepOutput.create({ data: {
     taskId: implementation.id,
     runId: implementationRun.id,

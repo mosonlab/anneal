@@ -148,6 +148,8 @@ export type LockedAuthorityRun = {
   repoId: string | null;
   runNumber: number;
   pushedBranch: string | null;
+  baseSha: string | null;
+  basePublishedAt: Date | null;
   branch: string | null;
   targetBranch: string | null;
 };
@@ -178,6 +180,8 @@ export const lockAuthorityRun = async (
       repoId: true,
       runNumber: true,
       pushedBranch: true,
+      baseSha: true,
+      basePublishedAt: true,
       branch: true,
       targetBranch: true,
     },

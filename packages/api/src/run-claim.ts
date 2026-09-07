@@ -843,12 +843,26 @@ export const claimRun = async (
       } catch (error: unknown) {
         if (!isCandidateActivationFailure(error)) throw error;
         const reason = namedFailureReason(error);
+        // An unpublished base is not a transport fault, and the two read alike
+        // on a runner. Name the implementation Task and the commit nobody
+        // published, in the metadata as well as the prose, so an operator can
+        // tell them apart without opening the database.
+        const unpublishedBase = isPinnedBaseCommitError(error) ? error.unpublishedBase : undefined;
         const parked = await parkQueuedCandidate(candidate, {
           reason,
           condition: "candidate-activation-failed",
           activityBody: `Queued run activation failed: ${reason}`,
           inboxBody: `Queued run activation failed and the task was parked in Backlog: ${reason}`,
-          metadata: { failureType: error.name, reason },
+          metadata: {
+            failureType: error.name,
+            reason,
+            ...(unpublishedBase
+              ? {
+                implementationTaskId: unpublishedBase.implementationTaskId,
+                unpublishedBaseSha: unpublishedBase.baseSha,
+              }
+              : {}),
+          },
         });
         if (parked.chainLocked) return HALT;
         return SKIP;
