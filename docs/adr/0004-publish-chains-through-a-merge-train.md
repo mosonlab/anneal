@@ -11,7 +11,9 @@ When `MERGE_TRAIN_WIDTH` is greater than zero, Merge readiness may authorize
 several ready Chains for one repository from one cumulative merge train. The
 value is an API startup setting from `0` through `3`; it is `0` when unset, so
 the existing single-candidate tail remains the default. A value greater than
-zero bounds the number of candidates in one train.
+zero bounds the number of candidates in one train. The width the API validated
+at startup is the one the readiness worker uses; an unparseable value is
+refused at startup rather than read as the legacy path.
 
 On each readiness tick, the control plane groups candidates by Repo and reads
 the live default-branch head. A candidate is eligible when its Chain's
@@ -56,7 +58,10 @@ a newer train under the same first-candidate Chain identity.
 Merge readiness acquires the repository's global Merge Lease for the train
 under the first candidate's Chain lease target before the detached Task is
 enqueued. A failed acquire defers the tick using the same behavior as
-`withMergeLease`; it does not start a second train. While the Lease is held,
+`withMergeLease`; it does not start a second train. A contended or unreachable
+acquisition is named in a `mergeTail.leaseContention` marker on the train Task
+and one activity per candidate before the tick returns, so a train that stops
+progressing is never silently retried. While the Lease is held,
 single-candidate readiness for that repository is deferred. The Lease remains
 held across the train Run, record validation, the second-read checks, and the
 serializable settlement and authorization transactions. It is released after
@@ -68,10 +73,12 @@ If the train Run ends without a stored `merge-train-v1` record, or the Run is
 lost, the control plane releases the Lease, writes a `mergeTail.train` marker
 with `state: "aborted"` and the named reason on every candidate, and returns
 the candidates to `ready` for a later tick. The detached Task is not retried.
-Settlement commits release intent in the existing deferred-release ledger
-before the external release. Restart reconciliation can therefore finish a
-release interrupted after settlement. Unresolved lease handoffs or releases
-exclude the repository from new train formation. Every Run-opening path refuses
+A release that fails is recorded once by `withMergeLease`'s own deferred-release
+path, which restart reconciliation finishes; settlement does not write a second
+release intent that a confirmed release would leave open. Unresolved lease
+handoffs or releases exclude the repository from new train formation only:
+candidates in that repository still settle through the single-candidate path,
+which serializes on the Merge Lease itself. Every Run-opening path refuses
 a second Run for the detached train, including platform lease-loss refunds.
 
 ## Authorization contract
@@ -93,7 +100,9 @@ authorized candidate, `predecessorOid` is that candidate's own prefix
 predecessor, `ref` is `refs/anneal/train/<publishHead>`, `position` is the
 one-based candidate position, and `trainTaskId` identifies the detached Task.
 The existing per-candidate Approval gate still applies before its
-authorization is written.
+authorization is written, and it is refused per candidate rather than per
+train: an unapproved candidate truncates the authorized prefix at its own
+position.
 
 All state changes use the same serializable transactions and Chain locks as
 the existing merge tail. The record's base and candidate heads are checked
@@ -112,6 +121,7 @@ settlement. Only the longest contiguous PASS prefix is authorized.
 | `no-verdict` prefix | Return that candidate to `ready` unchanged for a later train. |
 | Every `skipped` candidate | Return the candidate to `ready` unchanged for a later train. |
 | `blocked` candidate | Enter the existing refresh-conflict recovery stop with the recorded reason. |
+| `pass` prefix whose candidate has an unsatisfied Approval gate | Stop that candidate on its gate refusal, authorize only the positions before it against the truncated prefix, and return the positions after it to `ready`. |
 | Missing record or lost train Run | Abort the train, release the Lease, mark every candidate `aborted`, and return the candidates to `ready`. |
 
 None of these train settlements invokes `requeueRegressionSettlement` for
@@ -135,6 +145,9 @@ need the existing per-Chain drift recovery can set `MERGE_TRAIN_WIDTH=0`.
   stale candidate; a stale record authorizes nothing and releases the Lease.
 - Two or three ready candidates can share cumulative prefix construction and
   Merge gate work, while publication remains serialized by merge execution.
+- A settled train closes its own detached card; only an aborted train stays in
+  `REVIEW` with its named reason, so a completed automation card is never
+  presented as review work.
 - A failure at one prefix prevents later prefixes from crossing it. Later
   candidates are either returned to `ready`, stopped with their recorded
   reason, or repaired according to the settlement table; no path silently

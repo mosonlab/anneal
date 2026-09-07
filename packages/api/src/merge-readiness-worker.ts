@@ -696,10 +696,11 @@ const applyReadinessDecision = async (
   decision: ReadinessDecision,
   result: ReadinessTickResult,
   runner: ReadinessSettlementRunner,
+  trainWidth: number,
 ): Promise<ReadinessSettlementApplication> => {
   const { readiness, regression, recovery, claim } = read;
-  const selectedDecision = mergeTrainWidth() > 0 && decision.kind === "requeue-regression"
-    && decision.reason === "target base advanced after regression PASS"
+  const selectedDecision = trainWidth > 0 && decision.kind === "requeue-regression"
+    && decision.condition === "base-advanced"
     ? { kind: "defer" as const, reason: "Base advanced; candidate will join a merge train" }
     : decision;
   return dispatchReadinessDecision(selectedDecision, {
@@ -798,6 +799,7 @@ const runReadinessDecision = async (
   releaseChainLease: ReleaseMergeLease,
   runWithMergeLease: WithMergeLease,
   reader: PullRequestReader,
+  trainWidth: number,
 ): Promise<void> => {
   const { readiness, regression, claim } = read;
   const preAcquireRunner = createReadinessSettlementRunner(db, {
@@ -822,6 +824,7 @@ const runReadinessDecision = async (
     decision,
     result,
     preAcquireRunner,
+    trainWidth,
   );
   if (application.kind === "settled") return;
 
@@ -853,6 +856,7 @@ const runReadinessDecision = async (
       leasedDecision,
       result,
       heldRunner,
+      trainWidth,
     );
     if (leasedApplication.kind === "acquire-lease") {
       throw new Error("Held readiness settlement requested another Merge Lease");
@@ -902,6 +906,7 @@ const runReadinessDecisionSafely = async (
   releaseChainLease: ReleaseMergeLease,
   runWithMergeLease: WithMergeLease,
   reader: PullRequestReader,
+  trainWidth: number,
 ): Promise<void> => {
   const { readiness } = read;
   try {
@@ -913,6 +918,7 @@ const runReadinessDecisionSafely = async (
       releaseChainLease,
       runWithMergeLease,
       reader,
+      trainWidth,
     );
   } catch (error: unknown) {
     if (error instanceof LeaseReleaseDeferralRecordError) throw error;
@@ -960,13 +966,18 @@ export const readinessTick = async (
   limit: number,
   releaseChainLease: ReleaseMergeLease,
   runWithMergeLease: WithMergeLease,
+  width: number = mergeTrainWidth(),
 ): Promise<ReadinessTickResult> => {
-  const width = mergeTrainWidth();
   const pendingTrains = width === 0 ? await pendingMergeTrains(db) : undefined;
-  if (width > 0 || pendingTrains?.length) return mergeTrainReadinessTick(db, reader, now, width, releaseChainLease, runWithMergeLease, {
-    candidates: readinessCandidates, read: readReadiness,
-    authorize: authorizeReadinessSettlement, single: runReadinessDecisionSafely,
-  }, pendingTrains);
+  if (width > 0 || pendingTrains?.length) {
+    return mergeTrainReadinessTick(db, reader, now, { width, limit }, releaseChainLease, runWithMergeLease, {
+      candidates: readinessCandidates,
+      read: readReadiness,
+      authorize: authorizeReadinessSettlement,
+      single: (database, read, decision, result, release, lease, pullRequests) =>
+        runReadinessDecisionSafely(database, read, decision, result, release, lease, pullRequests, width),
+    }, pendingTrains);
+  }
   const result: ReadinessTickResult = { claimed: 0, authorized: 0, requeued: 0, stopped: 0 };
   const pageSize = Math.max(limit * 20, 100);
   for await (const readiness of readinessCandidates(db, pageSize)) {
@@ -977,7 +988,7 @@ export const readinessTick = async (
     if (!read.claimed) continue;
     const decision = await evaluateReadiness(reader, read.input);
     result.claimed += 1;
-    await runReadinessDecisionSafely(db, read, decision, result, releaseChainLease, runWithMergeLease, reader);
+    await runReadinessDecisionSafely(db, read, decision, result, releaseChainLease, runWithMergeLease, reader, width);
   }
   return result;
 };
@@ -985,6 +996,9 @@ export const readinessTick = async (
 export const startReadinessWorker = (
   db: PrismaClient,
   reader: PullRequestReader,
+  /** The width judged at startup; the ambient read is the fallback for callers
+   * that construct a worker without a startup verdict. */
+  width: number = mergeTrainWidth(),
 ): ReturnType<typeof setInterval> => {
   let inFlight = false;
   const timer = setInterval(() => {
@@ -998,6 +1012,7 @@ export const startReadinessWorker = (
         5,
         releaseMergeLease,
         withMergeLease,
+        width,
       ))
       .catch((error: unknown) => console.error("Merge readiness tick failed", error))
       .finally(() => {

@@ -16,6 +16,7 @@ import {
   StartupConfigError,
   evaluateStartupConfig,
   loadStartupConfig,
+  mergeTrainWidth,
 } from "./startup-config.js";
 import { spawnedSourceEntrypointArgv, spawnedStartupEnvironment } from "./test-startup-environment.js";
 
@@ -120,6 +121,21 @@ test("an invalid merge train width is refused with a named startup reason", () =
       refusalReasons(generatedEnvironment({ MERGE_TRAIN_WIDTH: width })),
       ["merge-train-width-invalid:MERGE_TRAIN_WIDTH"],
       `MERGE_TRAIN_WIDTH=${width} was accepted`,
+    );
+  }
+});
+
+test("the ambient merge train width reader refuses an unparseable value", () => {
+  assert.equal(mergeTrainWidth({}), DEFAULT_MERGE_TRAIN_WIDTH);
+  assert.equal(mergeTrainWidth({ MERGE_TRAIN_WIDTH: " 2 " }), 2);
+  // A width the startup verdict would refuse must never be read as the legacy
+  // path: the worker would silently resume per-chain drift recovery.
+  for (const width of ["4", "-1", "1.5", "", "00", "width"]) {
+    assert.throws(
+      () => mergeTrainWidth({ MERGE_TRAIN_WIDTH: width }),
+      (error: unknown) => error instanceof StartupConfigError
+        && error.message.includes("merge-train-width-invalid:MERGE_TRAIN_WIDTH"),
+      `MERGE_TRAIN_WIDTH=${width} was read instead of refused`,
     );
   }
 });

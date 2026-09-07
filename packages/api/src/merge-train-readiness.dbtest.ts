@@ -7,6 +7,7 @@ import {
   DependencyProvisioning,
   INTEGRATOR_SENTINEL_MODEL,
   MERGE_TRAIN_OUTPUT_KIND,
+  MergeLeaseEventState,
   openRun,
   mergeTrainClaimMetadata,
   readLatestMarker,
@@ -14,6 +15,7 @@ import {
   RunStatus,
   TaskStatus,
 } from "@anneal/db";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import {
@@ -24,6 +26,7 @@ import {
 import type { MergeLeaseAcquirer } from "./merge-lease.js";
 import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 import { readinessTick } from "./merge-readiness-worker.js";
+import { claimRun } from "./run-claim.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
 /**
@@ -65,6 +68,8 @@ const leasedTargets: MergeLeaseTarget[] = [];
 const releasedTargets: MergeLeaseTarget[] = [];
 const releasedChainIds: string[] = [];
 let observeLeaseAcquisition: ((chainId: string) => Promise<void>) | undefined;
+/** Replaces the acquisition outcome so a tick can meet a real refusal. */
+let leaseAcquisition: (() => Promise<Awaited<ReturnType<MergeLeaseAcquirer>>>) | undefined;
 
 const releaseChainLease: ReleaseMergeLease = async (target) => {
   if (!target) return;
@@ -74,6 +79,7 @@ const releaseChainLease: ReleaseMergeLease = async (target) => {
 
 const acquireChainLease: MergeLeaseAcquirer = async (chainId) => {
   await observeLeaseAcquisition?.(chainId);
+  if (leaseAcquisition) return leaseAcquisition();
   return { outcome: "acquired" };
 };
 
@@ -99,6 +105,7 @@ beforeEach(async () => {
   releasedTargets.length = 0;
   releasedChainIds.length = 0;
   observeLeaseAcquisition = undefined;
+  leaseAcquisition = undefined;
   process.env.MERGE_TRAIN_WIDTH = "0";
   await resetTestDb(db);
 });
@@ -960,30 +967,253 @@ test("a changed PR head aborts the train before it can authorize a stale candida
   assert.deepEqual(releasedChainIds, [seed.candidates[0]!.chainId]);
 });
 
-test("an unapproved gated candidate prevents a train authorization", async () => {
+test("an unapproved gated candidate stops alone and truncates the authorized prefix", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "3";
+  const seed = await seedTrainCandidates(3);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await db.task.update({ where: { id: seed.candidates[1]!.readiness.id }, data: { approvalGate: true } });
+  const { train } = await finishTrainRun(seed, recordFor(seed, ["pass", "pass", "pass"], 3));
+
+  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  // The gate is a per-candidate refusal: position 1 keeps its proven
+  // authorization against the shorter prefix, position 2 stops on its own
+  // refusal, and position 3 goes back to the next train untouched.
+  assert.equal(settled.authorized, 1);
+  assert.equal(settled.stopped, 1);
+  assert.equal(settled.requeued, 0);
+
+  const authorized = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seed.candidates[0]!.readiness.id,
+    metadata: { path: ["kind"], equals: "mergeIntegrator.authorization" },
+  } });
+  assert.deepEqual((authorized.metadata as Record<string, unknown>).train, {
+    publishHead: PREFIXES[0],
+    predecessorOid: BASE,
+    ref: `refs/anneal/train/${PREFIXES[0]}`,
+    position: 1,
+    trainTaskId: train.id,
+  });
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seed.candidates[0]!.readiness.id } })).status, TaskStatus.DONE);
+
+  const gated = await db.task.findUniqueOrThrow({ where: { id: seed.candidates[1]!.readiness.id } });
+  assert.equal(gated.status, TaskStatus.REVIEW);
+  assert.match(gated.failureReason ?? "", /operator authorization/iu);
+  const gatedMarker = (await trainMarkersFor(gated.id)).at(-1)!.metadata as Record<string, unknown>;
+  assert.equal(gatedMarker.state, "settled");
+  assert.equal(gatedMarker.outcome, "stopped");
+  assert.equal(gatedMarker.position, 2);
+
+  const trailing = seed.candidates[2]!;
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: trailing.readiness.id } })).status, TaskStatus.TODO);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: trailing.readiness.id,
+    metadata: { path: ["kind"], equals: "mergeIntegrator.authorization" },
+  } }), 0);
+  assert.equal(await db.run.count({ where: { taskId: trailing.regression.id } }), 1);
+  assert.deepEqual(releasedChainIds, [seed.candidates[0]!.chainId]);
+});
+
+test("a settled train closes its own card while an aborted train keeps its review state", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
   await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
-  await db.task.update({ where: { id: seed.candidates[1]!.readiness.id }, data: { approvalGate: true } });
+  await finishTrainRun(seed, recordFor(seed, ["pass", "pass"], 2));
+  await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+
+  const settledTrain = await db.task.findUniqueOrThrow({ where: { id: (await trainTaskFor(seed)).id } });
+  assert.equal(settledTrain.status, TaskStatus.DONE);
+  assert.equal(settledTrain.failureReason, null);
+  // A completed automation card must not linger as actionable review work, and
+  // the settlement must leave no unresolved lease event behind it.
+  assert.equal(await db.mergeLeaseEvent.count({ where: {
+    projectId: seed.project.id,
+    state: { in: [MergeLeaseEventState.RELEASE_DEFERRED, MergeLeaseEventState.HANDOFF_PENDING] },
+    chainId: seed.candidates[0]!.chainId,
+  } }), 0);
+});
+
+test("an aborted train keeps its diagnostic review state and reason", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await finishTrainRun(seed, null, RunStatus.LOST);
+  await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+
+  const aborted = await db.task.findUniqueOrThrow({ where: { id: (await trainTaskFor(seed)).id } });
+  assert.equal(aborted.status, TaskStatus.REVIEW);
+  assert.match(aborted.failureReason ?? "", /merge train run/iu);
+  assert.equal(await db.mergeLeaseEvent.count({ where: {
+    projectId: seed.project.id,
+    state: { in: [MergeLeaseEventState.RELEASE_DEFERRED, MergeLeaseEventState.HANDOFF_PENDING] },
+    chainId: seed.candidates[0]!.chainId,
+  } }), 0);
+});
+
+test("the queued merge-train Run is claimed with the ordered candidate list", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  const train = await trainTaskFor(seed);
+
+  const claimed = await claimRun(db, {
+    body: { runnerId: "merge-train-runner", leaseSeconds: 60, contractVersion: RUN_COMPLETION_CONTRACT_VERSION },
+    claimantClass: "runner",
+    now: new Date(TEST_NOW.getTime() + 500),
+    specificationReader: null,
+  });
+  assert.ok(claimed && "run" in claimed, JSON.stringify(claimed));
+  assert.equal(claimed.run.taskId, train.id);
+  // The runtime input the merge-train session actually receives, read at the
+  // Run claim rather than from the marker the control plane wrote.
+  assert.deepEqual(claimed.task.mergeTrain, {
+    schemaVersion: 1,
+    baseSha: BASE,
+    width: 2,
+    candidates: seed.candidates.map((candidate) => ({
+      taskId: candidate.readiness.id,
+      chainId: candidate.chainId,
+      headSha: candidate.headSha,
+      branch: candidate.branch,
+    })),
+  });
+});
+
+test("a settled train card cannot emit merge-train claim metadata on a later claim", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  const train = await trainTaskFor(seed);
+  await finishTrainRun(seed, recordFor(seed, ["pass", "pass"], 2));
+  await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+
+  await db.task.update({ where: { id: train.id }, data: { status: TaskStatus.TODO } });
+  const revived = await db.run.create({ data: {
+    projectId: seed.project.id,
+    taskId: train.id,
+    agentId: seed.candidates[0]!.regression.assigneeAgentId!,
+    repoId: seed.repo.id,
+    runNumber: 99,
+    dedupeKey: `task:${train.id}:run:99`,
+    runner: "CODEX",
+    model: "gpt-5.6-sol:high",
+    promptHash: "revived-train",
+    status: RunStatus.QUEUED,
+    targetBranch: "main",
+    readyAt: TEST_NOW,
+  } });
+  const claimed = await claimRun(db, {
+    body: { runnerId: "merge-train-runner", leaseSeconds: 60, contractVersion: RUN_COMPLETION_CONTRACT_VERSION },
+    claimantClass: "runner",
+    now: new Date(TEST_NOW.getTime() + 2_000),
+    specificationReader: null,
+  });
+  assert.ok(claimed && "run" in claimed, JSON.stringify(claimed));
+  assert.equal(claimed.run.id, revived.id);
+  assert.equal(claimed.task.mergeTrain ?? null, null);
+});
+
+test("a contended merge Lease defers the train with a durable, operator-visible record", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
   await finishTrainRun(seed, recordFor(seed, ["pass", "pass"], 2));
 
-  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
-  assert.equal(settled.authorized, 0);
-  assert.equal(settled.requeued, 0);
-  assert.equal(settled.stopped, 0);
-  assert.equal(await db.taskActivity.count({ where: {
-    taskId: { in: seed.candidates.map((candidate) => candidate.readiness.id) },
-    metadata: { path: ["kind"], equals: "mergeIntegrator.authorization" },
-  } }), 0);
+  leaseAcquisition = async () => ({ outcome: "contended", holder: {
+    holder: "another-chain", task: "task-9", reason: "chain merge tail", acquiredAt: TEST_NOW.toISOString(), sha: "e".repeat(40),
+  } });
+  const deferred = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  leaseAcquisition = undefined;
+
+  assert.deepEqual(deferred, { claimed: 0, authorized: 0, requeued: 0, stopped: 0 });
   const train = await trainTaskFor(seed);
-  assert.equal((await db.task.findUniqueOrThrow({ where: { id: train.id } })).status, TaskStatus.REVIEW);
-  for (const [position, candidate] of seed.candidates.entries()) {
-    const marker = (await trainMarkersFor(candidate.readiness.id)).at(-1)!.metadata as Record<string, unknown>;
-    assert.equal(marker.state, "aborted");
-    assert.equal(marker.position, position + 1);
-    assert.match(String(marker.reason), /approval gate|authorization|approval/iu);
+  const contention = await db.taskActivity.findFirstOrThrow({
+    where: { taskId: train.id, metadata: { path: ["kind"], equals: "mergeTail.leaseContention" } },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  assert.equal((contention.metadata as Record<string, unknown>).state, "contended");
+  assert.match(contention.body, /another-chain/u);
+  for (const candidate of seed.candidates) {
+    assert.equal(await db.taskActivity.count({ where: {
+      taskId: candidate.readiness.id,
+      metadata: { path: ["kind"], equals: "mergeTail.leaseContention" },
+    } }), 1);
   }
-  assert.deepEqual(releasedChainIds, [seed.candidates[0]!.chainId]);
+  // The train itself is untouched and settles on a later tick.
+  const resumed = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 2_000), 5, releaseChainLease, runWithMergeLease);
+  assert.equal(resumed.authorized, 2);
+});
+
+test("an unreachable merge Lease names the transport failure instead of retrying silently", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await finishTrainRun(seed, recordFor(seed, ["pass", "pass"], 2));
+
+  leaseAcquisition = async () => ({ outcome: "unreachable", detail: "origin refused the lease ref" });
+  const deferred = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  leaseAcquisition = undefined;
+
+  assert.deepEqual(deferred, { claimed: 0, authorized: 0, requeued: 0, stopped: 0 });
+  const train = await trainTaskFor(seed);
+  const named = await db.taskActivity.findFirstOrThrow({
+    where: { taskId: train.id, metadata: { path: ["kind"], equals: "mergeTail.leaseContention" } },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  assert.equal((named.metadata as Record<string, unknown>).state, "unreachable");
+  assert.match(named.body, /origin refused the lease ref/u);
+});
+
+test("an unresolved lease handoff blocks new train formation, not the repository's readiness", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  // A handoff belonging to another chain in this repository is the ordinary
+  // steady state after any authorization; it must not darken readiness.
+  await db.mergeLeaseEvent.create({ data: {
+    projectId: seed.project.id,
+    chainId: randomUUID(),
+    state: MergeLeaseEventState.HANDOFF_PENDING,
+    owningTaskId: seed.candidates[1]!.regression.id,
+    handedOffAt: TEST_NOW,
+  } });
+
+  const tick = await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  assert.equal(tick.claimed, 2);
+  assert.equal(tick.authorized, 2, "both candidates settled on the single-candidate path");
+  assert.equal(await db.task.count({ where: {
+    projectId: seed.project.id, chainId: null, description: { contains: "merge-train.sh" },
+  } }), 0);
+});
+
+test("the readiness tick honours its claim budget on the train path", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(3);
+  // Non-ready candidates take the single-candidate path one at a time; the
+  // caller's budget bounds how many one tick may claim.
+  for (const candidate of seed.candidates) {
+    await db.taskStepOutput.delete({ where: { taskId: candidate.regression.id } });
+  }
+  const tick = await readinessTick(db, readerFor(seed), TEST_NOW, 2, releaseChainLease, runWithMergeLease);
+  assert.equal(tick.claimed, 2);
+});
+
+test("train order follows when the Regression evidence was persisted, not its last write", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  // Re-writing the first candidate's evidence row moves `updatedAt` past the
+  // second candidate's without changing when the evidence was persisted.
+  await db.$executeRaw`
+    UPDATE "TaskStepOutput" SET "updatedAt" = ${new Date(TEST_NOW.getTime() + 60_000)}
+    WHERE "taskId" = ${seed.candidates[0]!.regression.id}
+  `;
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+
+  const metadata = (await trainTaskMarkerFor((await trainTaskFor(seed)).id)).metadata as Record<string, unknown>;
+  assert.deepEqual(metadata.candidates, seed.candidates.map((candidate) => ({
+    taskId: candidate.readiness.id,
+    chainId: candidate.chainId,
+    headSha: candidate.headSha,
+    branch: candidate.branch,
+  })));
 });
 
 test("one fresh candidate remains on the existing single-candidate authorization path", async () => {
@@ -1040,4 +1270,36 @@ test("overlapping settlement ticks cannot reacquire or release the same train ge
   }
   assert.equal((await first).authorized, 2);
   assert.equal(releasedChainIds.length, 1);
+});
+
+test("a readiness claim is released when the repository mutex is already held", { timeout: 30_000 }, async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(1);
+  const candidate = seed.candidates[0]!;
+  // A candidate that is not `ready` goes straight to the single-candidate path,
+  // whose early returns must not keep the claim for the whole claim lease.
+  await db.taskStepOutput.delete({ where: { taskId: candidate.regression.id } });
+
+  let releaseMutex!: () => void;
+  const holding = new Promise<void>((resolve) => { releaseMutex = resolve; });
+  let mutexTaken!: () => void;
+  const taken = new Promise<void>((resolve) => { mutexTaken = resolve; });
+  const holder = db.$transaction(async (tx) => {
+    await tx.$queryRaw`SELECT pg_try_advisory_xact_lock(hashtextextended(${`anneal:merge-train:${seed.repo.id}`}, 0))`;
+    mutexTaken();
+    await holding;
+  }, { timeout: 25_000 });
+  try {
+    await taken;
+    const tick = await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+    assert.equal(tick.claimed, 1);
+    assert.equal(tick.authorized, 0);
+    const readiness = await db.task.findUniqueOrThrow({ where: { id: candidate.readiness.id } });
+    assert.equal(readiness.status, TaskStatus.TODO);
+    assert.equal(readiness.readinessClaimToken, null);
+    assert.equal(readiness.readinessClaimExpiresAt, null);
+  } finally {
+    releaseMutex();
+    await holder;
+  }
 });

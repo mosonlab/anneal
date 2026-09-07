@@ -206,9 +206,26 @@ test("validated train evidence allows a diverged candidate comparison", async ()
   assert.equal(decision.evidence.baseSha, TRAIN_BASE);
 });
 
+test("each requeue names the condition callers branch on", async () => {
+  // The merge train suppresses exactly `base-advanced`; the prose reason is for
+  // operators and must never be the thing a caller matches on.
+  const advanced = await evaluateReadiness(reader({ snapshot: snapshot({ baseSha: TRAIN_BASE }) }), ready());
+  assert.equal(advanced.kind, "requeue-regression");
+  assert.equal(advanced.kind === "requeue-regression" ? advanced.condition : null, "base-advanced");
+
+  const staleTrainBase = await evaluateReadiness(reader({ snapshot: snapshot({ baseSha: BASE }) }), trainReady());
+  assert.equal(staleTrainBase.kind, "requeue-regression");
+  assert.equal(staleTrainBase.kind === "requeue-regression" ? staleTrainBase.condition : null, "train-base-stale");
+
+  const staleHead = await evaluateReadiness(reader({ snapshot: snapshot({ headRefOid: "c".repeat(40) }) }), ready());
+  assert.equal(staleHead.kind, "requeue-regression");
+  assert.equal(staleHead.kind === "requeue-regression" ? staleHead.condition : null, "stale-head");
+});
+
 test("a diverged comparison still requeues without train evidence", async () => {
   const decision = await evaluateReadiness(reader({
     comparison: { ...compared, status: "diverged", behindBy: 1 },
   }), ready());
   assert.equal(decision.kind, "requeue-regression");
+  assert.equal(decision.kind === "requeue-regression" ? decision.condition : null, "ancestry-refused");
 });

@@ -92,8 +92,9 @@ through `3`; when it is unset, the effective value is `0`. `0` leaves Merge
 readiness on its existing single-candidate path. Values `1`, `2`, and `3`
 enable cumulative train readiness and bound each train to that many
 candidates. A non-integer or a value outside `0` through `3` is a startup
-configuration refusal naming `MERGE_TRAIN_WIDTH`; the API does not start.
-Restart the API after changing the setting.
+configuration refusal naming `MERGE_TRAIN_WIDTH`; the API does not start, and
+the readiness worker uses the width the startup verdict validated rather than
+re-reading the environment. Restart the API after changing the setting.
 
 ## Files
 
@@ -1503,8 +1504,9 @@ The worker first reserves a detached train in `REVIEW` with a `mergeTail.train`
 marker in `acquiring` state and no Run. This has no Approval gate. It enqueues
 the sole Run and changes the markers to `queued` only under the Merge Lease.
 Reservations and queued trains drain even after the width is changed to zero.
-Settlement records release intent in the deferred-release ledger before the
-external release, so both ownership windows survive an API restart.
+A release that fails is recorded once in the deferred-release ledger by the
+Merge Lease helper itself and finished by restart reconciliation; settlement
+adds no second release intent.
 
 When `MERGE_TRAIN_WIDTH` is greater than zero, Merge readiness collects ready
 Chain candidates per Repo. A candidate must have a valid exact-head
@@ -1546,8 +1548,12 @@ one entry naming the train Task, position, and settlement.
 The train obtains the repository Merge Lease under the first candidate's Chain
 lease target before its Task is enqueued and keeps it through record
 validation, the second-read checks, and authorization settlement. A failed
-acquire defers the tick; while a train holds the Lease, single-candidate
-readiness for that Repo is deferred. The Lease is released after the last
+acquire defers the tick and is named: a contended or unreachable acquisition
+writes a `mergeTail.leaseContention` marker on the train Task and one activity
+entry per candidate. While a train holds the Lease, single-candidate readiness
+for that Repo is deferred; an unresolved Lease handoff or deferred release
+excludes the Repo from forming a *new* train only, and its candidates continue
+on the single-candidate path. The Lease is released after the last
 authorization or on every failure path. Merge executor publication occurs
 after the handoff and is outside this Lease. A train Run that is lost or ends
 without a stored `merge-train-v1` record releases the Lease, marks the train
@@ -1560,7 +1566,12 @@ the corresponding Chain's evidence head. It then repeats the existing
 second-read discipline once per candidate with the train base, still under
 the Lease. A stale base or mismatched candidate head authorizes nothing and
 releases the Lease. Positions `1` through `contiguousPassCount` are authorized
-in order with the `train` object described under `merge-authorization`.
+in order with the `train` object described under `merge-authorization`. The
+per-candidate Approval gate is refused per candidate: an unapproved candidate
+stops on its own gate refusal, only the positions before it are authorized
+against the truncated prefix, and the positions after it return to `ready`.
+A settled train card closes as `DONE`; only an aborted train stays in `REVIEW`
+with its named reason.
 
 Train settlement does not start a per-Chain base-drift Regression re-run. The
 first failing prefix enters the existing gate-fix repair path with the

@@ -67,6 +67,12 @@ export type ReadinessDecision =
     }
   | {
       kind: "requeue-regression";
+      /**
+       * Why the requeue was decided, as a name callers may branch on. The
+       * prose `reason` is for operators and is never control flow: the merge
+       * train suppresses exactly the `base-advanced` condition.
+       */
+      condition: "stale-head" | "base-advanced" | "train-base-stale" | "ancestry-refused";
       reason: string;
       staleBaseSha: string;
       currentBaseSha: string;
@@ -132,6 +138,7 @@ export const evaluateReadiness = async (
     if (snapshot.headRefOid !== input.regression.headSha) {
       return {
         kind: "requeue-regression",
+        condition: "stale-head",
         staleBaseSha: input.regression.baseHeadSha,
         currentBaseSha: snapshot.baseSha ?? "missing",
         reason: `stale PASS head ${input.regression.headSha}; current PR head is ${snapshot.headRefOid ?? "missing"}`,
@@ -144,6 +151,7 @@ export const evaluateReadiness = async (
     if (snapshot.baseSha !== expectedBaseSha) {
       return {
         kind: "requeue-regression",
+        condition: input.train ? "train-base-stale" : "base-advanced",
         staleBaseSha: input.regression.baseHeadSha,
         currentBaseSha: snapshot.baseSha,
         reason: input.train
@@ -179,6 +187,7 @@ export const evaluateReadiness = async (
     if (!normalAncestry && !validatedTrainDivergence) {
       return {
         kind: "requeue-regression",
+        condition: "ancestry-refused",
         staleBaseSha: input.regression.baseHeadSha,
         currentBaseSha: snapshot.baseSha,
         reason: `server-side ancestry check refused ${comparison.status} comparison with behind_by=${comparison.behindBy}`,

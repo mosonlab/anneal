@@ -1,6 +1,7 @@
 import {
   ACTIVE_RUN_STATUSES,
   MERGE_TAIL_KIND,
+  MERGE_TAIL_SCHEMA_VERSION,
   MERGE_TRAIN_OUTPUT_KIND,
   MergeRecoveryStatus,
   MergeLeaseEventState,
@@ -12,7 +13,8 @@ import {
   isMergeReadinessStep,
   parseMergeTrainRecord,
   parseRegressionVerdict,
-  recordLeaseDeferral,
+  isGatedMergeReadinessTask,
+  requireMergeGateAuthorization,
   writeMarker,
   type PrismaClient,
   type TrainAuthorization,
@@ -22,6 +24,7 @@ import {
 import type { PullRequestReader } from "./github-read.js";
 import { evaluateReadiness, READINESS_READ_BUDGET_MS, type ReadinessDecision } from "./readiness-decision.js";
 import type { WithMergeLease, ReleaseMergeLease, HeldLeaseOutcome } from "./merge-lease.js";
+import type { MergeLeaseHolder } from "../../../scripts/merge-lease-adapter.mjs";
 import type { ReadinessSettlement } from "./readiness-settlement.js";
 import type { ClaimedReadiness, ReadinessCandidate, ReadinessRead, ReadinessTickResult } from "./merge-readiness-worker.js";
 import { reserveMergeTrainTask, enqueueMergeTrainTask, mergeTrainTaskDescription } from "./merge-train-task.js";
@@ -70,6 +73,14 @@ type TrainHooks = {
 
 const serializable = { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 100_000 } as const;
 
+type PendingTrain = TrainBinding & {
+  taskId: string;
+  state: "acquiring" | "queued";
+  regressionTaskId: string;
+  projectId: string;
+  repoId: string;
+};
+
 /** This short-lived mutex fences stale API ticks across external lease calls.
  * It is distinct from the candidate chain locks acquired by settlement. */
 const tryRepositoryMutex = async (tx: Prisma.TransactionClient, repoId: string): Promise<boolean> => {
@@ -79,31 +90,85 @@ const tryRepositoryMutex = async (tx: Prisma.TransactionClient, repoId: string):
   return row?.held === true;
 };
 
+/**
+ * Record an acquisition this tick could not make. Contention is ordinary and a
+ * train simply waits, but the specification requires every failure to be named
+ * and visible rather than silently retried, so the episode is durable state on
+ * the train card and on each candidate. The write is skipped while the same
+ * episode continues so a poll interval cannot flood the board.
+ */
+const noteTrainLeaseUnavailable = async (
+  tx: Prisma.TransactionClient, train: PendingTrain,
+  state: "contended" | "unreachable", detail: string, now: Date,
+): Promise<void> => {
+  const open = await readLatestMarker(tx, train.taskId, "leaseContention", "control-plane");
+  if (open?.state === state && open.raw.detail === detail) return;
+  const body = state === "contended"
+    ? `Merge train ${train.taskId} is waiting for the repository merge Lease: ${detail}`
+    : `Merge train ${train.taskId} could not reach the merge Lease: ${detail}`;
+  await writeMarker(tx, train.taskId, "leaseContention", { actorType: "control-plane", body,
+    metadata: { state, trainTaskId: train.taskId, detail,
+      firstObservedAt: (open && open.state !== "resolved" && typeof open.raw.firstObservedAt === "string"
+        ? open.raw.firstObservedAt
+        : now.toISOString()) } });
+  for (const candidate of train.candidates) {
+    await tx.taskActivity.create({ data: { taskId: candidate.taskId, actorType: "control-plane", body,
+      metadata: { kind: MERGE_TAIL_KIND.leaseContention, schemaVersion: MERGE_TAIL_SCHEMA_VERSION,
+        state, trainTaskId: train.taskId, detail } } });
+  }
+};
+
+/** Any answer other than another refusal ends the episode. */
+const clearTrainLeaseUnavailable = async (
+  tx: Prisma.TransactionClient, train: PendingTrain,
+): Promise<void> => {
+  const open = await readLatestMarker(tx, train.taskId, "leaseContention", "control-plane");
+  if (!open || open.state === "resolved") return;
+  await writeMarker(tx, train.taskId, "leaseContention", { actorType: "control-plane",
+    body: `Merge train ${train.taskId} took the repository merge Lease`,
+    metadata: { state: "resolved", trainTaskId: train.taskId } });
+};
+
+const holderDetail = (holder: MergeLeaseHolder | null | undefined): string => holder
+  ? `held by ${holder.holder}${holder.task ? ` (task ${holder.task})` : ""} since ${holder.acquiredAt}`
+  : "held by a holder the lease script could not name";
+
 /** Preserve the owning Task on callback failure so release transport failures
  * enter the existing durable deferral path. The repository mutex remains held
  * through release, preventing an old tick from releasing a newer train held
  * under the same first-candidate Chain identity. */
 const withTrainLease = async <T>(
   db: PrismaClient, lease: WithMergeLease, target: { projectId: string; chainId: string },
-  regressionTaskId: string, trainTaskId: string, repoId: string,
+  train: PendingTrain, now: Date,
   fn: () => Promise<{ value: T; leaseOutcome: HeldLeaseOutcome }>,
 ): Promise<void> => {
   await db.$transaction(async (mutexTx) => {
-    if (!await tryRepositoryMutex(mutexTx, repoId)) return;
+    if (!await tryRepositoryMutex(mutexTx, train.repoId)) return;
     // Use a fresh read after acquisition, not the outer transaction's snapshot.
-    const marker = await readLatestMarker(db, trainTaskId, "train", "control-plane");
+    const marker = await readLatestMarker(db, train.taskId, "train", "control-plane");
     if (marker?.state !== "queued" && marker?.state !== "acquiring") return;
     let failed = false;
     let failure: unknown;
-    await lease(target, async () => {
+    const leased = await lease(target, async () => {
       try { return await fn(); }
       catch (error: unknown) {
         failed = true;
         failure = error;
-        return { value: undefined, leaseOutcome: { kind: "stop", taskId: regressionTaskId } };
+        return { value: undefined, leaseOutcome: { kind: "stop", taskId: train.regressionTaskId } };
       }
     }, db);
     if (failed) throw failure;
+    // An acquisition that never ran the callback leaves the train exactly as it
+    // was; it is deferred to a later tick, but never without a record.
+    if (leased.outcome === "contended") {
+      await noteTrainLeaseUnavailable(mutexTx, train, "contended", holderDetail(leased.holder), now);
+      return;
+    }
+    if (leased.outcome === "unreachable") {
+      await noteTrainLeaseUnavailable(mutexTx, train, "unreachable", leased.detail, now);
+      return;
+    }
+    await clearTrainLeaseUnavailable(mutexTx, train);
   }, { ...serializable, timeout: 300_000 });
 };
 
@@ -146,14 +211,6 @@ const evidenceStillMatches = async (tx: Prisma.TransactionClient, read: ReadyRea
     && !await excludedRecovery(tx, read.readiness.id);
 };
 
-type PendingTrain = TrainBinding & {
-  taskId: string;
-  state: "acquiring" | "queued";
-  regressionTaskId: string;
-  projectId: string;
-  repoId: string;
-};
-
 export const pendingMergeTrains = async (db: PrismaClient | Prisma.TransactionClient): Promise<PendingTrain[]> => {
   const tasks = await db.task.findMany({ where: {
     chainId: null,
@@ -186,19 +243,21 @@ const finishTrainMarker = async (
   train: PendingTrain,
   state: "settled" | "aborted",
   summary: string,
-  now: Date,
 ): Promise<void> => {
   await writeMarker(tx, train.taskId, "train", { actorType: "control-plane", body: summary,
     metadata: { state, trainTaskId: train.taskId, regressionTaskId: train.regressionTaskId,
       baseSha: train.baseSha, width: train.width, candidates: train.candidates, reason: summary } });
+  // A settled train is finished automation, not review work: closing it here
+  // keeps a completed card off the operator's board, while an aborted train
+  // keeps its diagnostic REVIEW state and reason. A failed release is recorded
+  // by `withMergeLease`'s own deferral path; writing release intent here would
+  // open a second unresolved lease event that a confirmed release never settles.
   await tx.task.update({ where: { id: train.taskId }, data: {
     description: `${mergeTrainTaskDescription(train)}\n\nSettlement:\n${summary}`,
-    ...(state === "aborted" ? { status: TaskStatus.REVIEW, failureReason: summary } : {}),
+    ...(state === "aborted"
+      ? { status: TaskStatus.REVIEW, failureReason: summary }
+      : { status: TaskStatus.DONE, failureReason: null }),
   } });
-  // Persist release intent *with* settlement. A restart in the post-commit
-  // release window is repaired by the existing deferred-release reconciler.
-  await recordLeaseDeferral(tx, { target: { projectId: train.projectId, chainId: train.candidates[0]!.chainId },
-    taskId: train.regressionTaskId, failureDetail: `Merge train ${train.taskId} ${state}; lease release pending`, at: now });
 };
 
 const candidateSettlementMarker = async (
@@ -214,26 +273,61 @@ const candidateSettlementMarker = async (
 };
 
 const abortTrain = async (
-  db: PrismaClient, train: PendingTrain, reason: string, now: Date, stoppedRead?: ReadyRead,
+  db: PrismaClient, train: PendingTrain, reason: string, now: Date,
 ): Promise<boolean> => db.$transaction(async (tx) => {
   await lockCandidates(tx, train.candidates);
   const current = await readLatestMarker(tx, train.taskId, "train", "control-plane");
   if (current?.state !== "queued" && current?.state !== "acquiring") return false;
   for (const [index, candidate] of train.candidates.entries()) {
-    if (stoppedRead?.readiness.id === candidate.taskId) {
-      await stopMergeTail(tx, { phase: "readiness", readinessTaskId: candidate.taskId,
-        regressionTaskId: stoppedRead.regression.id, reason, recovery: stoppedRead.recovery, at: now });
-      await tx.task.update({ where: { id: candidate.taskId }, data: { readinessClaimToken: null, readinessClaimExpiresAt: null } });
-    } else {
-      await tx.task.updateMany({ where: { id: candidate.taskId, status: { in: [TaskStatus.TODO, TaskStatus.DOING] } },
-        data: { status: TaskStatus.TODO, readinessClaimToken: null, readinessClaimExpiresAt: null, failureReason: null } });
-      await noticeMergeTrainAbort(tx, { readinessTaskId: candidate.taskId, trainTaskId: train.taskId, reason, now });
-    }
+    await tx.task.updateMany({ where: { id: candidate.taskId, status: { in: [TaskStatus.TODO, TaskStatus.DOING] } },
+      data: { status: TaskStatus.TODO, readinessClaimToken: null, readinessClaimExpiresAt: null, failureReason: null } });
+    await noticeMergeTrainAbort(tx, { readinessTaskId: candidate.taskId, trainTaskId: train.taskId, reason, now });
     await candidateSettlementMarker(tx, train, index + 1, "aborted", reason);
   }
-  await finishTrainMarker(tx, train, "aborted", reason, now);
+  await finishTrainMarker(tx, train, "aborted", reason);
   return true;
 }, serializable);
+
+/**
+ * Read and claim one candidate for a train phase. Both the enqueue and the
+ * settlement phase apply exactly this eligibility rule; keeping it in one place
+ * is what stops the two from drifting apart. `phase` supplies only the wording
+ * of the refusal.
+ */
+type CandidateReadResult =
+  | { kind: "ready"; read: ReadyRead }
+  | { kind: "claim-lost" }
+  | { kind: "ineligible"; reason: string };
+
+const readEligibleCandidate = async (
+  db: PrismaClient, train: PendingTrain, candidate: TrainCandidateBinding,
+  now: Date, hooks: TrainHooks, phase: string,
+): Promise<CandidateReadResult> => {
+  const refused = (detail: string): CandidateReadResult => (
+    { kind: "ineligible", reason: `Merge train ${phase} candidate ${candidate.taskId} ${detail}` }
+  );
+  const readiness = await db.task.findUnique({ where: { id: candidate.taskId }, include: {
+    templateStep: { include: { taskTemplate: { select: { name: true } } } }, repo: true,
+  } });
+  if (!readiness || readiness.projectId !== train.projectId || readiness.repoId !== train.repoId
+    || readiness.chainId !== candidate.chainId || !isMergeReadinessStep(readiness.templateStep)
+    || await excludedRecovery(db, candidate.taskId)) return refused("is no longer eligible");
+  const read = await hooks.read(db, readiness, now);
+  if (!read.claimed) {
+    if (read.input.stage === "claim-lost") return { kind: "claim-lost" };
+    return refused("no longer has completed Regression evidence");
+  }
+  if (read.input.stage !== "ready") {
+    await releaseClaim(db, read);
+    return refused("no longer has valid Regression evidence");
+  }
+  const ready = read as ReadyRead;
+  if (ready.input.regression.headSha !== candidate.headSha
+    || ready.regression.runs[0]?.branch !== candidate.branch) {
+    return refused("binding changed");
+  }
+  return { kind: "ready", read: ready };
+};
 
 const enqueueReservedTrain = async (
   db: PrismaClient, reader: PullRequestReader, train: PendingTrain, now: Date, hooks: TrainHooks,
@@ -241,26 +335,16 @@ const enqueueReservedTrain = async (
   const reads: ReadyRead[] = [];
   try {
     for (const candidate of train.candidates) {
-      const readiness = await db.task.findUnique({ where: { id: candidate.taskId }, include: {
-        templateStep: { include: { taskTemplate: { select: { name: true } } } }, repo: true,
-      } });
-      if (!readiness || readiness.projectId !== train.projectId || readiness.repoId !== train.repoId
-        || readiness.chainId !== candidate.chainId || !isMergeReadinessStep(readiness.templateStep)
-        || await excludedRecovery(db, candidate.taskId)) throw new Error(`Merge train reservation candidate ${candidate.taskId} is no longer eligible`);
-      const read = await hooks.read(db, readiness, now);
-      if (!read.claimed) {
-        if (read.input.stage === "claim-lost") return "waiting";
-        throw new Error(`Merge train reservation candidate ${candidate.taskId} lost its Regression evidence`);
-      }
-      if (read.input.stage !== "ready") {
-        await releaseClaim(db, read);
-        throw new Error(`Merge train reservation candidate ${candidate.taskId} has invalid evidence`);
-      }
-      reads.push(read as ReadyRead);
-      if (read.input.regression.headSha !== candidate.headSha || read.regression.runs[0]?.branch !== candidate.branch) {
-        throw new Error(`Merge train reservation candidate ${candidate.taskId} binding changed`);
-      }
+      const eligible = await readEligibleCandidate(db, train, candidate, now, hooks, "reservation");
+      if (eligible.kind === "claim-lost") return "waiting";
+      if (eligible.kind === "ineligible") throw new Error(eligible.reason);
+      reads.push(eligible.read);
     }
+    // The remote read stays outside the transaction: holding the repository row
+    // and every candidate chain lock across a 20-second GitHub call would block
+    // unrelated writers for no added guarantee, since the live base can move
+    // the instant after it is read either way.
+    if (await liveBase(reader, reads[0]!) !== train.baseSha) throw new Error("Merge train base moved before enqueue");
     await db.$transaction(async (tx) => {
       await lockCandidates(tx, train.candidates);
       await tx.$queryRaw`SELECT "id" FROM "Repo" WHERE "id" = ${train.repoId} FOR UPDATE`;
@@ -273,7 +357,6 @@ const enqueueReservedTrain = async (
       for (const read of reads) {
         if (!await evidenceStillMatches(tx, read)) throw new Error(`Merge train reservation evidence changed for ${read.readiness.id}`);
       }
-      if (await liveBase(reader, reads[0]!) !== train.baseSha) throw new Error("Merge train base moved before enqueue");
       await enqueueMergeTrainTask(tx, train.taskId, now);
       for (const read of reads) {
         const settled = await read.claim.settle(tx, { kind: "finish", at: now, apply: async (client) => {
@@ -290,6 +373,34 @@ const enqueueReservedTrain = async (
   } finally {
     for (const read of reads) await releaseClaim(db, read);
   }
+};
+
+/**
+ * The first candidate inside the passing prefix whose Approval gate has no
+ * operator authorization bound to the head and base this settlement verified.
+ * Read-only: it asks the same question `authorizeReadinessSettlement` asks, so
+ * the answer can truncate the prefix before any authorization is written.
+ */
+const firstGateRefusal = async (
+  tx: Prisma.TransactionClient, reads: ReadyRead[],
+  decisions: Array<Extract<ReadinessDecision, { kind: "authorize" }>>, passCount: number,
+): Promise<{ index: number; reason: string } | null> => {
+  for (let index = 0; index < Math.min(passCount, reads.length); index += 1) {
+    const read = reads[index]!;
+    const current = await tx.task.findUniqueOrThrow({ where: { id: read.readiness.id }, select: {
+      approvalGate: true,
+      templateStep: { select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } } },
+    } });
+    if (!isGatedMergeReadinessTask(current)) continue;
+    try {
+      await requireMergeGateAuthorization(tx, { taskId: read.readiness.id,
+        headSha: decisions[index]!.evidence.headSha, baseSha: decisions[index]!.evidence.baseSha });
+    } catch (error: unknown) {
+      if (!(error instanceof MergeGateAuthorizationError)) throw error;
+      return { index, reason: error.message };
+    }
+  }
+  return null;
 };
 
 const settleTrain = async (
@@ -319,28 +430,13 @@ const settleTrain = async (
   }
 
   const reads: ReadyRead[] = [];
-  let gateRefusalRead: ReadyRead | undefined;
   try {
     for (const candidate of train.candidates) {
-      const readiness = await db.task.findUnique({ where: { id: candidate.taskId }, include: {
-        templateStep: { include: { taskTemplate: { select: { name: true } } } }, repo: true,
-      } });
-      if (!readiness || readiness.projectId !== train.projectId || readiness.repoId !== train.repoId
-        || readiness.chainId !== candidate.chainId || !isMergeReadinessStep(readiness.templateStep)
-        || await excludedRecovery(db, candidate.taskId)) throw new Error(`Merge train candidate ${candidate.taskId} is no longer eligible`);
-      const read = await hooks.read(db, readiness, now);
-      if (!read.claimed) {
-        if (read.input.stage === "claim-lost") return "waiting";
-        throw new Error(`Merge train candidate ${candidate.taskId} no longer has completed Regression`);
-      }
+      const eligible = await readEligibleCandidate(db, train, candidate, now, hooks, "settlement");
+      if (eligible.kind === "claim-lost") return "waiting";
+      if (eligible.kind === "ineligible") throw new Error(eligible.reason);
       result.claimed += 1;
-      if (read.input.stage !== "ready") {
-        await releaseClaim(db, read);
-        throw new Error(`Merge train candidate ${candidate.taskId} no longer has valid Regression evidence`);
-      }
-      const ready = read as ReadyRead;
-      reads.push(ready);
-      if (ready.input.regression.headSha !== candidate.headSha) throw new Error(`Merge train candidate ${candidate.taskId} evidence head changed`);
+      reads.push(eligible.read);
     }
     const record = parsed.record;
     const bindingFailure = trainRecordBindingFailure(record, train, await liveBase(reader, reads[0]!));
@@ -365,27 +461,44 @@ const settleTrain = async (
       for (const read of reads) {
         if (!await evidenceStillMatches(tx, read)) throw new Error(`Merge train candidate ${read.readiness.id} evidence changed during settlement`);
       }
-      if (await liveBase(reader, reads[0]!) !== record.baseSha) throw new Error("Merge train base moved before authorization");
-      const passing = record.prefixes[record.contiguousPassCount - 1];
+      // The approval gate applies per candidate, so one unapproved candidate
+      // truncates the prefix here instead of discarding the whole train: the
+      // positions before it are authorized against the shorter prefix, it stops
+      // on its own refusal, and the positions after it return to `ready`. The
+      // check is read-only and runs before the first authorization write so a
+      // refusal cannot roll back a peer's settled authorization.
+      const gateRefusal = await firstGateRefusal(tx, reads, decisions, record.contiguousPassCount);
+      const authorizedCount = gateRefusal ? gateRefusal.index : record.contiguousPassCount;
+      const passing = record.prefixes[authorizedCount - 1];
       const summaries: string[] = [];
       let failed = false;
       let stopped = 0;
       for (const [index, read] of reads.entries()) {
         const prefix = record.prefixes[index];
         let settlement = "ready";
-        if (index < record.contiguousPassCount && passing && prefix) {
+        if (index < authorizedCount && passing && prefix) {
           const authorization = hooks.authorize(read, decisions[index]!, {
             publishHead: passing.prefixOid, predecessorOid: prefix.predecessorOid,
             ref: passing.ref, position: index + 1, trainTaskId: train.taskId,
           });
-          const applied = await authorization.body(tx, read.claim).catch((error: unknown) => {
-            if (error instanceof MergeGateAuthorizationError) gateRefusalRead = read;
-            throw error;
-          });
+          const applied = await authorization.body(tx, read.claim);
           if (!applied.value.applied) throw new Error(`Merge train readiness claim lost for ${read.readiness.id}`);
           // The train owns the one lease until every authorization is durable;
           // per-chain executor handoffs deliberately do not retain this lease.
           settlement = "authorized";
+        } else if (gateRefusal && index === gateRefusal.index) {
+          settlement = "stopped";
+          const transition = await read.claim.settle(tx, { kind: "finish", at: now, apply: async (client) => {
+            await stopMergeTail(client, { phase: "readiness", readinessTaskId: read.readiness.id,
+              regressionTaskId: read.regression.id, reason: gateRefusal.reason, recovery: read.recovery, at: now });
+            return { value: undefined, ownership: "released" };
+          } });
+          if (!transition.settled) throw new Error(`Merge train readiness claim lost for ${read.readiness.id}`);
+          stopped += 1;
+          await candidateSettlementMarker(tx, train, index + 1, settlement, gateRefusal.reason,
+            { verdict: prefix?.verdict ?? "skipped", ...(prefix ? { predecessorOid: prefix.predecessorOid } : {}) });
+          summaries.push(`${index + 1}. ${read.readiness.id}: ${prefix?.verdict ?? "skipped"} → ${settlement}`);
+          continue;
         } else {
           const blocked = record.blocked.find((candidate) => candidate.taskId === read.readiness.id);
           const firstFail = prefix?.verdict === "fail" && !failed;
@@ -415,16 +528,15 @@ const settleTrain = async (
           { verdict, ...(prefix ? { predecessorOid: prefix.predecessorOid } : {}) });
         summaries.push(`${index + 1}. ${read.readiness.id}: ${verdict} → ${settlement}`);
       }
-      await finishTrainMarker(tx, train, "settled", summaries.join("\n"), now);
-      return { authorized: record.contiguousPassCount, stopped };
+      await finishTrainMarker(tx, train, "settled", summaries.join("\n"));
+      return { authorized: authorizedCount, stopped };
     }, serializable);
     result.authorized += counts.authorized;
     result.stopped += counts.stopped;
     return "finished";
   } catch (error: unknown) {
     const reason = error instanceof Error ? error.message : String(error);
-    const aborted = await abortTrain(db, train, reason, now, gateRefusalRead);
-    if (aborted && gateRefusalRead) result.stopped += 1;
+    await abortTrain(db, train, reason, now);
     return "finished";
   } finally {
     for (const read of reads) await releaseClaim(db, read);
@@ -432,21 +544,28 @@ const settleTrain = async (
 };
 
 export const mergeTrainReadinessTick = async (
-  db: PrismaClient, reader: PullRequestReader, now: Date, width: number,
+  db: PrismaClient, reader: PullRequestReader, now: Date, budget: { width: number; limit: number },
   release: ReleaseMergeLease, lease: WithMergeLease, hooks: TrainHooks,
   existingPending?: PendingTrain[],
 ): Promise<ReadinessTickResult> => {
+  const { width, limit } = budget;
   const result: ReadinessTickResult = { claimed: 0, authorized: 0, requeued: 0, stopped: 0 };
   const pending = existingPending ?? await pendingMergeTrains(db);
   const unresolvedLeases = await db.mergeLeaseEvent.findMany({
     where: { state: { in: [MergeLeaseEventState.RELEASE_DEFERRED, MergeLeaseEventState.HANDOFF_PENDING] } },
     select: { state: true, owningTask: { select: { id: true, repoId: true } } },
   });
-  const busyRepos = new Set([...pending.map((train) => train.repoId),
-    ...unresolvedLeases.flatMap((event) => event.owningTask.repoId ? [event.owningTask.repoId] : [])]);
+  // A train holding the Lease is the only thing that suppresses a repository's
+  // single-candidate decisions. An unresolved handoff is the ordinary steady
+  // state after any authorization, so it excludes the repository from *new
+  // train formation* only, exactly as ADR-0004 scopes it.
+  const busyRepos = new Set(pending.map((train) => train.repoId));
+  const unresolvedLeaseRepos = new Set(
+    unresolvedLeases.flatMap((event) => event.owningTask.repoId ? [event.owningTask.repoId] : []),
+  );
   for (const train of pending) {
     const target = { projectId: train.projectId, chainId: train.candidates[0]!.chainId };
-    await withTrainLease(db, lease, target, train.regressionTaskId, train.taskId, train.repoId, async () => {
+    await withTrainLease(db, lease, target, train, now, async () => {
       const releaseWasDeferred = unresolvedLeases.some((event) => event.state === MergeLeaseEventState.RELEASE_DEFERRED
         && event.owningTask.id === train.regressionTaskId);
       let outcome: "waiting" | "finished";
@@ -472,13 +591,21 @@ export const mergeTrainReadinessTick = async (
     }, { ...serializable, timeout: 300_000 });
   };
   const groups = new Map<string, ReadyRead[]>();
+  // Every claim this tick takes is released here, including the ones handed to
+  // `single`, whose repository-mutex and pending-train arms return without
+  // settling. A claim left behind parks its candidate for the claim lease.
+  const claimed: ClaimedReadiness[] = [];
   try {
-    for await (const candidate of hooks.candidates(db, 100)) {
+    for await (const candidate of hooks.candidates(db, Math.max(limit * 20, 100))) {
+      // The caller's claim budget bounds this loop exactly as it bounds the
+      // single-candidate tick; a formed train is bounded by `width` instead.
+      if (result.claimed >= limit) break;
       if (!isMergeReadinessStep(candidate.templateStep)) continue;
       if ((candidate.repoId && busyRepos.has(candidate.repoId)) || await excludedRecovery(db, candidate.id)) continue;
       const read = await hooks.read(db, candidate, now);
       if (!read.claimed) continue;
       result.claimed += 1;
+      claimed.push(read);
       if (read.input.stage !== "ready" || !candidate.repoId || !read.input.target.resolved) {
         await single(read, await evaluateReadiness(reader, read.input));
         continue;
@@ -487,8 +614,10 @@ export const mergeTrainReadinessTick = async (
       group.push(read as ReadyRead);
       groups.set(candidate.repoId, group);
     }
-    for (const group of groups.values()) {
-      group.sort((left, right) => left.regression.stepOutput!.updatedAt.getTime() - right.regression.stepOutput!.updatedAt.getTime()
+    for (const [repoId, group] of groups) {
+      // FIFO by when the Regression evidence was persisted, which is the row's
+      // creation: `updatedAt` moves on any later re-upsert of the same verdict.
+      group.sort((left, right) => left.regression.stepOutput!.createdAt.getTime() - right.regression.stepOutput!.createdAt.getTime()
         || left.readiness.id.localeCompare(right.readiness.id));
       const first = group[0]!;
       let baseSha: string;
@@ -501,7 +630,7 @@ export const mergeTrainReadinessTick = async (
         } }) }), serializable);
         continue;
       }
-      if (width === 0) {
+      if (width === 0 || unresolvedLeaseRepos.has(repoId)) {
         for (const read of group) await single(read, await evaluateReadiness(reader, read.input));
         continue;
       }
@@ -560,14 +689,14 @@ export const mergeTrainReadinessTick = async (
       }
       if (reservation) {
         const train = reservation;
-        await withTrainLease(db, lease, target, first.regression.id, train.taskId, train.repoId, async () => {
+        await withTrainLease(db, lease, target, train, now, async () => {
           const outcome = await enqueueReservedTrain(db, reader, train, now, hooks);
           return { value: outcome, leaseOutcome: outcome === "waiting" ? { kind: "continue" } : { kind: "stop", taskId: first.regression.id } };
         });
       }
     }
   } finally {
-    for (const group of groups.values()) for (const read of group) await releaseClaim(db, read);
+    for (const read of claimed) await releaseClaim(db, read);
   }
   return result;
 };

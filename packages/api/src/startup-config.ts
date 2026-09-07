@@ -207,19 +207,28 @@ const checkListener = (reasons: string[], env: NodeJS.ProcessEnv): { host: strin
   return { host, port: Number.isSafeInteger(port) ? port : DEFAULT_API_PORT };
 };
 
-/** Read the validated train width for workers that receive configuration
- * outside the startup verdict. An omitted variable keeps the legacy path. */
+/**
+ * Read the train width from an environment. An omitted variable keeps the
+ * legacy path; an unparseable one is refused rather than quietly read as the
+ * legacy path, so a width that startup judged cannot silently become 0 later.
+ * `startReadinessWorker` receives the width judged at startup; this reader is
+ * the default for callers that construct a worker without that verdict.
+ */
 export const mergeTrainWidth = (env: NodeJS.ProcessEnv = process.env): number => {
   const raw = env["MERGE_TRAIN_WIDTH"];
   if (raw === undefined) return DEFAULT_MERGE_TRAIN_WIDTH;
   const normalized = raw.trim();
-  return MERGE_TRAIN_WIDTH_PATTERN.test(normalized) ? Number(normalized) : DEFAULT_MERGE_TRAIN_WIDTH;
+  if (!MERGE_TRAIN_WIDTH_PATTERN.test(normalized)) {
+    throw new StartupConfigError(["merge-train-width-invalid:MERGE_TRAIN_WIDTH"]);
+  }
+  return Number(normalized);
 };
 
 const checkMergeTrainWidth = (reasons: string[], env: NodeJS.ProcessEnv): number => {
   const raw = env["MERGE_TRAIN_WIDTH"];
   if (raw !== undefined && !MERGE_TRAIN_WIDTH_PATTERN.test(raw.trim())) {
     reasons.push("merge-train-width-invalid:MERGE_TRAIN_WIDTH");
+    return DEFAULT_MERGE_TRAIN_WIDTH;
   }
   return mergeTrainWidth(env);
 };
