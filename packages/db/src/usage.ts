@@ -99,12 +99,14 @@ const canonicalInputTokens = (uncached: number | null, cached: number | null): n
 /**
  * CLAUDE's terminal `result` carries a per-model breakdown under `modelUsage`,
  * keyed by model id, whose entries are camelCase — while the top-level `usage`
- * object is snake_case and describes ONE model, the primary one, repeated.
+ * object is snake_case and describes ONE model, the primary one.
  *
- * Verified against the real Claude captures transcribed in `usage.test.ts`: the
- * top-level `usage` equals `modelUsage["claude-opus-5"]` field for field, so
- * adding the two sources double-counts the primary model and reading only the
- * top-level one drops every secondary model. This branch is therefore
+ * In the single-invocation captures transcribed in `usage.test.ts`, top-level
+ * `usage` equals `modelUsage["claude-opus-5"]` field for field. On resume,
+ * `modelUsage` is session-cumulative while top-level `usage` remains per
+ * invocation; `sumSessionUsage` reconciles snapshots and later fallback usage.
+ * Adding both sources from one event double-counts the primary model, while
+ * reading only top-level usage drops secondary models. This branch is therefore
  * EXCLUSIVE, and the two vocabularies never share a key list.
  *
  * The returned input total is canonical: each model's provider-reported
@@ -250,8 +252,18 @@ export type ExtractedCacheSplit =
     };
 
 type DecodedUsage = {
+  providerSessionId: string | null;
   usage: SessionUsage;
   cacheSplit: ExtractedCacheSplit;
+  /**
+   * Claude's `usage` object is per invocation. Keep it separate from the
+   * session-cumulative `modelUsage` breakdown so a payload-level aggregation
+   * can apply the provider's two different accounting rules without changing
+   * the canonical one-payload result returned by `extractUsage`.
+   */
+  topLevelUsage: SessionUsage;
+  cumulativeModelUsage: SessionUsage | null;
+  cumulativeCostUsd: Prisma.Decimal | null;
 };
 
 /**
@@ -273,6 +285,41 @@ const cacheSplitFromUsage = (usage: SessionUsage): ExtractedCacheSplit => {
     cachedInputTokens: usage.cachedInputTokens,
     cacheCreationInputTokens: usage.cacheCreationInputTokens,
   };
+};
+
+/** Decode the per-invocation snake_case usage block without applying any
+ * model-breakdown precedence. The caller uses this only when no usable
+ * `modelUsage` exists, preserving the diagnostics and precedence of
+ * `extractUsage` while giving session aggregation its per-invocation source. */
+const extractTopLevelUsage = (usage: Record<string, unknown>): SessionUsage => {
+  const result: SessionUsage = {};
+  const input = tokenCount(usage.input_tokens, "usage.input_tokens");
+  const output = tokenCount(usage.output_tokens, "usage.output_tokens");
+  if (output !== null) result.outputTokens = output;
+
+  // CODEX reports one cached figure that is already included in input;
+  // CLAUDE reports a read/creation pair alongside uncached input. The pair
+  // is folded into input only in the latter shape. `reasoning_output_tokens`
+  // (CODEX) is deliberately not folded into output.
+  const cached = tokenCount(usage.cached_input_tokens, "usage.cached_input_tokens");
+  const cacheRead = tokenCount(usage.cache_read_input_tokens, "usage.cache_read_input_tokens");
+  const cacheCreation = tokenCount(usage.cache_creation_input_tokens, "usage.cache_creation_input_tokens");
+  const disjointCached = cached === null && (cacheRead !== null || cacheCreation !== null)
+    ? (cacheRead ?? 0) + (cacheCreation ?? 0)
+    : null;
+  if (cached !== null) {
+    result.cachedInputTokens = cached;
+    // CODEX's input_tokens already contains cached_input_tokens and its
+    // protocol has no cache-creation component. Preserve that known zero so
+    // the new split is not reported as unknown for Codex sessions.
+    result.cacheCreationInputTokens = 0;
+  } else {
+    if (cacheRead !== null) result.cachedInputTokens = cacheRead;
+    if (cacheCreation !== null) result.cacheCreationInputTokens = cacheCreation;
+  }
+  const canonicalInput = canonicalInputTokens(input, disjointCached);
+  if (canonicalInput !== null) result.inputTokens = canonicalInput;
+  return result;
 };
 
 /**
@@ -302,7 +349,14 @@ const decodeUsage = (payload: unknown, options: { strict?: boolean } = {}): Deco
   const event = asRecord(payload);
   if (!event) {
     if (options.strict) throw new Error("payload is not an object");
-    return { usage: {}, cacheSplit: { kind: "none" } };
+    return {
+      usage: {},
+      cacheSplit: { kind: "none" },
+      topLevelUsage: {},
+      cumulativeModelUsage: null,
+      cumulativeCostUsd: null,
+      providerSessionId: null,
+    };
   }
   if (options.strict) validateProviderShapes(event);
 
@@ -310,7 +364,30 @@ const decodeUsage = (payload: unknown, options: { strict?: boolean } = {}): Deco
   // session's totals, cost included, and PI's terminal event carries no other
   // usage vocabulary for the branches below to add to it.
   const pi = extractPiUsage(event.agentosPiUsage);
-  if (pi) return { usage: pi, cacheSplit: cacheSplitFromUsage(pi) };
+  if (pi) {
+    return {
+      usage: pi,
+      cacheSplit: cacheSplitFromUsage(pi),
+      topLevelUsage: {},
+      cumulativeModelUsage: null,
+      cumulativeCostUsd: null,
+      providerSessionId: null,
+    };
+  }
+  // Classify only after the exclusive PI branch. Read the id from each event:
+  // one database Session can contain multiple conversations after a failed resume.
+  const isClaude = event.type === "result"
+    || Object.prototype.hasOwnProperty.call(event, "modelUsage")
+    || Object.prototype.hasOwnProperty.call(event, "total_cost_usd");
+  const providerSessionId = isClaude && typeof event.session_id === "string" && event.session_id.length > 0
+    ? event.session_id
+    : null;
+  if (providerSessionId === null && (
+    Object.prototype.hasOwnProperty.call(event, "modelUsage")
+    || Object.prototype.hasOwnProperty.call(event, "total_cost_usd")
+  )) {
+    console.warn("[usage] Claude cumulative usage has no usable session_id; retaining additive accounting");
+  }
   const usage = asRecord(event.usage);
   const result: SessionUsage = {};
 
@@ -321,6 +398,7 @@ const decodeUsage = (payload: unknown, options: { strict?: boolean } = {}): Deco
     || models.cachedInputTokens !== null
     || models.cacheCreationInputTokens !== null
   );
+  const topLevelUsage = hasModelTokens || usage === null ? {} : extractTopLevelUsage(usage);
   if (hasModelTokens) {
     // Absence survives the branch: a breakdown that reports only input leaves
     // outputTokens absent, never 0. `exactOptionalPropertyTypes` is what keeps
@@ -332,40 +410,23 @@ const decodeUsage = (payload: unknown, options: { strict?: boolean } = {}): Deco
       result.cacheCreationInputTokens = models.cacheCreationInputTokens;
     }
   } else if (usage) {
-    const input = tokenCount(usage.input_tokens, "usage.input_tokens");
-    const output = tokenCount(usage.output_tokens, "usage.output_tokens");
-    if (output !== null) result.outputTokens = output;
-
-    // CODEX reports one cached figure that is already included in input;
-    // CLAUDE reports a read/creation pair alongside uncached input. The pair
-    // is folded into input only in the latter shape. `reasoning_output_tokens`
-    // (CODEX) is deliberately not folded into output.
-    const cached = tokenCount(usage.cached_input_tokens, "usage.cached_input_tokens");
-    const cacheRead = tokenCount(usage.cache_read_input_tokens, "usage.cache_read_input_tokens");
-    const cacheCreation = tokenCount(usage.cache_creation_input_tokens, "usage.cache_creation_input_tokens");
-    const disjointCached = cached === null && (cacheRead !== null || cacheCreation !== null)
-      ? (cacheRead ?? 0) + (cacheCreation ?? 0)
-      : null;
-    if (cached !== null) {
-      result.cachedInputTokens = cached;
-      // CODEX's input_tokens already contains cached_input_tokens and its
-      // protocol has no cache-creation component. Preserve that known zero so
-      // the new split is not reported as unknown for Codex sessions.
-      result.cacheCreationInputTokens = 0;
-    } else {
-      if (cacheRead !== null) result.cachedInputTokens = cacheRead;
-      if (cacheCreation !== null) result.cacheCreationInputTokens = cacheCreation;
-    }
-    const canonicalInput = canonicalInputTokens(input, disjointCached);
-    if (canonicalInput !== null) result.inputTokens = canonicalInput;
+    Object.assign(result, topLevelUsage);
   }
 
   // Token and cost usability are independent: a cost-only model breakdown must
   // not suppress valid top-level tokens, but its valid cost must still survive.
   // A reported terminal total remains authoritative when both sources exist.
   const cost = costAmount(event.total_cost_usd) ?? models?.costUsd ?? null;
+  const cumulativeModelUsage = hasModelTokens ? { ...result } : null;
   if (cost !== null) result.costUsd = cost;
-  return { usage: result, cacheSplit: cacheSplitFromUsage(result) };
+  return {
+    usage: result,
+    cacheSplit: cacheSplitFromUsage(result),
+    topLevelUsage,
+    cumulativeModelUsage,
+    cumulativeCostUsd: cost,
+    providerSessionId,
+  };
 };
 
 function strictToken(value: unknown, field: string): void {
@@ -470,6 +531,70 @@ export const sumUsage = (usages: SessionUsage[]): SessionUsage => {
     total.cacheCreationInputTokens = observedCacheCreation;
   }
   return total;
+};
+
+type ClaudeSessionUsage = {
+  /** Per-invocation fallback tokens since the latest cumulative model snapshot. */
+  topLevel: SessionUsage[];
+  /** The latest cumulative model breakdown in event order, when present. */
+  latestModelUsage: SessionUsage | null;
+  /** The latest usable cumulative cost in event order, when present. */
+  latestCostUsd: Prisma.Decimal | null;
+};
+
+/**
+ * Fold stored FINAL_OUTPUT payloads into one SessionUsage total.
+ *
+ * Claude's `result.total_cost_usd` and `result.modelUsage` are cumulative for
+ * the provider conversation identified by `session_id`; the latest usable
+ * value for each is therefore selected once per provider conversation. The
+ * top-level `usage` object remains per invocation. It is summed when a Claude
+ * payload has no usable model breakdown after the latest cumulative snapshot
+ * (the same fallback used by `extractUsage`); a new snapshot replaces those
+ * earlier increments. Payloads without a provider session id retain the original
+ * additive behavior used by Codex and PI.
+ *
+ * `payloads` must be in FINAL_OUTPUT sequence order. The recompute path reads
+ * SessionEvent rows ordered by `seq`, and callers using this helper directly
+ * should preserve that same order so "latest" has its provider meaning.
+ */
+export const sumSessionUsage = (payloads: readonly unknown[]): SessionUsage => {
+  const ungrouped: SessionUsage[] = [];
+  const claudeSessions = new Map<string, ClaudeSessionUsage>();
+
+  for (const payload of payloads) {
+    const decoded = decodeUsage(payload);
+    const sessionId = decoded.providerSessionId;
+    if (sessionId === null) {
+      ungrouped.push(decoded.usage);
+      continue;
+    }
+
+    const session = claudeSessions.get(sessionId) ?? {
+      topLevel: [],
+      latestModelUsage: null,
+      latestCostUsd: null,
+    } satisfies ClaudeSessionUsage;
+    if (decoded.cumulativeModelUsage !== null) {
+      session.latestModelUsage = decoded.cumulativeModelUsage;
+      session.topLevel = [];
+    } else {
+      session.topLevel.push(decoded.topLevelUsage);
+    }
+    if (decoded.cumulativeCostUsd !== null) session.latestCostUsd = decoded.cumulativeCostUsd;
+    claudeSessions.set(sessionId, session);
+  }
+
+  for (const session of claudeSessions.values()) {
+    const usage = sumUsage([
+      ...(session.latestModelUsage === null ? [] : [session.latestModelUsage]),
+      ...session.topLevel,
+    ]);
+    if (session.latestCostUsd !== null) usage.costUsd = session.latestCostUsd;
+    ungrouped.push(usage);
+  }
+
+  return sumUsage(ungrouped);
 };
 
 type DerivedUsage = {
@@ -583,7 +708,8 @@ export const sessionUsageLockKey = (sessionId: string): number => {
  * `SessionEvent` is the source of truth and the five columns are a derived
  * cache, which is what makes this idempotent: replaying an already-ingested
  * batch converges instead of drifting, a resumed session accumulates for free
- * (each attempt's `FINAL_OUTPUT` is its own row), a write lost to a crash
+ * (each provider conversation's latest cumulative `FINAL_OUTPUT` is selected,
+ * while fresh provider conversations still add), a write lost to a crash
  * between `createMany` and here is repaired by the next ingest or by the
  * backfill, and no NULL column is ever used in arithmetic.
  *
@@ -620,7 +746,7 @@ const recomputeSessionUsageOnce = async (db: PrismaClient, sessionId: string): P
       orderBy: { seq: "asc" },
       select: { payload: true },
     });
-    const derived = deriveUsageColumns(sumUsage(rows.map((row) => extractUsage(row.payload))));
+    const derived = deriveUsageColumns(sumSessionUsage(rows.map((row) => row.payload)));
     const current = await tx.session.findUnique({
       where: { id: sessionId },
       select: {

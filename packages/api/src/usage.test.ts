@@ -532,28 +532,58 @@ test("recomputeSessionUsage stores a cost-only session without inventing token z
   assert.equal(updates.length, 1);
 });
 
-test("recomputeSessionUsage accumulates across resume attempts", async () => {
-  const attemptOne = { type: "result", total_cost_usd: 0.1, usage: { input_tokens: 10, output_tokens: 3, cache_read_input_tokens: 100 } };
-  const attemptTwo = { type: "result", total_cost_usd: 0.2, usage: { input_tokens: 7, output_tokens: 11, cache_read_input_tokens: 50 } };
+const resumedClaudeResult = (sessionId: string, cost: number, input: number, output: number) => ({
+  type: "result",
+  session_id: sessionId,
+  total_cost_usd: cost,
+  usage: { input_tokens: 1, output_tokens: 1 },
+  modelUsage: { "claude-opus": { inputTokens: input, outputTokens: output } },
+});
 
-  const twoRows = emptyColumns();
-  await recomputeSessionUsage(stubDatabase([attemptOne, attemptTwo], twoRows).database, "session-1");
+test("recomputeSessionUsage selects the last cumulative Claude resume total", async () => {
+  const columns = emptyColumns();
+  const events = [
+    resumedClaudeResult("provider-a", 0.1, 100, 10),
+    resumedClaudeResult("provider-a", 0.2, 150, 15),
+  ];
+  const { database, updates } = stubDatabase(events, columns);
+  assert.equal(await recomputeSessionUsage(database, "session-1"), true);
+  assert.equal(columns.inputTokens, 150);
+  assert.equal(columns.outputTokens, 15);
+  assert.equal(columns.totalTokens, 165);
+  assert.equal(columns.costUsd?.toString(), "0.2");
+  assert.equal(await recomputeSessionUsage(database, "session-1"), false);
+  assert.equal(updates.length, 1);
+});
 
-  const oneCombinedRow = emptyColumns();
-  await recomputeSessionUsage(
-    stubDatabase([{ type: "result", total_cost_usd: 0.3, usage: { input_tokens: 17, output_tokens: 14, cache_read_input_tokens: 150 } }], oneCombinedRow).database,
-    "session-1",
-  );
+test("recomputeSessionUsage adds the latest totals from distinct Claude provider sessions", async () => {
+  const columns = emptyColumns();
+  const events = [
+    resumedClaudeResult("provider-a", 0.1, 100, 10),
+    resumedClaudeResult("provider-b", 0.3, 200, 20),
+    resumedClaudeResult("provider-a", 0.2, 150, 15),
+    resumedClaudeResult("provider-b", 0.4, 250, 25),
+  ];
+  await recomputeSessionUsage(stubDatabase(events, columns).database, "session-1");
+  assert.equal(columns.inputTokens, 400);
+  assert.equal(columns.outputTokens, 40);
+  assert.equal(columns.totalTokens, 440);
+  assert.equal(columns.costUsd?.toString(), "0.6");
+});
 
-  assert.equal(twoRows.inputTokens, 167);
-  assert.equal(twoRows.outputTokens, 14);
-  assert.equal(twoRows.cachedInputTokens, 150);
-  assert.equal(twoRows.totalTokens, 181);
-  // Accumulation is a property of the stored rows, not of write ordering.
-  assert.equal(twoRows.inputTokens, oneCombinedRow.inputTokens);
-  assert.equal(twoRows.outputTokens, oneCombinedRow.outputTokens);
-  assert.equal(twoRows.totalTokens, oneCombinedRow.totalTokens);
-  assert.equal(twoRows.costUsd?.toString(), oneCombinedRow.costUsd?.toString());
+test("recomputeSessionUsage corrects four identical Claude results to one quarter and is idempotent", async () => {
+  const event = resumedClaudeResult("provider-a", 30.10718275, 100, 10);
+  const events = [event, event, event, event];
+  const columns = deriveUsageColumns(sumUsage(events.map(extractUsage)));
+  const previousCost = columns.costUsd;
+  assert.equal(previousCost?.toString(), "120.4287");
+  const { database, updates } = stubDatabase(events, columns);
+  assert.equal(await recomputeSessionUsage(database, "session-1"), true);
+  assert.equal(columns.costUsd?.toString(), "30.1072");
+  assert.equal(columns.inputTokens, 100);
+  assert.equal(columns.outputTokens, 10);
+  assert.equal(await recomputeSessionUsage(database, "session-1"), false);
+  assert.equal(updates.length, 1);
 });
 
 test("recomputeSessionUsage repairs a session whose second attempt's write was lost", async () => {
