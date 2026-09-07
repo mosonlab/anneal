@@ -62,6 +62,9 @@ const RETIRED = agent({
 const SENTINEL = agent({ id: "a-merge", name: "merge-integrator", title: "Merge Integrator", assignable: false });
 const AGENTS = [SENIOR, RETIRED, SENTINEL];
 
+type TestTierSlots = { default: string | null; frontend: string | null; hard: string | null; hazard: string | null };
+const EMPTY_TIERS: TestTierSlots = { default: null, frontend: null, hard: null, hazard: null };
+
 const step = (overrides: Partial<TaskTemplateStep> & Pick<TaskTemplateStep, "stepIndex" | "name" | "outputKind">): TaskTemplateStep => ({
   id: `step-${overrides.stepIndex}`,
   assigneeType: "AGENT",
@@ -98,7 +101,7 @@ const TEMPLATE: TaskTemplate = {
   ],
 };
 
-const profile = (overrides: Partial<StaffingProfile> & Pick<StaffingProfile, "id" | "name">): StaffingProfile => ({
+const profile = (overrides: Partial<StaffingProfile> & Pick<StaffingProfile, "id" | "name"> & { tiers?: Partial<TestTierSlots> }): StaffingProfile & { tiers: TestTierSlots } => ({
   projectId: PROJECT.id,
   taskTemplateId: TEMPLATE.id,
   isDefault: false,
@@ -107,6 +110,7 @@ const profile = (overrides: Partial<StaffingProfile> & Pick<StaffingProfile, "id
   updatedAt: "2026-09-03T00:00:00.000Z",
   entries: [],
   ...overrides,
+  tiers: { ...EMPTY_TIERS, ...overrides.tiers },
 });
 
 const FAST_LANE = profile({
@@ -118,6 +122,11 @@ const FAST_LANE = profile({
     // Saved before the control plane owned that step; the next save must surface the refusal.
     { outputKind: "merge-authorization", assigneeAgentId: SENIOR.id, include: null },
   ],
+});
+const TIERED = profile({
+  id: "p-tiered",
+  name: "Tiered lane",
+  tiers: { default: SENIOR.id, frontend: null, hard: SENIOR.id, hazard: null },
 });
 const CAREFUL = profile({ id: "p-careful", name: "Careful lane" });
 
@@ -336,6 +345,7 @@ test("duplicating a profile posts a copy of its entries under a new name", async
     assert.deepEqual(bodyOf(page, "POST", PROFILES_PATH), {
       name: t("en", "workflows.profile.copyName", { name: "Fast lane" }),
       entries: FAST_LANE.entries,
+      tiers: EMPTY_TIERS,
     });
   } finally {
     await page.dispose();
@@ -360,19 +370,47 @@ test("a refused write reaches the operator as the control plane's own message", 
 
 /* --------------------------------------------------------------------- editor */
 
-const mountEditor = async (locale: "en" | "zh", routes: PageRoutes = {}): Promise<{
+const mountEditor = async (locale: "en" | "zh", routes: PageRoutes = {}, heldProfile: StaffingProfile = FAST_LANE): Promise<{
   page: PageHarness;
   saves: () => number;
 }> => {
   let saved = 0;
   const page = await mountPage(
     <LocaleProvider initialLocale={locale}>
-      <StaffingProfileEditor template={TEMPLATE} profile={FAST_LANE} agents={AGENTS} onSaved={() => { saved += 1; }} />
+      <StaffingProfileEditor template={TEMPLATE} profile={heldProfile} agents={AGENTS} onSaved={() => { saved += 1; }} />
     </LocaleProvider>,
     routes,
   );
   return { page, saves: () => saved };
 };
+
+test("the editor shows all four implementation tier slots and saves their agents", async () => {
+  const { page } = await mountEditor("en", {
+    "PUT /staffing-profiles/p-tiered": { profile: TIERED, warnings: [] },
+  }, TIERED);
+  try {
+    const slots = [...page.container.querySelectorAll<HTMLSelectElement>("[data-implementation-tier]")];
+    assert.deepEqual(slots.map((select) => select.dataset.implementationTier), ["default", "frontend", "hard", "hazard"]);
+    assert.deepEqual(slots.map((select) => select.value), [SENIOR.id, "", SENIOR.id, ""]);
+
+    await act(async () => {
+      const frontend = page.container.querySelector<HTMLSelectElement>('[data-implementation-tier="frontend"]');
+      assert.ok(frontend);
+      frontend.value = SENIOR.id;
+      frontend.dispatchEvent(new page.dom.window.Event("change", { bubbles: true }));
+    });
+    await page.settle();
+    await page.press(t("en", "workflows.editor.save"));
+    assert.deepEqual(bodyOf(page, "PUT", "/staffing-profiles/p-tiered").tiers, {
+      default: SENIOR.id,
+      frontend: SENIOR.id,
+      hard: SENIOR.id,
+      hazard: null,
+    });
+  } finally {
+    await page.dispose();
+  }
+});
 
 for (const locale of ["en", "zh"] as const) {
   test(`the editor renders one row per step, staffable agents only, and an include toggle only on optional steps in ${locale}`, async () => {
@@ -439,6 +477,7 @@ test("saving preserves a legacy readiness assignment and shows the refusal", asy
         { outputKind: "blind-findings", assigneeAgentId: SENIOR.id, include: false },
         { outputKind: "merge-authorization", assigneeAgentId: SENIOR.id, include: null },
       ],
+      tiers: EMPTY_TIERS,
     });
     assert.equal(saves(), 0);
     assert.match(page.container.textContent ?? "", /400 Step Merge readiness.*remove its entry/u);
