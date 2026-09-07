@@ -2213,8 +2213,30 @@ approval and evidence renewal preserve the same refusal evidence.
   the write replaced — or stating that the prompt was edited. Clearing a cap is
   such a change and is recorded as `Spend cap: $<previous> → none`. `spendCap`
   accepts `0` through `9999999999.99`, the range of its `Decimal(12,2)` column,
-  or `null` to clear it; anything else refuses with `400 Bad Request`. The prompt text itself is not copied into
-  the activity.
+  or `null` to clear it; anything else refuses with `400 Bad Request`. The
+  prompt text itself is not copied into the activity.
+- Amending a brief after the implementation Step has materialized the
+  Specification of record into `.chain/<branchName>/spec.md` does not stop the
+  Chain, as long as that Step's Run was claimed by a version that records what
+  it was handed. A review claim checks the file against the brief the
+  implementer was handed — recorded as a digest when its Run was claimed — so a
+  faithful materialization still passes, and every later review Run's prompt
+  carries one line naming the amended task and the time it was amended. The
+  route never rewrites `spec.md` on the branch: the file remains the
+  pre-amendment text, and the amended text stays on the task that was patched.
+  A `spec.md` that differs from what the implementer was handed is still refused
+  with `spec-transcription-mismatch` and parks the review task, whether or not
+  the brief was amended; that refusal also states whether the current brief
+  still matches the materialized specification, which is how tampering on the
+  branch is told apart from an amendment nobody transcribed.
+- A Chain whose implementation Run was claimed before that digest existed, and
+  one whose implementation output was written by hand through
+  `PUT /tasks/:taskId/output`, records no digest: its review claims still
+  compare `spec.md` against the brief as it reads now, so amending that brief
+  still refuses the claim with `spec-transcription-mismatch` and parks the
+  review task, and the refusal carries no clause about the brief's standing.
+  Recovery is unchanged: rewrite `spec.md` on the branch to the amended text,
+  `PUT` the implementation output's `headSha`, and restart each review Step.
 - A change to `assigneeType` or `assigneeAgentId`, including clearing the
   assignee to `null`, is refused with `409 Conflict` while the task has a Run in
   an active status (`QUEUED`, `RUNNING`, or `WAITING_INBOX`); the message names

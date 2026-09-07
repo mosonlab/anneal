@@ -31,7 +31,7 @@ import { blockingPredecessor } from "./chain.js";
 import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
 import type { Refusal } from "./refusal.js";
 import { validateSchedule } from "./scheduler.js";
-import { legacyBriefMigration, patchesBriefInPlace, rewriteBrief } from "./task-brief.js";
+import { BRIEF_EDIT_ACTIVITY_NOTE, legacyBriefMigration, patchesBriefInPlace, rewriteBrief } from "./task-brief.js";
 import { taskMoveAuthority } from "./task-move-authority.js";
 import {
   hasActiveRun,
@@ -147,7 +147,7 @@ export const fieldEditActivity = (
     body.spendCap !== undefined && cap(body.spendCap) !== cap(locked.spendCap)
       ? `Spend cap: ${cap(locked.spendCap)} → ${cap(body.spendCap)}`
       : null,
-    body.description !== undefined ? "Prompt edited" : null,
+    body.description !== undefined ? BRIEF_EDIT_ACTIVITY_NOTE : null,
   ].filter((note): note is string => note !== null);
   return notes.length === 0 ? null : { actorType: "operator", body: notes.join("; ") };
 };
