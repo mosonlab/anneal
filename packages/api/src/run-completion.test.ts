@@ -706,8 +706,8 @@ for (const outcome of ["review-fail", "refresh-conflict"]) {
       });
       const closed = await harness.complete({
         runNumber: 1, maxRunsPerTask: 1, budgetGrants: 0,
-        headSha: reportedHead,
-        runHeadSha: scenario === "persisted-mismatch" ? otherHead : undefined,
+        ...(reportedHead ? { headSha: reportedHead } : {}),
+        ...(scenario === "persisted-mismatch" ? { runHeadSha: otherHead } : {}),
         templateStep: { outputKind: "regression-verification-v2", requiresCommit: true, taskTemplate: { name: "direct-engineer-workflow" } },
         outcome: {
           case: "provider-failure", reason,
