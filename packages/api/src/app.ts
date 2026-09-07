@@ -51,7 +51,7 @@ export const createApp = (db: PrismaClient, options: LiveAppOptions): Hono<AppEn
   const app = new Hono<AppEnvironment>();
   const releaseChainLease = options.releaseMergeLease ?? releaseMergeLease;
   const noteArchivedQueuedRunsOnClaim = createArchivedRunNoticeScheduler(db);
-  const runners = createRunnerRegistry();
+  const runners = options.runnerRegistry ?? createRunnerRegistry();
   // Authentication circuits are global backend state, so only one daemon must
   // perform a recovery check. This short in-process lease prevents every idle
   // daemon from invoking the same provider login command on each heartbeat.

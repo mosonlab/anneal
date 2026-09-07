@@ -33,6 +33,7 @@ import {
   type ReleaseMergeLease,
   type WithMergeLease,
 } from "./merge-lease.js";
+import { executorsOnline } from "./merge-executor-daemon-fixture.js";
 import { readinessTick, reopenRecoveryHeadAdoptionFailures } from "./merge-readiness-worker.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
@@ -725,6 +726,7 @@ test("readiness records and reopens a head-adoption refusal by code, independent
     5,
     releaseChainLease,
     mutateBeforeLeaseCallback,
+    executorsOnline,
   ), { claimed: 1, authorized: 0, requeued: 0, stopped: 1 });
   const stopped = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } });
   assert.equal(stopped.status, "BLOCKED_DOWNSTREAM");
