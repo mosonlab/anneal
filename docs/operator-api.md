@@ -1503,12 +1503,18 @@ invalidated by a late salvage publication, a merge-tail requeue — as opposed t
 attempts its agent spent. It is bounded at three per task; at the bound the
 platform stops requeueing and parks the task for an operator, so a card showing
 `3` is one loss away from `REVIEW`. See "Lost-Run reconciliation" below.
+It also includes `spendCapUsage`: `null` on a task with no
+`spendCap`, and otherwise `{capUsd, spentUsd, exhausted}` — the cap, what the
+task's Runs have already spent against it, and whether the cap now refuses a
+new attempt. See "Task spend cap" below for what counts as spend.
+
 Every card also carries `baseline`, the same per-template-step cost and
 duration baseline `GET /tasks/:taskId` documents, or `null` for a card with no
 template step or too little history. The whole page is answered by one grouped
 query, so the board's query count does not grow with the number of cards. Rows
 of the `full` view carry the same `baseline` field on the same terms, read by
 the same single grouped query.
+
 For a Chain member, the first emitted member also carries the
 `chainAggregate` projection. Its `activation.state` is one of
 `parked-unactivated`, `waiting-on-predecessor`, `running`, `idle`, `held`, or
@@ -1582,6 +1588,10 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
   raise `maxSessionsPerTask` through `PATCH /tasks/:taskId` to lift it. It is a
   separate verdict from the board's `leaseLossRefunds`: a task can have budget
   left and still be out of platform refunds.
+- `spendCap` is the task's own spend limit in USD, a `Decimal(12,2)` or
+  `null`, and `taskCost` is the read-time cost of its Runs. Enforcement and the
+  cost basis are described under "Task spend cap".
+
 - `editableBrief` is the prompt text a caller may rewrite through `PATCH
   /tasks/:taskId` with `description`, already extracted: the brief alone for a
   Chain step that authors one, the whole stored description for an ordinary
@@ -2208,8 +2218,11 @@ approval and evidence renewal preserve the same refusal evidence.
   `opensPullRequest`, `maxDurationMin`, `stallTimeoutMin`,
   `maxSessionsPerTask`, `scheduleKind`, `runAt`, `cron`, and `timezone`.
   `status` is a task status (`BACKLOG`, `TODO`, `DOING`, `REVIEW`, `DONE`);
-  `failureReason` may be `null`. `dispatchAfterTaskId` is the Chain binding and
-  may be a task id or `null`.
+  `failureReason` may be `null`. `spendCap` is patchable but not creatable: a
+  non-negative number sets the task's spend limit in USD and `null` clears it.
+  Raising or clearing it is the way out of a `spend-cap-exhausted` refusal —
+  the next `POST /tasks/:taskId/retry` is measured against the new value.
+  `dispatchAfterTaskId` is the Chain binding and may be a task id or `null`.
 - For a Chain task, `approvalGate` can change only when the task's template
   step is one of the two configurable slots — the specification step or merge
   readiness step — and the stored task status is `TODO`. The accepted value is
@@ -2261,6 +2274,14 @@ approval and evidence renewal preserve the same refusal evidence.
   template Step metadata is missing, refuses with `400 Bad Request` and
   `Cannot rewrite task brief: <reason>`. Every other task stores `description`
   verbatim.
+- A `maxSessionsPerTask`, `spendCap` or `description` change is recorded as an
+  operator TaskActivity naming the budget's or cap's previous and new value —
+  both read under the write's own lock, so the stated previous value is the one
+  the write replaced — or stating that the prompt was edited. Clearing a cap is
+  such a change and is recorded as `Spend cap: $<previous> → none`. `spendCap`
+  accepts `0` through `9999999999.99`, the range of its `Decimal(12,2)` column,
+  or `null` to clear it; anything else refuses with `400 Bad Request`. The
+  prompt text itself is not copied into the activity.
 - Amending a brief after the implementation Step has materialized the
   Specification of record into `.chain/<branchName>/spec.md` does not stop the
   Chain, as long as that Step's Run was claimed by a version that records what
@@ -2283,9 +2304,6 @@ approval and evidence renewal preserve the same refusal evidence.
   review task, and the refusal carries no clause about the brief's standing.
   Recovery is unchanged: rewrite `spec.md` on the branch to the amended text,
   `PUT` the implementation output's `headSha`, and restart each review Step.
-- A `maxSessionsPerTask` or `description` change is recorded as an operator
-  TaskActivity naming the budget's previous and new value, or stating that the
-  prompt was edited. The prompt text itself is not copied into the activity.
 - A change to `assigneeType` or `assigneeAgentId`, including clearing the
   assignee to `null`, is refused with `409 Conflict` while the task has a Run in
   an active status (`QUEUED`, `RUNNING`, or `WAITING_INBOX`); the message names
@@ -2921,6 +2939,55 @@ curl -X POST "$BASE_URL/runs/$RUN_ID/cancel" \
 ```sh
 curl "$BASE_URL/runs/$RUN_ID/events?afterSeq=0&limit=500" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
+
+### Task spend cap
+
+`Task.spendCap` is a per-task limit in USD, or `null` for no limit. It is
+enforced at the single place a Run comes into existence, so every intent that
+would queue a new attempt — an operator retry, a chain enqueue, a merge-tail
+requeue or repair, a claim-invalidation replacement, and both automatic
+after-completion and after-lease-loss retries — is measured against it. When
+the cap is set and the task's accumulated spend is at or above it, no Run is
+opened: the Task moves to `REVIEW` with a `failureReason` beginning
+`Spend cap $<cap> reached`, and a TaskActivity carrying
+`metadata.refusal = "spend-cap-exhausted"` alongside the `spendCapUsd` and
+`spentUsd` the refusal measured. That park is the caller's write and
+is made on a path that commits, so it survives on every intent above: the
+callers that raise other Run-birth refusals out of their transaction park this
+one instead, because rolling it back would delete the record naming the cap the
+operator has to raise. Callers surface the refusal as a `409 Conflict`. Recover
+by raising or clearing `spendCap` through `PATCH /tasks/:taskId` and calling
+`POST /tasks/:taskId/retry`; the retry is measured against the new value.
+
+The cap, the total and every rendering of either are money with cents
+(`$1.00`, not `$1`) — the `failureReason`, the activity's `spendCapUsd` and
+`spentUsd` metadata, the board's `spendCapUsage`, and the operator activity a
+cap edit leaves, all from one formatter beside the basis below.
+
+The cost basis is defined once, in `packages/db/src/spend-cap.ts`:
+
+- Every Run of the task counts, priced the same way `taskCost` is: the
+  provider-reported `Session.costUsd` when there is one, otherwise the
+  read-time token estimate at the Run's own model.
+- The currency is USD. Nothing in the platform converts currencies.
+- A Run whose cost was never captured contributes nothing. A missing amount is
+  unknown, not large, and charging a guess would refuse attempts nobody paid
+  for.
+- An in-flight Run counts as soon as its cost is reported. Session usage is
+  written while the Run executes and at its end, so whatever has been reported
+  by the moment the next attempt is decided is included. A cap therefore stops
+  the attempt *after* the one that crossed it, never the one that is running.
+- The comparison is `spent >= cap`: reaching the cap exactly leaves nothing for
+  another attempt. A cap of `0` refuses every attempt.
+- `Task.spendCapApplicable` is not part of the decision: a cap is in force
+  whenever it is set. That column, and `Run.spendCap` and
+  `Run.spendCapApplicable` beside it, are written by nothing an operator can
+  reach and read by nothing; they are dead and can be dropped by a change that
+  owns the migration.
+
+`GET /tasks?view=board` projects `spendCapUsage`, and `GET /tasks/:taskId`
+returns `spendCap` beside `taskCost`, so the limit is never displayed without
+the number it is measured against.
 
 ### Lost-Run reconciliation
 

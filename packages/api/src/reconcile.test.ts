@@ -261,7 +261,13 @@ test("lease-loss retry refuses an archived Agent and parks the Task visibly", as
 
 // One mock for the whole bound: a Run whose lease has expired, a task whose
 // refund count is the only thing that varies between the cases below.
-const lostRunDatabase = (options: { leaseLossRefunds: number; maxSessionsPerTask?: number; runNumber?: number }) => {
+const lostRunDatabase = (options: {
+  leaseLossRefunds: number;
+  maxSessionsPerTask?: number;
+  runNumber?: number;
+  spendCap?: string;
+  spentUsd?: string;
+}) => {
   const now = new Date("2026-09-06T06:00:00.000Z");
   const created: Record<string, unknown>[] = [];
   const lostUpdates: Record<string, unknown>[] = [];
@@ -294,6 +300,15 @@ const lostRunDatabase = (options: { leaseLossRefunds: number; maxSessionsPerTask
       },
       agent: { findUnique: async () => live },
       run: {
+        // The spend-cap basis reads every Run of the task priced by its session.
+        findMany: async () => (options.spentUsd === undefined ? [] : [{
+          model: "model",
+          session: {
+            costUsd: new Prisma.Decimal(options.spentUsd),
+            inputTokens: null, cachedInputTokens: null, cacheCreationInputTokens: null,
+            outputTokens: null, nativeChildUsed: false,
+          },
+        }]),
         findFirst: async () => ({ id: "lost-1", cancelRequestId: null, cancelReason: null, cancelRequestedAt: null, headSha: null }),
         updateMany: async ({ data }: { data: Record<string, unknown> }) => {
           lostUpdates.push(data);
@@ -314,6 +329,7 @@ const lostRunDatabase = (options: { leaseLossRefunds: number; maxSessionsPerTask
           chainId: null, chainIndex: null, chainLayer: null, targetBranch: "main", opensPullRequest: true,
           maxDurationMin: 120, stallTimeoutMin: 10,
           maxSessionsPerTask: options.maxSessionsPerTask ?? 5,
+          spendCap: options.spendCap === undefined ? null : new Prisma.Decimal(options.spendCap),
           archivedAt: null,
           runs: [candidate],
         }),
@@ -358,6 +374,8 @@ test("the fourth lease loss is refused by name, parks the Task, and grants nothi
   assert.deepEqual(created, [], "no replacement is queued");
   assert.equal(taskUpdates.at(-1)?.status, TaskStatus.REVIEW);
   assert.match(String(taskUpdates.at(-1)?.failureReason), /Lease-loss refunds exhausted after 3/);
+  // Only the code: the refusal's own detail stays out of the park for every
+  // refusal but the spend cap.
   assert.deepEqual(activities.at(-1)?.metadata, { refusal: "lease-loss-refunds-exhausted" });
   assert.match(String(activities.at(-1)?.body), /Run 2 lost; automatic retry refused/);
   assert.match(String(inbox.at(-1)?.body), /Lease-loss refunds exhausted/);
@@ -365,6 +383,23 @@ test("the fourth lease loss is refused by name, parks the Task, and grants nothi
   // inherit the attempt this reconciliation just refused.
   assert.equal(lostUpdates.at(-1)?.budgetGrants, 3);
   assert.equal(lostUpdates.at(-1)?.maxRunsPerTask, 8);
+});
+
+test("an automatic lease-loss retry refused by a spend cap parks the cap and the total it refused against", async () => {
+  const { database, now, created, activities, taskUpdates } = lostRunDatabase({
+    leaseLossRefunds: 0, spendCap: "1.00", spentUsd: "1.50",
+  });
+
+  assert.equal(await reconcileDatabaseRuns(database, now), 1);
+
+  assert.deepEqual(created, [], "no replacement is queued");
+  assert.equal(taskUpdates.at(-1)?.status, TaskStatus.REVIEW);
+  assert.match(String(taskUpdates.at(-1)?.failureReason), /Spend cap \$1\.00 reached/);
+  // The park an operator filters by is also the one that has to name which cap
+  // to raise: the code alone leaves the amounts in prose and nowhere else.
+  assert.deepEqual(activities.at(-1)?.metadata, {
+    refusal: "spend-cap-exhausted", spendCapUsd: "1.00", spentUsd: "1.50", runs: 1,
+  });
 });
 
 test("refund exhaustion wins when the fourth lost run also reaches the ordinary ceiling", async () => {

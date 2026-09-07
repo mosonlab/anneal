@@ -20,6 +20,7 @@ import {
   MERGE_TAIL_KIND,
   parseAuthorizationMetadata,
   parseStopAnswerMetadata,
+  Prisma,
   PrismaClient,
   TaskStatus,
 } from "@anneal/db";
@@ -997,6 +998,69 @@ test("task PATCH renews a stopped integrator from confirmation bound to gated re
   assert.equal(runs.length, 2);
   assert.equal(runs[1]!.runNumber, 6);
   assert.equal(runs[1]!.status, "QUEUED");
+});
+
+/**
+ * The confirmation path raises every other Run-birth refusal, which rolls back
+ * the transaction that carries the human's authorization. A spend cap must not
+ * be enforced that way: rolling back would discard both the approval and the
+ * record naming the cap, leaving an operator with a 409 and no way to see which
+ * limit refused the renewal.
+ */
+test("a spend cap parks the renewed integrator instead of discarding the authorization", async () => {
+  const { chain } = await stoppedChain(
+    "renew-gated-readiness-spend-cap",
+    "head-drift",
+    "twelve-step-readiness",
+    5,
+    5,
+    true,
+  );
+  assert.ok(chain.readinessTask, "the readiness tail has a server-owned gate");
+  const question = await stopQuestionFor(chain.integratorTask!.id);
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: question!.id,
+    externalEventId: "evt-renew-gated-readiness-spend-cap-request",
+    decision: "re-authorize",
+  }));
+  await evidenceTick(db, { readPullRequest: async () => freshSnapshot() }, new Date());
+  // A cap of zero refuses every attempt, which is the cheapest exhausted cap.
+  await db.task.update({
+    where: { id: chain.integratorTask!.id },
+    data: { spendCap: new Prisma.Decimal("0") },
+  });
+
+  const approved = await call("PATCH", `/tasks/${chain.readinessTask.id}`, { status: "DONE" });
+  assert.equal(approved.status, 200, JSON.stringify(approved.body));
+  // The authorization the human gave is kept.
+  assert.equal(
+    await db.taskActivity.count({
+      where: {
+        taskId: chain.readinessTask.id,
+        metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.authorization },
+      },
+    }),
+    1,
+    "the authorization committed",
+  );
+  assert.equal(
+    await db.run.count({ where: { taskId: chain.integratorTask!.id } }),
+    1,
+    "no mechanical merge run was queued past the cap",
+  );
+  const parked = await db.task.findUniqueOrThrow({ where: { id: chain.integratorTask!.id } });
+  assert.equal(parked.status, "REVIEW");
+  assert.match(String(parked.failureReason), /Spend cap \$0\.00 reached/u);
+  assert.equal(
+    await db.taskActivity.count({
+      where: {
+        taskId: chain.integratorTask!.id,
+        metadata: { path: ["refusal"], equals: "spend-cap-exhausted" },
+      },
+    }),
+    1,
+    "the refusal names itself where an operator filters for it",
+  );
 });
 
 test("fresh confirmation rejection reruns regression, never gated readiness, for seven- and twelve-step tails", async () => {

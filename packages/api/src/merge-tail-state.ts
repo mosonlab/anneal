@@ -1,12 +1,16 @@
 import {
   attemptRunBirth,
   closeIntegratorQuestions,
-  enqueueTaskRun,
+  enqueueTaskRunInternal,
+  errorForOpenRunRefusal,
   MERGE_RECOVERY_CLASS_SETTLE,
   MERGE_RECOVERY_RETRY_CLASS_ENUM,
+  parksInsteadOfRaising,
+  recordRunBirthRefusal,
   MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
   openRun,
+  runBirthRefusalMetadata,
   Prisma,
   TaskStatus,
   recordReadinessRequeue,
@@ -217,7 +221,7 @@ export const requeueMergeTailRun = async (tx: DbTx, taskId: string, now: Date) =
     await tx.taskActivity.create({ data: {
       taskId, actorType: "control-plane",
       body: `Merge-tail target was not queued: ${refusal.message}`,
-      metadata: { refusal: refusal.code },
+      metadata: runBirthRefusalMetadata(refusal),
     } });
   }
   return attempt;
@@ -287,12 +291,28 @@ export const enterRepair = async (
     }
     return null;
   }
-  const run = attempt?.run ?? await enqueueTaskRun(
-    tx,
-    context.regressionTaskId,
-    input.now,
-    input.budgetGrant === 1 ? { budgetGrant: 1 } : {},
-  );
+  let run = attempt?.run ?? null;
+  if (!run) {
+    // Not `enqueueTaskRun`: a raised refusal aborts this transaction, and a
+    // spend cap must leave the regression task parked with the cap that
+    // refused it. Every other refusal keeps raising.
+    const opened = await enqueueTaskRunInternal(
+      tx,
+      context.regressionTaskId,
+      input.now,
+      null,
+      input.budgetGrant === 1 ? { budgetGrant: 1 } : {},
+    );
+    if (!opened.ok) {
+      if (!parksInsteadOfRaising(opened.refusal)) throw errorForOpenRunRefusal(opened.refusal);
+      await recordRunBirthRefusal(tx, context.regressionTaskId, opened.refusal);
+      await transitionMergeRecovery(tx, input.aggregateId, MergeRecoveryStatus.BLOCKED_DOWNSTREAM, {
+        failureReason: opened.refusal.message, endedAt: input.now,
+      });
+      return null;
+    }
+    run = opened.run;
+  }
   await transitionMergeRecovery(tx, input.aggregateId, MergeRecoveryStatus.REPAIRING, {
     recoveryRunId: run.id,
     currentBaseSha: input.currentBaseSha,
