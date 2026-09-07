@@ -1348,17 +1348,21 @@ export const attemptRunBirth = async (
 
 /**
  * What a park says about the refusal it records, for every caller that writes
- * one. The code is what an operator filters a REVIEW by, and the refusal's own
- * detail travels with it — for a spend cap that is the formatted `spendCapUsd`
- * and `spentUsd` the handbook promises an operator reading the park, which the
- * message states in prose and nothing else recorded. Callers add their own keys
- * around it; those win, because a caller naming a task or a schedule of its own
- * knows which row it meant.
+ * one. The code is what an operator filters a REVIEW by, and it is the whole
+ * of the metadata for every refusal but one: a refusal's `detail` belongs to
+ * the message and to `errorForOpenRunRefusal`, not to a shape callers already
+ * record. The spend cap is the exception, because its park *is* the operator's
+ * only record of which cap refused the attempt: it adds the formatted
+ * `spendCapUsd`, `spentUsd` and `runs` the handbook promises beside the code.
+ * Callers add their own keys around this; those win, because a caller naming a
+ * task or a schedule of its own knows which row it meant.
  */
 export const runBirthRefusalMetadata = (
   refusal: OpenRunRefusal,
 ): Record<string, string | number | boolean | null> =>
-  ({ ...refusal.detail, refusal: refusal.code });
+  (refusal.code === "spend-cap-exhausted"
+    ? { ...refusal.detail, refusal: refusal.code }
+    : { refusal: refusal.code });
 
 /**
  * The park a Run-birth refusal leaves behind, for the callers that have none of

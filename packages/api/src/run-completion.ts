@@ -1316,9 +1316,9 @@ export const completeRun = async (
           body: activityBody,
           // A refused automatic retry is a Run birth this completion parked
           // the Task for, so it is named here the way every other caller-owned
-          // park names its refusal — with the code an operator filters by and
-          // the refusal's own detail, which for a spend cap is the cap and the
-          // total the message states only in prose.
+          // park names its refusal — with the code an operator filters by, plus,
+          // for a spend cap alone, the cap and the total the message states only
+          // in prose.
           metadata: jsonValue({
             exitCode: body.exitCode, outcome: body.outcome.case, failureClass, pushStatus: body.pushStatus, pullRequestUrl: body.pullRequestUrl,
             ...(retryRefusal ? runBirthRefusalMetadata(retryRefusal) : {}),

@@ -374,9 +374,9 @@ test("the fourth lease loss is refused by name, parks the Task, and grants nothi
   assert.deepEqual(created, [], "no replacement is queued");
   assert.equal(taskUpdates.at(-1)?.status, TaskStatus.REVIEW);
   assert.match(String(taskUpdates.at(-1)?.failureReason), /Lease-loss refunds exhausted after 3/);
-  assert.deepEqual(activities.at(-1)?.metadata, {
-    refusal: "lease-loss-refunds-exhausted", leaseLossRefunds: 3, cap: 3,
-  });
+  // Only the code: the refusal's own detail stays out of the park for every
+  // refusal but the spend cap.
+  assert.deepEqual(activities.at(-1)?.metadata, { refusal: "lease-loss-refunds-exhausted" });
   assert.match(String(activities.at(-1)?.body), /Run 2 lost; automatic retry refused/);
   assert.match(String(inbox.at(-1)?.body), /Lease-loss refunds exhausted/);
   // A refund nobody may use is not recorded: the operator's own retry must not

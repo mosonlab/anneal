@@ -1595,6 +1595,56 @@ test("the park a raising caller owes a spend-cap refusal names the cap and the t
   assert.deepEqual(runBirthRefusalMetadata(opened.refusal), activities[0]?.metadata);
 });
 
+/**
+ * The park's shape is decided in one place, and only the spend cap widens it.
+ * Every other refusal keeps the exact `{ refusal }` each caller recorded before
+ * the cap existed, so adding a `detail` to a refusal for its message or its
+ * error never silently reshapes an activity an operator or a test reads.
+ */
+test("only the spend-cap park carries detail; every other refusal is its code alone", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+
+  // A refusal that carries `detail` of its own and is not the spend cap.
+  const lostTask = taskRow({
+    repoId: repo.id,
+    repo,
+    runs: [priorRun({ repoId: repo.id, leaseLossRefunds: 3 })],
+  });
+  const lost = await openRun(fakeTx(lostTask).tx, lostTask.id, {
+    kind: "retry-after-lease-loss",
+    readyAt: now,
+    sourceRunId: "run-3",
+    sourceMaxRunsPerTask: 5,
+    sourceBudgetGrants: 1,
+  });
+  assert.equal(lost.ok, false);
+  if (lost.ok) return;
+  assert.deepEqual(lost.refusal.detail, { leaseLossRefunds: 3, cap: 3 });
+  assert.deepEqual(runBirthRefusalMetadata(lost.refusal), {
+    refusal: "lease-loss-refunds-exhausted",
+  });
+
+  const cappedTask = taskRow({
+    repoId: repo.id,
+    repo,
+    spendCap: new Prisma.Decimal("1.00"),
+    runs: [priorRun({ repoId: repo.id })],
+  });
+  const capped = await openRun(
+    fakeTx(cappedTask, { costedRuns: [costedRun("1.50")] }).tx,
+    cappedTask.id,
+    { kind: "retry", readyAt: now },
+  );
+  assert.equal(capped.ok, false);
+  if (capped.ok) return;
+  assert.deepEqual(runBirthRefusalMetadata(capped.refusal), {
+    refusal: "spend-cap-exhausted",
+    spendCapUsd: "1.00",
+    spentUsd: "1.50",
+    runs: 1,
+  });
+});
+
 test("the spend basis counts reported and estimated run cost, and a raised cap queues again", async () => {
   const repo = { id: "repo-1", defaultBranch: "main" };
   const capped = (spendCap: string) => taskRow({

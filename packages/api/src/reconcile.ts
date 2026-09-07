@@ -369,8 +369,8 @@ export const reconcileDatabaseRuns = async (
               actorType: "control-plane",
               body: `Run ${run.runNumber} lost; automatic retry refused: ${opened.refusal.message}`,
               // Named, not merely prose: `lease-loss-refunds-exhausted` is the
-              // reason an operator filters this REVIEW by, and a spend cap adds
-              // the cap and the total it refused against.
+              // reason an operator filters this REVIEW by; a spend cap alone
+              // adds the cap and the total it refused against.
               metadata: runBirthRefusalMetadata(opened.refusal),
             },
           });
