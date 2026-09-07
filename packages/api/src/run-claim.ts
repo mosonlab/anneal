@@ -307,11 +307,11 @@ export const claimRun = async (
     // during a deploy return no work without observing candidates.
     if (!await deployBarrierAllowsClaim(tx)) return null;
     // The dispatch drain of a deploy that has been waiting past its budget.
-    // It is read before any candidate for the same reason as the barrier: the
-    // answer is about the platform, so nothing is inspected, parked, or
-    // charged to a task's session budget on the way to giving it.
+    // Snapshot it before candidate activation, then decide after reading each
+    // Run's step kind whether that Run would start an agent session. Mechanical
+    // merge execution remains admitted until the deploy takes the exclusive
+    // barrier half.
     const drain = await activeDispatchDrain(tx, now);
-    if (drain) return dispatchDrainingRefusal(drain);
     const candidateWhere = {
       where: {
         status: RunStatus.QUEUED,
@@ -704,6 +704,13 @@ export const claimRun = async (
       // empty — the shipped default — or with `MERGE_EXECUTOR_TOKEN` unset or
       // aliased onto the runner token, no integrator run is claimable at all.
       if (!claimantMayTake(executionMode, claimantClass, body.runnerId, executorRunnerIds)) return SKIP;
+      // A dispatch drain applies only to work that would start an agent
+      // session. Mechanical merge execution is covered by the deploy barrier
+      // acquired when the deploy actually starts, so an allowlisted executor
+      // may claim it while the drain is in force. Keep this after the
+      // claimant check: an executor polling a mixed queue must skip ordinary
+      // agent candidates and continue until it can find its mechanical work.
+      if (drain && executionMode === "agent") return dispatchDrainingRefusal(drain);
       // Compatibility with the independently released merge executor is one
       // decision, and `mechanicalContractMismatch` is all of it: the
       // comparison, the refusal on the wire, this record and the alert. What
