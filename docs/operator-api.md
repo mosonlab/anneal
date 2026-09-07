@@ -1499,6 +1499,13 @@ creation), `approvalGate`, `opensPullRequest`,
 
 ### Merge-train readiness
 
+The worker first reserves a detached train in `REVIEW` with a `mergeTail.train`
+marker in `acquiring` state and no Run. This has no Approval gate. It enqueues
+the sole Run and changes the markers to `queued` only under the Merge Lease.
+Reservations and queued trains drain even after the width is changed to zero.
+Settlement records release intent in the deferred-release ledger before the
+external release, so both ownership windows survive an API restart.
+
 When `MERGE_TRAIN_WIDTH` is greater than zero, Merge readiness collects ready
 Chain candidates per Repo. A candidate must have a valid exact-head
 `regression-verification-v2` PASS bound to its `(headSha, baseHeadSha)`, and

@@ -1,8 +1,9 @@
 import {
   errorForOpenRunRefusal,
-  MERGE_TAIL_KIND,
   MERGE_TAIL_SCHEMA_VERSION,
   openRun,
+  readLatestMarker,
+  parseMergeTrainMarker,
   Prisma,
   TaskStatus,
   type MergeTrainCandidate,
@@ -22,11 +23,12 @@ export type MergeTrainTaskInput = {
   now: Date;
 };
 
-export type MergeTrainTaskResult = { taskId: string; runId: string };
+export type MergeTrainTaskResult = { taskId: string };
 
 const SHA = /^[0-9a-f]{40}$/u;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
-const BRANCH = /^[^\u0000-\u001f\u007f\s]+$/u;
+const validBranch = (value: string): boolean => value.length > 0 && !/\s/u.test(value)
+  && [...value].every((character) => character.charCodeAt(0) > 0x20 && character.charCodeAt(0) !== 0x7f);
 
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\"'\"'")}'`;
 
@@ -81,7 +83,7 @@ const validateInput = (input: MergeTrainTaskInput): MergeTrainWidth => {
       || !UUID.test(candidate.chainId)
       || chainIds.has(candidate.chainId)
       || !SHA.test(candidate.headSha)
-      || typeof candidate.branch !== "string" || !BRANCH.test(candidate.branch)) {
+      || typeof candidate.branch !== "string" || !validBranch(candidate.branch)) {
       invalid("candidates contain a duplicate or malformed task, chain, head, or branch binding");
     }
     taskIds.add(candidate.taskId);
@@ -91,11 +93,11 @@ const validateInput = (input: MergeTrainTaskInput): MergeTrainWidth => {
 };
 
 /**
- * Create the one chain-detached Task and its first Run for a merge train.
- * The caller has already acquired the repository merge lease; this function
+ * Persist a chain-detached reservation before external lease acquisition.
+ * The caller owns the repository and candidate chain locks; this function
  * performs every task, Run, and marker write in that caller's transaction.
  */
-export const createMergeTrainTask = async (
+export const reserveMergeTrainTask = async (
   tx: DbTx,
   input: MergeTrainTaskInput,
 ): Promise<MergeTrainTaskResult> => {
@@ -150,45 +152,56 @@ export const createMergeTrainTask = async (
     assigneeAgentId,
     approvalGate: false,
     opensPullRequest: false,
-    status: TaskStatus.TODO,
+    status: TaskStatus.REVIEW,
     targetBranch: repo.defaultBranch,
     maxSessionsPerTask: 1,
   } });
-  const opened = await openRun(tx, task.id, { kind: "task-created", readyAt: input.now });
-  if (!opened.ok) throw errorForOpenRunRefusal(opened.refusal);
 
   const markerMetadata = {
-    state: "queued",
+    state: "acquiring",
     trainTaskId: task.id,
     regressionTaskId: input.regressionTaskId,
-    readinessTaskId: first.taskId,
-    firstRegressionTaskId: input.regressionTaskId,
-    firstReadinessTaskId: first.taskId,
     baseSha: input.baseSha,
     width,
     candidates: [...input.candidates],
   };
   await writeMarker(tx, task.id, "train", {
     actorType: "control-plane",
-    body: `Merge train queued with ${input.candidates.length} candidate${input.candidates.length === 1 ? "" : "s"}`,
+    body: `Merge train reserved with ${input.candidates.length} candidate${input.candidates.length === 1 ? "" : "s"}`,
     metadata: markerMetadata,
   });
   for (const [index, candidate] of input.candidates.entries()) {
     await writeMarker(tx, candidate.taskId, "train", {
       actorType: "control-plane",
-      body: `Merge train ${task.id} queued at position ${index + 1}`,
+      body: `Merge train ${task.id} reserved at position ${index + 1}`,
       metadata: {
-        state: "queued",
+        state: "acquiring",
         trainTaskId: task.id,
         position: index + 1,
       },
     });
   }
-  return { taskId: task.id, runId: opened.run.id };
+  return { taskId: task.id };
 };
 
-/** Marker metadata used by recovery to recognize a non-retryable train card. */
-export const isMergeTrainMarker = (metadata: unknown): boolean => (
-  typeof metadata === "object" && metadata !== null && !Array.isArray(metadata)
-  && (metadata as { kind?: unknown }).kind === MERGE_TAIL_KIND.train
-);
+/** Enqueue only after the reservation's external merge lease is held. */
+export const enqueueMergeTrainTask = async (
+  tx: DbTx, taskId: string, now: Date,
+): Promise<{ runId: string }> => {
+  const marker = await readLatestMarker(tx, taskId, "train");
+  const parsed = parseMergeTrainMarker(marker?.raw);
+  if (parsed.status !== "ok" || parsed.marker.state !== "acquiring" || !parsed.marker.candidates) {
+    throw new Error(`Merge train ${taskId} has no acquiring reservation`);
+  }
+  await tx.task.update({ where: { id: taskId }, data: { status: TaskStatus.TODO, failureReason: null } });
+  const opened = await openRun(tx, taskId, { kind: "task-created", readyAt: now });
+  if (!opened.ok) throw errorForOpenRunRefusal(opened.refusal);
+  await writeMarker(tx, taskId, "train", { actorType: "control-plane", body: "Merge lease acquired; train Run queued",
+    metadata: { ...parsed.marker.raw, state: "queued" } });
+  for (const [index, candidate] of parsed.marker.candidates.entries()) {
+    await writeMarker(tx, candidate.taskId, "train", { actorType: "control-plane",
+      body: `Merge train ${taskId} queued at position ${index + 1}`,
+      metadata: { state: "queued", trainTaskId: taskId, position: index + 1 } });
+  }
+  return { runId: opened.run.id };
+};

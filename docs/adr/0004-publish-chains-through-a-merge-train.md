@@ -42,6 +42,14 @@ candidate, so a failure is visible on both the board and Inbox.
 
 ## Lease window
 
+Before acquisition, readiness persists a detached Task reservation in `REVIEW`
+with `mergeTail.train.state: "acquiring"` and no Run. This is durable ownership
+intent, not an Approval gate. The same transaction reserves every candidate.
+After acquiring the Lease, readiness revalidates the reservation and enqueues
+its sole Run, changing the markers to `queued`. A restart can therefore recover
+the acquisition-to-enqueue window. Existing reservations and queued trains are
+drained even after `MERGE_TRAIN_WIDTH` is changed to zero.
+
 Merge readiness acquires the repository's global Merge Lease for the train
 under the first candidate's Chain lease target before the detached Task is
 enqueued. A failed acquire defers the tick using the same behavior as
@@ -57,8 +65,11 @@ If the train Run ends without a stored `merge-train-v1` record, or the Run is
 lost, the control plane releases the Lease, writes a `mergeTail.train` marker
 with `state: "aborted"` and the named reason on every candidate, and returns
 the candidates to `ready` for a later tick. The detached Task is not retried.
-The deferred-release handling also applies after a process restart, so a lost
-train cannot retain the repository Lease.
+Settlement commits release intent in the existing deferred-release ledger
+before the external release. Restart reconciliation can therefore finish a
+release interrupted after settlement. Unresolved lease handoffs or releases
+exclude the repository from new train formation. Every Run-opening path refuses
+a second Run for the detached train, including platform lease-loss refunds.
 
 ## Authorization contract
 

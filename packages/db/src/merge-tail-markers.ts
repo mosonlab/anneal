@@ -72,23 +72,8 @@ export const markerFromMetadata = (metadata: Prisma.JsonValue | null | undefined
   };
 };
 
-const MERGE_TRAIN_MARKER_STATES = new Set([
-  "queued",
-  "settled",
-  "aborted",
-  "authorized",
-  "repairing",
-  "blocked",
-  "ready",
-] as const);
-export type MergeTrainMarkerState =
-  | "queued"
-  | "settled"
-  | "aborted"
-  | "authorized"
-  | "repairing"
-  | "blocked"
-  | "ready";
+const MERGE_TRAIN_MARKER_STATES = new Set(["acquiring", "queued", "settled", "aborted"] as const);
+export type MergeTrainMarkerState = "acquiring" | "queued" | "settled" | "aborted";
 
 /** The durable lifecycle binding carried by a `mergeTail.train` marker. */
 export type MergeTrainMarker = {
@@ -97,8 +82,6 @@ export type MergeTrainMarker = {
   trainTaskId: string;
   regressionTaskId: string | null;
   readinessTaskId: string | null;
-  firstRegressionTaskId: string | null;
-  firstReadinessTaskId: string | null;
   position: number | null;
   baseSha: string | null;
   width: MergeTrainWidth | null;
@@ -169,9 +152,6 @@ export const parseMergeTrainMarker = (
   const optionalTextFields = [
     "regressionTaskId",
     "readinessTaskId",
-    "firstRegressionTaskId",
-    "firstReadinessTaskId",
-    "reason",
   ];
   if (optionalTextFields.some((field) => raw[field] !== undefined && raw[field] !== null && !hasText(raw[field]))) {
     return { status: "invalid", reason: "merge-train marker has malformed text binding" };
@@ -222,13 +202,11 @@ export const parseMergeTrainMarker = (
       trainTaskId: raw.trainTaskId,
       regressionTaskId: parseOptionalText("regressionTaskId"),
       readinessTaskId: parseOptionalText("readinessTaskId"),
-      firstRegressionTaskId: parseOptionalText("firstRegressionTaskId"),
-      firstReadinessTaskId: parseOptionalText("firstReadinessTaskId"),
       position,
       baseSha,
       width,
       candidates,
-      reason: parseOptionalText("reason"),
+      reason: typeof raw.reason === "string" ? raw.reason : null,
       raw,
     },
   };
