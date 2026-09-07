@@ -31,7 +31,11 @@ export type RegressionOutputHandoff = RegressionOutputHandoffSuccess | Regressio
 
 /** The exact Run and output contract used to qualify a Regression handoff. */
 export type RegressionHandoffClaim = {
-  task: { templateStep: Pick<NonNullable<ClaimedTask["task"]["templateStep"]>, "outputKind"> | null };
+  task: {
+    templateStep: Pick<NonNullable<ClaimedTask["task"]["templateStep"]>, "outputKind"> | null;
+    /** Detached merge-train Tasks carry their runtime output contract here. */
+    mergeTrain?: ClaimedTask["task"]["mergeTrain"];
+  };
   run: Pick<ClaimedTask["run"], "id">;
 };
 

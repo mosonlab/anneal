@@ -1,6 +1,12 @@
 import type { MergeRecoveryAttempt, Prisma } from "@prisma/client";
 
-import { asJsonObject, MERGE_TAIL_KIND, MERGE_TAIL_SCHEMA_VERSION } from "./merge-tail.js";
+import {
+  asJsonObject,
+  MERGE_TAIL_KIND,
+  MERGE_TAIL_SCHEMA_VERSION,
+  type MergeTrainCandidate,
+  type MergeTrainWidth,
+} from "./merge-tail.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -14,6 +20,9 @@ type Tx = Prisma.TransactionClient;
 export const MERGE_TAIL_MARKER_SCAN = 20;
 
 export type MarkerKind = keyof typeof MERGE_TAIL_KIND;
+
+/** Marker families whose state is a control-plane fact, never agent input. */
+const TRUSTED_MARKER_KINDS = new Set<MarkerKind>(["train", "leaseContention"]);
 
 /**
  * A merge-tail marker with its persisted fields already narrowed. Callers read
@@ -66,6 +75,162 @@ export const markerFromMetadata = (metadata: Prisma.JsonValue | null | undefined
   };
 };
 
+const MERGE_TRAIN_MARKER_STATES = new Set(["acquiring", "queued", "settled", "aborted"] as const);
+export type MergeTrainMarkerState = "acquiring" | "queued" | "settled" | "aborted";
+
+/** The durable lifecycle binding carried by a `mergeTail.train` marker. */
+export type MergeTrainMarker = {
+  kind: "train";
+  state: MergeTrainMarkerState;
+  trainTaskId: string;
+  regressionTaskId: string | null;
+  readinessTaskId: string | null;
+  position: number | null;
+  baseSha: string | null;
+  width: MergeTrainWidth | null;
+  candidates: MergeTrainCandidate[] | null;
+  reason: string | null;
+  raw: Record<string, unknown>;
+};
+
+export type MergeTrainMarkerParse =
+  | { status: "ok"; marker: MergeTrainMarker }
+  | { status: "invalid"; reason: string };
+
+/** The bounded payload a detached train Task exposes to its claiming Runner. */
+export type MergeTrainClaimMetadata = {
+  schemaVersion: typeof MERGE_TAIL_SCHEMA_VERSION;
+  baseSha: string;
+  width: MergeTrainWidth;
+  candidates: MergeTrainCandidate[];
+};
+
+const MERGE_TRAIN_SHA = /^[0-9a-f]{40}$/u;
+const MERGE_TRAIN_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+const hasControlCharacter = (value: string): boolean => [...value].some((character) => {
+  const code = character.codePointAt(0) ?? 0;
+  return code < 0x20 || code === 0x7f;
+});
+const hasText = (value: unknown): value is string => (
+  typeof value === "string" && value.trim().length > 0 && !hasControlCharacter(value)
+);
+
+const parseCandidate = (value: unknown): MergeTrainCandidate | null => {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (!hasText(candidate.taskId)
+    || typeof candidate.chainId !== "string" || !MERGE_TRAIN_UUID.test(candidate.chainId)
+    || typeof candidate.headSha !== "string" || !MERGE_TRAIN_SHA.test(candidate.headSha)
+    || !hasText(candidate.branch)) return null;
+  return {
+    taskId: candidate.taskId,
+    chainId: candidate.chainId,
+    headSha: candidate.headSha,
+    branch: candidate.branch,
+  };
+};
+
+/**
+ * Parse a persisted train marker. Detached train cards carry the complete
+ * payload; the corresponding readiness cards intentionally carry only the
+ * train id and position, so the payload fields are nullable here and the
+ * claim projection applies the complete-payload check below.
+ */
+export const parseMergeTrainMarker = (
+  metadata: Prisma.JsonValue | Record<string, unknown> | null | undefined,
+): MergeTrainMarkerParse => {
+  const raw = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    ? metadata as Record<string, unknown>
+    : null;
+  if (!raw || raw.kind !== MERGE_TAIL_KIND.train) return { status: "invalid", reason: "not a merge-train marker" };
+  if (raw.schemaVersion !== MERGE_TAIL_SCHEMA_VERSION) return { status: "invalid", reason: "unsupported merge-train marker schemaVersion" };
+  if (typeof raw.state !== "string" || !MERGE_TRAIN_MARKER_STATES.has(raw.state as MergeTrainMarkerState)) {
+    return { status: "invalid", reason: "invalid merge-train marker state" };
+  }
+  if (!hasText(raw.trainTaskId)) return { status: "invalid", reason: "merge-train marker has no trainTaskId" };
+
+  const parseOptionalText = (field: string): string | null => (
+    raw[field] === undefined || raw[field] === null ? null : hasText(raw[field]) ? raw[field] : null
+  );
+  const optionalTextFields = [
+    "regressionTaskId",
+    "readinessTaskId",
+  ];
+  if (optionalTextFields.some((field) => raw[field] !== undefined && raw[field] !== null && !hasText(raw[field]))) {
+    return { status: "invalid", reason: "merge-train marker has malformed text binding" };
+  }
+
+  const position = raw.position === undefined || raw.position === null
+    ? null
+    : typeof raw.position === "number" && Number.isInteger(raw.position) && raw.position > 0
+      ? raw.position
+      : null;
+  if (raw.position !== undefined && raw.position !== null && position === null) {
+    return { status: "invalid", reason: "merge-train marker position is invalid" };
+  }
+
+  const baseSha = raw.baseSha === undefined || raw.baseSha === null
+    ? null
+    : typeof raw.baseSha === "string" && MERGE_TRAIN_SHA.test(raw.baseSha) ? raw.baseSha : null;
+  if (raw.baseSha !== undefined && raw.baseSha !== null && baseSha === null) {
+    return { status: "invalid", reason: "merge-train marker baseSha is invalid" };
+  }
+  const width = raw.width === undefined || raw.width === null
+    ? null
+    : typeof raw.width === "number" && Number.isInteger(raw.width) && raw.width >= 1 && raw.width <= 3
+      ? raw.width as MergeTrainWidth
+      : null;
+  if (raw.width !== undefined && raw.width !== null && width === null) {
+    return { status: "invalid", reason: "merge-train marker width is invalid" };
+  }
+
+  let candidates: MergeTrainCandidate[] | null = null;
+  if (raw.candidates !== undefined && raw.candidates !== null) {
+    if (!Array.isArray(raw.candidates) || raw.candidates.length === 0 || (width !== null && raw.candidates.length > width)) {
+      return { status: "invalid", reason: "merge-train marker candidates are invalid" };
+    }
+    candidates = [];
+    for (const entry of raw.candidates) {
+      const candidate = parseCandidate(entry);
+      if (!candidate) return { status: "invalid", reason: "merge-train marker candidate is malformed" };
+      candidates.push(candidate);
+    }
+  }
+
+  return {
+    status: "ok",
+    marker: {
+      kind: "train",
+      state: raw.state as MergeTrainMarkerState,
+      trainTaskId: raw.trainTaskId,
+      regressionTaskId: parseOptionalText("regressionTaskId"),
+      readinessTaskId: parseOptionalText("readinessTaskId"),
+      position,
+      baseSha,
+      width,
+      candidates,
+      reason: typeof raw.reason === "string" ? raw.reason : null,
+      raw,
+    },
+  };
+};
+
+/** Parse and qualify the complete queued payload for a detached train claim. */
+export const mergeTrainClaimMetadata = (
+  marker: Marker | null,
+): MergeTrainClaimMetadata | null => {
+  if (!marker || marker.kind !== "train") return null;
+  const parsed = parseMergeTrainMarker(marker.raw);
+  if (parsed.status === "invalid" || parsed.marker.state !== "queued"
+    || !parsed.marker.baseSha || parsed.marker.width === null || !parsed.marker.candidates) return null;
+  return {
+    schemaVersion: MERGE_TAIL_SCHEMA_VERSION,
+    baseSha: parsed.marker.baseSha,
+    width: parsed.marker.width,
+    candidates: parsed.marker.candidates,
+  };
+};
+
 // A task's activity carries operator notes and other families of marker
 // (`mergeIntegrator.*`, evidence requests) alongside the merge tail's. Both
 // reads take rows first and keep the merge-tail ones second, which is what the
@@ -74,13 +239,13 @@ export const markerFromMetadata = (metadata: Prisma.JsonValue | null | undefined
 const scan = async (tx: Tx, taskId: string, take?: number): Promise<Marker[]> => {
   const rows = await tx.taskActivity.findMany({
     where: { taskId },
-    select: { metadata: true },
+    select: { actorType: true, metadata: true },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     ...(take === undefined ? {} : { take }),
   });
   return rows.flatMap((row) => {
     const marker = markerFromMetadata(row.metadata);
-    return marker ? [marker] : [];
+    return marker && (!TRUSTED_MARKER_KINDS.has(marker.kind) || row.actorType === "control-plane") ? [marker] : [];
   });
 };
 
@@ -110,8 +275,15 @@ export const readLatestMarker = async (
   taskId: string,
   kind: MarkerKind,
 ): Promise<Marker | null> => {
+  const actorFilter = TRUSTED_MARKER_KINDS.has(kind)
+    ? { actorType: "control-plane" as const }
+    : {};
   const row = await tx.taskActivity.findFirst({
-    where: { taskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND[kind] } },
+    where: {
+      taskId,
+      ...actorFilter,
+      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND[kind] },
+    },
     select: { metadata: true },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
   });

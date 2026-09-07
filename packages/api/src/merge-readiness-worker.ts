@@ -26,7 +26,11 @@ import {
   writeMarker,
   type PrismaClient,
   type RecoveryContext,
+  type TrainAuthorization,
 } from "@anneal/db";
+
+import { mergeTrainWidth } from "./startup-config.js";
+import { mergeTrainReadinessTick, pendingMergeTrains } from "./merge-train-readiness.js";
 
 import { lockTaskMutationRows } from "./task-write.js";
 import { RUNNER_FORGET_MS, type DaemonSnapshot } from "./runners.js";
@@ -102,10 +106,10 @@ const READINESS_CANDIDATE_INCLUDE = {
   templateStep: { include: { taskTemplate: { select: { name: true } } } },
   repo: true,
 } as const;
-type ReadinessCandidate = Prisma.TaskGetPayload<{ include: typeof READINESS_CANDIDATE_INCLUDE }>;
+export type ReadinessCandidate = Prisma.TaskGetPayload<{ include: typeof READINESS_CANDIDATE_INCLUDE }>;
 const READINESS_REGRESSION_INCLUDE = {
   stepOutput: true,
-  runs: { orderBy: { runNumber: "desc" as const }, take: 1, select: { id: true } },
+  runs: { orderBy: { runNumber: "desc" as const }, take: 1, select: { id: true, branch: true } },
 } as const;
 type ReadinessRegression = Prisma.TaskGetPayload<{ include: typeof READINESS_REGRESSION_INCLUDE }>;
 
@@ -650,7 +654,7 @@ const settleExecutorOffline = async (
   return application;
 };
 
-type ClaimedReadiness = {
+export type ClaimedReadiness = {
   claimed: true;
   readiness: ReadinessCandidate;
   regression: ReadinessRegression;
@@ -659,7 +663,14 @@ type ClaimedReadiness = {
   input: ReadinessInput;
 };
 
-type ReadinessRead = ClaimedReadiness | { claimed: false; input: ReadinessInput };
+export type ReadinessRead = ClaimedReadiness | { claimed: false; input: ReadinessInput };
+
+/** Unclaimed facts used by the train path to order all eligible evidence before
+ * its claim/work budget is applied. */
+export type ReadinessDiscovery = {
+  input: ReadinessInput;
+  evidenceCreatedAt: Date | null;
+};
 
 const decisionContext = (readiness: ReadinessCandidate, now: Date) => ({
   readiness: {
@@ -670,6 +681,56 @@ const decisionContext = (readiness: ReadinessCandidate, now: Date) => ({
   },
   now,
 });
+
+const discoverReadiness = async (
+  db: PrismaClient,
+  readiness: ReadinessCandidate,
+  now: Date,
+): Promise<ReadinessDiscovery> => {
+  const context = decisionContext(readiness, now);
+  try {
+    const regression = await db.task.findFirst({
+      where: {
+        projectId: readiness.projectId,
+        chainId: readiness.chainId,
+        templateId: readiness.templateId,
+        templateStep: { outputKind: { in: [...REGRESSION_VERIFICATION_OUTPUT_KINDS] } },
+      },
+      include: READINESS_REGRESSION_INCLUDE,
+    });
+    if (!regression || regression.status !== TaskStatus.DONE) {
+      return { input: { ...context, stage: "regression-pending" }, evidenceCreatedAt: null };
+    }
+    if (!regression.stepOutput) {
+      return { input: { ...context, stage: "missing-regression-evidence" }, evidenceCreatedAt: null };
+    }
+    const verdict = parseRegressionVerdict(regression.stepOutput.body, regression.stepOutput.kind);
+    if (verdict.status !== "ok" || verdict.verdict.outcome !== "pass"
+      || regression.stepOutput.commitSha !== verdict.verdict.headSha) {
+      return { input: { ...context, stage: "invalid-regression-evidence" }, evidenceCreatedAt: null };
+    }
+    const target = await db.$transaction((tx) => resolveChainTarget(tx, readiness));
+    return {
+      input: {
+        ...context,
+        stage: "ready",
+        regression: {
+          headSha: verdict.verdict.headSha,
+          baseHeadSha: verdict.verdict.baseHeadSha,
+        },
+        target,
+        defaultBranch: readiness.repo?.defaultBranch ?? "main",
+      },
+      evidenceCreatedAt: regression.stepOutput.createdAt,
+    };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      input: { ...context, stage: "read-failed", failure: { kind: "unexpected", message } },
+      evidenceCreatedAt: null,
+    };
+  }
+};
 
 const readReadiness = async (
   db: PrismaClient,
@@ -800,6 +861,7 @@ const heldLeaseOutcome = (ownership: ReadinessLeaseOwnership, taskId: string): H
 const authorizeReadinessSettlement = (
   read: ClaimedReadiness,
   decision: Extract<ReadinessDecision, { kind: "authorize" }>,
+  train?: TrainAuthorization,
 ): ReadinessSettlement => {
   const { readiness, regression, recovery } = read;
   return readinessSettlement("authorize", {
@@ -841,6 +903,7 @@ const authorizeReadinessSettlement = (
       const binding = `mechanical:${readiness.id}:${randomUUID()}`;
       const payload = {
         ...decision.evidence,
+        ...(train ? { train } : {}),
         mergeMethod: AUTHORIZED_MERGE_METHOD,
         issuedAt: decision.issuedAt,
         decision: {
@@ -882,6 +945,7 @@ const authorizeReadinessSettlement = (
           body: JSON.stringify({
             authorizationActivityId: activity.id,
             headSha: decision.evidence.headSha,
+            ...(train ? { train } : {}),
           }),
           commitSha: decision.evidence.headSha,
         },
@@ -890,6 +954,7 @@ const authorizeReadinessSettlement = (
           body: JSON.stringify({
             authorizationActivityId: activity.id,
             headSha: decision.evidence.headSha,
+            ...(train ? { train } : {}),
           }),
           commitSha: decision.evidence.headSha,
         },
@@ -972,9 +1037,14 @@ const applyReadinessDecision = async (
   decision: ReadinessDecision,
   result: ReadinessTickResult,
   runner: ReadinessSettlementRunner,
+  trainWidth: number,
 ): Promise<ReadinessSettlementApplication> => {
   const { readiness, regression, recovery, claim } = read;
-  return dispatchReadinessDecision(decision, {
+  const selectedDecision = trainWidth > 0 && decision.kind === "requeue-regression"
+    && decision.condition === "base-advanced"
+    ? { kind: "defer" as const, reason: "Base advanced; candidate will join a merge train" }
+    : decision;
+  return dispatchReadinessDecision(selectedDecision, {
     skip: () => Promise.resolve(runner.skip(regression.id)),
     defer: () => runner.apply(
       deferReadinessSettlement(readiness.id, regression.id, new Date()),
@@ -1071,6 +1141,7 @@ const runReadinessDecision = async (
   runWithMergeLease: WithMergeLease,
   reader: PullRequestReader,
   daemons: DaemonSnapshotReader,
+  trainWidth: number,
 ): Promise<void> => {
   const { readiness, regression, claim } = read;
   const preAcquireRunner = createReadinessSettlementRunner(db, {
@@ -1120,6 +1191,7 @@ const runReadinessDecision = async (
     decision,
     result,
     preAcquireRunner,
+    trainWidth,
   );
   if (application.kind === "settled") return;
 
@@ -1169,6 +1241,7 @@ const runReadinessDecision = async (
       leasedDecision,
       result,
       heldRunner,
+      trainWidth,
     );
     if (leasedApplication.kind === "acquire-lease") {
       throw new Error("Held readiness settlement requested another Merge Lease");
@@ -1210,6 +1283,97 @@ const runReadinessDecision = async (
   if (leased.value === "authorized") result.authorized += 1;
 };
 
+const runReadinessDecisionSafely = async (
+  db: PrismaClient,
+  read: ClaimedReadiness,
+  decision: ReadinessDecision,
+  result: ReadinessTickResult,
+  releaseChainLease: ReleaseMergeLease,
+  runWithMergeLease: WithMergeLease,
+  reader: PullRequestReader,
+  daemons: DaemonSnapshotReader,
+  trainWidth: number,
+): Promise<void> => {
+  const { readiness } = read;
+  try {
+    await runReadinessDecision(
+      db,
+      read,
+      decision,
+      result,
+      releaseChainLease,
+      runWithMergeLease,
+      reader,
+      daemons,
+      trainWidth,
+    );
+  } catch (error: unknown) {
+    if (error instanceof LeaseReleaseDeferralRecordError) throw error;
+    const refusalCode = error instanceof MergeRecoveryRefusalError ? error.refusalCode : null;
+    const message = error instanceof Error ? error.message : String(error);
+    // A refusal is a decision and stops the tail on its first occurrence. So
+    // is a missing or mismatched operator authorization: the gate is
+    // fail-closed, and retrying it would re-ask the same settled question
+    // three more times. An unexpected exception is neither: the stop it would
+    // write carries no review-fail or gate-fail verdict, so
+    // `merge-tail/repair` refuses to re-enter it and only a manual delivery
+    // finishes the branch. A killed child or a restarted deploy therefore
+    // costs one requeue of the readiness Step, bounded so a permanent fault
+    // still reaches an operator.
+    const decided = refusalCode !== null || error instanceof MergeGateAuthorizationError;
+    const spent = decided
+      ? 0
+      : await spentExceptionRequeues(db, read.regression.id, read.recovery);
+    const requeuing = !decided && spent < readinessExceptionRequeueLimit();
+    // Stopping the tail is not another refusal by the holder either, and the
+    // settlement below releases the claim this write is fenced by.
+    await forgetContention(
+      db,
+      readiness.chainId ? { projectId: readiness.projectId, chainId: readiness.chainId } : null,
+      readiness.id,
+      new Date(),
+      read.claim,
+    );
+    const runner = createReadinessSettlementRunner(db, {
+      kind: "pre-acquire",
+      release: releaseChainLease,
+    });
+    const settlement = requeuing
+      ? requeueReadinessExceptionSettlement({
+        readinessTaskId: readiness.id,
+        regressionTaskId: read.regression.id,
+        reason: `readiness evaluation exception: ${message}`,
+        requeue: spent + 1,
+        limit: readinessExceptionRequeueLimit(),
+        recovery: read.recovery,
+        now: new Date(),
+      })
+      : stopReadinessSettlement({
+        readinessTaskId: readiness.id,
+        regressionTaskId: read.regression.id,
+        reason: spent === 0
+          ? `readiness evaluation failed: ${message}`
+          : `readiness evaluation failed after ${String(spent)} exception requeues: ${message}`,
+        recovery: read.recovery,
+        refusalCode,
+        now: new Date(),
+      });
+    const settled = await runner.apply(settlement, read.claim);
+    if (settled.kind === "acquire-lease") {
+      throw new Error(`Readiness ${settlement.kind} requested a Merge Lease`);
+    }
+    if (settled.outcome.value.applied) {
+      if (requeuing) result.requeued += 1;
+      else result.stopped += 1;
+    }
+    // A failed release/hold recording can happen after stopMergeTail has
+    // already committed its state transition. A second stop then returns
+    // false and must not turn that failure into a successful-looking tick.
+    // Surface it to the worker caller so the missing evidence is observable.
+    if (!settled.outcome.value.applied) throw error;
+  }
+};
+
 export const readinessTick = async (
   db: PrismaClient,
   reader: PullRequestReader,
@@ -1218,9 +1382,20 @@ export const readinessTick = async (
   releaseChainLease: ReleaseMergeLease,
   runWithMergeLease: WithMergeLease,
   daemons: DaemonSnapshotReader,
+  width: number = mergeTrainWidth(),
 ): Promise<ReadinessTickResult> => {
+  const pendingTrains = width === 0 ? await pendingMergeTrains(db) : undefined;
+  if (width > 0 || pendingTrains?.length) {
+    return mergeTrainReadinessTick(db, reader, now, { width, limit }, releaseChainLease, runWithMergeLease, {
+      candidates: readinessCandidates,
+      discover: discoverReadiness,
+      read: readReadiness,
+      authorize: authorizeReadinessSettlement,
+      single: (database, read, decision, result, release, lease, pullRequests) =>
+        runReadinessDecisionSafely(database, read, decision, result, release, lease, pullRequests, daemons, width),
+    }, pendingTrains);
+  }
   const result: ReadinessTickResult = { claimed: 0, authorized: 0, requeued: 0, stopped: 0 };
-  const exceptionRequeueLimit = readinessExceptionRequeueLimit();
   const pageSize = Math.max(limit * 20, 100);
   for await (const readiness of readinessCandidates(db, pageSize)) {
     if (result.claimed >= limit) break;
@@ -1230,82 +1405,7 @@ export const readinessTick = async (
     if (!read.claimed) continue;
     const decision = await evaluateReadiness(reader, read.input);
     result.claimed += 1;
-    try {
-      await runReadinessDecision(
-        db,
-        read,
-        decision,
-        result,
-        releaseChainLease,
-        runWithMergeLease,
-        reader,
-        daemons,
-      );
-    } catch (error: unknown) {
-      if (error instanceof LeaseReleaseDeferralRecordError) throw error;
-      const refusalCode = error instanceof MergeRecoveryRefusalError ? error.refusalCode : null;
-      const message = error instanceof Error ? error.message : String(error);
-      // A refusal is a decision and stops the tail on its first occurrence. So
-      // is a missing or mismatched operator authorization: the gate is
-      // fail-closed, and retrying it would re-ask the same settled question
-      // three more times. An unexpected exception is neither: the stop it would
-      // write carries no review-fail or gate-fail verdict, so
-      // `merge-tail/repair` refuses to re-enter it and only a manual delivery
-      // finishes the branch. A killed child or a restarted deploy therefore
-      // costs one requeue of the readiness Step, bounded so a permanent fault
-      // still reaches an operator.
-      const decided = refusalCode !== null || error instanceof MergeGateAuthorizationError;
-      const spent = decided
-        ? 0
-        : await spentExceptionRequeues(db, read.regression.id, read.recovery);
-      const requeuing = !decided && spent < exceptionRequeueLimit;
-      // Stopping the tail is not another refusal by the holder either, and the
-      // settlement below releases the claim this write is fenced by.
-      await forgetContention(
-        db,
-        readiness.chainId ? { projectId: readiness.projectId, chainId: readiness.chainId } : null,
-        readiness.id,
-        new Date(),
-        read.claim,
-      );
-      const runner = createReadinessSettlementRunner(db, {
-        kind: "pre-acquire",
-        release: releaseChainLease,
-      });
-      const settlement = requeuing
-        ? requeueReadinessExceptionSettlement({
-          readinessTaskId: readiness.id,
-          regressionTaskId: read.regression.id,
-          reason: `readiness evaluation exception: ${message}`,
-          requeue: spent + 1,
-          limit: exceptionRequeueLimit,
-          recovery: read.recovery,
-          now: new Date(),
-        })
-        : stopReadinessSettlement({
-          readinessTaskId: readiness.id,
-          regressionTaskId: read.regression.id,
-          reason: spent === 0
-            ? `readiness evaluation failed: ${message}`
-            : `readiness evaluation failed after ${String(spent)} exception requeues: ${message}`,
-          recovery: read.recovery,
-          refusalCode,
-          now: new Date(),
-        });
-      const settled = await runner.apply(settlement, read.claim);
-      if (settled.kind === "acquire-lease") {
-        throw new Error(`Readiness ${settlement.kind} requested a Merge Lease`);
-      }
-      if (settled.outcome.value.applied) {
-        if (requeuing) result.requeued += 1;
-        else result.stopped += 1;
-      }
-      // A failed release/hold recording can happen after stopMergeTail has
-      // already committed its state transition. A second stop then returns
-      // false and must not turn that failure into a successful-looking tick.
-      // Surface it to the worker caller so the missing evidence is observable.
-      if (!settled.outcome.value.applied) throw error;
-    }
+    await runReadinessDecisionSafely(db, read, decision, result, releaseChainLease, runWithMergeLease, reader, daemons, width);
   }
   return result;
 };
@@ -1314,6 +1414,9 @@ export const startReadinessWorker = (
   db: PrismaClient,
   reader: PullRequestReader,
   daemons: DaemonSnapshotReader,
+  /** The width judged at startup; the ambient read is the fallback for callers
+   * that construct a worker without a startup verdict. */
+  width: number = mergeTrainWidth(),
 ): ReturnType<typeof setInterval> => {
   // Read once here so a misconfigured bound fails the service at startup rather
   // than inside the first tick that hits an exception.
@@ -1331,6 +1434,7 @@ export const startReadinessWorker = (
         releaseMergeLease,
         withMergeLease,
         daemons,
+        width,
       ))
       .catch((error: unknown) => console.error("Merge readiness tick failed", error))
       .finally(() => {

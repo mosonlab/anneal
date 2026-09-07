@@ -70,7 +70,10 @@ const releaseMergeLeaseWith = async (
   return release;
 };
 
-export type ReleaseMergeLease = (target: MergeLeaseTarget | null, db: PrismaClient) => Promise<void>;
+export type ReleaseMergeLease = (
+  target: MergeLeaseTarget | null,
+  db: PrismaClient,
+) => Promise<MergeLeaseRelease | void>;
 
 export const releaseMergeLease: ReleaseMergeLease = async (target, db) => {
   const release = await releaseMergeLeaseWith(releaseMergeLeaseAdapter, target);
@@ -80,6 +83,7 @@ export const releaseMergeLease: ReleaseMergeLease = async (target, db) => {
   if (target && release?.outcome === "released") {
     await recordMergeLeaseHold(db, target, release, new Date());
   }
+  return release ?? undefined;
 };
 
 /**
@@ -375,12 +379,22 @@ const releaseCommittedLeaseOutcomes = async (
 
   const failures: LeaseOutcomePostCommitFailure[] = [];
   for (const entry of targets.values()) {
+    let releaseResult: MergeLeaseRelease | void;
     try {
-      await release(entry.target, db);
+      releaseResult = await release(entry.target, db);
     } catch (error: unknown) {
       failures.push({ target: entry.target, phase: "release", error });
       continue;
     }
+    // A custom release dependency historically returned void, which means it
+    // completed without a machine-readable refusal. Treat that as confirmed
+    // for compatibility. Real adapters return `skipped`/`refused` when a newer
+    // holder owns the ref; leave the event open so reconciliation cannot mark a
+    // newer generation as released.
+    const releaseConfirmed = releaseResult === undefined
+      || releaseResult.outcome === "released"
+      || releaseResult.outcome === "not-held";
+    if (!releaseConfirmed) continue;
     if (entry.handoffs.length > 0 || entry.deferredReleases.length > 0) {
       try {
         await db.$transaction(async (tx) => {

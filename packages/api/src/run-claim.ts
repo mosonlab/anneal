@@ -16,11 +16,13 @@ import {
   isPinnedBaseCommitError,
   LEGACY_ALL_PRIOR_OUTPUTS,
   MERGE_TAIL_KIND,
+  mergeTrainClaimMetadata,
   MAX_APPROVAL_GATE_NOTE_CHARS,
   mergeExecutorRunnerIds,
   PinnedBaseCommitError,
   pinnedImplementationRange,
   Prisma,
+  readLatestMarker,
   type PrismaClient,
   RunStatus,
   RunnerKind,
@@ -1154,6 +1156,13 @@ export const claimRun = async (
       const specificationAmendment = prepared.status === "ready" && prepared.verification.currentBrief.kind === "amended"
         ? prepared.verification.currentBrief.note
         : null;
+      // A merge-train card is detached from every Chain and has no template
+      // step. Its queued marker is the durable source for the bounded runtime
+      // input; settled and aborted markers intentionally disappear from the
+      // claim so a stale card can never run the tool again.
+      const mergeTrain = candidate.task.chainId === null && candidate.task.templateStep === null
+        ? mergeTrainClaimMetadata(await readLatestMarker(tx, candidate.task.id, "train"))
+        : null;
       return {
         outcome: "claimed" as const,
         claim: {
@@ -1180,6 +1189,7 @@ export const claimRun = async (
               outputKind: candidate.task.templateStep.outputKind,
               taskTemplate: { name: candidate.task.templateStep.taskTemplate.name },
             },
+            ...(mergeTrain ? { mergeTrain } : {}),
           },
           agent: {
             id: candidate.agent.id,
