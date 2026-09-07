@@ -229,13 +229,15 @@ type SpecificationAuthority = {
   /** Hex SHA-256 of the normalized authoritative specification. */
   digest: string;
   /**
-   * `authority` is the pre-digest fallback, where the current brief *is* the
-   * digest. `amended` names the implementation Step whose brief has changed
-   * since the digest was recorded, which is what lets the claim date the
-   * amendment and lets a refusal tell a stale amendment apart from tampering.
+   * `not-compared` is every path that never weighed a brief against the digest:
+   * a compound chain, whose authority is its approved specification output, and
+   * the pre-digest fallback, where the current brief *is* the digest. `amended`
+   * names the implementation Step whose brief has changed since the digest was
+   * recorded, which is what lets the claim date the amendment and lets a
+   * refusal tell a stale amendment apart from tampering.
    */
   currentBrief:
-    | { kind: "authority" }
+    | { kind: "not-compared" }
     | { kind: "unamended" }
     | { kind: "amended"; taskId: string };
 };
@@ -271,8 +273,9 @@ const compoundAuthority = (source: AuthoritySource): AuthorityResult => {
   return { authority: {
     digest: specificationDigest(parsed.spec),
     // A compound chain's authority is its approved specification output, which
-    // no brief edit can move.
-    currentBrief: { kind: "unamended" },
+    // no brief edit can move and which no brief is compared against, so a
+    // refusal here says nothing about any task's brief.
+    currentBrief: { kind: "not-compared" },
   } };
 };
 
@@ -304,19 +307,21 @@ const directAuthority = (source: AuthoritySource): AuthorityResult => {
         : { kind: "amended", taskId: source.id },
     } };
   }
-  // Runs claimed before `Run.specificationDigest` existed recorded nothing, so
-  // chains already in flight keep comparing against the current brief — which
-  // is the behavior this change exists to end, because a tampered `spec.md`
-  // that happens to match an amended brief passes here. Delete this branch, and
-  // the null case of `Run.specificationDigest`, once no review step pins such a
-  // Run.
+  // No digest to compare against: the implementation Run was claimed before
+  // `Run.specificationDigest` existed, or the pinned output carries no Run at
+  // all because an operator wrote it through `PUT /tasks/:taskId/output`, which
+  // is how a parked chain is recovered by hand. Both keep comparing against the
+  // current brief — the behavior this change exists to end, because a tampered
+  // `spec.md` that happens to match an amended brief passes here. Delete this
+  // branch, and the null case of `Run.specificationDigest`, once no review step
+  // pins a digest-less implementation output.
   if (currentDigest === null) {
     return { error: refusal(
       SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON,
       "direct-chain task brief is unavailable",
     ) };
   }
-  return { authority: { digest: currentDigest, currentBrief: { kind: "authority" } } };
+  return { authority: { digest: currentDigest, currentBrief: { kind: "not-compared" } } };
 };
 
 type AuthorityResult = { authority: SpecificationAuthority } | { error: SpecificationRefusal };
@@ -374,13 +379,14 @@ const authorityFor = async (
  * Where the brief that is authoritative now stands against the digest the
  * materialized file is checked against.
  *
- * `authority` is the pre-digest fallback: the current brief *is* the digest, so
- * there is nothing to report and nothing to reconcile. `amended` carries the
+ * `not-compared` is a claim that weighed no brief against the digest — a
+ * compound chain, or the pre-digest fallback where the current brief *is* the
+ * digest — so it has nothing to report either way. `amended` carries the
  * finished prompt line, because only the claim transaction can read the
  * amendment's time off `TaskActivity`.
  */
 export type CurrentBriefStanding =
-  | { kind: "authority" }
+  | { kind: "not-compared" }
   | { kind: "unamended" }
   | { kind: "amended"; note: string };
 
@@ -403,6 +409,12 @@ export type SpecificationVerification = {
  * `PATCH /tasks/:id` records a brief edit as an operator `TaskActivity`, and
  * that row is the only record of when the amendment landed. A chain amended
  * before those rows carried this note says so rather than inventing a time.
+ *
+ * The line states where the amended text lives and stops there. Each Step keeps
+ * its own copy of the brief and `PATCH /tasks/:id` amends one Step at a time,
+ * so the reviewer's prompt need not carry the amended text and this claim has
+ * no way to put it there; telling the reviewer to judge against a brief it
+ * cannot read would be an instruction it cannot follow.
  */
 const briefAmendmentNote = async (
   tx: Prisma.TransactionClient,
@@ -415,7 +427,7 @@ const briefAmendmentNote = async (
     select: { createdAt: true },
   });
   const when = edit ? `at ${edit.createdAt.toISOString()}` : "at an unrecorded time";
-  return `Task ${taskId} had its brief amended ${when}, after ${path} was materialized: that file is the pre-amendment Specification of record, so judge this work against the current brief rather than against the file.`;
+  return `Task ${taskId} had its brief amended ${when}, after ${path} was materialized: that file is the pre-amendment Specification of record, and the amended text is the brief on that task.`;
 };
 
 export type SpecificationVerificationPreparation =
@@ -559,8 +571,9 @@ const failureDetail = (error: unknown): string => (
  * materialization read exactly the same in the refusal.
  */
 const BRIEF_STANDING_DETAIL: Record<CurrentBriefStanding["kind"], string> = {
-  // The current brief is the authority here, so it cannot stand apart from it.
-  authority: "",
+  // No brief was weighed against this digest, so the refusal claims nothing
+  // about one and keeps the message it had before digests existed.
+  "not-compared": "",
   unamended: "; the current task brief still matches that specification",
   amended: "; the current task brief also differs from that specification",
 };

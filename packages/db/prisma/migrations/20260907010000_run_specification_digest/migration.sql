@@ -9,6 +9,8 @@
 -- records their SHA-256 here and the fidelity check compares against it.
 --
 -- Nullable and never backfilled: Runs claimed before this release genuinely
--- have no record of what they were handed, and those keep comparing against the
--- current brief until no such Run is pinned by a review step.
+-- have no record of what they were handed. Those, and implementation outputs
+-- written by hand through "PUT /tasks/:taskId/output" with no Run behind them,
+-- keep comparing against the current brief until no review step pins a
+-- digest-less implementation output.
 ALTER TABLE "Run" ADD COLUMN "specificationDigest" TEXT;

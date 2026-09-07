@@ -6,6 +6,8 @@ import { test } from "node:test";
 import { TaskStatus } from "@anneal/db";
 
 import {
+  IMPLEMENTATION_BASE,
+  IMPLEMENTATION_HEAD,
   installParallelReviewLifecycle,
   SPECIFICATION_BRIEF,
 } from "./parallel-review-fixture.js";
@@ -14,9 +16,11 @@ import { specificationDigest } from "./specification-fidelity.js";
 const {
   db,
   claim,
+  complete,
   completeImplementation,
   instantiateDirect,
   operatorRequest,
+  request,
   reviewClaims,
   runnerRequest,
   setMaterializedSpecification,
@@ -50,6 +54,64 @@ test("the implementation claim records the digest of the brief it was handed", a
     (await implementationRun(fixture.implementationTaskId)).specificationDigest,
     specificationDigest(SPECIFICATION_BRIEF),
   );
+});
+
+test("a resumed implementation claim keeps the digest of the brief it materialized", async () => {
+  const fixture = await instantiateDirect();
+  const implementation = await claim("resume-implementation");
+  assert.equal(implementation.run.taskId, fixture.implementationTaskId);
+  await db.session.update({
+    where: { runId: implementation.run.id },
+    data: { providerConversationId: "resume-conversation" },
+  });
+  const question = await request(
+    `/session/runs/${implementation.run.id}/inbox/questions`,
+    "POST",
+    implementation.sessionToken,
+    {
+      fencingToken: implementation.fencingToken,
+      requestId: "resume-question",
+      body: "Should the brief cover the case the operator just raised?",
+      choices: [{ id: "amend", label: "the operator amends the brief, then continue" }],
+      chatId: "resume-chat",
+    },
+  );
+  assert.equal(question.status, 201, JSON.stringify(question.body));
+  // The operator amends the brief while answering. The runner reuses the
+  // workspace on a resume, so `.chain/<branch>/spec.md` keeps the text this Run
+  // was originally handed and the digest must keep it too.
+  await amendBrief(fixture.implementationTaskId, AMENDED_BRIEF);
+  const decision = await operatorRequest(`/inbox/messages/${(question.body as { id: string }).id}/decision`, "POST", {
+    requestId: "resume-decision",
+    decision: "amend",
+  });
+  assert.equal(decision.status, 201, JSON.stringify(decision.body));
+
+  const resumed = await claim("resume-implementation");
+  assert.equal(resumed.run.id, implementation.run.id);
+  assert.ok(resumed.resume);
+  assert.equal(
+    (await implementationRun(fixture.implementationTaskId)).specificationDigest,
+    specificationDigest(SPECIFICATION_BRIEF),
+  );
+
+  const completed = await complete(resumed, "resume-implementation", {
+    outputKind: "implementation",
+    output: {
+      schemaVersion: 1,
+      headSha: IMPLEMENTATION_HEAD,
+      baseSha: IMPLEMENTATION_BASE,
+      summary: "resumed implementation keeps the materialized specification",
+      testsRun: ["npm test -- parallel review"],
+    },
+    baseSha: IMPLEMENTATION_BASE,
+    branch: fixture.branchName,
+  });
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  const { first, second } = await reviewClaims(fixture, "resume-sol", "resume-blind");
+  for (const claimed of [first, second]) {
+    assert.match(claimed.specificationAmendment ?? "", /had its brief amended at /u);
+  }
 });
 
 test("a brief amended after materialization claims both reviews and tells them the brief moved", async () => {

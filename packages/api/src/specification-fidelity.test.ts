@@ -41,7 +41,7 @@ test("faithful pinned materialization accepts normalized line endings and passes
     path: specificationPathForBranch("feature/spec-check"),
     implementationHeadSha: "a".repeat(40),
     authoritativeDigest: specificationDigest(authoritative),
-    currentBrief: { kind: "authority" as const },
+    currentBrief: { kind: "not-compared" as const },
   };
   let call: { repository: string; path: string; commitSha: string } | undefined;
   const verdict = await verifyPreparedSpecification(
@@ -69,7 +69,7 @@ test("faithful pinned materialization accepts one final LF absent from authority
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "a".repeat(40),
       authoritativeDigest: specificationDigest("authoritative"),
-    currentBrief: { kind: "authority" },
+    currentBrief: { kind: "not-compared" },
     },
     { readFileAtCommit: async () => bytes("authoritative\n") },
     new AbortController().signal,
@@ -86,7 +86,7 @@ test("tampered materialization returns one stable operator-visible reason", asyn
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
       authoritativeDigest: specificationDigest("authoritative"),
-    currentBrief: { kind: "authority" },
+    currentBrief: { kind: "not-compared" },
     },
     { readFileAtCommit: async () => bytes("tampered") },
     new AbortController().signal,
@@ -155,7 +155,7 @@ test("a transient repository failure retries with backoff and then accepts faith
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
       authoritativeDigest: specificationDigest("authoritative"),
-    currentBrief: { kind: "authority" },
+    currentBrief: { kind: "not-compared" },
     },
     { readFileAtCommit: async () => {
       reads += 1;
@@ -180,7 +180,7 @@ test("persistent transient repository failure reports retry count and last failu
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
       authoritativeDigest: specificationDigest("authoritative"),
-    currentBrief: { kind: "authority" },
+    currentBrief: { kind: "not-compared" },
     },
     { readFileAtCommit: async () => {
       reads += 1;
@@ -206,7 +206,7 @@ test("a read deadline overrun is transient and exhausts the bounded retry schedu
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
       authoritativeDigest: specificationDigest("authoritative"),
-    currentBrief: { kind: "authority" },
+    currentBrief: { kind: "not-compared" },
     },
     { readFileAtCommit: async (_repository, _path, _commitSha, signal) => {
       reads += 1;
@@ -244,7 +244,8 @@ test("a read slower than the first deadline but faster than the last succeeds wi
       remoteUrl: "https://github.com/acme/repo.git",
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
-      authoritativeBytes: bytes("authoritative"),
+      authoritativeDigest: specificationDigest("authoritative"),
+      currentBrief: { kind: "not-compared" as const },
     },
     { readFileAtCommit: async (_repository, _path, _commitSha, signal) => {
       reads += 1;
@@ -280,7 +281,8 @@ test("an abort that is not this function's deadline is an ordinary transient, no
       remoteUrl: "https://github.com/acme/repo.git",
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
-      authoritativeBytes: bytes("authoritative"),
+      authoritativeDigest: specificationDigest("authoritative"),
+      currentBrief: { kind: "not-compared" as const },
     },
     { readFileAtCommit: async () => {
       throw new DOMException("aborted", "AbortError");
@@ -300,7 +302,8 @@ test("an all-deadline transient refusal is marked a timeout and any other transi
     remoteUrl: "https://github.com/acme/repo.git",
     path: ".chain/feature/spec-check/spec.md",
     implementationHeadSha: "b".repeat(40),
-    authoritativeBytes: bytes("authoritative"),
+    authoritativeDigest: specificationDigest("authoritative"),
+    currentBrief: { kind: "not-compared" as const },
   };
   const options = { retryDelaysMs: [0, 0], attemptTimeoutsMs: [5, 5, 5], wait: async () => {} };
   const timedOut = await verifyPreparedSpecification(
@@ -341,7 +344,7 @@ test("a permanent repository response failure refuses without retrying", async (
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
       authoritativeDigest: specificationDigest("authoritative"),
-    currentBrief: { kind: "authority" },
+    currentBrief: { kind: "not-compared" },
     },
     { readFileAtCommit: async () => {
       reads += 1;
@@ -366,7 +369,7 @@ test("a content mismatch refuses immediately without retrying", async () => {
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
       authoritativeDigest: specificationDigest("authoritative"),
-    currentBrief: { kind: "authority" },
+    currentBrief: { kind: "not-compared" },
     },
     { readFileAtCommit: async () => {
       reads += 1;
@@ -437,7 +440,18 @@ test("direct authority is read from the implementation task and compound authori
     branch: "feature/compound",
   }, "d".repeat(40));
   assert.equal(compound.status, "ready");
-  if (compound.status === "ready") assert.equal(compound.verification.authoritativeDigest, specificationDigest("approved compound spec"));
+  if (compound.status !== "ready") return;
+  assert.equal(compound.verification.authoritativeDigest, specificationDigest("approved compound spec"));
+  // No brief was weighed against the approved spec output, so a compound
+  // refusal says nothing about one.
+  assert.deepEqual(compound.verification.currentBrief, { kind: "not-compared" });
+  const tampered = await verifyPreparedSpecification(
+    compound.verification,
+    { readFileAtCommit: async () => bytes("a compound spec rewritten on the branch") },
+    new AbortController().signal,
+  );
+  assert.equal(tampered?.reason, SPEC_TRANSCRIPTION_REFUSAL_REASON);
+  assert.match(tampered?.message ?? "", /does not match the authoritative specification$/u);
 });
 
 test("PR review claims prepare identical implementation authority for code review and blind code review", async () => {
@@ -582,7 +596,7 @@ test("missing or corrupt authority and an unavailable reader are non-transient r
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "f".repeat(40),
       authoritativeDigest: specificationDigest("authoritative"),
-    currentBrief: { kind: "authority" },
+    currentBrief: { kind: "not-compared" },
     },
     null,
     new AbortController().signal,
@@ -639,7 +653,7 @@ test("the pinned implementation Run's digest outranks the current brief", async 
   assert.equal(prepared.verification.authoritativeDigest, specificationDigest(materialized));
   assert.deepEqual(prepared.verification.currentBrief, {
     kind: "amended",
-    note: `Task direct-implementation had its brief amended at ${AMENDED_AT.toISOString()}, after .chain/feature/direct/spec.md was materialized: that file is the pre-amendment Specification of record, so judge this work against the current brief rather than against the file.`,
+    note: `Task direct-implementation had its brief amended at ${AMENDED_AT.toISOString()}, after .chain/feature/direct/spec.md was materialized: that file is the pre-amendment Specification of record, and the amended text is the brief on that task.`,
   });
   assert.equal(
     await verifyPreparedSpecification(
@@ -756,7 +770,7 @@ test("a pinned Run without a digest keeps comparing against the current brief", 
   assert.equal(prepared.status, "ready");
   if (prepared.status !== "ready") return;
   assert.equal(prepared.verification.authoritativeDigest, specificationDigest(brief));
-  assert.deepEqual(prepared.verification.currentBrief, { kind: "authority" });
+  assert.deepEqual(prepared.verification.currentBrief, { kind: "not-compared" });
   const verdict = await verifyPreparedSpecification(
     prepared.verification,
     { readFileAtCommit: async () => bytes("something else entirely") },

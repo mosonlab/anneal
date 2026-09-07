@@ -79,7 +79,7 @@ test("serves the pinned file from the exact runner mirror key before GitHub", as
       path,
       implementationHeadSha: commit,
       authoritativeDigest: specificationDigest(bytes),
-      currentBrief: { kind: "authority" as const },
+      currentBrief: { kind: "not-compared" as const },
     };
     const githubVerdict = await verifyPreparedSpecification(
       verification,
@@ -172,7 +172,7 @@ test("replacement refs cannot change the pinned bytes accepted from a real mirro
       path,
       implementationHeadSha: original.trim(),
       authoritativeDigest: specificationDigest(bytes),
-      currentBrief: { kind: "authority" as const },
+      currentBrief: { kind: "not-compared" as const },
     };
 
     assert.equal(
