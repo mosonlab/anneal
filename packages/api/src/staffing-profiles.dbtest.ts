@@ -249,6 +249,7 @@ test("profiles are created, listed, replaced, reset and deleted", async () => {
   const listed = await call("GET", profilesPath(fixture));
   assert.equal(listed.status, 200);
   assert.deepEqual(listed.body.map((profile: { name: string }) => profile.name), ["Renamed"]);
+  assert.deepEqual(listed.body[0].tiers, reset.body.profile.tiers);
 
   // The last profile may go; instantiation then falls back to canonical.
   const deleted = await call("DELETE", `/staffing-profiles/${created.body.profile.id}`);

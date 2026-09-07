@@ -1625,6 +1625,8 @@ test("sync rolls model-neutral review output across all canonical templates and 
         taskTemplateId: template.id,
         name: "Operator review staffing",
         isDefault: true,
+        mergeTailRepairAgentId: staffedAgent.id,
+        tiers: { create: [{ tier: "hard", agentId: staffedAgent.id }] },
         entries: {
           create: [
             { outputKind: "sol-findings", assigneeAgentId: staffedAgent.id, include: null },
@@ -1702,7 +1704,7 @@ test("sync rolls model-neutral review output across all canonical templates and 
 
     const current = await prisma.taskTemplate.findUniqueOrThrow({
       where: { projectId_name: { projectId: project.id, name: templateName } },
-      include: { steps: { orderBy: { stepIndex: "asc" } }, staffingProfiles: { include: { entries: { orderBy: { outputKind: "asc" } } } } },
+      include: { steps: { orderBy: { stepIndex: "asc" } }, staffingProfiles: { include: { entries: { orderBy: { outputKind: "asc" } }, tiers: true } } },
     });
     assert.notEqual(current.id, fixture.templateId);
     assert.equal(current.steps.find(({ outputKind }) => outputKind === "review-findings")?.name, "Code review");
@@ -1712,6 +1714,8 @@ test("sync rolls model-neutral review output across all canonical templates and 
     assert.ok(carried);
     assert.equal(carried.name, "Operator review staffing");
     assert.equal(carried.isDefault, true);
+    assert.equal(carried.mergeTailRepairAgentId, staffedAgent.id);
+    assert.deepEqual(carried.tiers.map(({ tier, agentId }) => ({ tier, agentId })), [{ tier: "hard", agentId: staffedAgent.id }]);
     assert.deepEqual(
       carried.entries.map(({ outputKind, assigneeAgentId, include }) => ({ outputKind, assigneeAgentId, include })),
       [
