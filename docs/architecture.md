@@ -25,6 +25,8 @@ Local runner -----> ephemeral git workspace
 - The local runner claims work with a fenced lease, clones the selected
   repository into a controlled per-run workspace, creates or resumes the run
   branch, preflights the selected CLI, and records structured provider events.
+  Those events are buffered in memory and delivered independently of lease
+  renewal, so the buffer is bounded: see the event caps below.
 - Codex and Claude receive the Anneal session tools over a per-run stdio MCP
   server. Pi receives the corresponding task tools through an extension.
 - Anneal does not ship a repository command-line interface. Operators use the
@@ -72,6 +74,35 @@ Local runner -----> ephemeral git workspace
   and Git/workspace provisioning and delivery commands. Conventional host proxy
   variables are ignored. A `RUNNER_RUN_AS_PREFIX` launcher must preserve the
   explicit environment; proxy URLs are not serialized into provider argv.
+- Session events are bounded end to end. The runner holds at most 32 MiB and
+  20 000 undelivered events per Run, truncates any single payload above 256 KiB
+  to a `truncated` marker carrying its original size, and forms batches of at
+  most 250 events or 1 MiB. The API enforces the same per-event cap and reads at
+  most the batch cap plus envelope overhead of request body, refusing more with
+  413. Because event delivery is detached from lease renewal, a Run whose event
+  writes keep failing stays leased and keeps producing events; without the bound
+  the runner grows until the host runs out of memory, sooner with several
+  runners on it. Bounding means choosing what to lose: liveness detail
+  (streaming deltas, raw provider frames, captured stderr) is dropped
+  oldest-first along with tool output and provider status — the largest events a
+  Run produces. Lifecycle, terminal and error events are never dropped, but they
+  are not exempt from the bound either, because a provider can produce them
+  without limit too: once nothing droppable is left, such an event keeps its
+  sequence number, type and time and loses its payload — and the provider
+  identifiers no cap covers — to a `queue-bound` `truncated` marker, at about a
+  hundred bytes each instead of the 256 KiB a payload may carry, and once every
+  entry not in flight is such a marker the two oldest adjacent markers merge
+  into one carrying their summed counts, the sequence range they span, and the
+  drops and API refusals they were the only record of. So both bounds hold under any traffic mix while what a
+  protected event gives up is its detail, never its account. Every drop,
+  truncation and merge is itself recorded as an event. The batch in flight is
+  exempt from dropping and merging and is released by identity, so a provider
+  streaming during an append cannot cost an event the request never carried. A 413 the API
+  raises names the one offending event, so the runner loses that event rather
+  than wedging an ordered queue that only advances on success; a 413 that names
+  none makes the runner halve its batch budget and retry rather than resend a
+  body no peer will take. Both caps, and the cap on the one envelope field a
+  provider grows, are declared once in `@anneal/db/session-event-limits`.
 - Exactly one API control plane may own a canonical workspace root. Ownership is
   acquired from the protected, API-only `CONTROL_PLANE_STATE_DIR` before Prisma
   is imported or reconciliation begins. Runner daemons remain ordinary clients,

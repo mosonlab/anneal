@@ -1,10 +1,18 @@
-import { MergeRecoveryStatus, type MergeRecoveryAttempt, type Prisma } from "@prisma/client";
+import {
+  MergeRecoveryRefusalCode,
+  MergeRecoveryRetryClass,
+  MergeRecoveryStatus,
+  type MergeRecoveryAttempt,
+  type Prisma,
+} from "@prisma/client";
 
 import { stepRole } from "./step-role.js";
 
 export const MERGE_TAIL_SCHEMA_VERSION = 1;
 export const REGRESSION_VERIFICATION_SCHEMA_VERSION = 2;
 export const REGRESSION_VERIFICATION_OUTPUT_KIND = "regression-verification-v2";
+export const MERGE_TRAIN_SCHEMA_VERSION = 1;
+export const MERGE_TRAIN_OUTPUT_KIND = "merge-train-v1";
 export const LEGACY_REGRESSION_VERIFICATION_OUTPUT_KIND = "regression-verification";
 export const REGRESSION_VERIFICATION_OUTPUT_KINDS = [
   REGRESSION_VERIFICATION_OUTPUT_KIND,
@@ -35,7 +43,110 @@ export const MERGE_TAIL_KIND = {
 export const MAX_MERGE_TAIL_REPAIR_ATTEMPTS = 2;
 
 export const MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES = 2;
-export const MAX_BASE_DRIFT_CLASSIFICATION_RETRIES = 30;
+
+/**
+ * The base-drift classification budget, and the three retry classes it is
+ * split across. Only a `validation` failure — a classification that ran
+ * against real facts and could not conclude — spends the count budget, and it
+ * exhausts only once those failures have also spanned
+ * `BASE_DRIFT_VALIDATION_MIN_ELAPSED_MS`, so one burst inside a single
+ * incident cannot end a recovery. Waiting for the chain's own active Run and a
+ * failed repository read spend no count at all: they are held on a doubling
+ * backoff and bounded only by their own elapsed-time ceilings, because neither
+ * is evidence about the candidate.
+ */
+export const MAX_BASE_DRIFT_VALIDATION_ATTEMPTS = 30;
+export const BASE_DRIFT_VALIDATION_MIN_ELAPSED_MS = 30 * 60_000;
+export const BASE_DRIFT_WAITING_CEILING_MS = 6 * 60 * 60_000;
+export const BASE_DRIFT_TRANSPORT_CEILING_MS = 30 * 60_000;
+/** The doubling backoff, from one worker tick to a minute. */
+export const BASE_DRIFT_RETRY_BACKOFF_START_MS = 2_000;
+export const BASE_DRIFT_RETRY_BACKOFF_CAP_MS = 60_000;
+
+export type MergeRecoveryRetryClassName = "waiting" | "transport" | "validation";
+
+export const MERGE_RECOVERY_RETRY_CLASS_ENUM: Record<
+  MergeRecoveryRetryClassName,
+  MergeRecoveryRetryClass
+> = {
+  waiting: MergeRecoveryRetryClass.WAITING,
+  transport: MergeRecoveryRetryClass.TRANSPORT,
+  validation: MergeRecoveryRetryClass.VALIDATION,
+};
+
+/**
+ * What one class settles as: the durable refusal it records, and the state
+ * name that settle is written under in the recovery activity and its stop
+ * notice key. Both live here, in one entry per class, so a rename cannot leave
+ * the refusal on the attempt disagreeing with the state an operator reads.
+ * `state` is the refusal code's `@map` value in `schema.prisma`.
+ */
+export const MERGE_RECOVERY_CLASS_SETTLE = {
+  [MergeRecoveryRetryClass.WAITING]:
+    { refusalCode: MergeRecoveryRefusalCode.WAITING_CEILING, state: "waiting-ceiling" },
+  [MergeRecoveryRetryClass.TRANSPORT]:
+    { refusalCode: MergeRecoveryRefusalCode.TRANSPORT_CEILING, state: "transport-ceiling" },
+  [MergeRecoveryRetryClass.VALIDATION]:
+    { refusalCode: MergeRecoveryRefusalCode.VALIDATION_BUDGET, state: "validation-budget" },
+} as const satisfies Record<
+  MergeRecoveryRetryClass,
+  { refusalCode: MergeRecoveryRefusalCode; state: string }
+>;
+
+/** The three state names a class ceiling can settle under. */
+export type MergeRecoveryClassSettleState =
+  (typeof MERGE_RECOVERY_CLASS_SETTLE)[MergeRecoveryRetryClass]["state"];
+
+/** The refusal each class settles under when it crosses its own ceiling. */
+export const MERGE_RECOVERY_CLASS_REFUSAL_CODE: Record<
+  MergeRecoveryRetryClass,
+  MergeRecoveryRefusalCode
+> = {
+  [MergeRecoveryRetryClass.WAITING]: MERGE_RECOVERY_CLASS_SETTLE.WAITING.refusalCode,
+  [MergeRecoveryRetryClass.TRANSPORT]: MERGE_RECOVERY_CLASS_SETTLE.TRANSPORT.refusalCode,
+  [MergeRecoveryRetryClass.VALIDATION]: MERGE_RECOVERY_CLASS_SETTLE.VALIDATION.refusalCode,
+};
+
+/**
+ * The lowercase class name every recovery activity spells. The Prisma client
+ * carries the uppercase member name, which is not what operators or the
+ * board's markers read, so anything writing a class into text or metadata
+ * passes through here first.
+ */
+export const MERGE_RECOVERY_RETRY_CLASS_NAME = Object.fromEntries(
+  (Object.entries(MERGE_RECOVERY_RETRY_CLASS_ENUM) as Array<
+    [MergeRecoveryRetryClassName, MergeRecoveryRetryClass]
+  >).map(([name, member]) => [member, name]),
+) as Record<MergeRecoveryRetryClass, MergeRecoveryRetryClassName>;
+
+const CLASS_OF_REFUSAL = new Map<MergeRecoveryRefusalCode, MergeRecoveryRetryClass>(
+  (Object.entries(MERGE_RECOVERY_CLASS_REFUSAL_CODE) as Array<
+    [MergeRecoveryRetryClass, MergeRecoveryRefusalCode]
+  >).map(([retryClass, code]) => [code, retryClass]),
+);
+
+/**
+ * The class a refusal exhausted, or null when the refusal is an ordinary
+ * ineligibility rather than a class ceiling. This is what makes `re-validate`
+ * offerable: only a ceiling has counters an operator can reset.
+ */
+export const mergeRecoveryCeilingClass = (
+  refusalCode: MergeRecoveryRefusalCode | null,
+): MergeRecoveryRetryClass | null => (refusalCode ? CLASS_OF_REFUSAL.get(refusalCode) ?? null : null);
+
+/** The per-class counter reset one `re-validate` performs, and nothing else. */
+export const mergeRecoveryClassReset = (
+  retryClass: MergeRecoveryRetryClass,
+): Prisma.MergeRecoveryAttemptUpdateManyMutationInput => {
+  switch (retryClass) {
+    case MergeRecoveryRetryClass.WAITING:
+      return { waitingAttempts: 0, waitingFirstAt: null };
+    case MergeRecoveryRetryClass.TRANSPORT:
+      return { transportAttempts: 0, transportFirstAt: null };
+    case MergeRecoveryRetryClass.VALIDATION:
+      return { validationAttempts: 0, validationFirstAt: null };
+  }
+};
 
 export type MergeRecoveryPhase =
   | "validation"
@@ -173,6 +284,7 @@ export const mergeRecoveryPhase = (status: MergeRecoveryStatus): MergeRecoveryPh
 );
 
 const SHA = /^[0-9a-f]{40}$/u;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const PASS_GATE_PROOF = /^MERGE GATE: PASS ([0-9a-f]{40})$/u;
 const FAIL_GATE_PROOF = /^MERGE GATE: FAIL \(.+\)$/u;
 
@@ -264,6 +376,169 @@ export const parseRegressionVerdict = (
     return { status: "ok", verdict: value as RegressionVerdict };
   }
   return { status: "invalid", reason: "regression outcome and gateVerdict disagree or required summary is absent" };
+};
+
+export type MergeTrainVerdict = "pass" | "fail" | "no-verdict";
+export type MergeTrainWidth = 1 | 2 | 3;
+
+export type MergeTrainPrefix = {
+  index: number;
+  taskId: string;
+  chainId: string;
+  candidateHeadSha: string;
+  predecessorOid: string;
+  prefixOid: string;
+  ref: string;
+  verdict: MergeTrainVerdict;
+  gateExcerpt: string;
+};
+
+export type MergeTrainBlockedCandidate = {
+  taskId: string;
+  chainId: string;
+  candidateHeadSha: string;
+  reason: string;
+};
+
+export type MergeTrainRecord = {
+  schemaVersion: typeof MERGE_TRAIN_SCHEMA_VERSION;
+  baseSha: string;
+  width: MergeTrainWidth;
+  prefixes: MergeTrainPrefix[];
+  blocked: MergeTrainBlockedCandidate[];
+  skipped: string[];
+  contiguousPassCount: number;
+};
+
+export type MergeTrainRecordParse =
+  | { status: "ok"; record: MergeTrainRecord }
+  | { status: "invalid"; reason: string };
+
+const nonEmptyString = (value: unknown): value is string => (
+  typeof value === "string" && value.trim().length > 0
+);
+
+/**
+ * A prefix is only ever `pass` when the gate printed `MERGE GATE: PASS
+ * <prefixOid>` exactly, so the record has to carry that line, bound to that
+ * prefix, as a standalone line of its gate excerpt. Without it the parser would
+ * hand the control plane a proofless authorization to merge.
+ */
+const carriesGatePassProof = (gateExcerpt: string, prefixOid: string): boolean =>
+  gateExcerpt.split(/\r?\n/u).includes(`MERGE GATE: PASS ${prefixOid}`);
+
+/**
+ * Parse the persisted output of the runtime merge-train tool. The control
+ * plane treats this record as an authorization input, so the parser validates
+ * both its wire shape and the relationships the tool promises between fields.
+ */
+export const parseMergeTrainRecord = (
+  body: string | null | undefined,
+): MergeTrainRecordParse => {
+  if (!body) return { status: "invalid", reason: "missing merge train output" };
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { return { status: "invalid", reason: "merge train output is not JSON" }; }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { status: "invalid", reason: "merge train output is not an object" };
+  }
+
+  const value = parsed as Record<string, unknown>;
+  const fail = (reason: string): MergeTrainRecordParse => ({ status: "invalid", reason });
+  if (value.schemaVersion !== MERGE_TRAIN_SCHEMA_VERSION) return fail("unsupported merge train schemaVersion");
+  if (typeof value.baseSha !== "string" || !SHA.test(value.baseSha)) return fail("invalid merge train baseSha");
+  if (typeof value.width !== "number" || !Number.isInteger(value.width) || value.width < 1 || value.width > 3) {
+    return fail("invalid merge train width");
+  }
+  if (!Array.isArray(value.prefixes)) return fail("merge train prefixes is not an array");
+  if (value.prefixes.length > value.width) return fail("merge train prefixes exceed width");
+
+  const prefixes: MergeTrainPrefix[] = [];
+  for (const [position, entry] of value.prefixes.entries()) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return fail("malformed merge train prefix");
+    const prefix = entry as Record<string, unknown>;
+    if (typeof prefix.index !== "number" || !Number.isInteger(prefix.index) || prefix.index !== position + 1) {
+      return fail("merge train prefix indexes are not one-based and ordered");
+    }
+    if (!nonEmptyString(prefix.taskId)) return fail("invalid merge train prefix taskId");
+    if (typeof prefix.chainId !== "string" || !UUID.test(prefix.chainId)) return fail("invalid merge train prefix chainId");
+    if (typeof prefix.candidateHeadSha !== "string" || !SHA.test(prefix.candidateHeadSha)) {
+      return fail("invalid merge train candidateHeadSha");
+    }
+    if (typeof prefix.predecessorOid !== "string" || !SHA.test(prefix.predecessorOid)) {
+      return fail("invalid merge train predecessorOid");
+    }
+    if (typeof prefix.prefixOid !== "string" || !SHA.test(prefix.prefixOid)) {
+      return fail("invalid merge train prefixOid");
+    }
+    const expectedPredecessor = prefixes.at(-1)?.prefixOid ?? value.baseSha;
+    if (prefix.predecessorOid !== expectedPredecessor) return fail("merge train prefix predecessor is not continuous");
+    if (prefix.ref !== `refs/anneal/train/${prefix.prefixOid}`) return fail("merge train prefix ref is not append-only train ref");
+    if (prefix.verdict !== "pass" && prefix.verdict !== "fail" && prefix.verdict !== "no-verdict") {
+      return fail("invalid merge train prefix verdict");
+    }
+    if (typeof prefix.gateExcerpt !== "string") return fail("invalid merge train gateExcerpt");
+    if (prefix.verdict === "pass" && !carriesGatePassProof(prefix.gateExcerpt, prefix.prefixOid)) {
+      return fail("merge train pass prefix carries no gate PASS proof for its prefixOid");
+    }
+    prefixes.push({
+      index: prefix.index,
+      taskId: prefix.taskId,
+      chainId: prefix.chainId,
+      candidateHeadSha: prefix.candidateHeadSha,
+      predecessorOid: prefix.predecessorOid,
+      prefixOid: prefix.prefixOid,
+      ref: prefix.ref,
+      verdict: prefix.verdict,
+      gateExcerpt: prefix.gateExcerpt,
+    });
+  }
+
+  if (!Array.isArray(value.blocked)) return fail("merge train blocked is not an array");
+  const blocked: MergeTrainBlockedCandidate[] = [];
+  for (const entry of value.blocked) {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return fail("malformed merge train blocked candidate");
+    const candidate = entry as Record<string, unknown>;
+    if (!nonEmptyString(candidate.taskId)
+      || typeof candidate.chainId !== "string" || !UUID.test(candidate.chainId)
+      || typeof candidate.candidateHeadSha !== "string" || !SHA.test(candidate.candidateHeadSha)
+      || !nonEmptyString(candidate.reason)) {
+      return fail("malformed merge train blocked candidate");
+    }
+    blocked.push({
+      taskId: candidate.taskId,
+      chainId: candidate.chainId,
+      candidateHeadSha: candidate.candidateHeadSha,
+      reason: candidate.reason,
+    });
+  }
+  if (blocked.length > 1) return fail("merge train has more than one blocked candidate");
+
+  if (!Array.isArray(value.skipped) || !value.skipped.every(nonEmptyString)) return fail("merge train skipped is malformed");
+  if (blocked.length === 0 && value.skipped.length > 0) return fail("merge train skipped candidates require a blocked candidate");
+  if (prefixes.length + blocked.length + value.skipped.length > value.width) return fail("merge train candidates exceed width");
+  if (typeof value.contiguousPassCount !== "number"
+    || !Number.isInteger(value.contiguousPassCount)
+    || value.contiguousPassCount < 0) {
+    return fail("invalid merge train contiguousPassCount");
+  }
+  let leadingPassCount = 0;
+  while (leadingPassCount < prefixes.length && prefixes[leadingPassCount]!.verdict === "pass") leadingPassCount += 1;
+  if (value.contiguousPassCount !== leadingPassCount) {
+    return fail("merge train contiguousPassCount does not match leading pass prefixes");
+  }
+
+  return {
+    status: "ok",
+    record: {
+      schemaVersion: MERGE_TRAIN_SCHEMA_VERSION,
+      baseSha: value.baseSha,
+      width: value.width as MergeTrainWidth,
+      prefixes,
+      blocked,
+      skipped: [...value.skipped],
+      contiguousPassCount: value.contiguousPassCount,
+    },
+  };
 };
 
 /**
@@ -372,8 +647,10 @@ const DEFENSE_EXACT = new Set([
   "packages/db/src/merge-integrator.ts",
   "packages/db/src/gate-attestation.ts",
   "packages/db/src/merge-integrator-db.ts",
+  "packages/db/src/merge-recovery-revalidate.ts",
   "packages/db/src/merge-tail.ts",
   "packages/db/src/merge-tail-markers.ts",
+  "packages/db/src/readiness-requeue.ts",
   "packages/db/src/canonical-output-schema.ts",
   "packages/db/src/template-sources.ts",
   "packages/db/src/agent-contract.ts",

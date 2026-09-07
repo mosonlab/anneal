@@ -14,6 +14,7 @@ import {
   mergeRecoveryTransitionAllowed,
   RECOVERY_TRANSITIONS,
   parseResolverResult,
+  parseMergeTrainRecord,
   parseRegressionVerdict,
 } from "./merge-tail.js";
 
@@ -201,6 +202,79 @@ test("Regression v2 gate failure excerpts are optional strings", () => {
   for (const gateFailureExcerpt of [null, 42, true, {}, []]) {
     assert.equal(parseRegressionVerdict(JSON.stringify({ ...verdict, gateFailureExcerpt }), "regression-verification-v2").status, "invalid");
   }
+});
+
+test("merge train records are versioned and validate the contiguous passing prefix", () => {
+  const chainId = "00000000-0000-4000-8000-000000000001";
+  const record = {
+    schemaVersion: 1,
+    baseSha: A,
+    width: 3,
+    prefixes: [{
+      index: 1,
+      taskId: "task-1",
+      chainId,
+      candidateHeadSha: B,
+      predecessorOid: A,
+      prefixOid: "c".repeat(40),
+      ref: `refs/anneal/train/${"c".repeat(40)}`,
+      verdict: "pass",
+      gateExcerpt: `MERGE GATE: PASS ${"c".repeat(40)}`,
+    }],
+    blocked: [],
+    skipped: [],
+    contiguousPassCount: 1,
+  };
+  const accepted = parseMergeTrainRecord(JSON.stringify(record));
+  assert.equal(accepted.status, "ok");
+  if (accepted.status === "ok") assert.deepEqual(accepted.record, record);
+
+  const { contiguousPassCount: _missing, ...withoutCount } = record;
+  assert.equal(parseMergeTrainRecord(JSON.stringify(withoutCount)).status, "invalid");
+  assert.equal(parseMergeTrainRecord(JSON.stringify({
+    ...record,
+    prefixes: [{ ...record.prefixes[0], verdict: "unknown" }],
+  })).status, "invalid");
+  assert.equal(parseMergeTrainRecord(JSON.stringify({ ...record, contiguousPassCount: 2 })).status, "invalid");
+
+  const blocked = {
+    taskId: "task-blocked",
+    chainId,
+    candidateHeadSha: "d".repeat(40),
+    reason: "merge conflict",
+  };
+  assert.equal(parseMergeTrainRecord(JSON.stringify({ ...record, blocked: [blocked], skipped: ["task-3"] })).status, "ok");
+  assert.equal(parseMergeTrainRecord(JSON.stringify({ ...record, skipped: ["task-3"] })).status, "invalid");
+  assert.equal(parseMergeTrainRecord(JSON.stringify({ ...record, blocked: [blocked], skipped: ["task-3", "task-4"] })).status, "invalid");
+  assert.equal(parseMergeTrainRecord(JSON.stringify({ ...record, blocked: [blocked, blocked] })).status, "invalid");
+
+  // A pass is an authorization input, so it is only ever accepted with the
+  // gate's own proof line for that exact prefix.
+  for (const gateExcerpt of [
+    "",
+    "MERGE GATE: PASS",
+    `MERGE GATE: PASS ${"e".repeat(40)}`,
+    `noise MERGE GATE: PASS ${"c".repeat(40)}`,
+    `MERGE GATE: PASS ${"c".repeat(40)} suffix`,
+  ]) {
+    assert.equal(parseMergeTrainRecord(JSON.stringify({
+      ...record,
+      prefixes: [{ ...record.prefixes[0], gateExcerpt }],
+    })).status, "invalid", gateExcerpt);
+  }
+  assert.equal(parseMergeTrainRecord(JSON.stringify({
+    ...record,
+    prefixes: [{
+      ...record.prefixes[0],
+      gateExcerpt: `run-gate: noise\nMERGE GATE: PASS ${"c".repeat(40)}\n`,
+    }],
+  })).status, "ok");
+  // A non-pass prefix carries diagnostics, not proof, so no proof is required.
+  assert.equal(parseMergeTrainRecord(JSON.stringify({
+    ...record,
+    prefixes: [{ ...record.prefixes[0], verdict: "no-verdict", gateExcerpt: "GATE NOT RUN" }],
+    contiguousPassCount: 0,
+  })).status, "ok");
 });
 
 test("readiness role is mechanical across template generations and ordinals", () => {

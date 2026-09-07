@@ -250,6 +250,20 @@ const dispatchBoundSuccessor = async (
   // an integrity violation rather than a caller-recoverable refusal.
   if (!successor) throw new Error(`Bound successor ${successorId} disappeared while dispatching`);
 
+  // The successor list was read under the predecessor's chain mutex only, and
+  // `PATCH /tasks/:taskId` may re-point or release the binding of a chain that
+  // has no Run while this transaction waits for that chain's mutex. Decide on
+  // the row read under the lock: a binding that no longer names this
+  // predecessor is not this completion's to dispatch.
+  if (successor.dispatchAfterTaskId !== predecessor.id) {
+    await boundDispatchActivities(tx, predecessor, successor, {
+      successorBody: "Bound predecessor completed after the binding moved; successor was not queued",
+      predecessorBody: "Bound chain dispatch skipped: the successor is no longer bound to this task",
+      metadata: { state: "rebound", dispatchAfterTaskId: successor.dispatchAfterTaskId },
+    });
+    return;
+  }
+
   if (!predecessorTerminal) {
     await parkBoundSuccessor(
       tx,

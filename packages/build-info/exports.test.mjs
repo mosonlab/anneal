@@ -22,6 +22,7 @@ const mappings = [
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./gate-toggle", source: "./src/gate-toggle.ts", dist: "./dist/gate-toggle.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./wire-contract", source: "./src/wire-contract.ts", dist: "./dist/wire-contract.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./wire-serialization", source: "./src/wire-serialization.ts", dist: "./dist/wire-serialization.js" },
+  { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./session-event-limits", source: "./src/session-event-limits.ts", dist: "./dist/session-event-limits.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./claim-contract", source: "./src/claim-contract.ts", dist: "./dist/claim-contract.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./service-lock", source: "./src/service-maintenance-lock.ts", dist: "./dist/service-maintenance-lock.js" },
   { packageName: "@anneal/runner", packageDirectory: "packages/runner", subpath: "./adapters", source: "./src/adapters.ts", dist: "./dist/adapters.js" },
@@ -31,7 +32,7 @@ const mappings = [
   { packageName: "@anneal/github-client", packageDirectory: "packages/github-client", subpath: ".", source: "./src/index.ts", dist: "./dist/index.js" },
 ];
 
-assert.equal(mappings.length, 19);
+assert.equal(mappings.length, 20);
 
 const packageSpecifier = ({ packageName, subpath }) =>
   subpath === "." ? packageName : `${packageName}/${subpath.slice(2)}`;
@@ -80,7 +81,7 @@ const resolveInChild = (conditions) => {
   return JSON.parse(execFileSync(process.execPath, args, { cwd: repositoryRoot, encoding: "utf8" }));
 };
 
-test("all nineteen source-backed exports have ordered development targets", () => {
+test("all twenty source-backed exports have ordered development targets", () => {
   const entriesByPackage = new Map();
   for (const mapping of mappings) {
     const manifest = readManifest(mapping.packageDirectory);

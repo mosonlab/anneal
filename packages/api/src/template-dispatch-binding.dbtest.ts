@@ -553,3 +553,153 @@ test("deleting one bound chain releases only its own binding", async () => {
   assert.deepEqual(stillBound.map((task) => task.chainId), [retainedChainId]);
   assert.equal(await db.task.count({ where: { chainId: retainedChainId } }), STEP_COUNT);
 });
+
+/** The chain whose binding the PATCH tests re-point: a bound successor of a
+ *  predecessor that is still TODO, so nothing about it has started. */
+const boundSuccessor = async (seed: Fixture, predecessorId: string, name: string) => {
+  const created = await request(seed.project.id, seed.template.id, {
+    repoId: seed.repo.id,
+    variables: {},
+    name,
+    afterTaskId: predecessorId,
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const chainId = created.body.chainId as string;
+  const tasks = await db.task.findMany({ where: { chainId }, orderBy: { chainIndex: "asc" } });
+  assert.equal(tasks[0]!.dispatchAfterTaskId, predecessorId);
+  return { chainId, first: tasks[0]!, tasks };
+};
+
+test("an unstarted bound chain is re-pointed at a DONE task and becomes startable", async () => {
+  const seed = await fixture("repoint-done");
+  const stranded = (await instantiate(seed)).at(-1)!;
+  const successor = await boundSuccessor(seed, stranded.id, "re-pointed successor");
+  const replacement = (await instantiate(seed)).at(-1)!;
+  await db.task.update({ where: { id: replacement.id }, data: { status: TaskStatus.DONE } });
+
+  const patched = await operatorRequest(
+    `/tasks/${successor.first.id}`, "PATCH", { dispatchAfterTaskId: replacement.id },
+  );
+  assert.equal(patched.status, 200, JSON.stringify(patched.body));
+  assert.equal(patched.body.dispatchAfterTaskId, replacement.id);
+  assert.equal(
+    (await db.task.findUniqueOrThrow({ where: { id: successor.first.id } })).dispatchAfterTaskId,
+    replacement.id,
+  );
+  // Re-pointing resolves the binding; it does not dispatch the chain.
+  assert.equal(await db.run.count({ where: { task: { chainId: successor.chainId } } }), 0);
+  const activity = await db.taskActivity.findFirstOrThrow({
+    where: { taskId: successor.first.id, body: { contains: "Chain binding changed" } },
+  });
+  assert.equal(
+    activity.body,
+    `Chain binding changed by operator request: predecessor ${stranded.id} → ${replacement.id}`,
+  );
+  assert.deepEqual(activity.metadata, {
+    chainId: successor.chainId,
+    previousDispatchAfterTaskId: stranded.id,
+    dispatchAfterTaskId: replacement.id,
+  });
+
+  const started = await operatorRequest(`/tasks/${successor.first.id}/start`, "POST");
+  assert.equal(started.status, 201, JSON.stringify(started.body));
+});
+
+test("an archived, foreign, standalone, or same-chain predecessor is refused as an invalid binding target", async () => {
+  const seed = await fixture("repoint-invalid");
+  const stranded = (await instantiate(seed)).at(-1)!;
+  const successor = await boundSuccessor(seed, stranded.id, "invalid target successor");
+  const archived = (await instantiate(seed)).at(-1)!;
+  await db.task.update({ where: { id: archived.id }, data: { archivedAt: new Date() } });
+  const other = await fixture("repoint-invalid-other");
+  const foreign = (await instantiate(other)).at(-1)!;
+  // A standalone task never advances a chain, so binding onto one would strand
+  // the successor exactly the way an archived predecessor does.
+  const standalone = await db.task.create({
+    data: {
+      projectId: seed.project.id,
+      repoId: seed.repo.id,
+      name: "standalone predecessor",
+      description: "not a chain task",
+      assigneeType: "AGENT",
+      assigneeAgentId: seed.agent.id,
+    },
+  });
+
+  for (const targetId of [archived.id, foreign.id, standalone.id, successor.tasks.at(-1)!.id, successor.first.id]) {
+    const refused = await operatorRequest(
+      `/tasks/${successor.first.id}`, "PATCH", { dispatchAfterTaskId: targetId },
+    );
+    assert.equal(refused.status, 400, JSON.stringify(refused.body));
+    assert.equal(refused.body.code, "chain_binding_target_invalid", JSON.stringify(refused.body));
+    assert.equal(
+      (await db.task.findUniqueOrThrow({ where: { id: successor.first.id } })).dispatchAfterTaskId,
+      stranded.id,
+    );
+  }
+  assert.equal(await db.taskActivity.count({
+    where: { taskId: successor.first.id, body: { contains: "Chain binding changed" } },
+  }), 0);
+});
+
+test("null releases the binding of an unstarted chain without starting it", async () => {
+  const seed = await fixture("release-binding");
+  const stranded = (await instantiate(seed)).at(-1)!;
+  const successor = await boundSuccessor(seed, stranded.id, "released successor");
+
+  const patched = await operatorRequest(
+    `/tasks/${successor.first.id}`, "PATCH", { dispatchAfterTaskId: null },
+  );
+  assert.equal(patched.status, 200, JSON.stringify(patched.body));
+  assert.equal(patched.body.dispatchAfterTaskId, null);
+  assert.equal(await db.task.count({ where: { chainId: successor.chainId } }), STEP_COUNT);
+  assert.equal(await db.run.count({ where: { task: { chainId: successor.chainId } } }), 0);
+  const activity = await db.taskActivity.findFirstOrThrow({
+    where: { taskId: successor.first.id, body: { contains: "Chain binding changed" } },
+  });
+  assert.equal(
+    activity.body,
+    `Chain binding changed by operator request: predecessor ${stranded.id} → none`,
+  );
+
+  const started = await operatorRequest(`/tasks/${successor.first.id}/start`, "POST");
+  assert.equal(started.status, 201, JSON.stringify(started.body));
+});
+
+test("a chain with one Run keeps its binding, and so does a later step", async () => {
+  const seed = await fixture("binding-immutable");
+  const predecessor = (await instantiate(seed)).at(-1)!;
+  const successor = await boundSuccessor(seed, predecessor.id, "started successor");
+  const replacement = (await instantiate(seed)).at(-1)!;
+  await db.task.update({ where: { id: replacement.id }, data: { status: TaskStatus.DONE } });
+
+  // A later step never carries the binding, started or not.
+  const laterStep = await operatorRequest(
+    `/tasks/${successor.tasks[1]!.id}`, "PATCH", { dispatchAfterTaskId: replacement.id },
+  );
+  assert.equal(laterStep.status, 409, JSON.stringify(laterStep.body));
+  assert.equal(laterStep.body.code, "chain_binding_immutable_after_start");
+
+  await db.task.update({ where: { id: predecessor.id }, data: { status: TaskStatus.DONE } });
+  const started = await operatorRequest(`/tasks/${successor.first.id}/start`, "POST");
+  assert.equal(started.status, 201, JSON.stringify(started.body));
+
+  const refused = await operatorRequest(
+    `/tasks/${successor.first.id}`, "PATCH", { dispatchAfterTaskId: replacement.id },
+  );
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.equal(refused.body.code, "chain_binding_immutable_after_start", JSON.stringify(refused.body));
+  assert.equal(
+    (await db.task.findUniqueOrThrow({ where: { id: successor.first.id } })).dispatchAfterTaskId,
+    predecessor.id,
+  );
+  // The binding it already carries is still accepted, and writes nothing.
+  const idempotent = await operatorRequest(
+    `/tasks/${successor.first.id}`, "PATCH", { dispatchAfterTaskId: predecessor.id },
+  );
+  assert.equal(idempotent.status, 200, JSON.stringify(idempotent.body));
+  assert.equal(idempotent.body.dispatchAfterTaskId, predecessor.id);
+  assert.equal(await db.taskActivity.count({
+    where: { taskId: successor.first.id, body: { contains: "Chain binding changed" } },
+  }), 0);
+});
