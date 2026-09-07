@@ -9,6 +9,12 @@ written.
 
 ## Unreleased
 
+- A gate dispatch queued behind other gates no longer gives up while the queue
+  is moving. `GATE_DISPATCH_TIMEOUT_MINUTES` now bounds a queue that makes no
+  progress: each poll reads which process holds each busy slot, and a slot that
+  changes hands restarts the timeout. `GATE DISPATCH: NO SLOT` (exit 75) still
+  reports a queue where nothing finished for the whole timeout, so a stalled
+  queue is still surfaced instead of waited out.
 - Retired the `POST /files/mkdir` and `POST /files/move` routes and their
   underlying store operations.
 - Removed `POST /inbox/messages/:messageId/supersede`;
