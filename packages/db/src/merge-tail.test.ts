@@ -384,6 +384,10 @@ test("the defense list covers tracked merge-tail machinery", () => {
   for (const path of runnerContractPaths) {
     assert.equal(defenseListReason(path), "merge-tail-machinery", path);
   }
+  for (const path of ["packages/inbox/src/index.ts", "packages/inbox/src/events.ts",
+    "packages/inbox/src/merge-executor-liveness.ts", "packages/db/src/local-origin.ts"]) {
+    assert.equal(defenseListReason(path), "merge-tail-machinery", path);
+  }
   assert.equal(defenseListReason("apps/web/src/app.tsx"), null);
   assert.equal(defenseListReason("agents/templates/pr-engineer-workflow/01-implementation.md"), "template-step-set");
 });

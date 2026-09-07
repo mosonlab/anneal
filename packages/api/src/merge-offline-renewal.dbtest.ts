@@ -209,7 +209,7 @@ test("confirmation renewal defers and records the offline episode when no execut
   });
 });
 
-test("a live confirmation renewal closes the open offline episode", async () => {
+test("a live confirmation renewal leaves episode closure to the readiness claim", async () => {
   await withExecutorEnvironment(async () => {
     const { chain, card } = await confirmationCard();
     assert.ok(chain.readinessTask);
@@ -250,14 +250,35 @@ test("a live confirmation renewal closes the open offline episode", async () => 
         metadata: { path: ["state"], equals: "requeued-executor-offline" },
       },
     });
-    assert.equal((marker.metadata as { episodeClosed?: unknown }).episodeClosed, true);
+    assert.notEqual((marker.metadata as { episodeClosed?: unknown }).episodeClosed, true);
     const closed = await db.taskActivity.findMany({
       where: {
         taskId: chain.readinessTask.id,
         metadata: { path: ["state"], equals: "executor-offline-closed" },
       },
     });
-    assert.equal(closed.length, 1);
-    assert.equal(closed[0]!.body, "Merge readiness executor-offline episode ended: executor observed online during operator renewal");
+    assert.equal(closed.length, 0);
   });
 });
+
+for (const cause of ["no-reader", "http-503", "unreachable", "malformed", "no-token"]) {
+  test(`unobservable confirmation renewal refuses without authorization (${cause})`, async () => {
+    await withExecutorEnvironment(async () => {
+      const { chain, card } = await confirmationCard();
+      await assert.rejects(() => applyInboxDecision(db, {
+        inboxMessageId: card.id, externalEventId: `unreadable-${cause}`, decision: "approve",
+        ...(cause === "no-reader" ? {} : {
+          mergeExecutorLiveness: () => ({ observation: "unreadable" as const, cause }),
+        }),
+      }), new RegExp(`merge-executor-offline: executor liveness unreadable.*${cause}`));
+      assert.equal(await db.taskActivity.count({ where: { taskId: chain.readinessTask!.id,
+        metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.authorization } } }), 0);
+      assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: card.id } })).status, "OPEN");
+      const refusal = await db.taskActivity.findFirstOrThrow({ where: { taskId: chain.readinessTask!.id,
+        metadata: { path: ["state"], equals: "requeued-executor-unobservable" } } });
+      assert.equal((refusal.metadata as { cause: string }).cause, cause);
+      assert.equal((refusal.metadata as { observation: string }).observation, "unreadable");
+      assert.equal((refusal.metadata as { episodeStartedAt?: string }).episodeStartedAt, undefined);
+    });
+  });
+}

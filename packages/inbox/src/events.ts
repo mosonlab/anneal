@@ -4,7 +4,7 @@ import {
   InboxSender,
   InboxStatus,
   Prisma,
-  type MergeExecutorDaemonSnapshot,
+  type MergeExecutorObservation,
   type PrismaClient,
 } from "@anneal/db";
 
@@ -20,7 +20,7 @@ export type FeishuEventOptions = {
    * Read the API's shared daemon registry before opening the DB transaction.
    * Network-backed readers belong here, outside `applyInboxDecisionTx`.
    */
-  readMergeExecutorLiveness?: () => Promise<readonly MergeExecutorDaemonSnapshot[]>;
+  readMergeExecutorLiveness?: () => Promise<MergeExecutorObservation>;
 };
 
 const record = (value: unknown): Record<string, unknown> | null =>
@@ -61,14 +61,13 @@ export const processFeishuEvent = async (
   // card is also a possible decision. Pre-read those candidate events and
   // freeze the observation for the transaction; non-message events do not
   // perform a liveness request.
-  let daemonSnapshot: readonly MergeExecutorDaemonSnapshot[] = [];
+  let daemonSnapshot: MergeExecutorObservation = { observation: "unreadable", cause: "no-reader" };
   if (mayBeDecision && options.readMergeExecutorLiveness) {
     try {
       daemonSnapshot = await options.readMergeExecutorLiveness();
     } catch {
-      // Liveness is an authorization prerequisite. A reader failure therefore
-      // becomes an offline observation rather than a bypass or an event loss.
-      daemonSnapshot = [];
+      console.error("Inbox executor liveness unreadable: unreachable");
+      daemonSnapshot = { observation: "unreadable", cause: "unreachable" };
     }
   }
   try {
@@ -128,8 +127,8 @@ export const processFeishuEvent = async (
         allowFreeText: choiceId === null,
         actorOpenId: string(record(event.operator)?.open_id) ?? string(record(record(event.sender)?.sender_id)?.open_id),
         externalMessageId: string(message?.message_id),
-        // An empty snapshot is a fail-closed observation when the configured
-        // allowlist has no live executor or no reader was supplied.
+        // Preserve unreadable observations and their cause through rollback;
+        // an empty observed fleet is a distinct, real offline observation.
         mergeExecutorLiveness: () => daemonSnapshot,
       }, now);
       await tx.inboxExternalEvent.update({

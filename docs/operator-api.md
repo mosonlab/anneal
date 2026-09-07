@@ -2802,9 +2802,10 @@ the wait. An executor still offline at the ceiling stops the tail like any
 other readiness stop: the Regression and readiness tasks move to `REVIEW`
 with a `failureReason` naming `merge-executor-offline` and the runner ids. A
 later readiness tick that observes an allowed executor online automatically
-re-arms that ceiling stop: it returns both Steps from `REVIEW` to `TODO`,
+re-arms that ceiling stop: it returns readiness from `REVIEW` to `TODO` and
+restores the parked Regression to `DONE` with its existing evidence,
 records the exit as a TaskActivity, and closes the current `merge-readiness-stop:`
-Inbox notice (and any legacy `merge-tail-stop:` notice). The worker then
+Inbox notice (and any legacy `merge-tail-stop:` notice). The worker on that same tick
 follows the ordinary authorization path against the current base. The re-arm
 itself opens no new Regression Run and never bypasses
 the exact `(headSha, baseHeadSha)` check; existing base-drift requeue handling
@@ -2815,9 +2816,20 @@ before writing its `purpose: "confirmation"` authorization. During an outage
 it writes no authorization and defers with the same marker,
 `metadata.state = "requeued-executor-offline"` and
 `metadata.reason = "merge-executor-offline"`; renewal can proceed after a
-later liveness observation finds an allowed executor online. A successful
-renewal closes any earlier offline episode and records the live observation in
-the same approval transaction.
+later liveness observation finds an allowed executor online. Episode closure
+remains owned by the readiness worker under its claim.
+
+The separate Inbox process reads `GET /runners` before its decision transaction.
+It requires `OPERATOR_TOKEN` and uses `RUNNER_API_URL` (default
+`http://127.0.0.1:3000`), validated as an exact numeric IPv4 loopback HTTP
+origin with an explicit port and no userinfo, path, query, or fragment.
+`MERGE_EXECUTOR_API_URL` is not used by Inbox. Redirects are refused and the
+request has a two-second timeout. Missing credentials, a refused destination,
+HTTP errors, an unreachable API, and malformed responses are logged and refuse
+renewal while leaving its card open. These unreadable observations carry
+`observation: "unreadable"` and a diagnostic `cause` in the refusal TaskActivity
+with state `requeued-executor-unobservable`; they do not open or close an outage
+episode. An omitted reader similarly refuses with cause `no-reader`.
 
 An empty allowlist is unchanged behaviour: with `MERGE_EXECUTOR_RUNNER_IDS`
 unset no executor is named, the check is skipped, and readiness authorizes as

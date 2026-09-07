@@ -13,6 +13,7 @@ import {
   findEvidenceRequestByNonce,
   gateFeedsIntegratorStep,
   mergeExecutorRunnerIds,
+  isUnreadableExecutorObservation,
   mergeExecutorsBlockingAuthorization,
   type MergeExecutorLivenessReader,
 } from "./merge-integrator-db.js";
@@ -40,9 +41,9 @@ export const isMergeEvidenceError = (error: unknown): error is MergeEvidenceErro
 /** The named refusal for an attestation taken against another base. */
 export const GATE_ATTESTATION_BASE_MISMATCH = "gate-attestation-base-mismatch";
 
-/** These names are shared with readiness's requeue marker. */
-export const MERGE_EXECUTOR_OFFLINE_STATE = "requeued-executor-offline";
-export const MERGE_EXECUTOR_OFFLINE_REASON = "merge-executor-offline";
+export { MERGE_EXECUTOR_OFFLINE_STATE, MERGE_EXECUTOR_OFFLINE_REASON } from "./merge-tail-markers.js";
+import { MERGE_EXECUTOR_OFFLINE_STATE, MERGE_EXECUTOR_OFFLINE_REASON,
+  executorOfflineDetail, latestExecutorOfflineMarker, openEpisodeStart } from "./merge-tail-markers.js";
 
 /** Persist only after the caller's approval transaction has rolled back. */
 export const recordMergeEvidenceRefusal = async (db: PrismaClient, error: unknown): Promise<void> => {
@@ -60,20 +61,6 @@ export type MergeAuthorizationResult = {
   payload: AuthorizationPayload;
 };
 
-const executorOfflineDetail = (executorRunnerIds: readonly string[]): string =>
-  `${MERGE_EXECUTOR_OFFLINE_REASON}: no merge executor in ${executorRunnerIds.join(", ")} is online`;
-
-type OfflineMarker = { createdAt: Date; metadata: Prisma.JsonValue };
-
-const openOfflineEpisodeStart = (marker: OfflineMarker | null, now: Date): Date => {
-  if (!marker) return now;
-  const metadata = marker.metadata as { episodeStartedAt?: unknown; episodeClosed?: unknown } | null;
-  if (metadata?.episodeClosed === true) return now;
-  if (typeof metadata?.episodeStartedAt !== "string") return marker.createdAt;
-  const started = new Date(metadata.episodeStartedAt);
-  return Number.isNaN(started.getTime()) ? marker.createdAt : started;
-};
-
 /**
  * A confirmation approval is a renewal of the mechanical Run. When the
  * allowlisted executor fleet is offline, preserve the OPEN card by refusing
@@ -86,61 +73,25 @@ const executorOfflineRefusal = async (
   readinessTaskId: string,
   executorRunnerIds: readonly string[],
   now: Date,
+  unreadableCause?: string,
 ): Promise<MergeEvidenceError> => {
-  const marker = await tx.taskActivity.findFirst({
-    where: {
-      taskId: readinessTaskId,
-      metadata: { path: ["state"], equals: MERGE_EXECUTOR_OFFLINE_STATE },
-    },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    select: { createdAt: true, metadata: true },
-  });
-  const episodeStartedAt = openOfflineEpisodeStart(marker, now);
+  const marker = await latestExecutorOfflineMarker(tx, readinessTaskId);
+  const episodeStartedAt = openEpisodeStart(marker) ?? now;
   return new MergeEvidenceError(
-    `Merge readiness withheld its authorization: ${executorOfflineDetail(executorRunnerIds)}`,
+    `Merge readiness withheld its authorization: ${unreadableCause ? `${MERGE_EXECUTOR_OFFLINE_REASON}: executor liveness unreadable (${unreadableCause})` : executorOfflineDetail(executorRunnerIds)}`,
     {
       taskId: readinessTaskId,
       metadata: {
         kind: MERGE_TAIL_KIND.readiness,
-        state: MERGE_EXECUTOR_OFFLINE_STATE,
+        state: unreadableCause ? "requeued-executor-unobservable" : MERGE_EXECUTOR_OFFLINE_STATE,
         reason: MERGE_EXECUTOR_OFFLINE_REASON,
         executorRunnerIds: [...executorRunnerIds],
-        episodeStartedAt: episodeStartedAt.toISOString(),
+        ...(unreadableCause
+          ? { observation: "unreadable", cause: unreadableCause }
+          : { episodeStartedAt: episodeStartedAt.toISOString() }),
       },
     },
   );
-};
-
-/** Close the readiness outage episode in the same transaction as the live
- * operator renewal. The readiness worker cannot own this transition because
- * readiness Step is already complete when the operator renews its authorization. */
-const closeRenewalOfflineEpisode = async (tx: Tx, readinessTaskId: string): Promise<void> => {
-  const marker = await tx.taskActivity.findFirst({
-    where: {
-      taskId: readinessTaskId,
-      metadata: { path: ["state"], equals: MERGE_EXECUTOR_OFFLINE_STATE },
-    },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    select: { id: true, metadata: true },
-  });
-  if (!marker) return;
-  const metadata = marker.metadata as { episodeClosed?: unknown } | null;
-  if (metadata?.episodeClosed === true) return;
-  const updatedMetadata = (marker.metadata ?? {}) as Prisma.JsonObject;
-  await tx.taskActivity.update({
-    where: { id: marker.id },
-    data: { metadata: { ...updatedMetadata, episodeClosed: true } },
-  });
-  await tx.taskActivity.create({ data: {
-    taskId: readinessTaskId,
-    actorType: "control-plane",
-    body: "Merge readiness executor-offline episode ended: executor observed online during operator renewal",
-    metadata: {
-      kind: MERGE_TAIL_KIND.readiness,
-      state: "executor-offline-closed",
-      observation: "executor observed online during operator renewal",
-    },
-  } });
 };
 
 /**
@@ -228,13 +179,17 @@ export const produceMergeAuthorization = async (
   }
 
   if (purpose === "confirmation") {
-    // A configured executor fleet with no observation is offline by default.
-    // Callers must supply the shared daemon snapshot; an omitted reader must
-    // never turn a renewal into an authorization written against a dead fleet.
+    // Missing observations fail closed without fabricating an outage episode.
+    // Callers must supply the shared daemon snapshot to authorize a renewal.
     const allowlist = mergeExecutorRunnerIds();
-    const blocked = mergeExecutorsBlockingAuthorization(input.executorLiveness?.() ?? [], allowlist);
-    if (blocked.length > 0) throw await executorOfflineRefusal(tx, gateTaskId, blocked, now);
-    await closeRenewalOfflineEpisode(tx, gateTaskId);
+    if (allowlist.length > 0) {
+      const observation = input.executorLiveness?.() ?? { observation: "unreadable", cause: "no-reader" };
+      if (isUnreadableExecutorObservation(observation)) {
+        throw await executorOfflineRefusal(tx, gateTaskId, allowlist, now, observation.cause);
+      }
+      const blocked = mergeExecutorsBlockingAuthorization(observation, allowlist);
+      if (blocked.length > 0) throw await executorOfflineRefusal(tx, gateTaskId, blocked, now);
+    }
   }
 
   const activity = await tx.taskActivity.create({ data: {

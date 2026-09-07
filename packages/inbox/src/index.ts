@@ -4,12 +4,11 @@ import * as Lark from "@larksuiteoapi/node-sdk";
 import {
   isArchivedAssigneeError,
   isArchivedTaskError,
-  mergeExecutorRunnerIds,
   prisma,
-  type MergeExecutorDaemonSnapshot,
 } from "@anneal/db";
 import { config as loadEnvironment } from "dotenv";
 
+import { readMergeExecutorLiveness } from "./merge-executor-liveness.js";
 import { deliverPending, type FeishuMessageClient } from "./delivery.js";
 import { processFeishuEvent, type FeishuEnvelope } from "./events.js";
 import { ConnectionSupervisor, type SocketCallbacks } from "./supervisor.js";
@@ -19,44 +18,6 @@ loadEnvironment({ path: new URL("../../../.env", import.meta.url), quiet: true }
 const appId = process.env.FEISHU_APP_ID;
 const appSecret = process.env.FEISHU_APP_SECRET;
 if (!appId || !appSecret) throw new Error("FEISHU_APP_ID and FEISHU_APP_SECRET are required in the repository root .env");
-
-// Keep the Inbox's local control-plane destination aligned with the runner's
-// established default when neither process-specific override is present.
-const DEFAULT_API_URL = "http://127.0.0.1:3000";
-
-/**
- * Feishu is a separate process from the API's in-memory RunnerRegistry. Read
- * that registry through the operator endpoint before the DB transaction and
- * pass the frozen projection into the shared authorization path. Any missing
- * credential, unavailable API, malformed response, or non-2xx response is an
- * empty observation, which keeps a configured executor fleet fail-closed.
- */
-const readMergeExecutorLiveness = async (): Promise<readonly MergeExecutorDaemonSnapshot[]> => {
-  if (mergeExecutorRunnerIds().length === 0) return [];
-  const apiUrl = process.env.MERGE_EXECUTOR_API_URL ?? process.env.RUNNER_API_URL ?? DEFAULT_API_URL;
-  const operatorToken = process.env.OPERATOR_TOKEN;
-  if (!apiUrl || !operatorToken) return [];
-  try {
-    const response = await fetch(new URL("/runners", apiUrl), {
-      headers: { Authorization: `Bearer ${operatorToken}` },
-      signal: AbortSignal.timeout(2_000),
-    });
-    if (!response.ok) return [];
-    const body = await response.json() as unknown;
-    const daemons = typeof body === "object" && body !== null && !Array.isArray(body)
-      ? (body as { daemons?: unknown }).daemons
-      : null;
-    if (!Array.isArray(daemons)) return [];
-    return daemons.flatMap((daemon): MergeExecutorDaemonSnapshot[] => {
-      if (typeof daemon !== "object" || daemon === null || Array.isArray(daemon)) return [];
-      const runnerId = (daemon as { runnerId?: unknown }).runnerId;
-      const online = (daemon as { online?: unknown }).online;
-      return typeof runnerId === "string" && typeof online === "boolean" ? [{ runnerId, online }] : [];
-    });
-  } catch {
-    return [];
-  }
-};
 
 await prisma.inboxMessage.updateMany({
   where: { deliveryStatus: "SENDING" },

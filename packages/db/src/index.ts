@@ -145,3 +145,7 @@ export * from "./canonical-template-installation.js";
 export * from "./canonical-output-schema.js";
 export * from "./verify-starter-onboarding.js";
 export * from "./chain-control.js";
+
+export { parseLocalApiDestination } from "./local-origin.js";
+
+export { executorOfflineDetail, latestExecutorOfflineMarker, openEpisodeStart, closeExecutorOfflineEpisodeTx } from "./merge-tail-markers.js";

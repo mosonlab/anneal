@@ -1130,7 +1130,12 @@ export const isMergeExecutorRunnerId = (runnerId: string, allowlist = mergeExecu
  * database authorization path. Keeping this structural lets the database
  * package apply the allowlist rule without importing the API's registry. */
 export type MergeExecutorDaemonSnapshot = { runnerId: string; online: boolean };
-export type MergeExecutorLivenessReader = () => readonly MergeExecutorDaemonSnapshot[];
+export type MergeExecutorObservation = readonly MergeExecutorDaemonSnapshot[]
+  | { observation: "unreadable"; cause: string };
+export type MergeExecutorLivenessReader = () => MergeExecutorObservation;
+export const isUnreadableExecutorObservation = (
+  observation: MergeExecutorObservation,
+): observation is { observation: "unreadable"; cause: string } => !Array.isArray(observation);
 
 /**
  * The configured merge executors for which the current daemon observation has
