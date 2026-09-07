@@ -41,6 +41,7 @@ export type {
   RunToolNameMetrics,
   ScheduleKind,
   Session,
+  SessionDetail,
   TaskActivity,
   TaskDetail,
   TaskList,
