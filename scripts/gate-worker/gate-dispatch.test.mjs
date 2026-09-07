@@ -1280,7 +1280,7 @@ test("one configured primary slot makes a busy remote-1 a fully busy primary", (
   assert.match(result.stderr, /primary primary\(1\)/u);
   assert.match(result.stderr, /trying fallback.*fallback after 6 min; waited 6/u);
   assert.match(result.stderr, /running on fallback/u);
-  assert.equal(existsSync(join(cache, "gate-dispatch", "remote-1-2.slot")), false);
+  assert.doesNotMatch(result.stderr, /running on primary/u);
   assert.equal(readFileSync(clock, "utf8"), "1360");
 });
 

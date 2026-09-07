@@ -1294,6 +1294,11 @@ test("RUNNER_GATE_FALLBACK_SERVER selects a runner-owned two-host environment", 
     assert.equal(launch.args.includes("AGENTOS_GATE_PRIMARY_SERVER=gate-self"), true);
     assert.equal(launch.args.includes("AGENTOS_GATE_FALLBACK_SERVER=agentos-gate"), true);
     assert.equal(launch.args.some((arg) => arg.startsWith("AGENTOS_GATE_SERVER=")), false);
+    const launchOneSlot = launchArgv(
+      { binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" }, runAsPrefix: config.runAsPrefix },
+      "CODEX", [], dualOneSlot,
+    );
+    assert.equal(launchOneSlot.args.includes("AGENTOS_GATE_PRIMARY_SLOTS=1"), true);
     const { gateServer: _gateServer, ...withoutGate } = config;
     assert.throws(
       () => buildChildEnvironment(

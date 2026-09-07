@@ -178,10 +178,10 @@ slots), `remote-2`, and, when local dispatch is enabled, `local-1` through
 direct `merge-gate.sh` bypasses that accounting. A direct `remote-gate.sh`
 bypasses the local lock too, but it cannot exceed worker capacity: every
 installed `run-gate.sh` contends for the worker-wide `~/gate/.full-gate.lock`
-and, only on a capacity-two host, `~/gate/.full-gate-2.lock`. Each is held with `flock` for the real process
-lifetime. If an SSH connection drops while its remote process survives, that
-process keeps its worker slot and a later invocation waits instead of exceeding
-the configured capacity.
+and, only on a capacity-two host, `~/gate/.full-gate-2.lock`. Each is held
+with `flock` for the real process lifetime. If an SSH connection drops while
+its remote process survives, that process keeps its worker slot and a later
+invocation waits instead of exceeding the configured capacity.
 
 That wait is bounded. `run-gate.sh` gives up after `SLOT_WAIT_MINUTES` (default
 20) with `GATE NOT RUN: worker slot wait exceeded <n> minutes` and exit `76`, so
@@ -192,9 +192,9 @@ whose `worker-capacity` says one produced an ssh session that simply never
 returned. The dispatcher also reads the capacity the worker states in its own
 output and logs `gate-dispatch: warning — the primary worker reports
 worker-capacity N but this dispatcher configures M primary slot(s)` when they
-disagree. That warning changes nothing on its own; it names the drift, which the operator
-resolves by setting `RUNNER_GATE_PRIMARY_SLOTS` (below) to the worker's
-capacity or by changing the worker's `worker-capacity`.
+disagree. That warning changes nothing on its own; it names the drift, which
+the operator resolves by setting `RUNNER_GATE_PRIMARY_SLOTS` (below) to the
+worker's capacity or by changing the worker's `worker-capacity`.
 
 Local slots are accounted per runner account: the account that owns
 `AGENTOS_RUNNER_HOME` owns the shared slot directory at
