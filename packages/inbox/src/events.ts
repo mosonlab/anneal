@@ -1,4 +1,12 @@
-import { applyInboxDecisionTx, recordMergeEvidenceRefusal, InboxSender, InboxStatus, Prisma, type PrismaClient } from "@anneal/db";
+import {
+  applyInboxDecisionTx,
+  recordMergeEvidenceRefusal,
+  InboxSender,
+  InboxStatus,
+  Prisma,
+  type MergeExecutorObservation,
+  type PrismaClient,
+} from "@anneal/db";
 
 export type FeishuEnvelope = {
   header?: { event_id?: string; event_type?: string };
@@ -6,6 +14,14 @@ export type FeishuEnvelope = {
 };
 
 type EventResult = { duplicate: boolean; resumed: boolean; messageId?: string; unmatched?: boolean };
+
+export type FeishuEventOptions = {
+  /**
+   * Read the API's shared daemon registry before opening the DB transaction.
+   * Network-backed readers belong here, outside `applyInboxDecisionTx`.
+   */
+  readMergeExecutorLiveness?: () => Promise<MergeExecutorObservation>;
+};
 
 const record = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -27,15 +43,39 @@ export const eventIdentity = (envelope: FeishuEnvelope): { eventId: string; even
   return { eventId, eventType };
 };
 
-export const processFeishuEvent = async (db: PrismaClient, envelope: FeishuEnvelope, now = new Date()): Promise<EventResult> => {
+export const processFeishuEvent = async (
+  db: PrismaClient,
+  envelope: FeishuEnvelope,
+  now = new Date(),
+  options: FeishuEventOptions = {},
+): Promise<EventResult> => {
   const { eventId, eventType } = eventIdentity(envelope);
+  const event = envelope.event ?? {};
+  const message = record(event.message);
+  const action = record(event.action);
+  // An unthreaded text event can still resolve to the sole OPEN card in its
+  // chat, so every message event needs the same liveness observation as a
+  // threaded reply. The reader is only invoked before the transaction.
+  const mayBeDecision = action !== null || message !== null;
+  // Confirmation cards are normally action events, but a text reply to a
+  // card is also a possible decision. Pre-read those candidate events and
+  // freeze the observation for the transaction; non-message events do not
+  // perform a liveness request.
+  let daemonSnapshot: MergeExecutorObservation = { observation: "unreadable", cause: "no-reader" };
+  if (mayBeDecision && options.readMergeExecutorLiveness) {
+    try {
+      daemonSnapshot = await options.readMergeExecutorLiveness();
+    } catch {
+      console.error("Inbox executor liveness unreadable: unreachable");
+      daemonSnapshot = { observation: "unreadable", cause: "unreachable" };
+    }
+  }
   try {
     return await db.$transaction(async (tx) => {
       await tx.inboxExternalEvent.create({ data: {
         channel: "FEISHU", externalEventId: eventId, eventType,
         payload: envelope as Prisma.InputJsonValue,
       } });
-      const event = envelope.event ?? {};
       const message = record(event.message);
       const action = record(event.action);
       const actionValue = record(action?.value);
@@ -87,6 +127,9 @@ export const processFeishuEvent = async (db: PrismaClient, envelope: FeishuEnvel
         allowFreeText: choiceId === null,
         actorOpenId: string(record(event.operator)?.open_id) ?? string(record(record(event.sender)?.sender_id)?.open_id),
         externalMessageId: string(message?.message_id),
+        // Preserve unreadable observations and their cause through rollback;
+        // an empty observed fleet is a distinct, real offline observation.
+        mergeExecutorLiveness: () => daemonSnapshot,
       }, now);
       await tx.inboxExternalEvent.update({
         where: { channel_externalEventId: { channel: "FEISHU", externalEventId: eventId } }, data: { processedAt: now },

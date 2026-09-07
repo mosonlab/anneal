@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  ACTIVE_RUN_STATUSES,
   AUTHORIZED_MERGE_METHOD,
   asJsonObject,
   MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
@@ -18,6 +19,13 @@ import {
   isMergeReadinessStep,
   latestRecordedStop,
   mergeExecutorRunnerIds,
+  executorOfflineDetail,
+  latestExecutorOfflineMarker,
+  openEpisodeStart,
+  closeExecutorOfflineEpisodeTx as closeOfflineEpisodeTx,
+  mergeExecutorsBlockingAuthorization,
+  MERGE_EXECUTOR_OFFLINE_REASON,
+  MERGE_EXECUTOR_OFFLINE_STATE,
   MergeGateAuthorizationError,
   MERGE_TAIL_KIND,
   parseRegressionVerdict,
@@ -27,6 +35,7 @@ import {
   recordReadinessRequeue,
   recoveryContext,
   resolveChainTarget,
+  transitionMergeRecovery,
   writeMarker,
   type PrismaClient,
   type RecoveryContext,
@@ -255,7 +264,10 @@ const readinessCandidates = async function* (
   while (true) {
     const page: ReadinessCandidate[] = await db.task.findMany({
       where: {
-        status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
+        OR: [
+          { status: { in: [TaskStatus.TODO, TaskStatus.DOING] } },
+          { status: TaskStatus.REVIEW, failureReason: { startsWith: `${MERGE_EXECUTOR_OFFLINE_REASON}:` } },
+        ],
         templateStep: { outputKind: "merge-authorization" },
       },
       include: READINESS_CANDIDATE_INCLUDE,
@@ -503,8 +515,8 @@ export const requeueRegressionSettlement = (
  */
 export type DaemonSnapshotReader = () => DaemonSnapshot[];
 
-const EXECUTOR_OFFLINE_STATE = "requeued-executor-offline";
-export const MERGE_EXECUTOR_OFFLINE_REASON = "merge-executor-offline";
+const EXECUTOR_OFFLINE_STATE = MERGE_EXECUTOR_OFFLINE_STATE;
+export { MERGE_EXECUTOR_OFFLINE_REASON };
 
 /**
  * How long readiness waits at the door for a merge executor before the tail
@@ -526,14 +538,8 @@ export const executorsBlockingAuthorization = (
 ): string[] => {
   const allowlist = mergeExecutorRunnerIds();
   if (allowlist.length === 0) return [];
-  const online = new Set(
-    daemons().filter((daemon) => daemon.online).map((daemon) => daemon.runnerId),
-  );
-  return allowlist.some((runnerId) => online.has(runnerId)) ? [] : allowlist;
+  return mergeExecutorsBlockingAuthorization(daemons(), allowlist);
 };
-
-const executorOfflineDetail = (executorRunnerIds: string[]): string =>
-  `${MERGE_EXECUTOR_OFFLINE_REASON}: no merge executor in ${executorRunnerIds.join(", ")} is online`;
 
 /**
  * Readiness returning itself to the queue: the regression evidence and its Run
@@ -581,60 +587,26 @@ const executorOfflineRequeueSettlement = (
   },
 });
 
-type ExecutorOfflineMarker = { id: string; createdAt: Date; metadata: Prisma.JsonValue };
-
-/** The newest skipped authorization on this readiness Step, the outage anchor. */
-const latestExecutorOfflineMarker = async (
-  db: PrismaClient | Prisma.TransactionClient,
+/** Close only under the readiness claim, using the caller's transaction. */
+export const closeExecutorOfflineEpisodeTx = async (
+  tx: Prisma.TransactionClient,
   readinessTaskId: string,
-): Promise<ExecutorOfflineMarker | null> => db.taskActivity.findFirst({
-  where: {
-    taskId: readinessTaskId,
-    metadata: { path: ["state"], equals: EXECUTOR_OFFLINE_STATE },
-  },
-  orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-  select: { id: true, createdAt: true, metadata: true },
-});
-
-/**
- * When the outage this marker belongs to began, or `null` once that outage has
- * ended. An episode ends on an observed fact rather than after an elapsed time:
- * readiness closes it on the tick that finds an executor online or settles the
- * Step some other way, and on the stop it writes at the ceiling. Elapsed time
- * cannot decide this -- `MERGE_READINESS_POLL_INTERVAL_MS` sets the distance
- * between two skipped authorizations of one outage, so any fixed gap an
- * interval can exceed would restart the wait every tick and let an executor
- * stay offline forever without ever reaching the ceiling.
- */
-const openEpisodeStart = (marker: ExecutorOfflineMarker | null): Date | null => {
-  if (!marker) return null;
-  const metadata = marker.metadata as {
-    episodeStartedAt?: unknown;
-    episodeClosed?: unknown;
-  } | null;
-  if (metadata?.episodeClosed === true) return null;
-  const recorded = metadata?.episodeStartedAt;
-  if (typeof recorded !== "string") return marker.createdAt;
-  const started = new Date(recorded);
-  return Number.isNaN(started.getTime()) ? marker.createdAt : started;
+  claim: ReadinessClaimHandle,
+  observation: string,
+): Promise<void> => {
+  await claim.settle(tx, {
+    kind: "keep",
+    apply: (client) => closeOfflineEpisodeTx(client, readinessTaskId, observation),
+  });
 };
 
-/**
- * Ends the outage readiness was waiting out, so the next one waits out its own
- * ceiling. Only the newest marker is closed because only the newest is ever
- * read: an older one is already behind a closed episode.
- */
-const closeExecutorOfflineEpisode = async (
-  db: PrismaClient | Prisma.TransactionClient,
+export const closeExecutorOfflineEpisode = async (
+  db: PrismaClient,
   readinessTaskId: string,
+  claim: ReadinessClaimHandle,
+  observation: string,
 ): Promise<void> => {
-  const marker = await latestExecutorOfflineMarker(db, readinessTaskId);
-  if (!marker || openEpisodeStart(marker) === null) return;
-  const metadata = (marker.metadata ?? {}) as Prisma.JsonObject;
-  await db.taskActivity.update({
-    where: { id: marker.id },
-    data: { metadata: { ...metadata, episodeClosed: true } },
-  });
+  await db.$transaction((tx) => closeExecutorOfflineEpisodeTx(tx, readinessTaskId, claim, observation));
 };
 
 /**
@@ -645,7 +617,7 @@ const closeExecutorOfflineEpisode = async (
  * outage, like every other readiness stop.
  */
 const executorOfflineSettlement = async (
-  db: PrismaClient | Prisma.TransactionClient,
+  db: Prisma.TransactionClient,
   read: ClaimedReadiness,
   executorRunnerIds: string[],
 ): Promise<ReadinessSettlement> => {
@@ -654,7 +626,7 @@ const executorOfflineSettlement = async (
   const episodeStartedAt = openEpisodeStart(await latestExecutorOfflineMarker(db, readiness.id)) ?? now;
   const waitedMs = now.getTime() - episodeStartedAt.getTime();
   if (waitedMs >= MERGE_EXECUTOR_OFFLINE_WAIT_MS) {
-    await closeExecutorOfflineEpisode(db, readiness.id);
+    await closeExecutorOfflineEpisodeTx(db, readiness.id, read.claim, "executor-offline ceiling reached");
     return stopReadinessSettlement({
       readinessTaskId: readiness.id,
       regressionTaskId: regression.id,
@@ -680,7 +652,7 @@ const settleExecutorOffline = async (
   result: ReadinessTickResult,
   runner: ReadinessSettlementRunner,
 ): Promise<Extract<ReadinessSettlementApplication, { kind: "settled" }>> => {
-  const settlement = await executorOfflineSettlement(db, read, executorRunnerIds);
+  const settlement = await db.$transaction((tx) => executorOfflineSettlement(tx, read, executorRunnerIds));
   const application = await runner.apply(settlement, read.claim);
   if (application.kind === "acquire-lease") {
     throw new Error("Readiness executor-offline settlement requested a Merge Lease");
@@ -770,10 +742,68 @@ const discoverReadiness = async (
   }
 };
 
+const EXECUTOR_OFFLINE_REARMED = "executor-offline-rearmed";
+
+/** Re-arm only the pair parked by this outage, under the Chain mutation lock. */
+const rearmExecutorOffline = async (
+  db: PrismaClient,
+  readiness: ReadinessCandidate,
+  regression: ReadinessRegression,
+  now: Date,
+): Promise<boolean> => {
+  return db.$transaction(async (tx) => {
+    await lockTaskMutationRows(tx, readiness.id);
+    const tasks = await tx.task.findMany({ where: { id: { in: [readiness.id, regression.id] } } });
+    if (tasks.length !== 2 || tasks.some((task) => task.status !== TaskStatus.REVIEW
+      || task.failureReason !== readiness.failureReason)) return false;
+    if (await tx.run.count({ where: {
+      taskId: { in: [readiness.id, regression.id] }, status: { in: [...ACTIVE_RUN_STATUSES] },
+    } })) return false;
+    const recovery = await tx.mergeRecoveryAttempt.findFirst({ where: {
+      readinessTaskId: readiness.id, regressionTaskId: regression.id,
+      recoveryRunId: regression.runs[0]?.id ?? null,
+      status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM, failureReason: readiness.failureReason,
+    }, orderBy: [{ attempt: "desc" }, { id: "desc" }] });
+    if (recovery) {
+      await transitionMergeRecovery(tx, recovery.id, MergeRecoveryStatus.REPAIRING, {
+        failureReason: null, endedAt: null,
+      });
+    }
+    await tx.task.update({
+      where: { id: readiness.id },
+      data: { status: TaskStatus.TODO, failureReason: null, readinessClaimToken: null, readinessClaimExpiresAt: null },
+    });
+    await tx.task.update({
+      where: { id: regression.id },
+      data: { status: TaskStatus.DONE, failureReason: null, readinessClaimToken: null, readinessClaimExpiresAt: null },
+    });
+    await tx.taskActivity.create({ data: {
+      taskId: readiness.id,
+      actorType: "control-plane",
+      body: "Merge executor observed online; executor-offline ceiling stop exited, readiness returned to TODO and existing Regression evidence restored to DONE without a new Run",
+      metadata: { kind: MERGE_TAIL_KIND.readiness, state: EXECUTOR_OFFLINE_REARMED,
+        regressionTaskId: regression.id, regressionOutputId: regression.stepOutput?.id ?? null },
+    } });
+    await tx.inboxMessage.updateMany({ where: {
+      taskId: { in: [readiness.id, regression.id] }, status: "OPEN",
+      body: { contains: readiness.failureReason! },
+      OR: [
+        { dedupeKey: { startsWith: `merge-readiness-stop:${readiness.id}:` } },
+        { dedupeKey: { startsWith: "merge-tail-stop:" } },
+        ...(recovery ? [{ dedupeKey: {
+          equals: `merge-base-drift-recovery-tail-stop:${recovery.sourceStopId}:readiness:${recovery.recoveryRunId}`,
+        } }] : []),
+      ],
+    }, data: { status: "CLOSED", answeredAt: now } });
+    return true;
+  });
+};
+
 const readReadiness = async (
   db: PrismaClient,
   readiness: ReadinessCandidate,
   now: Date,
+  daemons: DaemonSnapshotReader,
 ): Promise<ReadinessRead> => {
   const context = decisionContext(readiness, now);
   const regression = await db.task.findFirst({
@@ -785,10 +815,35 @@ const readReadiness = async (
     },
     include: READINESS_REGRESSION_INCLUDE,
   });
-  if (!regression || regression.status !== TaskStatus.DONE) {
-    return { claimed: false, input: { ...context, stage: "regression-pending" } };
+  if (readiness.status === TaskStatus.REVIEW) {
+    if (executorsBlockingAuthorization(daemons).length !== 0 || !regression
+      || !readiness.failureReason?.startsWith(`${MERGE_EXECUTOR_OFFLINE_REASON}:`)
+      || !await rearmExecutorOffline(db, readiness, regression, now)) {
+      return { claimed: false, input: { ...context, stage: "regression-pending" } };
+    }
+    regression.status = TaskStatus.DONE;
+    readiness = { ...readiness, status: TaskStatus.TODO, failureReason: null };
   }
 
+  if (!regression || regression.status !== TaskStatus.DONE) {
+    // Read first: skipped Steps without an open episode need no mutation fence.
+    if (mergeExecutorRunnerIds().length > 0
+      && executorsBlockingAuthorization(daemons).length === 0
+      && openEpisodeStart(await latestExecutorOfflineMarker(db, readiness.id)) !== null) {
+      const claim = await claimReadinessStep(db, readiness.id, now);
+      if (claim) {
+        await closeExecutorOfflineEpisode(db, readiness.id, claim, "executor observed online on a skipped tick");
+        await db.$transaction((tx) => claim.settle(tx, {
+          kind: "finish", at: now,
+          apply: async (client) => {
+            await client.task.update({ where: { id: readiness.id }, data: { status: TaskStatus.TODO } });
+            return { value: null, ownership: "released" };
+          },
+        }));
+      }
+    }
+    return { claimed: false, input: { ...context, stage: "regression-pending" } };
+  }
   const claim = await claimReadinessStep(db, readiness.id, now);
   if (!claim) return { claimed: false, input: { ...context, stage: "claim-lost" } };
 
@@ -1205,25 +1260,18 @@ const runReadinessDecision = async (
   // under the Lease, below; this one only spares an outage the cost of taking
   // a Lease every tick, exactly as the pre-acquire read spares a base move one.
   // Settling here also ends the contention episode below.
-  const blockedExecutors = decision.kind === "authorize"
-    ? executorsBlockingAuthorization(daemons)
-    : [];
-  if (blockedExecutors.length > 0) {
+  const blockedExecutors = executorsBlockingAuthorization(daemons);
+  if (decision.kind === "authorize" && blockedExecutors.length > 0) {
     await forgetContention(db, target, readiness.id, read.input.now, claim);
     await settleExecutorOffline(db, read, blockedExecutors, result, preAcquireRunner);
     return;
   }
 
-  // The outage ends only when this tick observed it ending: an authorization
-  // reached the liveness read and nothing blocked it, or the Step settles for
-  // good and its next readiness starts a wait of its own. A deferred or skipped
-  // tick observed nothing about the executor, so the episode it may be inside
-  // stays open and keeps its start; otherwise one transport timeout inside the
-  // wait would hand the outage a fresh window.
   const regressionWillRequeue = decision.kind === "requeue-regression"
     && !(trainWidth > 0 && decision.condition === "base-advanced");
-  if (decision.kind === "authorize" || regressionWillRequeue || decision.kind === "stop") {
-    await closeExecutorOfflineEpisode(db, readiness.id);
+  if (blockedExecutors.length === 0 || regressionWillRequeue || decision.kind === "stop") {
+    await closeExecutorOfflineEpisode(db, readiness.id, claim,
+      blockedExecutors.length === 0 ? "executor observed online" : `readiness ${decision.kind}`);
   }
 
   // The alert window measures continuous contention, so anything other than
@@ -1271,10 +1319,11 @@ const runReadinessDecision = async (
     // Repeat the liveness read too, for the same reason: an executor that went
     // down while this tick was acquiring the Lease and re-reading GitHub must
     // not have an authorization written for it. This is the read that decides.
-    const leasedBlockedExecutors = leasedDecision.kind === "authorize"
-      ? executorsBlockingAuthorization(daemons)
-      : [];
-    if (leasedBlockedExecutors.length > 0) {
+    const leasedBlockedExecutors = executorsBlockingAuthorization(daemons);
+    if (leasedBlockedExecutors.length === 0) {
+      await closeExecutorOfflineEpisode(db, readiness.id, claim, "executor observed online under the Merge Lease");
+    }
+    if (leasedDecision.kind === "authorize" && leasedBlockedExecutors.length > 0) {
       const settlement = await settleExecutorOffline(
         db,
         read,
@@ -1383,6 +1432,10 @@ const runReadinessDecisionSafely = async (
       new Date(),
       read.claim,
     );
+    if (!requeuing || executorsBlockingAuthorization(daemons).length === 0) {
+      await closeExecutorOfflineEpisode(db, readiness.id, read.claim,
+        requeuing ? "executor observed online after an exception" : "readiness exception stop");
+    }
     const runner = createReadinessSettlementRunner(db, {
       kind: "pre-acquire",
       release: releaseChainLease,
@@ -1438,11 +1491,11 @@ export const readinessTick = async (
     return mergeTrainReadinessTick(db, reader, now, { width, limit }, releaseChainLease, runWithMergeLease, {
       candidates: readinessCandidates,
       discover: discoverReadiness,
-      read: readReadiness,
+      read: (database, task, at) => readReadiness(database, task, at, daemons),
       authorize: authorizeReadinessSettlement,
       executor: {
         blocking: () => executorsBlockingAuthorization(daemons),
-        closeEpisode: closeExecutorOfflineEpisode,
+        closeEpisode: (tx, read) => closeExecutorOfflineEpisodeTx(tx, read.readiness.id, read.claim, "executor observed online under the train Lease"),
         settleOffline: async (tx, read, executorRunnerIds) => {
           const settlement = await executorOfflineSettlement(tx, read, executorRunnerIds);
           const applied = await settlement.body(tx, read.claim);
@@ -1460,7 +1513,7 @@ export const readinessTick = async (
     if (result.claimed >= limit) break;
     if (!isMergeReadinessStep(readiness.templateStep)) continue;
 
-    const read = await readReadiness(db, readiness, now);
+    const read = await readReadiness(db, readiness, now, daemons);
     if (!read.claimed) continue;
     const decision = await evaluateReadiness(reader, read.input);
     result.claimed += 1;

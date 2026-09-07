@@ -1,9 +1,14 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import * as Lark from "@larksuiteoapi/node-sdk";
-import { isArchivedAssigneeError, isArchivedTaskError, prisma } from "@anneal/db";
+import {
+  isArchivedAssigneeError,
+  isArchivedTaskError,
+  prisma,
+} from "@anneal/db";
 import { config as loadEnvironment } from "dotenv";
 
+import { readMergeExecutorLiveness } from "./merge-executor-liveness.js";
 import { deliverPending, type FeishuMessageClient } from "./delivery.js";
 import { processFeishuEvent, type FeishuEnvelope } from "./events.js";
 import { ConnectionSupervisor, type SocketCallbacks } from "./supervisor.js";
@@ -33,12 +38,12 @@ dispatcher.register({
     const body = data as unknown as Record<string, unknown>;
     const message = body.message as Record<string, unknown> | undefined;
     if (message?.message_type !== "text") return;
-    await processFeishuEvent(prisma, envelopeFor(body));
+    await processFeishuEvent(prisma, envelopeFor(body), new Date(), { readMergeExecutorLiveness });
   },
   "card.action.trigger": async (data: unknown) => {
     const event = data as Record<string, unknown>;
     try {
-      const result = await processFeishuEvent(prisma, envelopeFor(event));
+      const result = await processFeishuEvent(prisma, envelopeFor(event), new Date(), { readMergeExecutorLiveness });
       return { toast: { type: "success", content: result.duplicate ? "该决策已处理" : "决策已收到，任务将继续" } };
     } catch (error: unknown) {
       if (isArchivedAssigneeError(error) || isArchivedTaskError(error)) return { toast: { type: "error", content: error.message } };

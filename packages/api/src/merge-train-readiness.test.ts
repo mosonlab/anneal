@@ -271,8 +271,8 @@ for (const staleTrailingBase of [false, true]) {
         offlineMarkers.set(read.readiness.id, marker);
         return "ready" as const;
       },
-      closeEpisode: async (_client: Prisma.TransactionClient, taskId: string) => {
-        const marker = offlineMarkers.get(taskId);
+      closeEpisode: async (_client: Prisma.TransactionClient, read: ReturnType<typeof makeRead>) => {
+        const marker = offlineMarkers.get(read.readiness.id);
         if (marker) marker.metadata.episodeClosed = true;
       },
     },
