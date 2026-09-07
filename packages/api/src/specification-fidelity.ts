@@ -11,7 +11,7 @@ import {
 import type { ClaimSpecificationMaterialization } from "@anneal/db/claim-contract";
 
 import { abortableDelay, abortReason } from "./abortable-delay.js";
-import { isCanonicalBlindFindingsStep, isCanonicalSolFindingsStep } from "./canonical-task-output.js";
+import { isCanonicalBlindFindingsStep, isCanonicalReviewFindingsStep } from "./canonical-task-output.js";
 import { isValidBranchName } from "./branch-name.js";
 import { GitHubReadError } from "./github-read.js";
 import { BRIEF_EDIT_ACTIVITY_NOTE, legacyBriefMigration, readBrief } from "./task-brief.js";
@@ -442,7 +442,7 @@ export const prepareSpecificationVerification = async (
   implementationHeadSha: string | null,
 ): Promise<SpecificationVerificationPreparation> => {
   const step = candidate.task.templateStep;
-  if (!step || (!isCanonicalSolFindingsStep(step) && !isCanonicalBlindFindingsStep(step))) {
+  if (!step || (!isCanonicalReviewFindingsStep(step) && !isCanonicalBlindFindingsStep(step))) {
     return { status: "not-required" };
   }
   if (!implementationHeadSha) {

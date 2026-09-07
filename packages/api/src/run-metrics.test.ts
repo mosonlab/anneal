@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { RunnerKind } from "@anneal/db";
+import type { RunnerKind, RunStatus } from "@anneal/db";
 import type { RunBaseline } from "@anneal/db/board-contract";
 
-import { runMetrics, type RunMetricsSession, type RunMetricsToolEvent } from "./run-metrics.js";
+import { runMetrics, runPhase, type RunMetricsSession, type RunMetricsToolEvent } from "./run-metrics.js";
 
 const READY = new Date("2026-09-01T10:00:00.000Z");
 const PROVISIONED = new Date("2026-09-01T10:00:05.000Z");
@@ -45,10 +45,19 @@ const metricsOf = (input: {
   session?: RunMetricsSession | null;
   toolEvents?: readonly RunMetricsToolEvent[];
   readyAt?: Date;
+  runStatus?: RunStatus;
+  runEndedAt?: Date | null;
   now?: Date;
   baseline?: RunBaseline | null;
 } = {}) => runMetrics({
-  run: { readyAt: input.readyAt ?? READY },
+  // A settled run by default, because the fixture session below is a settled
+  // one: the run row and its session have to describe the same run for the
+  // phase they share to mean anything.
+  run: {
+    readyAt: input.readyAt ?? READY,
+    status: input.runStatus ?? "SUCCEEDED",
+    endedAt: input.runEndedAt === undefined ? ENDED : input.runEndedAt,
+  },
   session: input.session === undefined ? session() : input.session,
   toolEvents: input.toolEvents ?? [],
   now: input.now ?? new Date(ENDED.getTime() + 60_000),
@@ -98,12 +107,44 @@ test("each phase is null when either bounding timestamp is missing", () => {
   });
 });
 
+test("the phase a run is named by is the phase its executing clock is measured to", () => {
+  // One helper, two readers: the board card names the phase and the
+  // diagnostics measure the durations between the same boundaries. A run whose
+  // phase is `executing` is exactly the run whose executingMs is still growing.
+  const live = session({
+    executionStatus: "RUNNING", endedAt: null, cleanupStartedAt: null, cleanupEndedAt: null,
+  });
+  const liveRun = { readyAt: READY, status: "RUNNING" as RunStatus, endedAt: null };
+  assert.deepEqual(runPhase(liveRun, live), { phase: "executing", phaseSince: STARTED });
+  assert.equal(
+    runMetrics({ run: liveRun, session: live, toolEvents: [], now: new Date(STARTED.getTime() + 42_000) }).phases.executingMs,
+    42_000,
+  );
+
+  // And a settled run's executing phase is closed, whatever its session status
+  // column happens to say.
+  const settledRun = { readyAt: READY, status: "SUCCEEDED" as RunStatus, endedAt: ENDED };
+  assert.equal(runPhase(settledRun, session()).phase, "finished");
+  assert.equal(metricsOf().phases.executingMs, 100_000);
+});
+
+test("the shared phase helper uses the current question timestamp for an Inbox wait", () => {
+  const waiting = session({ executionStatus: "WAITING_INBOX", endedAt: null,
+    cleanupStartedAt: null, cleanupEndedAt: null, inboxWaitStartedAt: at(30_000) });
+  const run = { readyAt: READY, status: "WAITING_INBOX" as const, endedAt: null };
+  assert.deepEqual(runPhase(run, waiting), { phase: "waiting-inbox", phaseSince: at(30_000) });
+  assert.deepEqual(runPhase(run, { ...waiting, inboxWaitStartedAt: null }), { phase: "waiting-inbox", phaseSince: null });
+});
+
 test("a live run measures executingMs to now and leaves cleanup unknown", () => {
   const now = new Date(STARTED.getTime() + 42_000);
   const live = metricsOf({
     session: session({
       executionStatus: "RUNNING", endedAt: null, cleanupStartedAt: null, cleanupEndedAt: null,
     }),
+    // The Run row of a live session is not terminal either: the phase is read
+    // from both, so a fixture that settles one and not the other is not a run.
+    runStatus: "RUNNING", runEndedAt: null,
     now,
   });
   assert.equal(live.phases.executingMs, 42_000);
@@ -379,8 +420,13 @@ test("a settled run is measured against its step baseline", () => {
 });
 
 test("a live run has no durationRatio: its executing phase is still running", () => {
-  const live = session({ costUsd: "1", endedAt: null, executionStatus: "RUNNING" });
-  const metrics = metricsOf({ session: live, now: new Date(STARTED.getTime() + 20_000), baseline: baseline() });
+  const live = session({
+    costUsd: "1", endedAt: null, executionStatus: "RUNNING", cleanupStartedAt: null, cleanupEndedAt: null,
+  });
+  const metrics = metricsOf({
+    session: live, runStatus: "RUNNING", runEndedAt: null,
+    now: new Date(STARTED.getTime() + 20_000), baseline: baseline(),
+  });
   assert.equal(metrics.phases.executingMs, 20_000);
   assert.deepEqual(metrics.vsBaseline, { costRatio: 0.5, durationRatio: null });
 });

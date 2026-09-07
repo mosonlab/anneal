@@ -301,7 +301,7 @@ export const validateStaffingEntries = (
       }),
   );
   const implementers = agentsFor(new Set(["implementation", "fixed-implementation"]));
-  const reviewers = agentsFor(new Set(["plan-review", "sol-findings", "blind-findings"]));
+  const reviewers = agentsFor(new Set(["plan-review", "review-findings", "blind-findings"]));
   if ([...reviewers].some((agentId) => implementers.has(agentId))) {
     warnings.push({
       code: "same_agent_implements_and_reviews",

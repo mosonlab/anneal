@@ -61,6 +61,7 @@ import {
   createDeployHost,
   createDeployStartup,
   createQuietWindowWaitReporter,
+  openDispatchDrain,
   quietWindowHoldLine,
   DEFAULT_SERVICE_OBSERVATION_WINDOW_MS,
   deployRootFromEnvironment,
@@ -1039,7 +1040,7 @@ test("retryable escalation self-clears after a successful deployment outcome", a
   assert.deepEqual(state.logs, ["SELF-CLEAR escalation reason=quiet-window-query-failed attempts=2"]);
 });
 
-test("repeated retryable failures persist attempts atomically through the cap and then block", async (t) => {
+test("repeated retryable failures persist attempts atomically through the cap and then wait", async (t) => {
   const state = escalationFixture(t, {
     outcome: "failure",
     reason: "remote-main-unreadable",
@@ -1049,7 +1050,7 @@ test("repeated retryable failures persist attempts atomically through the cap an
   for (const expected of [ESCALATION_RETRY_CAP - 1, ESCALATION_RETRY_CAP]) {
     const persisted = writeEscalationWithAttempts({
       escalationPath: state.escalationPath,
-      record: { outcome: "failure", reason: "remote-main-unreadable" },
+      record: { outcome: "failure", reason: "remote-main-unreadable", to: "unknown" },
       retryableReasons: RETRYABLE_ESCALATION_REASONS,
     });
     assert.equal(persisted.attempts, expected);
@@ -1934,6 +1935,50 @@ test("missing artifact records FAILED without quiet-window, build, or activation
   assert.equal(calls.some((call) => /dependencies|install/u.test(call)), false);
   assert.equal(records.at(-1).state, "FAILED");
 });
+
+for (const [name, diagnostic, terminalReason, retryable] of [
+  ["source TLS", "fatal: gnutls_handshake() failed: The TLS connection was non-properly terminated.", "release-artifact-source-unavailable", true],
+  ["recovered TLS then compile", "fatal: gnutls_handshake() failed\ncompile failed", "release-artifact-build-failed", false],
+  ["dependency TLS", "npm error: SSL_ERROR_SYSCALL", "release-artifact-dependencies-failed", false],
+]) {
+  test(`captured builder stderr preserves escalation policy: ${name}`, async (t) => {
+    withDeployBinaries(t);
+    const stderr = `${"earlier build output\n".repeat(150)}${diagnostic}\nfile:///deploy/scripts/deploy/release-artifact.mjs:291\n    const failure = new DeployFailure(\n                    ^\n\nDeployFailure: ${terminalReason}: exit-128\n    at run (release-artifact.mjs:291:21)\n    at buildReleaseArtifact (release-artifact.mjs:358:27)\nNode.js v24.0.0\n`;
+    const host = createDeployHost({
+      environment: controlPlaneEnvironment(),
+      serviceControl: { platform: "linux" },
+      runCommand: async (_program, args, options) => {
+        assert.ok(args[0].endsWith("/build-release-artifact.mjs"));
+        assert.equal(options.capture, true);
+        return { code: 1, stderr, stdout: "" };
+      },
+    });
+    const attempt = openDeploymentAttempt({
+      deployRoot: "/fixture", targetCommit: revisions.to, transactionId: `captured-${name}`,
+    });
+    let failure;
+    await assert.rejects(host.prepareReleaseArtifact(attempt), (error) => {
+      failure = error;
+      return error.reason === "release-artifact-build-failed";
+    });
+    const record = { reason: failure.reason, detail: failure.detail, to: revisions.to };
+    const state = escalationFixture(t, { ...record, attempts: ESCALATION_RETRY_CAP - 1 });
+    const now = new Date("2026-09-07T12:00:00.000Z");
+    const persisted = writeEscalationWithAttempts({ ...state.options, record, now: () => now });
+    assert.equal(Object.hasOwn(persisted, "retryAfter"), retryable);
+    if (retryable) {
+      assert.equal(persisted.attempts, ESCALATION_RETRY_CAP);
+      assert.equal(persisted.retryAfter, "2026-09-07T12:05:00.000Z");
+      assert.equal(failure.detail, `exit-1: ${stderr.trim().slice(-2_000)}`);
+    } else {
+      assert.equal(Object.hasOwn(persisted, "attempts"), false);
+    }
+    const options = { ...state.options, readRemoteMain: async () => revisions.to };
+    assert.equal((await checkExistingEscalation({ ...options, now: () => now })).active, true);
+    assert.equal((await checkExistingEscalation({ ...options,
+      now: () => new Date(now.getTime() + 300_000) })).active, !retryable);
+  });
+}
 
 test("malformed builder receipt records FAILED before the quiet window opens", async () => {
   const { host, attempt, calls, records } = fixture({ builderOutput: "RELEASE-ARTIFACT {not-json}\n" });
@@ -3142,3 +3187,259 @@ test("production startup wiring keeps backup failure host-scoped", async (t) => 
   assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
   assert.equal(targetReads, 0);
 });
+
+/** The wait-and-drain half of a production host, wired to recorded writers.
+ * Everything outside the wait — the barrier, the watchdog child, the sleep and
+ * the Inbox — is substituted, so what runs here is the real drain decision and
+ * nothing else. */
+const drainFixture = ({
+  waitBudgetMs = 0,
+  quietAfterPolls = 2,
+  insert = null,
+  remove = null,
+} = {}) => {
+  const writes = { inserted: [], removed: [] };
+  const blocking = [{ id: "run-1", status: "running", runnerId: "mac-runner-1" }];
+  let polls = 0;
+  const drainWriter = {
+    insert: async (record) => {
+      writes.inserted.push(record);
+      if (insert) return insert(record);
+      return { id: `drain-${writes.inserted.length}`, expiresAt: record.expiresAt };
+    },
+    remove: async (id) => {
+      writes.removed.push(id);
+      if (remove) return remove(id);
+      return 1;
+    },
+  };
+  const host = createDeployHost({
+    serviceControl: { platform: "linux", restart: async () => undefined, isRunning: async () => true, describe: async () => "" },
+    environment: controlPlaneEnvironment(),
+    waitBudgetMs,
+    blockingRunsAdapter: async () => {
+      // The interruption reaches the wait exactly where SIGTERM and the
+      // barrier watchdog do: the next blocking-runs read.
+      if (quietAfterPolls === "interrupted" && polls > 1) throw new DeployFailure("deploy-interrupted", "SIGTERM");
+      return quietAfterPolls === "interrupted" || polls < quietAfterPolls ? blocking : [];
+    },
+    acquireBarrier: async () => ({ release: async () => undefined, verify: async () => true }),
+    createWatchdog: async () => ({ release: async () => undefined }),
+    pollWait: async () => { polls += 1; await new Promise((accept) => { setImmediate(accept); }); },
+    notify: async () => undefined,
+    drainWriter,
+    drainDeadlineMs: 90 * 60_000,
+    deployHostname: "test-host",
+  });
+  return { host, writes };
+};
+
+/** The fixture deployment, with the real wait-and-drain phase spliced in. */
+const deployWithDrain = ({ failure = null, ...drainOptions } = {}) => {
+  const run = fixture({ failure });
+  const drain = drainFixture(drainOptions);
+  run.host.waitForQuiet = async (attempt) => {
+    run.calls.push("acquire-quiet-window");
+    run.phaseCalls.push("acquire-quiet-window");
+    return drain.host.waitForQuiet(attempt);
+  };
+  return { ...run, writes: drain.writes };
+};
+
+test("a wait past its budget opens one drain naming this host, and the deploy deletes it", async () => {
+  const run = deployWithDrain();
+  const openedBefore = Date.now();
+  assert.deepEqual(await executeUpgrade(run.host, run.attempt), { ok: true });
+  assert.equal(run.writes.inserted.length, 1, "one wait opens one drain, however often it alerts");
+  const [record] = run.writes.inserted;
+  assert.equal(
+    record.reason,
+    `quiet-window-wait-exceeded host=test-host role=control-plane from=${revisions.from.slice(0, 12)} to=${revisions.to.slice(0, 12)}`,
+  );
+  assert.equal(record.requestedBy, "auto-deploy:fixture-transaction");
+  assert.ok(record.expiresAt.getTime() >= openedBefore + 90 * 60_000);
+  assert.deepEqual(run.writes.removed, ["drain-1"], "the successful deploy deletes the row it opened");
+});
+
+test("a quiet window found inside the budget opens no drain", async () => {
+  const run = deployWithDrain({ waitBudgetMs: 60 * 60_000, quietAfterPolls: 0 });
+  assert.deepEqual(await executeUpgrade(run.host, run.attempt), { ok: true });
+  assert.deepEqual(run.writes, { inserted: [], removed: [] });
+});
+
+test("a deploy that stops after the window still deletes its drain", async () => {
+  const run = deployWithDrain({ failure: "restart-services" });
+  const result = await executeUpgrade(run.host, run.attempt);
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.reason, "restart-services-failed");
+  assert.deepEqual(run.writes.removed, ["drain-1"]);
+});
+
+test("a deploy that escalates deletes its drain before the operator is told to look", async () => {
+  const run = deployWithDrain({ failure: "guarded-migration" });
+  const result = await executeUpgrade(run.host, run.attempt);
+  assert.equal(result.ok, false);
+  assert.equal(run.state.escalated.reason, "guarded-migration-failed");
+  assert.ok(run.calls.indexOf("escalate") >= 0);
+  assert.deepEqual(run.writes.removed, ["drain-1"]);
+});
+
+test("a wait interrupted after it drained deletes the row it never handed back", async () => {
+  const run = deployWithDrain({ quietAfterPolls: "interrupted" });
+  const result = await executeUpgrade(run.host, run.attempt);
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.reason, "deploy-interrupted");
+  assert.equal(run.writes.inserted.length, 1);
+  assert.deepEqual(run.writes.removed, ["drain-1"], "the drain never reached the phase's facts, and is deleted anyway");
+});
+
+test("a drain that cannot be deleted escalates instead of leaving the fleet drained", async () => {
+  const run = deployWithDrain({ remove: () => { throw Object.assign(new Error("connection lost"), { name: "PrismaClientKnownRequestError" }); } });
+  const result = await executeUpgrade(run.host, run.attempt);
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.reason, "dispatch-drain-delete-failed");
+  assert.equal(result.failure.detail, "drain-1-PrismaClientKnownRequestError");
+  assert.equal(run.state.escalated.reason, "dispatch-drain-delete-failed");
+});
+
+test("a drain that cannot be written is logged and handed to the deploy's failure path", async () => {
+  const lines = [];
+  const failures = [];
+  const drain = openDispatchDrain({
+    insert: async () => { throw Object.assign(new Error("connection lost"), { name: "PrismaClientInitializationError" }); },
+    remove: async () => { throw new Error("a row that was never written must not be deleted"); },
+    onWriteFailure: (failure) => failures.push(failure),
+    log: (line) => lines.push(line),
+  });
+  // Releasing is what every exit path does; the failure is already reported.
+  await drain.release();
+  assert.deepEqual(failures.map(({ reason, detail }) => [reason, detail]), [
+    ["dispatch-drain-create-failed", "PrismaClientInitializationError"],
+  ]);
+  assert.deepEqual(lines, ["STOP dispatch-drain-create-failed detail=PrismaClientInitializationError"]);
+});
+
+test("a drain is renewed while its wait runs, and a renewal that fails is reported", async () => {
+  const lines = [];
+  const failures = [];
+  const extended = [];
+  let extendFails = false;
+  const drain = openDispatchDrain({
+    insert: async () => ({ id: "drain-1", expiresAt: new Date("2026-09-07T04:00:00.000Z") }),
+    extend: async (id) => {
+      if (extendFails) throw Object.assign(new Error("connection lost"), { name: "PrismaClientKnownRequestError" });
+      extended.push(id);
+      return { expiresAt: new Date("2026-09-07T06:00:00.000Z") };
+    },
+    remove: async () => 1,
+    onWriteFailure: (failure) => failures.push(failure),
+    log: (line) => lines.push(line),
+  });
+  await drain.renew();
+  extendFails = true;
+  await drain.renew();
+  await drain.release();
+  assert.deepEqual(extended, ["drain-1"], "the same row is pushed out rather than replaced");
+  assert.deepEqual(failures.map(({ reason, detail }) => [reason, detail]), [
+    ["dispatch-drain-extend-failed", "drain-1-PrismaClientKnownRequestError"],
+  ]);
+  assert.deepEqual(lines, [
+    "HOLD dispatch-draining id=drain-1 expires=2026-09-07T04:00:00.000Z",
+    "HOLD dispatch-draining id=drain-1 expires=2026-09-07T06:00:00.000Z",
+    "STOP dispatch-drain-extend-failed id=drain-1 detail=PrismaClientKnownRequestError",
+    "PASS dispatch-drain-cleared id=drain-1 rows=1",
+  ]);
+});
+
+test("a wait longer than the drain deadline extends its row instead of opening a second one", async () => {
+  const attempt = openDeploymentAttempt({
+    deployRoot: "/fixture",
+    targetCommit: revisions.to,
+    transactionId: "quiet-window-wait-renew",
+  });
+  attempt.establish({ revisions });
+  let opened = 0;
+  let renewals = 0;
+  const report = createQuietWindowWaitReporter({
+    attempt,
+    revisions,
+    notify: async () => undefined,
+    log: () => undefined,
+    openDrain: () => {
+      opened += 1;
+      return { renew: async () => { renewals += 1; }, release: async () => undefined };
+    },
+  });
+  const event = {
+    elapsedSeconds: 2_700,
+    polls: 45,
+    peakBlockingRuns: 7,
+    blockingRuns: 5,
+    budgetMs: 2_700_000,
+    blockingRunsByRunner: {},
+  };
+  await report(event);
+  await report({ ...event, elapsedSeconds: 6_300 });
+  await report({ ...event, elapsedSeconds: 9_900 });
+  // One row for the whole wait, pushed out on every later crossing: a wait
+  // that outlives the deadline must not let the fleet resume claiming into the
+  // release this deploy is still waiting to install.
+  assert.equal(opened, 1);
+  assert.equal(renewals, 2);
+});
+
+
+test("capped source read failure waits under the lock, retries, and backs off again", async (t) => {
+  let time = Date.parse("2026-09-07T12:00:00.000Z");
+  const marker = escalationFixture(t, {
+    reason: "remote-main-read-timeout", to: "unknown", attempts: 5,
+    retryAfter: new Date(time + 300_000).toISOString(),
+  });
+  let targetReads = 0;
+  const state = startupFixture({
+    checkEscalation: () => checkExistingEscalation({ ...marker.options, now: () => new Date(time) }),
+    readRemoteMain: async () => {
+      targetReads += 1;
+      throw new DeployFailure("remote-main-read-timeout", "read timeout");
+    },
+    persistFailure: async (failure) => writeEscalationWithAttempts({ ...marker.options,
+      record: { reason: failure.reason, detail: failure.detail, to: "unknown" },
+      now: () => new Date(time) }),
+  });
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
+  assert.equal(targetReads, 0);
+  assert.equal(state.calls.at(-1), "release-lock");
+  time += 300_000;
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 1 });
+  assert.equal(targetReads, 1);
+  const persisted = JSON.parse(readFileSync(marker.escalationPath, "utf8"));
+  assert.equal(persisted.attempts, 6);
+  assert.equal(Date.parse(persisted.retryAfter), time + 600_000);
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
+  assert.equal(targetReads, 1);
+});
+
+for (const noop of [false, true]) {
+  test(`expired capped marker clears after successful ${noop ? "no-op" : "deployment"}`, async (t) => {
+    const marker = escalationFixture(t, {
+      reason: "remote-main-read-timeout", to: "unknown", attempts: 5,
+      retryAfter: "2026-09-07T12:05:00.000Z",
+    });
+    const startup = startupFixture({ checkEscalation: () => checkExistingEscalation({
+      ...marker.options, now: () => new Date("2026-09-07T12:05:00.000Z"),
+    }) });
+    const invocation = await decideInvocation(startup.startup, "upgrade");
+    assert.equal(invocation.targetCommit, revisions.to);
+    const { host, attempt } = fixture();
+    attempt.establish({ retryEscalation: invocation.retryEscalation });
+    if (noop) host.checkAlreadyDeployed = async () => ({ skip: "already-deployed" });
+    host.selfClearEscalation = async (deployment) => selfClearEscalation({
+      ...marker.options, retryEscalation: deployment.fact("retryEscalation"),
+      notify: async (record) => marker.notifications.push(record),
+    });
+    assert.equal((await executeUpgrade(host, attempt)).ok, true);
+    assert.equal(existsSync(marker.escalationPath), false);
+    assert.equal(marker.notifications.at(-1).reason, "escalation-self-cleared");
+    await invocation.lock.release();
+  });
+}

@@ -9,6 +9,26 @@ written.
 
 ## Unreleased
 
+- An auto-deploy whose quiet-window wait outlives its budget now stops the
+  platform from admitting new Runs until that deploy lands: it opens a
+  platform-wide dispatch drain, every claim is refused with `dispatch-draining`
+  without touching any Task or its run budget, and the deploy deletes the drain
+  on every exit path. Running Runs are never interrupted, the refused runners
+  stay online, and `GET /runners` reports the drain as `dispatchDrain`. A drain
+  left behind by a dead deploy process expires by itself 120 minutes after that
+  deploy last reported itself (`DISPATCH_DRAIN_DEADLINE_MINUTES`). One migration adds the drain table.
+- The runner's dispatcher slot count for the primary gate worker follows
+  `RUNNER_GATE_PRIMARY_SLOTS` (1 or 2, default 2) instead of always being two,
+  and sessions receive it as `AGENTOS_GATE_PRIMARY_SLOTS` in the two-host gate
+  topology. Set it to the primary worker's own `~/gate/worker-capacity`, or a
+  dispatch holds a slot while it waits on that worker's execution lock.
+- A base-drift recovery that stopped on a merge gate FAIL the branch did not
+  cause can be re-run from the API:
+  `POST /tasks/:taskId/merge-tail/rerun` on the Regression task opens the next
+  recovery attempt against the same head and queues a fresh Regression Run. It
+  opens no repair task, charges no repair budget, spends none of the two
+  automatic base-drift recovery attempts, and grants the queued Run its own
+  budget, and it is bounded at two re-runs per recovery stop.
 - A gate dispatch queued behind other gates no longer gives up while the queue
   is moving. `GATE_DISPATCH_TIMEOUT_MINUTES` now bounds a queue that makes no
   progress: each poll reads which process holds each busy slot, and a slot that

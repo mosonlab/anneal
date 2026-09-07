@@ -6,7 +6,7 @@ import {
   SESSION_EVENT_PAYLOAD_TOO_LARGE_CODE,
   SESSION_EVENTS_REQUEST_TOO_LARGE_CODE,
 } from "@anneal/db/session-event-limits";
-import type { ClaimContract } from "@anneal/db/claim-contract";
+import { DISPATCH_DRAINING_CODE, type ClaimContract } from "@anneal/db/claim-contract";
 
 import type { RunnerConfig, RunnerKind } from "./config.js";
 
@@ -94,6 +94,14 @@ const authorityAfterHeartbeat = (result: HeartbeatResult): Authority =>
   result.cancellation
     ? { held: false, reason: "cancelled", request: result.cancellation }
     : { held: true };
+
+/**
+ * Whether the control plane refused this claim because dispatch is draining
+ * for a pending deploy. It is not a runner fault and not a lost claim: no work
+ * exists for anyone until the deploy lands or its drain expires.
+ */
+export const claimRefusedByDispatchDrain = (error: unknown): boolean =>
+  error instanceof ControlPlaneError && error.status === 409 && error.code === DISPATCH_DRAINING_CODE;
 
 /** Startup may retry transport failures and control-plane 5xx responses only. */
 export const retriableStartupError = (error: unknown): boolean =>

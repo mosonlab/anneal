@@ -203,3 +203,18 @@ test("the revalidation capability is keyed on the canonical step, not on any age
   assert.equal(isRevalidationStep({ ...canonical, outputKind: "implementation" }), false);
   assert.equal(isRevalidationStep({ ...canonical, taskTemplate: { name: "custom-workflow" } }), false);
 });
+
+test("a retired Direct Chain retains revalidation authority for its original implementation", () => {
+  const name = "direct-engineer-workflow-legacy-pre-model-neutral-review-output-template-1";
+  const originalCaller = caller();
+  const retiredCaller = caller({ templateStep: { ...originalCaller.templateStep!, taskTemplate: { name } } });
+  const implementation = task({
+    id: "implementation", chainIndex: 1, chainLayer: 1, dispatchAfterTaskId: null,
+    templateStep: { stepIndex: 2, outputKind: "implementation", priorOutputKinds: ["revalidation"], taskTemplate: { name } },
+  });
+  assert.equal(isRevalidationStep(retiredCaller.templateStep), true);
+  assert.equal(deriveBoundImplementationTask(retiredCaller, [retiredCaller, implementation]), implementation);
+  const foreign = deriveBoundImplementationTask(retiredCaller, [{ ...implementation, templateId: "successor-template" }]);
+  assert.ok("reason" in foreign && foreign.reason === "conflict");
+  assert.equal(isRevalidationStep({ ...retiredCaller.templateStep!, taskTemplate: { name: "direct-engineer-workflow-legacy-unregistered-template-1" } }), false);
+});

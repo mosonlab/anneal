@@ -2,6 +2,7 @@ import "./dom-preload";
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import { JSDOM } from "jsdom";
 import { act, type ReactNode, useState } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -10,13 +11,14 @@ import { BOARD, BOARD_GRID, CARD_PAGE_SIZE, BoardArrows, BoardColumn, BoardNavig
 import { MobileTaskList } from "../components/mobile-task-list";
 import { PaginatedBoardEntries } from "../components/paginated-board-entries";
 import { cardModel, cardTime, cardTitle, TaskCard } from "../components/task-card";
-import { COLUMNS, type BoardEntry, boardEntries, columnStep, countByStatus, heldChains, parkedChains, taskBoardEntry } from "../lib/board";
+import { COLUMNS, STALLED_AFTER_MS, type BoardEntry, boardEntries, columnStep, countByStatus, heldChains, parkedChains, taskBoardEntry } from "../lib/board";
 import { LocaleProvider } from "../lib/i18n";
 import { translate } from "../lib/i18n-core";
 import { ProjectProvider } from "../lib/project";
 import { storage } from "../lib/storage";
 import { BOARD_PAGE, ActivateAllDialog, ChainFilterControl, HoldAllDialog, TasksPage, activateAllNotice, archiveDoneNotice, holdAllNotice, moveAction, moveNotAllowedNotice, stableRows, startabilityRefusal, tasksForChain, useTaskStartConfirmation } from "../pages/Tasks";
 import type { BoardTask, ChainAggregate, ChainAggregateState, ChainProgress, TaskStartability, TaskStatus } from "../lib/types";
+import { boardRun } from "./board-run";
 import { type PageHarness, installDom, mountPage, reactDom } from "./dom-harness";
 
 const en = (key: string, vars?: Record<string, string | number>): string => translate("en", key, vars);
@@ -26,7 +28,7 @@ const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   assigneeType: "HUMAN", createdAt: "2026-08-15T00:00:00.000Z",
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
-  chainName: null, updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, blockedOn: null, latestRun: null, taskCost: null,
+  chainName: null, updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, blockedOn: null, latestRun: null, taskCost: null, spendCapUsage: null,
   mergeOutcome: null, repairOf: null, budgetRemaining: true, leaseLossRefunds: 0, chainAggregate: null, baseline: null, readinessRequeues: 0, readinessGrants: 0, strandedSalvageBranches: [],
   ...overrides,
 });
@@ -44,10 +46,9 @@ const localizedCard = (locale: "en" | "zh", overrides: Partial<BoardTask> = {}):
 
 test("a member card links its newest run's pull request, after the assignee", () => {
   const withPr = card({
-    latestRun: {
-      id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT",
-      costUsd: "0.42", startedAt: null, endedAt: null, pullRequestUrl: "https://github.com/mosonlab/anneal/pull/351",
-    },
+    latestRun: boardRun({
+      model: "gpt-5.6-sol:high", costUsd: "0.42", pullRequestUrl: "https://github.com/mosonlab/anneal/pull/351",
+    }),
   });
   assert.match(withPr, /data-card-assignee=[\s\S]*data-card-pull-request/u);
   assert.match(withPr, /href="https:\/\/github\.com\/mosonlab\/anneal\/pull\/351"/u);
@@ -386,7 +387,7 @@ test("Archive All confirms the project-wide Done scope even while one chain is v
     chainId, chainName, detailTaskId: taskId, stepCount: 1,
     statusCounts: { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 1 }, status: "DONE" as const,
     frontier: { taskId, title: "Review", status: "DONE" as const, latestRun: null, mergeOutcome: null, failureReason: null, position: 1 }, activeRepair: null,
-    activation: { state: "settled" as const, predecessor: null, taskId, hold: null }, totalCost: null,
+    activation: { state: "settled" as const, predecessor: null, taskId, hold: null }, totalCost: null, firstRunStartedAt: null,
     createdAt: "2026-08-15T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
   });
   const rows = [
@@ -451,18 +452,28 @@ test("the board renders every column newest first, Backlog included", async () =
   }
 });
 
-test("running, ended, and absent runs render only durations their timestamps prove", () => {
+test("a live run reads as its phase and the time in it; ended and absent runs keep their durations", () => {
   const originalNow = Date.now;
   Date.now = () => new Date("2026-08-16T00:12:00.000Z").getTime();
   try {
-    assert.equal(cardTime(task({ latestRun: { id: "r1", runNumber: 1, status: "RUNNING", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: null, pullRequestUrl: null } })), "12m 0s");
-    // Every live status the run line already gives an elapsed clock to gets the
-    // same clock here: the footer used to answer `timeAgo` for a CLAIMED run
-    // that the aggregate card was counting up.
-    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "CLAIMED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: null, pullRequestUrl: null } })), "12m 0s");
-    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: "2026-08-16T00:08:00.000Z", pullRequestUrl: null } })), "8m 0s · 3h ago");
+    assert.equal(cardTime(task({ latestRun: boardRun({ status: "RUNNING", startedAt: "2026-08-16T00:00:00.000Z" }) })), "Executing · 12m 0s");
+    // The clock counts the phase, not the run: a run twelve minutes old that
+    // entered provisioning twenty seconds ago has been provisioning for 20s.
+    assert.equal(cardTime(task({
+      updatedAt: "2026-08-15T21:12:00.000Z",
+      latestRun: boardRun({ status: "PROVISIONING", phase: "provisioning", phaseSince: "2026-08-16T00:11:40.000Z" }),
+    })), "Provisioning · 20s");
+    // A queued run has a phase start where it used to have nothing to count from.
+    assert.equal(cardTime(task({
+      updatedAt: "2026-08-15T21:12:00.000Z",
+      latestRun: boardRun({ status: "QUEUED", phase: "queued", phaseSince: "2026-08-16T00:11:40.000Z" }),
+    })), "Queued · 20s");
+    assert.equal(cardTime(task({ latestRun: boardRun({ status: "WAITING_INBOX", startedAt: "2026-08-16T00:00:00.000Z",
+      phase: "waiting-inbox", phaseSince: "2026-08-16T00:11:40.000Z" }) })), "Waiting on Inbox · 20s");
+    // A finished run reads exactly as it did.
+    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: boardRun({ startedAt: "2026-08-16T00:00:00.000Z", endedAt: "2026-08-16T00:08:00.000Z" }) })), "8m 0s · 3h ago");
     assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z" })), "3h ago");
-    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null } })), "3h ago");
+    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: boardRun() })), "3h ago");
   } finally {
     Date.now = originalNow;
   }
@@ -474,24 +485,101 @@ test("a mounted running card advances elapsed time while its props stay unchange
   const originalSetInterval = dom.window.setInterval;
   const originalClearInterval = dom.window.clearInterval;
   let now = new Date("2026-08-16T00:12:00.000Z").getTime();
-  let tick: (() => void) | null = null;
+  const ticks = new Set<() => void>();
+  const tick = () => { for (const callback of ticks) callback(); };
   Date.now = () => now;
   Object.defineProperty(dom.window, "setInterval", {
-    configurable: true, value: (run: () => void) => { tick = run; return 1; },
+    configurable: true, value: (run: () => void) => { ticks.add(run); return run; },
   });
-  Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: () => undefined });
+  Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: (run: () => void) => { ticks.delete(run); } });
   const root = (await reactDom()).createRoot(container);
-  const running = task({ latestRun: {
-    id: "r1", runNumber: 1, status: "RUNNING", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null,
-    startedAt: "2026-08-16T00:00:00.000Z", endedAt: null, pullRequestUrl: null,
-  } });
+  const running = task({ latestRun: boardRun({ status: "RUNNING", startedAt: "2026-08-16T00:00:00.000Z" }) });
+  let nameReads = 0;
+  Object.defineProperty(running, "name", { get: () => { nameReads++; return "Ship the thing"; } });
   try {
     await act(async () => root.render(<TaskCard task={running} actions={ACTIONS} />));
-    assert.match(container.textContent ?? "", /12m 0s/);
+    assert.match(container.textContent ?? "", /Executing · 12m 0s/);
+    nameReads = 0;
     now += 60_000;
+    assert.ok(ticks.size);
+    await act(async () => tick?.());
+    assert.match(container.textContent ?? "", /Executing · 13m 0s/);
+    assert.equal(nameReads, 0, "the phase tick does not render the card body");
+    const waiting = task({ latestRun: boardRun({ status: "WAITING_INBOX", startedAt: "2026-08-16T00:00:00.000Z",
+      phase: "waiting-inbox", phaseSince: new Date(now - 20_000).toISOString() }) });
+    await act(async () => root.render(<TaskCard task={waiting} actions={ACTIONS} />));
+    assert.match(container.textContent ?? "", /Waiting on Inbox · 20s/);
+    now += 10_000;
+    await act(async () => tick());
+    assert.match(container.textContent ?? "", /Waiting on Inbox · 30s/);
+    // A new phase restarts the clock: the footer counts time in the phase.
+    const cleaning = task({
+      latestRun: boardRun({
+        status: "SUCCEEDED", startedAt: "2026-08-16T00:00:00.000Z",
+        endedAt: new Date(now - 5_000).toISOString(),
+        phase: "cleanup", phaseSince: new Date(now - 5_000).toISOString(),
+      }),
+    });
+    await act(async () => root.render(<TaskCard task={cleaning} actions={ACTIONS} />));
+    assert.match(container.textContent ?? "", /Cleaning up · 5s/);
+    assert.doesNotMatch(container.textContent ?? "", /13m/);
+    now += 10_000;
+    await act(async () => tick?.());
+    assert.match(container.textContent ?? "", /Cleaning up · 15s/);
+    await act(async () => root.render(<TaskCard task={{ ...cleaning, latestRun: { ...cleaning.latestRun!, phase: "finished" } }} actions={ACTIONS} />));
+    assert.doesNotMatch(container.textContent ?? "", /Cleaning up/);
+  } finally {
+    await act(async () => root.unmount());
+    Date.now = originalNow;
+    Object.defineProperty(dom.window, "setInterval", { configurable: true, value: originalSetInterval });
+    Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: originalClearInterval });
+    dom.window.close();
+  }
+});
+
+test("a queued fixture renders the server's dated phase", () => {
+  const latestRun = boardRun({ status: "QUEUED" });
+  assert.equal(latestRun.phaseSince, "2026-08-16T00:00:00.000Z");
+  const originalNow = Date.now;
+  Date.now = () => new Date("2026-08-16T00:00:20.000Z").getTime();
+  try { assert.match(card({ latestRun }), /Queued · 20s/); }
+  finally { Date.now = originalNow; }
+  const provisioning = boardRun({ status: "PROVISIONING" });
+  assert.equal(provisioning.phase, "provisioning");
+  assert.equal(provisioning.phaseSince, "2026-08-16T00:00:00.000Z");
+});
+
+test("a mounted card calls a run stalled while its props stay unchanged", async () => {
+  // A stall is exactly the case where the polled row stops changing, so the
+  // badge has to come from the card's own clock and not from a new prop.
+  const { dom, container } = installDom();
+  const originalNow = Date.now;
+  const originalSetInterval = dom.window.setInterval;
+  const originalClearInterval = dom.window.clearInterval;
+  let now = new Date("2026-08-16T00:12:00.000Z").getTime();
+  const ticks = new Set<() => void>();
+  const tick = () => { for (const callback of ticks) callback(); };
+  Date.now = () => now;
+  Object.defineProperty(dom.window, "setInterval", {
+    configurable: true, value: (run: () => void) => { ticks.add(run); return run; },
+  });
+  Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: (run: () => void) => { ticks.delete(run); } });
+  const root = (await reactDom()).createRoot(container);
+  const quiet = task({
+    latestRun: boardRun({
+      status: "RUNNING", startedAt: "2026-08-16T00:00:00.000Z",
+      lastProgressEventAt: new Date(now - STALLED_AFTER_MS + 60_000).toISOString(),
+    }),
+  });
+  try {
+    await act(async () => root.render(<TaskCard task={quiet} actions={ACTIONS} />));
+    assert.equal(container.querySelector("[data-card-badge='stalled']"), null);
+    now += 2 * 60_000;
     assert.ok(tick);
     await act(async () => tick?.());
-    assert.match(container.textContent ?? "", /13m 0s/);
+    const stalled = container.querySelector("[data-card-badge='stalled']");
+    assert.ok(stalled, "the badge appears on the clock alone");
+    assert.equal(stalled.getAttribute("title"), en("tasks.badge.stalled.title", { minutes: 5 }));
   } finally {
     await act(async () => root.unmount());
     Date.now = originalNow;
@@ -590,7 +678,7 @@ test("the model line is the run's snapshot, not the agent's current tier", () =>
   // claude-opus-5:medium showed as gpt-5.6-sol:high.
   const markup = card({
     assigneeAgent: { id: "a1", title: "merge-resolver-opus-medium", model: "gpt-5.6-sol:high" },
-    latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null },
+    latestRun: boardRun(),
   });
   assert.match(markup, /claude-opus-5:medium/);
   assert.doesNotMatch(markup, /gpt-5\.6-sol:high/);
@@ -598,10 +686,8 @@ test("the model line is the run's snapshot, not the agent's current tier", () =>
 });
 
 test("a FAST run adds a fast marker to the single-task model line, but DEFAULT does not", () => {
-  const run = (codexServiceTier: "DEFAULT" | "FAST") => ({
-    id: "r1", runNumber: 1, status: "SUCCEEDED" as const, model: "gpt-5.6-sol:high", codexServiceTier,
-    costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null,
-  } as NonNullable<BoardTask["latestRun"]> & { codexServiceTier: "DEFAULT" | "FAST" });
+  const run = (codexServiceTier: "DEFAULT" | "FAST") =>
+    boardRun({ model: "gpt-5.6-sol:high", codexServiceTier }) as NonNullable<BoardTask["latestRun"]> & { codexServiceTier: "DEFAULT" | "FAST" };
 
   const fast = card({ latestRun: run("FAST") });
   assert.match(fast, /gpt-5\.6-sol:high · fast/u);
@@ -612,23 +698,130 @@ test("a FAST run adds a fast marker to the single-task model line, but DEFAULT d
   assert.doesNotMatch(standard, /fast/u);
 });
 
-test("a running single-task card shows the elapsed time alone, in both locales", () => {
-  const latestRun = {
-    id: "r1", runNumber: 1, status: "RUNNING" as const, model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT" as const,
-    costUsd: null, startedAt: new Date(Date.now() - 4 * 60_000).toISOString(), endedAt: null, pullRequestUrl: null,
-  };
+test("a running single-task card shows its phase and the time in it, in both locales", () => {
+  const latestRun = boardRun({
+    status: "RUNNING", model: "gpt-5.6-sol:high", startedAt: new Date(Date.now() - 4 * 60_000).toISOString(),
+  });
 
-  // The run line's amber dot is what says a run is live; the footer says how
-  // long, and neither locale spends a word repeating the other.
+  // The run line's amber dot is what says a run is live; the footer says where
+  // it is and for how long, and neither locale spends a status word repeating
+  // the phase.
   const chinese = localizedCard("zh", { status: "DOING", latestRun });
   assert.doesNotMatch(chinese, /运行中/u);
-  assert.match(chinese, /\d+ 分 \d+ 秒/u);
+  assert.match(chinese, /执行中 · \d+ 分 \d+ 秒/u);
 
   // Render English last because the test i18n adapter retains the latest
   // requested locale for helpers exercised later in this process.
   const english = localizedCard("en", { status: "DOING", latestRun });
   assert.doesNotMatch(english, /running/u);
-  assert.match(english, /\d+m \d+s/u);
+  assert.match(english, /Executing · \d+m \d+s/u);
+});
+
+test("the run line never repeats the phase the footer names", () => {
+  const latestRun = boardRun({
+    status: "PROVISIONING", phase: "provisioning", phaseSince: new Date(Date.now() - 20_000).toISOString(),
+  });
+  const chinese = localizedCard("zh", { status: "DOING", latestRun });
+  assert.match(chinese, /准备中 · \d+ 秒/u);
+  assert.equal((chinese.match(/准备中/gu) ?? []).length, 1);
+
+  const english = localizedCard("en", { status: "DOING", latestRun });
+  assert.match(english, /Provisioning · \d+s/u);
+  assert.equal((english.match(/provisioning/giu) ?? []).length, 1);
+});
+
+test("an Inbox wait is named and never timed", () => {
+  const latestRun = boardRun({ status: "WAITING_INBOX", startedAt: new Date(Date.now() - 4 * 60_000).toISOString() });
+  const english = localizedCard("en", { status: "DOING", latestRun });
+  assert.match(english, /Waiting on Inbox/u);
+  assert.doesNotMatch(english, /Waiting on Inbox · |\d+m \d+s/u);
+});
+
+/* -------------------------------------------------------------- the badges */
+
+const NOW = new Date("2026-08-16T00:12:00.000Z").getTime();
+const at = (offsetMs: number): string => new Date(NOW + offsetMs).toISOString();
+const BASELINE = {
+  sampleSize: 7,
+  costUsd: { sampleSize: 7, p50: 1, p90: 2 },
+  durationMs: { sampleSize: 7, p50: 5 * 60_000, p90: 8 * 60_000 },
+};
+
+/** A card rendered at a pinned instant, so a badge read against the clock is
+ *  the same on every run of the suite. */
+const cardAt = (overrides: Partial<BoardTask> = {}): string => {
+  const originalNow = Date.now;
+  Date.now = () => NOW;
+  try {
+    return card(overrides);
+  } finally {
+    Date.now = originalNow;
+  }
+};
+
+/** The hover text of one badge, or null where the card carries none of that kind. */
+const badge = (markup: string, kind: string): string | null => {
+  const body = new JSDOM(`<!doctype html><html><body>${markup}</body></html>`).window.document.body;
+  return body.querySelector(`[data-card-badge="${kind}"]`)?.getAttribute("title") ?? null;
+};
+
+test("a stalled run is badged with the threshold in its hover text", () => {
+  const markup = cardAt({
+    latestRun: boardRun({ status: "RUNNING", startedAt: at(-20 * 60_000), lastProgressEventAt: at(-6 * 60_000) }),
+  });
+  assert.equal(badge(markup, "stalled"), en("tasks.badge.stalled.title", { minutes: 5 }));
+  assert.match(markup, new RegExp(`>${en("tasks.badge.stalled")}<`, "u"));
+  // Never reported progress is unknown, not silent since forever.
+  assert.doesNotMatch(cardAt({
+    latestRun: boardRun({ status: "RUNNING", startedAt: at(-20 * 60_000), lastProgressEventAt: null }),
+  }), /data-card-badge/u);
+});
+
+test("terminal runs with an unknown execution end have no duration anomaly", () => {
+  for (const status of ["LOST", "FAILED"] as const) {
+    const latestRun = boardRun({ status, startedAt: at(-30 * 60_000), endedAt: null });
+    assert.equal(badge(cardAt({ baseline: BASELINE, latestRun }), "over-baseline"), null);
+    assert.equal(badge(cardAt({ baseline: BASELINE, latestRun: { ...latestRun, costUsd: "3" } }), "over-baseline"),
+      en("tasks.badge.overBaseline.title", { metric: en("tasks.badge.metric.cost"), n: 7 }));
+  }
+});
+
+test("an over-baseline run names the metric and the sample it was read against", () => {
+  const costly = cardAt({
+    baseline: BASELINE,
+    latestRun: boardRun({ status: "RUNNING", startedAt: at(-60_000), lastProgressEventAt: at(-1_000), costUsd: "2.50" }),
+  });
+  assert.equal(badge(costly, "over-baseline"), en("tasks.badge.overBaseline.title", { metric: en("tasks.badge.metric.cost"), n: 7 }));
+  assert.match(costly, new RegExp(`>${en("tasks.badge.overBaseline")}<`, "u"));
+  const slow = cardAt({
+    baseline: BASELINE,
+    latestRun: boardRun({ status: "RUNNING", startedAt: at(-11 * 60_000), lastProgressEventAt: at(-1_000) }),
+  });
+  assert.equal(badge(slow, "over-baseline"), en("tasks.badge.overBaseline.title", { metric: en("tasks.badge.metric.duration"), n: 7 }));
+  const both = cardAt({
+    baseline: BASELINE,
+    latestRun: boardRun({ status: "RUNNING", startedAt: at(-11 * 60_000), lastProgressEventAt: at(-1_000), costUsd: "2.50" }),
+  });
+  assert.equal(badge(both, "over-baseline"), en("tasks.badge.overBaseline.title", { metric: en("tasks.badge.metric.both"), n: 7 }));
+  // No baseline, or no cost samples in it, is unknown: a two-dollar run with
+  // nothing to compare against is not over anything.
+  const expensive = boardRun({ status: "RUNNING", startedAt: at(-60_000), lastProgressEventAt: at(-1_000), costUsd: "99" });
+  assert.doesNotMatch(cardAt({ baseline: null, latestRun: expensive }), /data-card-badge/u);
+  assert.doesNotMatch(cardAt({ baseline: { ...BASELINE, costUsd: null }, latestRun: expensive }), /data-card-badge/u);
+  assert.doesNotMatch(cardAt({ baseline: BASELINE, latestRun: boardRun({ ...expensive, costUsd: null }) }), /data-card-badge/u);
+});
+
+test("a retried task counts its attempts, and a single run is not a retry", () => {
+  const retried = cardAt({ latestRun: boardRun({ runNumber: 2, maxRunsPerTask: 5 }) });
+  assert.equal(badge(retried, "retries"), en("tasks.badge.retries.title", { n: 2, max: 5 }));
+  assert.match(retried, new RegExp(`>${en("tasks.badge.retries", { n: 2, max: 5 })}<`, "u"));
+  assert.doesNotMatch(cardAt({ latestRun: boardRun({ runNumber: 1 }) }), /data-card-badge/u);
+});
+
+test("a card with nothing to flag carries no badge row at all", () => {
+  // An empty row would still take a meta line's height and gap.
+  assert.doesNotMatch(cardAt(), /data-card-badge/u);
+  assert.doesNotMatch(cardAt({ latestRun: boardRun({ status: "RUNNING", startedAt: at(-60_000) }) }), /data-card-badge/u);
 });
 
 test("a task with no runs still shows the agent's configured model", () => {
@@ -639,7 +832,7 @@ test("a task with no runs still shows the agent's configured model", () => {
 test("an unassigned task with a run still shows the run's model snapshot", () => {
   const markup = card({
     assigneeAgent: null,
-    latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null },
+    latestRun: boardRun(),
   });
   assert.match(markup, /claude-opus-5:medium/);
   assert.match(markup, /aria-label="Model claude-opus-5:medium"/);
@@ -685,7 +878,7 @@ test("a NOW card carries no schedule row, and every informative schedule still d
 test("a card with no runs has no run row, and a card with a run reads exactly as before", () => {
   assert.doesNotMatch(card(), /no runs/);
   const withRun = card({
-    latestRun: { id: "r1", runNumber: 3, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null },
+    latestRun: boardRun({ runNumber: 3 }),
   });
   assert.match(withRun, new RegExp(en("tasks.card.run", { n: 3 })));
   assert.match(withRun, new RegExp(en("status.run.SUCCEEDED")));
@@ -818,6 +1011,26 @@ test("exactly one phone tab is selected and only it is tabbable", () => {
   assert.equal((markup.match(/tabindex="0"/g) ?? []).length, 1);
 });
 
+test("the phone's cards name the phase and carry the same badges", () => {
+  // One `TaskCard` through `PaginatedBoardEntries`, so the phone inherits the
+  // desktop card's live footer and badge row rather than a second rendering.
+  const live = task({
+    status: "DOING",
+    latestRun: boardRun({
+      status: "RUNNING", runNumber: 2, maxRunsPerTask: 5, startedAt: at(-3 * 60_000), phase: "provisioning", phaseSince: at(-20_000),
+    }),
+  });
+  const originalNow = Date.now;
+  Date.now = () => NOW;
+  try {
+    const markup = mobile("DOING", boardEntries([live]));
+    assert.match(markup, /Provisioning · 20s/u);
+    assert.equal(badge(markup, "retries"), en("tasks.badge.retries.title", { n: 2, max: 5 }));
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
 test("the phone's cards are not draggable, and Archive All follows the Done tab", () => {
   // HTML5 drag does not fire on touch; the menu's `Move to` is the replacement.
   assert.doesNotMatch(mobile("TODO", boardEntries([task()])), /draggable="true"/);
@@ -927,7 +1140,7 @@ const chainRow = (options: {
       taskId: options.activationTaskId === undefined ? headId : options.activationTaskId,
       hold: options.hold ?? null,
     },
-    totalCost: null, createdAt: "2026-08-15T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
+    totalCost: null, firstRunStartedAt: null, createdAt: "2026-08-15T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
   };
   return task({
     id: headId, name: `${options.name ?? options.chainId}: Implementation`, displayName: "Implementation", status,

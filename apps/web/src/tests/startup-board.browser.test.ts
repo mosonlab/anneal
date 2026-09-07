@@ -106,7 +106,7 @@ const taskRow = (index: number): BoardTask => ({
   status: "DONE", failureReason: null, scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
   chainName: null, updatedAt: "2026-08-28T00:00:00.000Z", assigneeAgent: null,
-  moveTargets: [], chainProgress: null, blockedOn: null, latestRun: null, taskCost: null,
+  moveTargets: [], chainProgress: null, blockedOn: null, latestRun: null, taskCost: null, spendCapUsage: null,
   mergeOutcome: null, repairOf: null, budgetRemaining: true, leaseLossRefunds: 0, chainAggregate: null, baseline: null, readinessRequeues: 0, readinessGrants: 0, strandedSalvageBranches: [],
 });
 

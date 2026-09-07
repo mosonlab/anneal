@@ -262,13 +262,44 @@ export type ClaimContract = {
 };
 
 /** The refusal `claimRun` reports instead of a claim, rendered as a 409. */
-export type ClaimRefusal = ClaimRefused | MechanicalContractMismatchRefusal;
+export type ClaimRefusal = ClaimRefused | MechanicalContractMismatchRefusal | DispatchDrainingRefusal;
 
 /** A refusal that carries no evidence beyond its reason. */
 export type ClaimRefused = {
   error: string;
   reason: string;
 };
+
+/** Stable refusal discriminator for every claim refused by a dispatch drain. */
+export const DISPATCH_DRAINING_CODE = "dispatch-draining";
+
+/**
+ * The refusal every claim gets while an auto-deploy's dispatch drain is in
+ * force. It is a statement about the platform, not about any candidate: no
+ * Run is read, no Task is parked, and no budget is consumed, so a runner that
+ * keeps polling through the drain loses nothing but the poll.
+ *
+ * `code` repeats `reason` for the same reason the mismatch refusal does: the
+ * runner branches on the `code` field of the parsed body.
+ */
+export type DispatchDrainingRefusal = {
+  error: string;
+  reason: typeof DISPATCH_DRAINING_CODE;
+  code: typeof DISPATCH_DRAINING_CODE;
+  /** When the drain stops being honoured even if nothing deletes it. */
+  expiresAt: string;
+};
+
+/** The wire form of one in-force dispatch drain, composed once for every claim. */
+export const dispatchDrainingRefusal = (drain: {
+  reason: string;
+  expiresAt: Date;
+}): DispatchDrainingRefusal => ({
+  error: `Dispatch is draining for a pending deploy (${drain.reason})`,
+  reason: DISPATCH_DRAINING_CODE,
+  code: DISPATCH_DRAINING_CODE,
+  expiresAt: drain.expiresAt.toISOString(),
+});
 
 /**
  * The refusal a mechanical claim gets when the two independently released

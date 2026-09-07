@@ -239,7 +239,7 @@ const createParallelReviewHarness = ({
       chainId: chain.chainId,
       branchName,
       implementationTaskId: taskFor("implementation").id,
-      solTaskId: taskFor("sol-findings").id,
+      solTaskId: taskFor("review-findings").id,
       blindTaskId: taskFor("blind-findings").id,
       fixTaskId: taskFor("fixed-implementation").id,
     };
@@ -278,7 +278,7 @@ const createParallelReviewHarness = ({
       branchName,
       revalidationTaskId: taskFor("revalidation").id,
       implementationTaskId: taskFor("implementation").id,
-      solTaskId: taskFor("sol-findings").id,
+      solTaskId: taskFor("review-findings").id,
       blindTaskId: taskFor("blind-findings").id,
       fixTaskId: taskFor("fixed-implementation").id,
     };
@@ -310,7 +310,7 @@ const createParallelReviewHarness = ({
       chainId: chain.chainId,
       branchName,
       implementationTaskId: taskFor("implementation").id,
-      solTaskId: taskFor("sol-findings").id,
+      solTaskId: taskFor("review-findings").id,
       fixTaskId: taskFor("fixed-implementation").id,
       regressionTaskId: taskFor("regression-verification-v2").id,
       readinessTaskId: taskFor("merge-authorization").id,
@@ -374,7 +374,7 @@ const createParallelReviewHarness = ({
       chainId: chain.chainId,
       branchName,
       implementationTaskId: implementation.id,
-      solTaskId: taskFor("sol-findings").id,
+      solTaskId: taskFor("review-findings").id,
       blindTaskId: taskFor("blind-findings").id,
     };
   };
@@ -468,7 +468,7 @@ const createParallelReviewHarness = ({
   });
 
   const reviewOutput = (
-    kind: "sol-findings" | "blind-findings",
+    kind: "review-findings" | "blind-findings",
     findings: CanonicalReviewArtifact["findings"] = [],
   ) => ({
     schemaVersion: 1,
@@ -476,7 +476,7 @@ const createParallelReviewHarness = ({
     reviewedBase: IMPLEMENTATION_BASE,
     reviewedHead: IMPLEMENTATION_HEAD,
     findings,
-    ...(kind === "sol-findings" ? { commandsRun: ["git diff --check"] } : {}),
+    ...(kind === "review-findings" ? { commandsRun: ["git diff --check"] } : {}),
   });
 
   const completeImplementation = async (fixture: DirectFixture | FullFixture | OptionalDirectFixture, runnerId = "implementation-runner"): Promise<Claim> => {
@@ -516,7 +516,7 @@ const createParallelReviewHarness = ({
   const completeReview = async (
     claimed: Claim,
     runnerId: string,
-    kind: "sol-findings" | "blind-findings",
+    kind: "review-findings" | "blind-findings",
     findings: CanonicalReviewArtifact["findings"] = [],
   ) => {
     const result = await complete(claimed, runnerId, {

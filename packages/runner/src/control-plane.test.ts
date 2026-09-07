@@ -8,12 +8,16 @@ import {
 
 import {
   authorityFor,
+  claimRefusedByDispatchDrain,
   ControlPlaneError,
   isEventsRequestTooLarge,
   openRunSession,
   retriableStartupError,
+  type ClaimedTask,
+  type ControlPlane,
   type RunSessionClaim,
 } from "./api.js";
+import { pollForTask } from "./runner.js";
 
 const session = (apiUrl = "http://anneal.test") => openRunSession(
   { apiUrl, runnerToken: "runner-token", apiTimeoutMs: 1000 } as never,
@@ -116,6 +120,24 @@ test("session status refuses a payload that is not the decided answer", async ()
       restore();
     }
   }
+});
+
+test("a dispatch drain is a poll outcome rather than a claim failure", async () => {
+  const drained = new ControlPlaneError(
+    409,
+    JSON.stringify({ error: "Dispatch is draining for a pending deploy (quiet-window-wait-exceeded)", reason: "dispatch-draining", code: "dispatch-draining", expiresAt: new Date(0).toISOString() }),
+    "dispatch-draining",
+  );
+  assert.equal(claimRefusedByDispatchDrain(drained), true);
+  assert.equal(claimRefusedByDispatchDrain(new ControlPlaneError(409, "stale fence")), false);
+  assert.equal(claimRefusedByDispatchDrain(new ControlPlaneError(503, "unavailable", "dispatch-draining")), false);
+
+  const pollWith = (claim: () => Promise<ClaimedTask | null>): Promise<string> =>
+    pollForTask({} as never, { claim } as unknown as ControlPlane);
+  assert.equal(await pollWith(async () => { throw drained; }), "draining");
+  assert.equal(await pollWith(async () => null), "idle");
+  // Every other refusal still reaches the loop's error path.
+  await assert.rejects(pollWith(async () => { throw new ControlPlaneError(409, "stale fence"); }), /Anneal API 409/u);
 });
 
 test("an events envelope never carries a provider conversation id past its cap", async () => {

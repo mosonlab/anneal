@@ -109,6 +109,7 @@ const expectedRoutes = [
   "POST /tasks/:taskId/chain/hold",
   "POST /tasks/:taskId/chain/resume",
   "POST /tasks/:taskId/merge-tail/repair",
+  "POST /tasks/:taskId/merge-tail/rerun",
   "PATCH /tasks/:taskId",
   "DELETE /tasks/:taskId/chain",
   "DELETE /tasks/:taskId",

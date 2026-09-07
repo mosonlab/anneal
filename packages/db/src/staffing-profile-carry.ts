@@ -67,6 +67,8 @@ export type StaffingProfileCarryTarget = Readonly<{ outputKind: string; optional
  * `targetSteps` is the new graph, in step order. Entries that match nothing are
  * dropped and reported; profile names, default membership and the surviving
  * entries' assignees are carried unchanged.
+ * `renamedKinds` is supplied only by the canonical installer for registered
+ * output-kind renames; exact matches still own their destination first.
  *
  * `include` is carried against the *target's* optionality, not the source's
  * (R3): a step that became optional gains the default opinion `true`, one that
@@ -76,6 +78,7 @@ export type StaffingProfileCarryTarget = Readonly<{ outputKind: string; optional
 export const planStaffingProfileCarry = (
   profiles: readonly StaffingProfileCarrySource[],
   targetSteps: readonly StaffingProfileCarryTarget[],
+  renamedKinds: Readonly<Record<string, string>> = {},
 ): StaffingProfileCarryPlan => {
   const targetOutputKinds = targetSteps.map((step) => step.outputKind);
   const optionalTargets = new Set(targetSteps.filter((step) => step.optional).map((step) => step.outputKind));
@@ -105,7 +108,10 @@ export const planStaffingProfileCarry = (
         entries.push(carryEntry(entry, entry.outputKind));
         continue;
       }
-      const sameBase = byBase.get(staffingOutputKindBase(entry.outputKind)) ?? [];
+      const renamedKind = renamedKinds[entry.outputKind];
+      const sameBase = renamedKind !== undefined
+        ? targetOutputKinds.filter((kind) => kind === renamedKind)
+        : byBase.get(staffingOutputKindBase(entry.outputKind)) ?? [];
       const candidates = sameBase.filter((kind) => !claimed.has(kind));
       if (candidates.length === 1) {
         claimed.add(candidates[0]!);

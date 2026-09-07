@@ -1,5 +1,6 @@
 import {
   PR_TEMPLATE_NAME,
+  canonicalTemplateIdentity,
   executionModeFor,
   isMergeExecutorRunnerId,
   loadIntegratorTask,
@@ -84,7 +85,7 @@ const prDeliveryStage = (task: {
 }): PrHandoffStage | null => {
   if (typeof task.chainId !== "string" || task.chainId.trim().length === 0) return null;
   if (task.chainIndex === null || !Number.isInteger(task.chainIndex) || task.chainIndex <= 0) return null;
-  if (task.templateStep?.taskTemplate?.name !== PR_TEMPLATE_NAME) return null;
+  if (!task.templateStep || canonicalTemplateIdentity(task.templateStep.taskTemplate.name)?.canonicalName !== PR_TEMPLATE_NAME) return null;
   if (task.templateStep.outputKind === "implementation") return "implementation";
   return task.templateStep.outputKind === "fixed-implementation" ? "final" : null;
 };
@@ -122,7 +123,7 @@ const prHandoffFor = async (
       chainIndex: stage === "implementation" ? task.chainIndex! : { lte: task.chainIndex! },
       templateStep: {
         outputKind: { in: [...PR_HANDOFF_KINDS] },
-        taskTemplate: { name: PR_TEMPLATE_NAME },
+        taskTemplate: { name: task.templateStep!.taskTemplate.name },
       },
       stepOutput: stage === "implementation"
         ? { is: { runId, kind: "implementation" } }
@@ -138,10 +139,16 @@ const prHandoffFor = async (
     select: {
       id: true,
       chainIndex: true,
+      templateStep: { select: { outputKind: true } },
       stepOutput: { select: { kind: true, body: true, commitSha: true } },
     },
   });
 
+  for (const row of rows) {
+    if (row.stepOutput && row.stepOutput.kind !== row.templateStep?.outputKind) {
+      return { case: "incomplete", reason: `canonical PR output kind does not match the producing Step for Task ${row.id}` };
+    }
+  }
   return decidePrHandoff(
     { taskId: task.id, chainIndex: task.chainIndex!, stage },
     rows.map((row) => ({

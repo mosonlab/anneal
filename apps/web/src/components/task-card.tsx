@@ -1,15 +1,18 @@
 import { type ReactNode, memo, useEffect, useState } from "react";
 
 import { chainPositionMarker } from "../lib/chain";
-import { duration, money, timeAgo, usageCostAmount, usageCostLabel } from "../lib/format";
-import { chainBinding, chainBindingLabel, retryable, runLiveness, scheduleLabel, statusLabel } from "../lib/board";
+import { duration, formatT, money, timeAgo, usageCostAmount, usageCostLabel } from "../lib/format";
+import {
+  type CardBadge, STALLED_AFTER_MS, cardBadges, chainBinding, chainBindingLabel, retryable, scheduleLabel,
+  statusLabel,
+} from "../lib/board";
 import { type Translate, useT } from "../lib/i18n";
-import type { BoardTask, TaskStatus } from "../lib/types";
+import type { BoardLatestRun, BoardTask, TaskStatus } from "../lib/types";
 import { cn } from "../lib/utils";
 import { BoardCardShell, CardPullRequest } from "./board-card-shell";
 import { IconRobot, IconUser } from "./icons";
 import { RunLine } from "./run-line";
-import { Pill, ROW, type RowMenuEntry } from "./ui";
+import { Pill, type PillTone, ROW, type RowMenuEntry } from "./ui";
 
 const TASK_PILL = "py-0";
 
@@ -77,25 +80,79 @@ export const cardTime = (task: BoardTask, now = Date.now()): string => {
   const run = task.latestRun;
   if (!run) return timeAgo(task.updatedAt);
   // A live run says so with the run line's amber dot; the footer is left with
-  // the one thing the dot cannot say, which is how long it has been running.
-  const { elapsedSince } = runLiveness(run);
-  if (elapsedSince !== null) return duration(elapsedSince, null, now);
+  // what the dot cannot say, which is where the run is and how long it has been
+  // there. A missing phase start is unknown, never a zero.
+  if (run.phase !== "finished") {
+    const phase = formatT(`tasks.phase.${run.phase}`);
+    return run.phaseSince === null ? phase : `${phase} · ${duration(run.phaseSince, null, now)}`;
+  }
   if (run.startedAt !== null && run.endedAt !== null) {
     return `${duration(run.startedAt, run.endedAt)} · ${timeAgo(task.updatedAt)}`;
   }
   return timeAgo(task.updatedAt);
 };
 
-/** Only the changing text owns a clock. Memoized inactive cards never wake. */
-export const RunningCardTime = ({ task }: { task: BoardTask }): ReactNode => {
+/** Only the changing footer and badge leaves own clocks. Cleanup can remain
+ * active after Run status becomes terminal; the projected phase owns time. */
+const useLiveNow = (run: BoardLatestRun | null): number => {
+  const live = run !== null && run.phase !== "finished";
+  const since = run?.phaseSince ?? null;
   const [now, setNow] = useState(Date.now);
   useEffect(() => {
+    if (!live) return undefined;
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, [task.latestRun?.startedAt]);
-  return <>{cardTime(task, now)}</>;
+  }, [live, since]);
+  return now;
 };
+
+/** What each badge says, and the tone it says it in: amber where a runner is
+ *  still owed something, grey for the inert count of attempts. */
+const badgeCopy = (badge: CardBadge, t: Translate): { tone: PillTone; label: string; title: string } => {
+  switch (badge.kind) {
+    case "stalled":
+      return {
+        tone: "amber",
+        label: t("tasks.badge.stalled"),
+        title: t("tasks.badge.stalled.title", { minutes: STALLED_AFTER_MS / 60_000 }),
+      };
+    case "over-baseline":
+      return {
+        tone: "amber",
+        label: t("tasks.badge.overBaseline"),
+        title: t("tasks.badge.overBaseline.title", { metric: t(`tasks.badge.metric.${badge.metric}`), n: badge.sampleSize }),
+      };
+    case "retries":
+      return {
+        tone: "grey",
+        label: t("tasks.badge.retries", { n: badge.n, max: badge.max }),
+        title: t("tasks.badge.retries.title", { n: badge.n, max: badge.max }),
+      };
+  }
+};
+
+const CardTime = memo(({ task }: { task: BoardTask }): ReactNode => {
+  // Locale changes must also reach this memoized leaf.
+  useT();
+  const now = useLiveNow(task.latestRun);
+  return cardTime(task, now);
+});
+
+const CardBadges = memo(({ task }: { task: BoardTask }): ReactNode => {
+  const t = useT();
+  const now = useLiveNow(task.latestRun);
+  const badges = cardBadges(task, now);
+  if (badges.length === 0) return null;
+  return <span data-card-badges="" className="contents">
+    {badges.map((badge) => {
+      const copy = badgeCopy(badge, t);
+      return <span key={badge.kind} data-card-badge={badge.kind} title={copy.title}>
+        <Pill tone={copy.tone} className={TASK_PILL}>{copy.label}</Pill>
+      </span>;
+    })}
+  </span>;
+});
 
 const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry[] => {
   const targets = task.moveTargets;
@@ -123,9 +180,9 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
   const hasScheduleRow = schedule !== null || task.approvalGate || task.source === "CRON" || task.source === "WEBHOOK";
   const model = cardModel(task);
   const modelLine = model === null ? null : cardModelFast(task, model);
-  // The footer owns this card's clock, so the run line never renders one and
-  // never repeats the RUNNING word beside it.
-  const elapsedSince = task.latestRun === null ? null : runLiveness(task.latestRun).elapsedSince;
+  // The footer owns this card's clock and names the phase beside it, so the run
+  // line (`elapsed="caller"`) never renders one and never repeats the phase
+  // word above it.
   const taskCostLabel = usageCostLabel(task.taskCost);
   const hasTokenFallback = task.taskCost !== null && task.taskCost.costUsd === null;
   // The task's own total where there is one, and the newest run's spend where
@@ -184,6 +241,10 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
     ...(task.latestRun === null ? [] : [
       <RunLine run={task.latestRun} mergeOutcome={task.mergeOutcome} elapsed="caller" />,
     ]),
+    // What is wrong with the newest run, where anything is. Nothing renders on
+    // unknown data: `cardBadges` owns which absences are unknown rather than
+    // fine, and the hover text names the figure each badge was read against.
+    <CardBadges task={task} />,
     /* A readiness Step that was sent back to Regression looks, from the rest of
        the merge-tail line, like any other rerun. The pill is what says the
        reruns were the base moving under an authorized candidate, and how many
@@ -220,7 +281,7 @@ const TaskCardBody = ({ task, actions, draggable = false }: CardProps): ReactNod
       <span className="flex-1" />
       <span className="whitespace-nowrap">
         {costAmount === null ? null : `${costAmount} · `}
-        {elapsedSince === null ? cardTime(task) : <RunningCardTime task={task} />}
+        <CardTime task={task} />
       </span>
   </>;
   const after = hasTokenFallback ? (

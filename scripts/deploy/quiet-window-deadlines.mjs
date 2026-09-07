@@ -91,6 +91,23 @@ export const quietWindowWaitBudgetMs = (environment = process.env) => {
   return minutes(Number(text));
 };
 
+/** How long a dispatch drain opened by an over-budget wait stays in force
+ * without the deploy that opened it. The deploy deletes its own row on every
+ * exit path; this deadline only bounds the row a killed deploy process leaves
+ * behind, so it is generous compared with a deploy and short compared with a
+ * working day. */
+export const DEFAULT_DISPATCH_DRAIN_DEADLINE_MS = minutes(120);
+
+export const dispatchDrainDeadlineMs = (environment = process.env) => {
+  const configured = environment?.DISPATCH_DRAIN_DEADLINE_MINUTES;
+  if (configured === undefined || configured === "") return DEFAULT_DISPATCH_DRAIN_DEADLINE_MS;
+  const text = String(configured);
+  if (!/^[0-9]+$/u.test(text) || Number(text) < 1 || Number(text) > 1440) {
+    throw new DeployFailure("environment-invalid", `DISPATCH_DRAIN_DEADLINE_MINUTES-${text}`);
+  }
+  return minutes(Number(text));
+};
+
 /** Blocking Runs counted by the runner that owns them. The control-plane
  * quiet-window query is database-wide, so these counts name runner-only hosts
  * as well as the deploying host. */

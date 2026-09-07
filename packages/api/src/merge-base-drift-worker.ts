@@ -426,7 +426,18 @@ const queueRecovery = async (
   // Validation refusals remain visible aggregate rows but do not consume the
   // two executor-drift attempts. Historical TaskActivity rows are deliberately
   // ignored: the migration has no backfill, so absence here means zero.
-  const attempts = await recoveryAllowanceSpent(tx, aggregate);
+  //
+  // The unit is the stop, not the row: automatic validation opens exactly one
+  // row per source stop, while an operator rerun
+  // (`POST /tasks/:taskId/merge-tail/rerun`) opens a further row for a stop
+  // already counted here. Counting rows would let a rerun of a host-caused
+  // gate FAIL spend an automatic recovery the branch never used.
+  // External integrator replays are separate execution charges, so keep those
+  // in the shared allowance while collapsing operator-rerun rows to one
+  // automatic recovery charge per prior source stop.
+  const attempts = await recoveryAllowanceSpent(tx, aggregate, {
+    excludeSourceStopId: expected.stopId,
+  });
   const decision = classifyDurable({
     expected,
     candidateDecision: classifyCandidate(candidateFacts),
@@ -550,12 +561,15 @@ const addTickDelta = (result: BaseDriftRecoveryTickResult, delta: RecoveryTickDe
 export const recoveryAllowanceSpent = async (
   tx: Prisma.TransactionClient,
   identity: MergeRecoveryAttempt,
+  options: { excludeSourceStopId?: string } = {},
 ): Promise<number> => {
   const rows = await tx.mergeRecoveryAttempt.findMany({ where: {
     integratorTaskId: identity.integratorTaskId, repository: identity.repository,
     prNumber: identity.prNumber, targetBranch: identity.targetBranch,
-  }, select: { recoveryRunId: true, externalReplayCount: true } });
-  return rows.reduce((total, row) => total + (row.recoveryRunId ? 1 : 0) + row.externalReplayCount, 0);
+    ...(options.excludeSourceStopId ? { sourceStopId: { not: options.excludeSourceStopId } } : {}),
+  }, select: { sourceStopId: true, recoveryRunId: true, externalReplayCount: true } });
+  const spentStops = new Set(rows.filter((row) => row.recoveryRunId !== null).map((row) => row.sourceStopId));
+  return spentStops.size + rows.reduce((total, row) => total + row.externalReplayCount, 0);
 };
 
 /** Resume releases the Hold; this worker consumes the aggregate intent under a

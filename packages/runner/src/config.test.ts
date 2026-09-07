@@ -336,6 +336,27 @@ test("the runner accepts only a bounded positive local gate slot count", () => {
   }
 });
 
+test("the runner takes the primary gate slot count only as 1 or 2", () => {
+  const previous = process.env.RUNNER_GATE_PRIMARY_SLOTS;
+  try {
+    delete process.env.RUNNER_GATE_PRIMARY_SLOTS;
+    assert.equal(loadRunnerConfig().gatePrimarySlots, 2);
+
+    for (const [raw, expected] of [["1", 1], ["2", 2]] as const) {
+      process.env.RUNNER_GATE_PRIMARY_SLOTS = raw;
+      assert.equal(loadRunnerConfig().gatePrimarySlots, expected);
+    }
+
+    for (const raw of ["", "0", "3", "-1", "1.5", "2slots", " 2", "2 "]) {
+      process.env.RUNNER_GATE_PRIMARY_SLOTS = raw;
+      assert.throws(loadRunnerConfig, /RUNNER_GATE_PRIMARY_SLOTS must be 1 or 2/u);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.RUNNER_GATE_PRIMARY_SLOTS;
+    else process.env.RUNNER_GATE_PRIMARY_SLOTS = previous;
+  }
+});
+
 test("the tool inactivity deadline defaults to 30 minutes and rejects unsafe values", () => {
   const previous = process.env.RUNNER_TOOL_DEADLINE_MS;
   try {

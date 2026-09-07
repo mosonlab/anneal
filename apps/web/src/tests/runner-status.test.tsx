@@ -25,6 +25,7 @@ const payload = (overrides: Partial<RunnersResponse> = {}): RunnersResponse => (
     { runner: "CODEX", cliVersion: "0.147.0", authMode: "chatgpt", lastPreflightAt: now.toISOString(), lastPreflightOk: true, circuitOpen: false, circuitReason: null },
     { runner: "PI", cliVersion: null, authMode: null, lastPreflightAt: null, lastPreflightOk: null, circuitOpen: null, circuitReason: null },
   ],
+  dispatchDrain: null,
   ...overrides,
 });
 
