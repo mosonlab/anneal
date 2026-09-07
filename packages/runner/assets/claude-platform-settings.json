@@ -13,5 +13,6 @@
         ]
       }
     ]
-  }
+  },
+  "disableAllHooks": false
 }

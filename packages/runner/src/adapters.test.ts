@@ -429,6 +429,7 @@ test("Claude excludes host settings and auto-memory with the versioned platform 
   assert.equal(claude[settingsIndex + 1], claudePlatformSettingsPath());
   const settings = JSON.parse(await readFile(claude[settingsIndex + 1]!, "utf8"));
   assert.equal(settings.autoMemoryEnabled, false);
+  assert.equal(settings.disableAllHooks, false, "platform settings override project/local hook disabling");
   assert.equal(settings.hooks.PreToolUse[0].matcher, "^(Agent|Task)$");
   assert.equal(settings.hooks.PreToolUse[0].hooks[0].type, "command");
   const prompt = buildPrompt({ ...claim, runner: "CLAUDE" });
