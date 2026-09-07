@@ -519,6 +519,7 @@ export type RunBirthTask = Omit<RunBranchTask, "repo"> & { repo: { defaultBranch
  *  applies, which ref this Run would own, and what its predecessor carried. */
 export type RunBirth = {
   intent: OpenRunIntent["kind"];
+  repairStartHeadSha?: string;
   runNumber: number;
   prior: { branch: string | null; targetBranch: string | null; runNumber: number } | null;
 };
@@ -776,6 +777,11 @@ export const resolveRunBranches = async (
   birth: RunBirth,
 ): Promise<{ branch: string | null; targetBranch: string | null }> => {
   const { intent, prior } = birth;
+  // A failed no-result repair retries the recorded clean start, even when its
+  // prior session published a partially resolved salvage tree.
+  if (intent === "retry-after-completion" && birth.repairStartHeadSha) {
+    return { branch: prior?.branch ?? task.targetBranch, targetBranch: birth.repairStartHeadSha };
+  }
   // A Task with no Repo publishes nothing, so there is no head to declare; it
   // carries its predecessor's columns forward untouched.
   if (!task.repo) {
@@ -874,6 +880,7 @@ export type OpenRunIntent =
     sourceRunId: string;
     sourceMaxRunsPerTask: number;
     sourceBudgetGrants: number;
+    repairStartHeadSha?: string;
     budgetGrant: 0 | 1;
   }
   | {
@@ -1269,10 +1276,12 @@ export const openRun = async (
     }
   }
 
-  // Every intent asks the same module, so no arm can put a Step on a different
-  // branch from the rest of its Chain, and no caller has to fill in a head.
+  // Every intent asks the same module. A no-result repair retry supplies its
+  // recorded start; other intents derive their base from publication evidence.
   const branches = await resolveRunBranches(tx, task, {
     intent: intent.kind,
+    ...(intent.kind === "retry-after-completion" && intent.repairStartHeadSha
+      ? { repairStartHeadSha: intent.repairStartHeadSha } : {}),
     runNumber,
     prior: prior ?? null,
   });

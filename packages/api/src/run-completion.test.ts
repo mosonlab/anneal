@@ -239,6 +239,7 @@ const statefulCompletionHarness = (
   persistedOutput: Record<string, unknown> | null = null,
 ) => {
   const activities: RecordedActivity[] = [];
+  const queuedRuns: Record<string, unknown>[] = [];
   const closedRuns = new Map<string, Record<string, unknown>>();
   const taskUpdates: Record<string, unknown>[] = [];
   const archivedAt = new Date("2026-08-16T06:00:00.000Z");
@@ -271,11 +272,12 @@ const statefulCompletionHarness = (
         closedRuns.set(currentRun.id, { ...currentRun });
         return { count: 1 };
       },
-      create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "unexpected-retry", ...data }),
+      create: async ({ data }: { data: Record<string, unknown> }) => { queuedRuns.push(data); return { id: "retry-run", ...data }; },
     },
     agent: { findUnique: async () => task.assigneeAgent },
     session: { update: async () => ({}) },
     task: {
+      update: async ({ data }: { data: Record<string, unknown> }) => { taskUpdates.push(data); return data; },
       updateMany: async ({ data }: { data: Record<string, unknown> }) => {
         taskUpdates.push(data);
         Object.assign(task, data);
@@ -298,7 +300,7 @@ const statefulCompletionHarness = (
       create: async ({ data }: { data: RecordedActivity }) => { activities.push(data); return data; },
     },
     runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }), update: async () => ({}) },
-    inboxMessage: { create: async () => ({}) },
+    inboxMessage: { create: async () => ({}), upsert: async () => ({}) },
   };
   const database = {
     $transaction: async (operation: (client: unknown) => Promise<unknown>) => operation(tx),
@@ -349,7 +351,7 @@ const statefulCompletionHarness = (
     return closedRuns.get(currentRun.id)!;
   };
 
-  return { activities, complete, taskUpdates };
+  return { activities, complete, taskUpdates, queuedRuns };
 };
 
 for (const state of ["settled", "aborted"]) {
@@ -775,6 +777,47 @@ for (const outputKind of ["regression-verification", "regression-verification-v2
       });
       assert.equal(closed.failureClass, FailureClass.PROTOCOL_ERROR);
       assert.equal(harness.activities.some((activity) => activity.metadata?.failureReason === reason), reportHead);
+    });
+  }
+}
+
+for (const repairKind of ["refresh-conflict", "review-fix", "gate-fix"]) {
+  for (const scenario of ["remaining", "exhausted", "result", "prior-result", "result-marker"] as const) {
+    test(`failed ${repairKind} repair session: ${scenario}`, async () => {
+      const harness = statefulCompletionHarness({
+        opensPullRequest: false, maxSessionsPerTask: 2,
+        assigneeAgent: { id: "agent-1", name: "Repair agent", archivedAt: null },
+      }, scenario.endsWith("result") ? { runId: scenario === "result" ? "run-1" : "older-run", body: "result" } : null);
+      harness.activities.push({ taskId: "task-refunds", actorType: "control-plane", body: "Repair opened",
+        metadata: { kind: "mergeTail.repairAttempt", schemaVersion: 1, state: "opened",
+          regressionTaskId: "parent-regression", repairTaskId: "task-refunds", repairKind,
+          headSha: baseSha, baseHeadSha: "6".repeat(40) },
+      });
+      if (scenario === "result-marker") {
+        harness.activities.push({ taskId: "task-refunds", actorType: "control-plane", body: "Repair result recorded",
+          metadata: { kind: "mergeTail.repairResult", schemaVersion: 1, runId: "run-1", repairKind },
+        });
+      }
+      await harness.complete({
+        runNumber: scenario === "exhausted" ? 2 : 1, maxRunsPerTask: 2, budgetGrants: 0,
+        outcome: { case: "provider-failure", reason: "resolver crashed", envelope: {
+          version: 1, phase: "EXECUTE", agentExited: true, exitCode: 1, signal: null,
+          terminationReason: null, timedOut: false, timeoutMs: null, transient: false,
+          runnerClass: FailureClass.TASK_FAILED, providerError: null,
+          stderrSummary: "resolver crashed", stdoutSummary: null, terminalEventSeen: true, terminalSuccess: false,
+        } },
+      });
+      const retries = scenario === "remaining" || scenario === "prior-result";
+      assert.equal(harness.queuedRuns.length, retries ? 1 : 0);
+      assert.equal(harness.activities.some(({ body }) => body === "merge-tail repair Run 1 failed before a result; Run 2 queued"), retries);
+      if (retries) {
+        assert.equal(harness.queuedRuns[0]!.maxRunsPerTask, 2);
+        assert.equal(harness.queuedRuns[0]!.budgetGrants, 0);
+        assert.equal(harness.queuedRuns[0]!.leaseLossRefunds, 0);
+        assert.equal(harness.taskUpdates.some((update) => update.status === "REVIEW"), false);
+      } else {
+        assert.ok(harness.taskUpdates.some((update) => String(update.failureReason).includes("failed without closing the repair")));
+      }
     });
   }
 }

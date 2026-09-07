@@ -2387,7 +2387,7 @@ failed: <message>` reason and no refusal code.
 ### Recovering a merge tail stopped after its repair budget
 
 An automatic merge-tail repair Run (`refresh-conflict`, `review-fix`, or
-`gate-fix`) that fails before writing its `repairResult` consumes one session
+`gate-fix`) that fails before recording its result consumes one session
 of that detached repair Task's `maxSessionsPerTask` budget. For a
 `task-failed` Run, when another session remains, the platform queues the next
 Run of the same repair Task automatically against the recorded start head and
