@@ -75,6 +75,17 @@ export const applyRevalidationRoute = async (
       const grant = agent && !agent.archivedAt && agent.projectId === source.projectId && implementation.repoId
         ? await lockAgentRepoGrant(tx, { projectId: source.projectId, agentId: agent.id, repoId: implementation.repoId })
         : false;
+      if (grant) {
+        // Unlike presence alone, write permission is mutable without deleting
+        // the grant; hold it against a concurrent permission downgrade too.
+        await tx.$queryRaw`
+          SELECT "agentId" FROM "AgentRepoAccess"
+          WHERE "projectId" = ${source.projectId}
+            AND "agentId" = ${candidate.id}
+            AND "repoId" = ${implementation.repoId}
+          FOR SHARE
+        `;
+      }
       const writable = grant && await tx.agentRepoAccess.findFirst({
         where: { projectId: source.projectId, agentId: candidate.id, repoId: implementation.repoId!, permissions: RepoPermission.GIT_WRITE },
         select: { agentId: true },
