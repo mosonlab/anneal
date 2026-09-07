@@ -54,6 +54,11 @@ written.
   stop notices, and an approval decision still closes the gate's sibling cards.
 - The retired `goal-5a0` authorization-marker harness and root
   `test:dependency-gate` script are removed.
+- The runner no longer writes or reads the `.agentos/task-output-receipt.json`
+  delivery receipt, and the `POST_DELIVERY_DISCONNECT_ACCEPTED` event no longer
+  carries its `localReceipt` and `localReceiptReadError` diagnostics. The
+  server-returned output identity alone authorizes that recovery, which is
+  unchanged; the receipt was diagnostic evidence only.
 - Removed the completed one-shot database backfill and post-delivery audit
   CLIs and their root aliases; upgrades from pre-backfill versions are not
   supported. The unused root `db:export-goal-lineage` and

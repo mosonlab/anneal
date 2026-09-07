@@ -343,11 +343,7 @@ const deliveredResult = (root: string): RunOutputEvidence => outputEvidence({
 const succeedingAgentThatSignalsExit = (sentinel: string): string =>
   succeedingAgent.replace(/exit 0$/u, `touch ${sentinel}\nexit 0`);
 
-const streamLostAfterDeliveryAgent = (
-  output: "matching" | "mismatched" | "missing" | "protected",
-  exitCode = 0,
-  stderr = "",
-): string => [
+const streamLostAfterDeliveryAgent = (exitCode = 0, stderr = ""): string => [
   "#!/bin/sh",
   'case "$1" in',
   '  --version) echo "1.2.3-stub"; exit 0 ;;',
@@ -356,12 +352,6 @@ const streamLostAfterDeliveryAgent = (
   "esac",
   "cat > /dev/null",
   ...committedFixtureChange,
-  ...(output === "missing" ? [] : [
-    'head_sha="$(git rev-parse HEAD)"',
-    ...(output === "mismatched" ? [`head_sha="${"a".repeat(40)}"`] : []),
-    'printf \'{"runId":"%s","kind":"result","commitSha":"%s"}\\n\' "$AGENTOS_RUN_ID" "$head_sha" > .agentos/task-output-receipt.json',
-    ...(output === "protected" ? ["chmod 000 .agentos/task-output-receipt.json"] : []),
-  ]),
   ...(stderr ? [`echo ${JSON.stringify(stderr)} >&2`] : []),
   `exit ${exitCode}`,
 ].join("\n");
@@ -1246,7 +1236,7 @@ for (const fixture of explicitTerminalFailureFixtures) {
     try {
       const remote = await seedRemote(root);
       const agentBinary = join(root, "agent.sh");
-      await writeFile(agentBinary, streamLostAfterDeliveryAgent("matching"));
+      await writeFile(agentBinary, streamLostAfterDeliveryAgent());
       await chmod(agentBinary, 0o755);
       const controlPlane = createControlPlaneDouble({
         outputStatus: async () => deliveredResult(root),
@@ -1275,12 +1265,12 @@ for (const fixture of explicitTerminalFailureFixtures) {
   });
 }
 
-test("a missing terminal event with matching server output succeeds without a local receipt", async () => {
+test("a missing terminal event with matching server output succeeds", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-output-disconnect-promoted-"));
   try {
     const remote = await seedRemote(root);
     const agentBinary = join(root, "agent.sh");
-    await writeFile(agentBinary, streamLostAfterDeliveryAgent("missing"));
+    await writeFile(agentBinary, streamLostAfterDeliveryAgent());
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
       outputStatus: async () => deliveredResult(root),
@@ -1307,8 +1297,6 @@ test("a missing terminal event with matching server output succeeds without a lo
     assert.match(String(accepted[0]?.payload.commitSha), /^[0-9a-f]{40}$/u);
     assert.equal(accepted[0]?.payload.providerError, null);
     assert.equal(accepted[0]?.payload.terminalEventSeen, false);
-    assert.equal(accepted[0]?.payload.localReceipt, null);
-    assert.match(String(accepted[0]?.payload.localReceiptReadError), /receipt is absent/u);
     const tolerated = controlPlane.activities.find(({ body, metadata }) =>
       metadata.stream === "runner" && body.includes("provider disconnect after delivery was tolerated"));
     assert.ok(tolerated);
@@ -1434,11 +1422,10 @@ test("transport-noise stderr does not suppress post-delivery disconnect promotio
   try {
     const remote = await seedRemote(root);
     const agentBinary = join(root, "agent.sh");
-    await writeFile(agentBinary, streamLostAfterDeliveryAgent(
-      "matching",
-      0,
-      "HTTP 503: connection reset while provider stream disconnected",
-    ));
+    await writeFile(
+      agentBinary,
+      streamLostAfterDeliveryAgent(0, "HTTP 503: connection reset while provider stream disconnected"),
+    );
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
       outputStatus: async () => deliveredResult(root),
@@ -1458,52 +1445,7 @@ test("transport-noise stderr does not suppress post-delivery disconnect promotio
   }
 });
 
-test("a run-as reader includes an otherwise protected receipt in recovery audit", async () => {
-  const root = await mkdtemp(join(tmpdir(), "runner-output-disconnect-run-as-"));
-  try {
-    const remote = await seedRemote(root);
-    await mkdir(join(root, "workspaces"), { recursive: true });
-    const agentBinary = join(root, "agent.sh");
-    await writeFile(agentBinary, streamLostAfterDeliveryAgent("protected"));
-    await chmod(agentBinary, 0o755);
-    const prefixLog = join(root, "run-as.log");
-    const launcher = join(root, "run-as.sh");
-    await writeFile(launcher, [
-      "#!/bin/sh",
-      `printf '%s\\n' "$*" >> ${JSON.stringify(prefixLog)}`,
-      'case "$*" in',
-      '  *agentos-task-output-receipt*)',
-      '    receipt="$PWD/.agentos/task-output-receipt.json"',
-      `    if [ ! -r "$receipt" ]; then echo protected-receipt >> ${JSON.stringify(prefixLog)}; chmod 600 "$receipt"; fi`,
-      "    ;;",
-      "esac",
-      'exec "$@"',
-    ].join("\n"));
-    await chmod(launcher, 0o755);
-    const controlPlane = createControlPlaneDouble({
-      outputStatus: async () => deliveredResult(root),
-    });
-    const promotedClaim = resultOutputClaim(remote);
-    promotedClaim.run.branch = "configured-delivery";
-    const configured = {
-      ...config(join(root, "workspaces"), agentBinary),
-      runAsPrefix: [launcher],
-    };
-
-    await executeClaim(configured, promotedClaim, { controlPlane: controlPlane.controlPlane });
-
-    const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.outcome.case, "delivered-then-disconnected", JSON.stringify(completion));
-    assert.equal(completion?.pushedBranch, "configured-delivery");
-    const invocations = await readFile(prefixLog, "utf8");
-    assert.match(invocations, /protected-receipt/u, "the receipt started unreadable to the daemon uid");
-    assert.match(invocations, /agentos-task-output-receipt/u, "the receipt read must use runAsPrefix");
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("the real task_output MCP receipt promotes a delivered disconnect", async () => {
+test("a real task_output MCP delivery promotes a delivered disconnect", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-output-disconnect-mcp-"));
   const receivedOutputs: Array<Record<string, unknown>> = [];
   const server = createServer((request, response) => {
@@ -1564,7 +1506,7 @@ test("exit code 0 with no persisted output stays FAILED", async () => {
   try {
     const remote = await seedRemote(root);
     const agentBinary = join(root, "agent.sh");
-    await writeFile(agentBinary, streamLostAfterDeliveryAgent("matching"));
+    await writeFile(agentBinary, streamLostAfterDeliveryAgent());
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
       outputStatus: async () => outputEvidence({ case: "not-required" }),
@@ -1589,7 +1531,7 @@ for (const fixture of rejectedServerIdentityFixtures) {
     try {
       const remote = await seedRemote(root);
       const agentBinary = join(root, "agent.sh");
-      await writeFile(agentBinary, streamLostAfterDeliveryAgent("matching"));
+      await writeFile(agentBinary, streamLostAfterDeliveryAgent());
       await chmod(agentBinary, 0o755);
       const controlPlane = createControlPlaneDouble({
         outputStatus: async () => outputEvidence({ case: "delivered", output: fixture.output(root) }),
@@ -1621,7 +1563,7 @@ test("a tolerance-activity failure does not demote a qualified promotion", async
   try {
     const remote = await seedRemote(root);
     const agentBinary = join(root, "agent.sh");
-    await writeFile(agentBinary, streamLostAfterDeliveryAgent("matching"));
+    await writeFile(agentBinary, streamLostAfterDeliveryAgent());
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
       outputStatus: async () => deliveredResult(root),
@@ -1654,7 +1596,7 @@ test("a failed delivery never claims that its provider disconnect was tolerated"
     const agentBinary = join(root, "agent.sh");
     await writeFile(
       agentBinary,
-      streamLostAfterDeliveryAgent("matching").replace(
+      streamLostAfterDeliveryAgent().replace(
         /\nexit 0$/u,
         "\ngit remote set-url origin /does/not/exist\nexit 0",
       ),
@@ -1683,7 +1625,7 @@ test("output lookup errors preserve the original PROTOCOL_ERROR and are reported
   try {
     const remote = await seedRemote(root);
     const agentBinary = join(root, "agent.sh");
-    await writeFile(agentBinary, streamLostAfterDeliveryAgent("matching"));
+    await writeFile(agentBinary, streamLostAfterDeliveryAgent());
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
       outputStatus: async () => {
@@ -1706,39 +1648,12 @@ test("output lookup errors preserve the original PROTOCOL_ERROR and are reported
   }
 });
 
-test("rewritten local receipt cannot override a mismatched server commit SHA", async () => {
-  const root = await mkdtemp(join(tmpdir(), "runner-output-disconnect-stale-"));
-  try {
-    const remote = await seedRemote(root);
-    const agentBinary = join(root, "agent.sh");
-    await writeFile(agentBinary, streamLostAfterDeliveryAgent("mismatched"));
-    await chmod(agentBinary, 0o755);
-    const controlPlane = createControlPlaneDouble({
-      outputStatus: async () => outputEvidence({
-        case: "delivered",
-        output: { kind: "result", commitSha: "a".repeat(40) },
-      }),
-    });
-
-    await executeClaim(config(join(root, "workspaces"), agentBinary), resultOutputClaim(remote), {
-      controlPlane: controlPlane.controlPlane,
-    });
-
-    const completion = controlPlane.completions.at(-1);
-    assert.equal(completion?.outcome.case, "provider-failure");
-    assert.equal(envelopeOf(completion?.outcome).runnerClass, "PROTOCOL_ERROR");
-    assert.notEqual(completion?.pushedBranch, "master");
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
 test("nonzero exit with persisted output stays FAILED", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-output-disconnect-nonzero-"));
   try {
     const remote = await seedRemote(root);
     const agentBinary = join(root, "agent.sh");
-    await writeFile(agentBinary, streamLostAfterDeliveryAgent("matching", 1));
+    await writeFile(agentBinary, streamLostAfterDeliveryAgent(1));
     await chmod(agentBinary, 0o755);
     const controlPlane = createControlPlaneDouble({
       outputStatus: async () => deliveredResult(root),
@@ -1762,7 +1677,7 @@ test("timeout terminationReason with persisted output stays FAILED", async () =>
   try {
     const remote = await seedRemote(root);
     const agentBinary = join(root, "agent.sh");
-    await writeFile(agentBinary, streamLostAfterDeliveryAgent("matching"));
+    await writeFile(agentBinary, streamLostAfterDeliveryAgent());
     await chmod(agentBinary, 0o755);
     const adapter = {
       ...adapters.CLAUDE,
