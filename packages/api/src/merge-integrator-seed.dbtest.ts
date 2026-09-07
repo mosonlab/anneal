@@ -203,10 +203,18 @@ const rebindFixStepToRetiredSeniorDev = async (projectId: string, templateId: st
 };
 
 /** Rebuild the pre-model-neutral shape that the retired registry identifies. */
-const restoreRetiredReviewStepNames = async (templateId: string): Promise<void> => {
+const restoreRetiredReviewContract = async (templateId: string): Promise<void> => {
+  const steps = await db.taskTemplateStep.findMany({ where: { taskTemplateId: templateId } });
+  for (const step of steps) {
+    await db.taskTemplateStep.update({ where: { id: step.id }, data: {
+      outputKind: step.outputKind === "review-findings" ? "sol-findings" : step.outputKind,
+      priorOutputKinds: step.priorOutputKinds.map((kind) => kind === "review-findings" ? "sol-findings" : kind),
+      prompt: step.prompt.replaceAll("review-findings", "sol-findings").replaceAll("the code review report", "the Sol report"),
+    } });
+  }
   await Promise.all([
     db.taskTemplateStep.updateMany({
-      where: { taskTemplateId: templateId, outputKind: "review-findings" },
+      where: { taskTemplateId: templateId, outputKind: "sol-findings" },
       data: { name: "Code review (Sol)" },
     }),
     db.taskTemplateStep.updateMany({
@@ -374,7 +382,7 @@ test("canonical sync installs the reviewed PR prompt generation while instantiat
   });
   await db.taskTemplateStep.update({ where: { id: fixed.id }, data: { prompt: reviewedPrompt } });
   await rebindFixStepToRetiredSeniorDev(project.id, template.id);
-  await restoreRetiredReviewStepNames(template.id);
+  await restoreRetiredReviewContract(template.id);
   const reviewedSteps = await db.taskTemplateStep.findMany({
     where: { taskTemplateId: template.id },
     include: { assigneeAgent: true },
@@ -459,13 +467,20 @@ test("canonical sync installs the reviewed PR prompt generation while instantiat
       baseFromStepIndex: step.baseFromStepIndex,
     })),
   );
-  // Retired chains keep the old labels; successor labels are checked against source above.
+  // Retired Chains retain exact output contracts as well as labels and prompts.
+  assert.deepEqual(
+    pinnedTasks.map(({ templateStep }) => templateStep?.outputKind),
+    snapshot.map(({ outputKind }) => outputKind),
+  );
   assert.deepEqual(
     pinnedTasks.map(({ templateStep }) => templateStep?.name),
     snapshot.map(({ name }) => name),
   );
   assert.deepEqual(
-    snapshot.map(({ id: _id, prompt: _prompt, name: _name, ...shape }) => shape),
+    snapshot.map(({ id: _id, prompt: _prompt, name: _name, ...shape }) => ({
+      ...shape,
+      outputKind: shape.outputKind === "sol-findings" ? "review-findings" : shape.outputKind,
+    })),
     successor.steps.map((step) => ({
       layer: step.layer,
       outputKind: step.outputKind,
@@ -495,7 +510,7 @@ test("canonical sync rolls quiescent adjudication-era graphs only after active R
       where: { taskTemplateId: template.id },
       data: { provisionDependencies: true },
     });
-    await restoreRetiredReviewStepNames(template.id);
+    await restoreRetiredReviewContract(template.id);
     let historicalSteps = await db.taskTemplateStep.findMany({
       where: { taskTemplateId: template.id },
       include: { assigneeAgent: true },
