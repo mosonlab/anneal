@@ -284,6 +284,9 @@ test("aggregate card renders an active repair line and omits it when no repair i
   const activeText = visibleText(activeMarkup);
   assert.match(activeMarkup, /data-chain-repair=""/u);
   assert.match(activeText, /gate-fix · .*run 3 · gpt-5\.6-sol · high · fast · \d+m/u);
+  // The repair's own row is not on the page, so the aggregate is the one round
+  // the card can count.
+  assert.equal(element(activeMarkup, "[data-chain-repair-rounds]").textContent, "Repairs 1");
 
   const settledMarkup = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate()} />);
   assert.doesNotMatch(settledMarkup, /data-chain-repair=/u);
@@ -437,4 +440,64 @@ test("aggregate Activate starts step zero and keeps a stale-view 4xx visible", a
   } finally {
     await page.dispose();
   }
+});
+
+const HOUR = 60 * 60_000;
+const REPAIR = { chainId: "chain-1", chainName: "Release", repairKind: "gate-fix" };
+const COST = { costUsd: "13.74", estimated: true, inputTokens: null, cachedInputTokens: null, cacheCreationInputTokens: null, outputTokens: null };
+
+/** A chain whose first Step finished a day ago, whose repair is settled, and
+ *  whose frontier is still running: the figures read a day-scale lead time
+ *  from the members and one repair round from its row. */
+const measuredChain = (): { projection: ChainAggregate; rows: BoardTask[] } => {
+  const now = Date.now();
+  const projection = aggregate({
+    totalCost: COST,
+    frontier: {
+      taskId: "step-3", title: "Implement release", status: "DOING",
+      latestRun: runWithTier({ status: "RUNNING", startedAt: new Date(now - 4 * 60_000).toISOString() }),
+      mergeOutcome: null, failureReason: null, position: 3,
+    },
+  });
+  const rows = [
+    chainStep("step-1", 1, "DONE", projection, { latestRun: runWithTier({ startedAt: new Date(now - 26.5 * HOUR).toISOString(), endedAt: new Date(now - 25 * HOUR).toISOString() }) }),
+    task({ id: "fix-1", displayName: "Gate fix", status: "DONE", chainId: projection.chainId, repairOf: REPAIR, latestRun: runWithTier({ startedAt: new Date(now - 10 * HOUR).toISOString(), endedAt: new Date(now - 9 * HOUR).toISOString() }) }),
+    chainStep("step-3", 3, "DOING", projection),
+  ];
+  return { projection, rows };
+};
+
+test("the figures row states the cost, the lead time and the repair rounds from the rows the page holds", () => {
+  const { projection, rows } = measuredChain();
+  const english = renderToStaticMarkup(<ChainAggregateCard aggregate={projection} members={rows} />);
+  const figures = element(english, "[data-chain-figures]");
+  assert.equal(figures.querySelector("[data-chain-lead-time]")?.textContent, "Lead 1d 2h");
+  assert.equal(figures.querySelector("[data-chain-lead-time]")?.getAttribute("title"), translate("en", "tasks.aggregate.leadTime.title"));
+  assert.equal(figures.querySelector("[data-chain-repair-rounds]")?.textContent, "Repairs 1");
+  assert.match(visibleText(english), /\$13\.74 · /u);
+
+  const chinese = renderToStaticMarkup(
+    <LocaleProvider initialLocale="zh"><ChainAggregateCard aggregate={projection} members={rows} /></LocaleProvider>,
+  );
+  assert.equal(element(chinese, "[data-chain-lead-time]").textContent, "历时 1 天 2 小时");
+  assert.equal(element(chinese, "[data-chain-repair-rounds]").textContent, "修复 1");
+});
+
+test("a chain with no repairs carries no repairs pill, and one whose runs never started no lead time", () => {
+  // "Repairs 0" on every card would be noise; the pill is a signal only when
+  // there is a round to report.
+  const { projection, rows } = measuredChain();
+  const unrepaired = renderToStaticMarkup(<ChainAggregateCard aggregate={projection} members={rows.filter((row) => row.repairOf === null)} />);
+  assert.ok(element(unrepaired, "[data-chain-lead-time]"));
+  assert.doesNotMatch(unrepaired, /data-chain-repair-rounds/u);
+  assert.doesNotMatch(unrepaired, /Repairs 0/u);
+
+  // A queued frontier is active but has no start, so the span is unknown, not
+  // "0s" — and with nothing to report, the row itself is absent.
+  const unstarted = aggregate({
+    frontier: { taskId: "step-3", title: "Implement release", status: "DOING", latestRun: runWithTier({ status: "QUEUED" }), mergeOutcome: null, failureReason: null, position: 3 },
+  });
+  const markup = renderToStaticMarkup(<ChainAggregateCard aggregate={unstarted} members={[chainStep("step-3", 3, "DOING", unstarted)]} />);
+  assert.doesNotMatch(markup, /data-chain-figures|data-chain-lead-time/u);
+  assert.doesNotMatch(visibleText(markup), /Lead|0s/u);
 });
