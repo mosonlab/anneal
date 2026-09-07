@@ -780,6 +780,8 @@ const seedPiAuth = async (root: string): Promise<void> => {
 };
 
 const runtimeToolSources = [
+  ["merge-train.sh", "../runtime-tools/merge-train.sh"],
+  ["merge-train.mjs", "../runtime-tools/merge-train.mjs"],
   ["regression-verification.sh", "../runtime-tools/regression-verification.sh"],
   ["gate-worker/gate-dispatch.sh", "../runtime-tools/gate-worker/gate-dispatch.sh"],
   ["gate-worker/lib.sh", "../runtime-tools/gate-worker/lib.sh"],
