@@ -690,7 +690,10 @@ On Linux with the follower installed, adoption is automatic after the control
 plane deploys. Darwin stays manual. The following manual adoption procedure
 remains available for installation and recovery:
 
-1. stop the executor and leave the API running fail closed;
+1. hold the chains queued at merge readiness, then stop the executor and leave
+   the API running fail closed. Readiness authorizes nothing while no executor
+   is online and parks a waiting chain in `REVIEW` after fifteen minutes, so an
+   upgrade window is not a way to drain;
 2. fetch and check out the intended tag or commit in an unprivileged clean
    staging checkout;
 3. install locked dependencies, build, run the merge-executor tests and the

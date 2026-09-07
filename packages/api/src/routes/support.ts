@@ -14,7 +14,7 @@ import {
   SymlinkError,
 } from "../files/store.js";
 import type { SpecificationReader } from "../specification-fidelity.js";
-import { createRunnerRegistry } from "../runners.js";
+import type { RunnerRegistry } from "../runners.js";
 import { appendRunActivity, fencedActivityInput } from "../run-lifecycle.js";
 import type { Principal } from "../auth.js";
 import type { ProjectBootstrapLoaders } from "../project-bootstrap.js";
@@ -34,6 +34,12 @@ export interface LiveAppOptions {
   specificationReader?: SpecificationReader | null;
   /** Source loaders used by POST /projects; injectable for route tests. */
   projectBootstrapLoaders?: Partial<ProjectBootstrapLoaders>;
+  /**
+   * The daemon registry `GET /runners` reports from. The entrypoint passes its
+   * own so the readiness worker reads the same liveness this app records; an
+   * app without one keeps a private registry, as every test app does.
+   */
+  runnerRegistry?: RunnerRegistry;
 }
 
 export type RouteDeps = {
@@ -43,7 +49,7 @@ export type RouteDeps = {
   projectBootstrapLoaders: ProjectBootstrapLoaders;
   releaseChainLease: ReleaseMergeLease;
   readLeaseHolder: MergeLeaseHolderReader;
-  runners: ReturnType<typeof createRunnerRegistry>;
+  runners: RunnerRegistry;
   appendFencedActivity: ReturnType<typeof createAppendFencedActivityHandler>;
 };
 

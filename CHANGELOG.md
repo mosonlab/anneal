@@ -9,6 +9,21 @@ written.
 
 ## Unreleased
 
+- A gate dispatch queued behind other gates no longer gives up while the queue
+  is moving. `GATE_DISPATCH_TIMEOUT_MINUTES` now bounds a queue that makes no
+  progress: each poll reads which process holds each busy slot, and a slot that
+  changes hands restarts the timeout, up to an absolute ceiling of twice the
+  timeout so a dispatch that keeps losing the race for a slot still gives up.
+  `GATE DISPATCH: NO SLOT` (exit 75) now reports either a queue where nothing
+  finished for the whole timeout or one that moved for the whole ceiling without
+  room for this dispatch, and the stderr line above it says which.
+- Editing a chain step's brief after implementation has started no longer parks
+  the chain. A review claim now checks the materialized `.chain/<branch>/spec.md`
+  against the brief the implementer was actually handed instead of against the
+  brief as it reads now, and tells the reviewer, in one line, that the brief was
+  amended after materialization. A `spec.md` rewritten on the branch is still
+  refused, and the refusal says whether the current brief also differs. Adds one
+  migration.
 - Session events are now bounded end to end. A runner holds at most 32 MiB and
   20 000 undelivered events per Run. When it fills, the oldest liveness events —
   streaming deltas, raw provider frames, captured stderr, provider status and
@@ -54,6 +69,9 @@ written.
   stop notices, and an approval decision still closes the gate's sibling cards.
 - The retired `goal-5a0` authorization-marker harness and root
   `test:dependency-gate` script are removed.
+- Removed the `bench-postgres.sh` and `bench-dbtest-concurrency.sh` gate-worker
+  benchmark scripts; gate throughput tuning is closed and the measured ceiling
+  is recorded in operator records outside this repository.
 - The runner no longer writes or reads the `.agentos/task-output-receipt.json`
   delivery receipt, and the `POST_DELIVERY_DISCONNECT_ACCEPTED` event no longer
   carries its `localReceipt` and `localReceiptReadError` diagnostics. The

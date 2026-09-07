@@ -148,7 +148,11 @@ test("a non-settling private-key read is aborted and named within the configured
   assert.deepEqual(result, { ok: false, failure: "private-key-read-failed" });
   assert.equal(readSignal?.aborted, true);
   assert.equal(httpCalls, 0);
-  assert.ok(Date.now() - startedAt < 500);
+  // The bound under test is the 10ms timeoutMs above, and the abort is asserted
+  // directly. This wall clock only says the read was abandoned rather than
+  // awaited, so it is sized for the loaded gate worker rather than an idle host
+  // (CONTRIBUTING.md, "Test timing on the gate worker").
+  assert.ok(Date.now() - startedAt < 30_000);
 });
 
 test("timeout, HTTP, malformed, token, and expiry failures are strict and redact response bodies", async () => {

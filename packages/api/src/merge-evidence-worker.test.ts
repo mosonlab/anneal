@@ -6,6 +6,7 @@ import type { PrismaClient } from "@anneal/db";
 
 import type { PullRequestReader } from "./github-read.js";
 import { startEvidenceWorker } from "./merge-evidence-worker.js";
+import { waitUntil } from "./worker-tick-wait.js";
 
 /**
  * A tick reads GitHub up to three times under an 8 s deadline, which is longer
@@ -38,19 +39,13 @@ test("a second evidence tick is skipped while the first is still in flight", asy
 
   const timer = startEvidenceWorker(db, reader);
   try {
-    await waitFor(() => ticks >= 1, "the evidence worker did not start");
+    await waitUntil(() => ticks >= 1, "the evidence worker did not start");
     await delay(750);
     assert.equal(ticks, 1, "the interval fired repeatedly but only one tick may run at a time");
     releaseFirstTick();
-    await waitFor(() => ticks > 1, "the guard was never cleared, so no later tick ran");
+    await waitUntil(() => ticks > 1, "the guard was never cleared, so no later tick ran");
   } finally {
     releaseFirstTick();
     if (timer) clearInterval(timer);
   }
 });
-
-async function waitFor(predicate: () => boolean, message: string): Promise<void> {
-  const deadline = Date.now() + 10_000;
-  while (!predicate() && Date.now() < deadline) await delay(25);
-  assert.ok(predicate(), message);
-}

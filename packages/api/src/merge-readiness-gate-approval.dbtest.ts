@@ -23,6 +23,7 @@ import {
   type WithMergeLease,
 } from "./merge-lease.js";
 import { evidenceTick } from "./merge-evidence-worker.js";
+import { executorsOnline } from "./merge-executor-daemon-fixture.js";
 import { readinessTick } from "./merge-readiness-worker.js";
 import { claimRun } from "./run-claim.js";
 import { completeRun, completionInput } from "./run-completion.js";
@@ -251,6 +252,7 @@ test("Inbox approval releases gated readiness only after exact-head authorizatio
     5,
     releaseLease,
     runWithMergeLease,
+    executorsOnline,
   );
   assert.deepEqual(tick, { claimed: 1, authorized: 1, requeued: 0, stopped: 0 });
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.DONE);
@@ -348,6 +350,7 @@ test("task PATCH approval shares the Inbox disposition and leaves readiness work
     5,
     releaseLease,
     runWithMergeLease,
+    executorsOnline,
   );
   assert.equal(tick.authorized, 1);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.DONE);
@@ -381,6 +384,7 @@ test("head and base drift after approval requeues regression and opens a fresh e
       5,
       releaseLease,
       runWithMergeLease,
+      executorsOnline,
     );
     assert.deepEqual(drifted, { claimed: 1, authorized: 0, requeued: 1, stopped: 0 });
     assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.TODO);
@@ -483,6 +487,7 @@ test("an old gate authorization cannot release a fresh gate after the state is r
     5,
     releaseLease,
     runWithMergeLease,
+    executorsOnline,
   );
   assert.equal(tick.stopped, 1);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.REVIEW);
@@ -511,6 +516,7 @@ test("a hard-stopped gated readiness tail reopens a fresh gate after regression 
     5,
     releaseLease,
     runWithMergeLease,
+    executorsOnline,
   );
   assert.deepEqual(stopped, { claimed: 1, authorized: 0, requeued: 0, stopped: 1 });
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.REVIEW);
@@ -580,6 +586,7 @@ test("missing or mismatched operator approval stops a gated readiness settlement
       5,
       releaseLease,
       runWithMergeLease,
+      executorsOnline,
     );
     assert.equal(tick.stopped, 1, label);
     const [readiness, regression] = await Promise.all([

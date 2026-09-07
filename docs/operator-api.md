@@ -2217,6 +2217,28 @@ approval and evidence renewal preserve the same refusal evidence.
   template Step metadata is missing, refuses with `400 Bad Request` and
   `Cannot rewrite task brief: <reason>`. Every other task stores `description`
   verbatim.
+- Amending a brief after the implementation Step has materialized the
+  Specification of record into `.chain/<branchName>/spec.md` does not stop the
+  Chain, as long as that Step's Run was claimed by a version that records what
+  it was handed. A review claim checks the file against the brief the
+  implementer was handed — recorded as a digest when its Run was claimed — so a
+  faithful materialization still passes, and every later review Run's prompt
+  carries one line naming the amended task and the time it was amended. The
+  route never rewrites `spec.md` on the branch: the file remains the
+  pre-amendment text, and the amended text stays on the task that was patched.
+  A `spec.md` that differs from what the implementer was handed is still refused
+  with `spec-transcription-mismatch` and parks the review task, whether or not
+  the brief was amended; that refusal also states whether the current brief
+  still matches the materialized specification, which is how tampering on the
+  branch is told apart from an amendment nobody transcribed.
+- A Chain whose implementation Run was claimed before that digest existed, and
+  one whose implementation output was written by hand through
+  `PUT /tasks/:taskId/output`, records no digest: its review claims still
+  compare `spec.md` against the brief as it reads now, so amending that brief
+  still refuses the claim with `spec-transcription-mismatch` and parks the
+  review task, and the refusal carries no clause about the brief's standing.
+  Recovery is unchanged: rewrite `spec.md` on the branch to the amended text,
+  `PUT` the implementation output's `headSha`, and restart each review Step.
 - A `maxSessionsPerTask` or `description` change is recorded as an operator
   TaskActivity naming the budget's previous and new value, or stating that the
   prompt was edited. The prompt text itself is not copied into the activity.
@@ -2458,6 +2480,35 @@ Response fields:
   "events": []
 }
 ```
+
+### Readiness authorization and merge executor liveness
+
+Merge readiness writes an authorization only while a merge executor can claim
+it. Before the leased `authorize` decision is applied, readiness checks the
+runner ids in `MERGE_EXECUTOR_RUNNER_IDS` against the same daemon liveness
+`GET /runners` reports: at least one of them must be `online`. If none is,
+nothing is authorized and no Merge Lease is taken; readiness settles as a
+requeue of itself, leaving the regression evidence and its Run untouched, and
+writes a TaskActivity on the readiness task with `metadata.state =
+"requeued-executor-offline"`, `metadata.reason = "merge-executor-offline"` and
+the executor runner ids it checked. The next tick asks again.
+
+That wait is bounded by the 15 minutes after which the registry forgets a
+daemon altogether, and it is measured per outage: the wait starts at the first
+skipped authorization of the outage the chain is currently in, not at the first
+one this task ever recorded. An outage ends when readiness observes it ending --
+the next tick that finds an executor online, settles the Step some other way, or
+stops at the ceiling -- and never merely because time passed between two skipped
+authorizations, so `MERGE_READINESS_POLL_INTERVAL_MS` cannot lengthen or reset
+the wait. An executor still offline at the ceiling stops the tail like any
+other readiness stop: the regression and readiness tasks move to `REVIEW` with
+a `failureReason` naming `merge-executor-offline` and the runner ids. Recover by bringing the executor back and calling
+`POST /tasks/:taskId/retry`.
+
+An empty allowlist is unchanged behaviour: with `MERGE_EXECUTOR_RUNNER_IDS`
+unset no executor is named, the check is skipped, and readiness authorizes as
+before. An executor that is offline stops new authorizations by itself; drain
+by holding chains, not by stopping the executor.
 
 ## Inbox
 
