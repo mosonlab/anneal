@@ -503,7 +503,7 @@ test("enqueueTaskRun rejects archived agents with a name-recognisable typed erro
 test("enqueueTaskRun preserves the precise archived-assignee refusal for a compound executioner", async () => {
   const archivedAt = new Date();
   const executioner = runAgent({
-    name: "plan-executor-astra-medium",
+    name: "plan-executor-astra-low",
     archivedAt,
   });
   const tx = {
@@ -548,7 +548,7 @@ test("enqueueTaskRun preserves the precise archived-assignee refusal for a compo
   assert.ok(error instanceof ArchivedAssigneeError);
   assert.equal(
     error.message,
-    "Task Implementation assignee plan-executor-astra-medium is archived; unarchive the agent to queue this step",
+    "Task Implementation assignee plan-executor-astra-low is archived; unarchive the agent to queue this step",
   );
 });
 

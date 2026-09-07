@@ -693,7 +693,7 @@ test("the latest run carries its own claimed model, not the assignee's current o
   // The board card labels the run line with this; a re-tiered agent must not
   // relabel a run that already happened.
   const card = boardCard(row({
-    assigneeAgent: { id: "a1", title: "merge-resolver-opus-medium", model: "gpt-5.6-sol:high", archivedAt: null },
+    assigneeAgent: { id: "a1", title: "merge-resolver-luna-max", model: "gpt-5.6-sol:high", archivedAt: null },
     runs: [{ id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, readyAt: RUN_READY, createdAt: RUN_READY, startedAt: null, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5, session: null }],
   }), null, moveContext);
   assert.equal(card.latestRun?.model, "claude-opus-5:medium");

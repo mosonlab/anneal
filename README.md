@@ -95,13 +95,13 @@ different models stay distinguishable at a glance.
 | 1 | Write a spec | `spec-opus-high` | Turns the task into the specification of record | Claude | Claude Opus 5 · high |
 | 2 | Plan | `plan-fable-medium` | Cuts the spec into parallel vertical tracer-bullet slices | Claude | Claude Fable 5 · medium |
 | 3 | Plan review | `review-coordinator-astra-medium` | Reviews every slice against the spec and the frozen base | Codex | GPT-6 Astra · medium |
-| 4 | Revise plan | `plan-reviser-opus-high` | Edits the slice set against the findings, in a fresh session | Claude | Claude Opus 5 · high |
-| 5 | Implementation | `plan-executor-astra-medium` | Executes the slice set from the live dependency frontier and opens the pull request | Codex | GPT-6 Astra · medium, with GPT-5.6 Luna · max subagents |
+| 4 | Revise plan | `plan-reviser-opus-medium` | Edits the slice set against the findings, in a fresh session | Claude | Claude Opus 5 · medium |
+| 5 | Implementation | `plan-executor-astra-low` | Executes the slice set from the live dependency frontier and opens the pull request | Codex | GPT-6 Astra · low, with GPT-5.6 Luna · max subagents |
 | 6 | Code review | `code-reviewer-sol-high` | Reviews the integrated diff at the pinned base and head | Codex | GPT-5.6 Sol · high |
-| 7 | Blind code review | `code-reviewer-opus-high` | Reviews the same diff again, blind to step 6's findings | Claude | Claude Opus 5 · high |
+| 7 | Blind code review | `code-reviewer-opus-medium` | Reviews the same diff again, blind to step 6's findings | Claude | Claude Opus 5 · medium |
 | 8 | Apply review fixes | `senior-dev-astra-low` | Dispositions every finding from both reviews and applies the adopted ones | Codex | GPT-6 Astra · low |
 | 9 | Documentation | `librarian-luna-xhigh` | Updates internal documentation to match the delivered code | Codex | GPT-5.6 Luna · xhigh |
-| 10 | Regression verification | `regression-verifier-luna-xhigh` | Refreshes onto the target branch and reruns the regressions | Codex | GPT-5.6 Luna · xhigh |
+| 10 | Regression verification | `regression-verifier-luna-max` | Refreshes onto the target branch and reruns the regressions | Codex | GPT-5.6 Luna · max |
 | 11 | Merge readiness | — | Recomputes the head, requires head-bound regression PASS evidence and a server-side ancestry check, emits an exact-head authorization | — | mechanical, no model run |
 | 12 | Merge execution | `merge-integrator` | Re-verifies every precondition against the live pull request, then merges | — | mechanical, no model run |
 

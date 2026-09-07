@@ -34,7 +34,7 @@ export type ProjectInput = z.infer<typeof projectInput>;
 export const PROJECT_BOOTSTRAP_ROLE_NAMES = [
   "senior-dev-luna-max",
   "code-reviewer-sol-high",
-  "code-reviewer-opus-high",
+  "code-reviewer-opus-medium",
   "senior-dev-astra-low",
 ] as const;
 

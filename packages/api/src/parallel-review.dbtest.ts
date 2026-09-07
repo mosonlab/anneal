@@ -136,7 +136,7 @@ test("failed, parked, and archived-Agent review siblings fail-stop the join unti
       assert.equal((refusalActivity.metadata as Record<string, unknown>).refusal, "assignee-archived");
       assert.match(
         blindTask.failureReason ?? "",
-        /assignee code-reviewer-opus-high is archived; unarchive the agent to queue this step/u,
+        /assignee code-reviewer-opus-medium is archived; unarchive the agent to queue this step/u,
       );
       assert.ok(blindTask.assigneeAgentId);
       const unarchived = await operatorRequest(`/agents/${blindTask.assigneeAgentId}/unarchive`, "POST");
