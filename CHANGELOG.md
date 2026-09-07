@@ -248,6 +248,12 @@ previews other than a fresh install. This release adds three migrations.
 
 ### Costs and API
 
+- Claude Session usage now treats `FINAL_OUTPUT` cost and `modelUsage` totals
+  cumulatively across resumed events. A one-time recompute corrected the four
+  affected Claude Sessions (`cmtqvyz950sc8db0iciwov1v7`,
+  `cmtqorhdj0akddb0i1829jsy0`, `cmtpxh0ys0fcfdb3epgfakk0s`, and
+  `cmtqlef8n000pdb0ipoos42ni`), reducing the recorded total from $1,141.21 to
+  $999.10, a $142.11 correction.
 - A Codex session with native children is priced by the model that produced each
   token, rather than attributing every token to the session's parent model.
 - A mechanical completion contract mismatch opens an Inbox alert instead of
