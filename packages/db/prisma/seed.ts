@@ -1,7 +1,7 @@
 import { AssigneeType, CodexServiceTier, PrismaClient } from "@prisma/client";
 
 import { DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME } from "../src/agent-contract.js";
-import { CANONICAL_ROLE_RENAMES, loadAgentSources } from "../src/agent-sources.js";
+import { adoptRenamedCanonicalRoles, loadAgentSources } from "../src/agent-sources.js";
 import { findCanonicalAgent } from "../src/canonical-agent-lookup.js";
 import {
   applyCanonicalInstallation,
@@ -130,29 +130,7 @@ const main = async (): Promise<void> => {
     },
   });
 
-  // The source roster may rename a canonical slug while production still
-  // carries the previous canonicalRole. Adopt the identity in place so seed
-  // preserves the Agent row and every template binding. A second row claiming
-  // the target role is a loud collision rather than a duplicate installation.
-  for (const [from, to] of CANONICAL_ROLE_RENAMES) {
-    const existingByRole = await prisma.agent.findUnique({
-      where: { projectId_canonicalRole: { projectId: project.id, canonicalRole: from } },
-      select: { id: true },
-    });
-    const existing = existingByRole ?? await prisma.agent.findFirst({
-      where: { projectId: project.id, canonicalRole: null, name: from },
-      select: { id: true },
-    });
-    if (!existing) continue;
-    const target = await prisma.agent.findUnique({
-      where: { projectId_canonicalRole: { projectId: project.id, canonicalRole: to } },
-      select: { id: true, name: true },
-    });
-    if (target && target.id !== existing.id) {
-      throw new Error(`Agent role rename ${from} -> ${to} would collide with Agent ${target.name} (${target.id})`);
-    }
-    await prisma.agent.update({ where: { id: existing.id }, data: { canonicalRole: to } });
-  }
+  await adoptRenamedCanonicalRoles(prisma, project.id, (message) => new Error(message));
 
   for (const role of sources.roles) {
     // Canonical identity is `canonicalRole`, not `name`: the operator may rename

@@ -1279,6 +1279,9 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   `implementation_route_conflicts_with_step_override`, and
   `implementation_route_agent_renamed`; `step_override_agent_not_found` is
   returned when the routed Agent name cannot be resolved in the project.
+  The routed implementation Agent requires a `GIT_WRITE` grant on the Chain
+  Repo, using the same check as judged-tier staffing; a missing or read-only
+  grant returns `step_override_missing_repo_grant`.
 - One predecessor task accepts several bound successor chains: binding a
   second chain to a predecessor that already has one is accepted, and the
   predecessor records one `Chain <id> bound to predecessor <name>` activity per

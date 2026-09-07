@@ -10,6 +10,7 @@ import {
   gateSlotOf,
   isDirectImplementationStep,
   lockAgentRepoGrant,
+  lockAgentRepoWriteGrant,
   lockAgentRows,
   lockChainRows,
   lockProjectGateDefaults,
@@ -797,14 +798,19 @@ export const instantiateTemplate = async (
       effective.assigneeAgentId ? [effective.assigneeAgentId] : []
     )))].sort();
     for (const agentId of grantedAgentIds) {
-      const granted = await lockAgentRepoGrant(tx, { projectId, agentId, repoId: repo.id });
+      const routedImplementation = effectiveSteps.find((candidate) => (
+        candidate.step.stepIndex === routedImplementationStepIndex && candidate.assigneeAgentId === agentId
+      ));
+      const granted = await (routedImplementation ? lockAgentRepoWriteGrant : lockAgentRepoGrant)(
+        tx, { projectId, agentId, repoId: repo.id },
+      );
       if (!granted) {
-        const effective = effectiveSteps.find((candidate) => candidate.assigneeAgentId === agentId);
+        const effective = routedImplementation ?? effectiveSteps.find((candidate) => candidate.assigneeAgentId === agentId);
         const agentName = effective?.assigneeAgent?.name ?? agentId;
         if (effective?.assigneeSource === "override") {
           throw templateRefusal(
             "step_override_missing_repo_grant",
-            `Override agent ${agentName} (${agentId}) for step ${effective.step.stepIndex} has no grant for Repo ${repo.name}`,
+            `Override agent ${agentName} (${agentId}) for step ${effective.step.stepIndex} has no ${routedImplementation ? "GIT_WRITE " : ""}grant for Repo ${repo.name}`,
           );
         }
         if (effective?.assigneeSource === "profile") {

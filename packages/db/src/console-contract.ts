@@ -105,7 +105,9 @@ export type StaffingProfileEntry = {
   include: boolean | null;
 };
 
-export type StaffingProfileTier = "default" | "frontend" | "hard" | "hazard";
+/** Ordered tier vocabulary shared by persistence and the console. */
+export const STAFFING_PROFILE_TIERS = ["default", "frontend", "hard", "hazard"] as const;
+export type StaffingProfileTier = (typeof STAFFING_PROFILE_TIERS)[number];
 
 /** Agent IDs selected for the four implementation tiers. A null value leaves
  * that tier unstaffed; the implementation step then keeps its current Agent. */

@@ -463,3 +463,30 @@ test("routing and output persistence roll back together", async () => {
   assert.equal(await db.taskStepOutput.count({ where: { taskId: scenario.revalidationTaskId } }), 0);
   assert.equal(await db.taskActivity.count({ where: { taskId: scenario.implementationTaskId, body: { startsWith: "Implementation tier" } } }), 0);
 });
+
+
+test("a GIT_READ-only Agent is refused by both Route instantiation and judged tier staffing", async () => {
+  const scenario = await seedScenario();
+  const agentId = scenario.tierAgents.hard!;
+  await db.agentRepoAccess.updateMany({
+    where: { agentId, repoId: scenario.repoId },
+    data: { permissions: RepoPermission.GIT_READ },
+  });
+  const source = await db.task.findUniqueOrThrow({ where: { id: scenario.revalidationTaskId } });
+  await assert.rejects(
+    instantiateTemplate(db, scenario.projectId, source.templateId!, {
+      repoId: scenario.repoId,
+      variables: { branchName: `read-only/${randomUUID()}` },
+      name: "read-only route",
+      description: `Route: implementation=${scenario.tierAgentNames.hard}`,
+      staffingProfileId: scenario.profileId,
+      autoStart: false,
+    }),
+    (error: unknown) => error instanceof Error
+      && "code" in error && error.code === "step_override_missing_repo_grant",
+  );
+  const run = await createLiveRun(source.id, scenario.projectId, source.assigneeAgentId!, scenario.repoId);
+  await submitRevalidation(run, "hard");
+  assert.equal((await implementation(scenario)).assigneeAgentId, scenario.previousAgentId);
+  assert.equal((await routeActivity(scenario)).metadata.decision, "refused");
+});

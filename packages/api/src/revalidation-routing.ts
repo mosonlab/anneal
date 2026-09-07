@@ -1,4 +1,4 @@
-import { lockAgentRepoGrant, lockAgentRow, lockChainRows, Prisma, RepoPermission } from "@anneal/db";
+import { lockAgentRepoWriteGrant, lockAgentRow, lockChainRows, Prisma } from "@anneal/db";
 import { legacyBriefMigration, readBrief } from "./task-brief.js";
 import { parseImplementationRoute } from "./templates.js";
 
@@ -48,7 +48,7 @@ export const applyRevalidationRoute = async (
   });
   const override = object(implementationProvenance?.metadata)?.implementationAssigneeOverride;
   const brief = readBrief(implementation.description, legacyBriefMigration(implementation.templateStep));
-  let decision: "applied" | "overridden" | "unstaffed" | "already-running" | "refused";
+  let decision: "applied" | "overridden" | "unstaffed" | "already-running" | "refused" | "brief-unreadable";
   let detail: string;
   let next = previous;
   if (implementation.runs.length > 0) {
@@ -58,7 +58,7 @@ export const applyRevalidationRoute = async (
     decision = "overridden";
     detail = `judged tier overridden by ${override === "stepOverrides" ? "explicit stepOverrides assignee" : "brief Route line"}`;
   } else if ("unparseable" in brief) {
-    decision = "refused";
+    decision = "brief-unreadable";
     detail = `cannot establish Route precedence: ${brief.unparseable}`;
   } else {
     // Never substitute today's default profile for the profile this Chain used.
@@ -72,24 +72,9 @@ export const applyRevalidationRoute = async (
       detail = "judged tier was unstaffed in the Chain's recorded profile; assignment unchanged";
     } else {
       const agent = await lockAgentRow(tx, candidate.id);
-      const grant = agent && !agent.archivedAt && agent.projectId === source.projectId && implementation.repoId
-        ? await lockAgentRepoGrant(tx, { projectId: source.projectId, agentId: agent.id, repoId: implementation.repoId })
+      const writable = agent && !agent.archivedAt && agent.projectId === source.projectId && implementation.repoId
+        ? await lockAgentRepoWriteGrant(tx, { projectId: source.projectId, agentId: agent.id, repoId: implementation.repoId })
         : false;
-      if (grant) {
-        // Unlike presence alone, write permission is mutable without deleting
-        // the grant; hold it against a concurrent permission downgrade too.
-        await tx.$queryRaw`
-          SELECT "agentId" FROM "AgentRepoAccess"
-          WHERE "projectId" = ${source.projectId}
-            AND "agentId" = ${candidate.id}
-            AND "repoId" = ${implementation.repoId}
-          FOR SHARE
-        `;
-      }
-      const writable = grant && await tx.agentRepoAccess.findFirst({
-        where: { projectId: source.projectId, agentId: candidate.id, repoId: implementation.repoId!, permissions: RepoPermission.GIT_WRITE },
-        select: { agentId: true },
-      });
       if (!writable) {
         decision = "refused";
         detail = `judged Agent ${candidate.name} (${candidate.id}) refused: active project Agent with GIT_WRITE Repo grant required (step_override_missing_repo_grant)`;

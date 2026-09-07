@@ -1,3 +1,4 @@
+import { STAFFING_PROFILE_TIERS, type StaffingProfileTier, type StaffingProfileTiers } from "@anneal/db/console-contract";
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { api } from "../lib/api";
@@ -61,18 +62,7 @@ const PROFILE_NAME_ID = "staffing-profile-name";
 const NEW_PROFILE_NAME_ID = "new-staffing-profile-name";
 
 type DraftEntry = { assigneeAgentId: string; include: boolean };
-export const IMPLEMENTATION_TIERS = ["default", "frontend", "hard", "hazard"] as const;
-export type ImplementationTier = typeof IMPLEMENTATION_TIERS[number];
-export type StaffingTierSlots = Record<ImplementationTier, string | null>;
-
-type Draft = { name: string; entries: Record<string, DraftEntry>; tiers: StaffingTierSlots };
-
-const emptyTierSlots = (): StaffingTierSlots => ({
-  default: null,
-  frontend: null,
-  hard: null,
-  hazard: null,
-});
+type Draft = { name: string; entries: Record<string, DraftEntry>; tiers: StaffingProfileTiers };
 
 /** The profile as the editor holds it: one row per template step, keyed by the
  *  step's own output kind, with the profile's opinion or the empty one. */
@@ -107,13 +97,6 @@ export const entriesOf = (template: TaskTemplate, draft: Draft): StaffingProfile
       include,
     }];
   });
-
-const tiersOf = (draft: Draft): StaffingTierSlots => ({
-  default: draft.tiers.default,
-  frontend: draft.tiers.frontend,
-  hard: draft.tiers.hard,
-  hazard: draft.tiers.hazard,
-});
 
 const seedOf = (profile: StaffingProfile): string =>
   JSON.stringify({ name: profile.name, entries: profile.entries, tiers: profile.tiers });
@@ -338,7 +321,7 @@ export const WorkflowDetailPage = ({ templateId }: { templateId: string }): Reac
       const created = await api.post<StaffingProfileResponse>(profilesPath!, {
         name,
         entries: [],
-        tiers: emptyTierSlots(),
+        tiers: Object.fromEntries(STAFFING_PROFILE_TIERS.map((tier) => [tier, null])),
       });
       setCreating(false);
       profiles.reload();
@@ -467,19 +450,19 @@ const StepRow = ({ step, agents, entry, onChange }: {
   );
 };
 
-const tierLabelKeys: Record<ImplementationTier, string> = {
+const tierLabelKeys: Record<StaffingProfileTier, string> = {
   default: "workflows.editor.tier.default",
   frontend: "workflows.editor.tier.frontend",
   hard: "workflows.editor.tier.hard",
   hazard: "workflows.editor.tier.hazard",
 };
 
-const tierControlId = (tier: ImplementationTier): string => `staffing-tier-${tier}`;
+const tierControlId = (tier: StaffingProfileTier): string => `staffing-tier-${tier}`;
 
 const TierSlots = ({ slots, agents, onChange }: {
-  slots: StaffingTierSlots;
+  slots: StaffingProfileTiers;
   agents: Agent[];
-  onChange: (tier: ImplementationTier, agentId: string | null) => void;
+  onChange: (tier: StaffingProfileTier, agentId: string | null) => void;
 }): ReactNode => {
   const t = useT();
   return (
@@ -487,7 +470,7 @@ const TierSlots = ({ slots, agents, onChange }: {
       <div className="mb-[5px] text-[13px] text-foreground">{t("workflows.editor.tiers.title")}</div>
       <div className={cn(HINT, "mb-[14px]")}>{t("workflows.editor.tiers.hint")}</div>
       <div className="grid gap-[12px]">
-        {IMPLEMENTATION_TIERS.map((tier) => (
+        {STAFFING_PROFILE_TIERS.map((tier) => (
           <Field key={tier} label={t(tierLabelKeys[tier])} htmlFor={tierControlId(tier)}>
             <Select
               id={tierControlId(tier)}
@@ -535,7 +518,7 @@ export const StaffingProfileEditor = ({ template, profile, agents, onSaved }: {
       const answer = await api.put<StaffingProfileResponse>(`/staffing-profiles/${profile.id}`, {
         name: draft.name.trim(),
         entries: entriesOf(template, draft),
-        tiers: tiersOf(draft),
+        tiers: draft.tiers,
       });
       setWarnings(answer.warnings);
       onSaved();

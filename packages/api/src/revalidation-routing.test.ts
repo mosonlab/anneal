@@ -5,7 +5,7 @@ import { applyRevalidationRoute } from "./revalidation-routing.js";
 import { composeBrief } from "./task-brief.js";
 
 const harness = (options: {
-  tier?: string; route?: boolean; override?: boolean; running?: boolean;
+  unreadable?: boolean; tier?: string; route?: boolean; override?: boolean; running?: boolean;
   empty?: boolean; granted?: boolean; readOnly?: boolean; same?: boolean; profileMissing?: boolean;
 } = {}) => {
   const events: string[] = [];
@@ -13,7 +13,7 @@ const harness = (options: {
   const task = {
     id: "implementation", projectId: "project", chainId: "chain", templateId: "template", repoId: "repo",
     assigneeAgentId: "previous", assigneeAgent: { id: "previous", name: "Previous Agent" },
-    description: composeBrief({ prompt: "Implement.", brief: options.route ? "Build.\nRoute: implementation=previous - operator choice" : "Build.", attachmentsFromPrevious: true, outputKind: "implementation" }),
+    description: options.unreadable ? "unframed legacy text" : composeBrief({ prompt: "Implement.", brief: options.route ? "Build.\nRoute: implementation=previous - operator choice" : "Build.", attachmentsFromPrevious: true, outputKind: "implementation" }),
     templateStep: { priorOutputKinds: ["revalidation"] }, runs: options.running ? [{ id: "run" }] : [],
   };
   const agent = { id: options.same ? "previous" : "judged", name: "Judged Agent", archivedAt: null, projectId: "project" };
@@ -31,7 +31,7 @@ const harness = (options: {
     staffingProfile: { findFirst: async () => options.empty ? { tiers: [] } : { tiers: [{ tier: options.tier ?? "hard", agent }] } },
     agent: { findUnique: async () => agent },
     agentRepoAccess: {
-      count: async () => options.granted === false ? 0 : 1,
+      count: async ({ where }: { where: { permissions?: string } }) => options.granted === false || (options.readOnly && where.permissions === "GIT_WRITE") ? 0 : 1,
       findFirst: async () => options.readOnly ? null : { permissions: RepoPermission.GIT_WRITE },
     },
   } as unknown as Prisma.TransactionClient;
@@ -50,6 +50,7 @@ for (const tier of ["default", "hard", "frontend", "hazard"] as const) {
   });
 }
 for (const [label, options, decision] of [
+  ["unreadable brief", { unreadable: true }, "brief-unreadable"],
   ["brief Route", { route: true }, "overridden"],
   ["explicit stepOverrides", { override: true }, "overridden"],
   ["empty tier", { empty: true }, "unstaffed"],

@@ -3,14 +3,14 @@ import { readdir, readFile } from "node:fs/promises";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { RunnerPreference } from "@prisma/client";
+import { type Prisma, RunnerPreference } from "@prisma/client";
 
 import {
   assertCanonicalAgentSources,
   canonicalRoleSlugSuffix,
   MODEL_FREE_CANONICAL_ROLES,
 } from "./agent-contract.js";
-import { loadAgentSources, loadStarterAgentSource, PUBLIC_STARTER_ROLE_NAME } from "./agent-sources.js";
+import { adoptRenamedCanonicalRoles, CANONICAL_ROLE_RENAMES, loadAgentSources, loadStarterAgentSource, PUBLIC_STARTER_ROLE_NAME } from "./agent-sources.js";
 
 /**
  * The public starter is the release-owned source, not a copy of it.
@@ -134,4 +134,43 @@ test("the contract refuses a slug, a title or a file name that drifts from the r
   assert.throws(() => assertCanonicalAgentSources([{ ...role, title: "Senior Developer (Astra low)" }]), /must be one or two capitalised words/u);
   assert.throws(() => assertCanonicalAgentSources([{ ...role, title: "Astra Dev" }]), /names the runtime/u);
   assert.throws(() => assertCanonicalAgentSources([{ ...role, title: "Low Dev" }]), /names the runtime/u);
+});
+
+
+test("renamed canonical roles preserve IDs, prefer canonical identity, and reject collisions", async () => {
+  const [from, to] = CANONICAL_ROLE_RENAMES[0];
+  type Row = { id: string; name: string; canonicalRole: string | null };
+  const original: Row = { id: "original", name: "operator-name", canonicalRole: from };
+  const legacy: Row = { id: "legacy", name: from, canonicalRole: null };
+  let rows: Row[] = [original, legacy];
+  const tx = {
+    agent: {
+      findUnique: async ({ where }: { where: { projectId_canonicalRole: { projectId: string; canonicalRole: string } } }) => {
+        assert.equal(where.projectId_canonicalRole.projectId, "project");
+        return rows.find((row) => row.canonicalRole === where.projectId_canonicalRole.canonicalRole) ?? null;
+      },
+      findFirst: async ({ where }: { where: { name: string; canonicalRole: null } }) =>
+        rows.find((row) => row.name === where.name && row.canonicalRole === null) ?? null,
+      update: async ({ where, data }: { where: { id: string }; data: { canonicalRole: string } }) => {
+        Object.assign(rows.find((row) => row.id === where.id)!, data);
+      },
+    },
+  } as unknown as Prisma.TransactionClient;
+  const collision = (message: string) => new Error(`entrypoint: ${message}`);
+  await adoptRenamedCanonicalRoles(tx, "project", collision);
+  assert.equal(original.canonicalRole, to);
+  assert.equal(legacy.canonicalRole, null);
+  assert.equal(rows.length, 2);
+
+  rows = [legacy];
+  await adoptRenamedCanonicalRoles(tx, "project", collision);
+  assert.equal(legacy.canonicalRole, to);
+  assert.equal(legacy.id, "legacy");
+  await adoptRenamedCanonicalRoles(tx, "project", collision);
+  assert.equal(rows.length, 1);
+
+  original.canonicalRole = from;
+  rows = [original, legacy];
+  await assert.rejects(adoptRenamedCanonicalRoles(tx, "project", collision), /entrypoint: Agent role rename .* collide/);
+  assert.equal(original.canonicalRole, from, "collision must not mutate the old identity");
 });

@@ -17,7 +17,7 @@
 
 import {
   AssigneeType,
-  CANONICAL_STAFFING_TIER_ROLES,
+  canonicalTierSlots,
   catalogRunnerForModel,
   canonicalMergeTailRepairAgentRole,
   canonicalStaffingEntries,
@@ -809,15 +809,7 @@ export const resetStaffingProfile = async (
     canonicalRole: resetRepairRole,
     activeOnly: false,
   });
-  const tierSlots = emptyTierSlots();
-  for (const tier of STAFFING_PROFILE_TIERS) {
-    const canonical = await findCanonicalAgent(tx, {
-      projectId: existing.projectId,
-      canonicalRole: CANONICAL_STAFFING_TIER_ROLES[tier],
-      activeOnly: true,
-    });
-    if (canonical) tierSlots[tier] = canonical.id;
-  }
+  const tierSlots = await canonicalTierSlots(tx, existing.projectId);
   const resetWarnings: StaffingProfileWarning[] = [];
   if (resetRepairRole !== null && defaultRepairAgent === null) {
     resetWarnings.push({ code: "merge_tail_repair_agent_unavailable",
@@ -932,15 +924,7 @@ export const installDefaultStaffingProfile = async (
     canonicalRole: repairRole,
     activeOnly: true,
   });
-  const tierSlots = emptyTierSlots();
-  for (const tier of STAFFING_PROFILE_TIERS) {
-    const canonical = await findCanonicalAgent(tx, {
-      projectId: input.projectId,
-      canonicalRole: CANONICAL_STAFFING_TIER_ROLES[tier],
-      activeOnly: true,
-    });
-    if (canonical) tierSlots[tier] = canonical.id;
-  }
+  const tierSlots = await canonicalTierSlots(tx, input.projectId);
   const profile = await tx.staffingProfile.create({
     data: {
       projectId: input.projectId,

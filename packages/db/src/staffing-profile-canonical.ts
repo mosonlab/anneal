@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 
 import { DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME } from "./agent-contract.js";
+import { STAFFING_PROFILE_TIERS, type StaffingProfileTiers } from "./console-contract.js";
 import { findCanonicalAgent } from "./canonical-agent-lookup.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
 import { isMergeReadinessStep } from "./merge-tail.js";
@@ -23,7 +24,7 @@ export const CANONICAL_STAFFING_PROFILE_NAME = "Default" as const;
 
 /** The tier keys persisted by every staffing profile. Keep this list ordered
  * for stable API payloads and deterministic writes. */
-export const STAFFING_PROFILE_TIERS = ["default", "frontend", "hard", "hazard"] as const;
+export { STAFFING_PROFILE_TIERS } from "./console-contract.js";
 export type StaffingProfileTierKey = (typeof STAFFING_PROFILE_TIERS)[number];
 
 /** Canonical Agent role installed for each implementation tier. */
@@ -32,6 +33,21 @@ export const CANONICAL_STAFFING_TIER_ROLES: Readonly<Record<StaffingProfileTierK
   frontend: "frontend-dev-opus-medium",
   hard: "senior-dev-astra-low",
   hazard: "senior-dev-astra-medium",
+};
+
+/** Resolve every tier from the same active canonical roster for reset and install. */
+export const canonicalTierSlots = async (
+  tx: Prisma.TransactionClient,
+  projectId: string,
+): Promise<StaffingProfileTiers> => {
+  const slots = {} as StaffingProfileTiers;
+  for (const tier of STAFFING_PROFILE_TIERS) {
+    const agent = await findCanonicalAgent(tx, {
+      projectId, canonicalRole: CANONICAL_STAFFING_TIER_ROLES[tier], activeOnly: true,
+    });
+    slots[tier] = agent?.id ?? null;
+  }
+  return slots;
 };
 
 /** Canonical profile entries share the platform's merge-readiness predicate. */
@@ -91,15 +107,7 @@ export const installCanonicalDefaultStaffingProfiles = async (
   // for this pass; full installation calls again after installing the role.
   if (!agent) return 0;
 
-  const tierAgents = new Map<StaffingProfileTierKey, string>();
-  for (const tier of STAFFING_PROFILE_TIERS) {
-    const tierAgent = await findCanonicalAgent(tx, {
-      projectId,
-      canonicalRole: CANONICAL_STAFFING_TIER_ROLES[tier],
-      activeOnly: true,
-    });
-    if (tierAgent) tierAgents.set(tier, tierAgent.id);
-  }
+  const tierSlots = await canonicalTierSlots(tx, projectId);
 
   let created = 0;
   for (const template of templates) {
@@ -120,7 +128,10 @@ export const installCanonicalDefaultStaffingProfiles = async (
           create: canonicalStaffingEntries(template.steps),
         },
         tiers: {
-          create: [...tierAgents].map(([tier, agentId]) => ({ tier, agentId })),
+          create: STAFFING_PROFILE_TIERS.flatMap((tier) => {
+            const agentId = tierSlots[tier];
+            return agentId === null ? [] : [{ tier, agentId }];
+          }),
         },
       },
     });

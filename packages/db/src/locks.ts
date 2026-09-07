@@ -17,7 +17,7 @@
  * takes only the Project row. No existing writer takes a step row and then
  * acquires its template row.
  */
-import { Prisma, RunnerPreference, type Agent } from "@prisma/client";
+import { Prisma, RepoPermission, RunnerPreference, type Agent } from "@prisma/client";
 
 type Tx = Prisma.TransactionClient;
 
@@ -255,6 +255,25 @@ export const lockAgentRepoGrant = async (
   `;
   if (rows.length === 0) return false;
   return (await tx.agentRepoAccess.count({ where: input })) === 1;
+};
+
+/** Route-line and judged-tier implementation Agents need write access. Hold
+ * permission updates as well as grant deletion until the caller commits. */
+export const lockAgentRepoWriteGrant = async (
+  tx: Tx,
+  input: { projectId: string; agentId: string; repoId: string },
+): Promise<boolean> => {
+  const rows = await tx.$queryRaw<Array<{ agentId: string }>>`
+    SELECT "agentId" FROM "AgentRepoAccess"
+    WHERE "projectId" = ${input.projectId}
+      AND "agentId" = ${input.agentId}
+      AND "repoId" = ${input.repoId}
+    FOR SHARE
+  `;
+  if (rows.length === 0) return false;
+  return (await tx.agentRepoAccess.count({
+    where: { ...input, permissions: RepoPermission.GIT_WRITE },
+  })) === 1;
 };
 
 /** Exclusive companion for grant revocation. */

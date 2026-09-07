@@ -131,7 +131,10 @@ The Route line and an explicit `stepOverrides` `assigneeAgentId` for the
 implementation step are mutually exclusive; supplying both is refused with
 `implementation_route_conflicts_with_step_override`. An include-only override
 does not conflict, and a selected staffing profile does not conflict. The
-existing override checks still apply to the routed Agent; if its identity
+routed implementation Agent must hold a `GIT_WRITE` grant on the Chain Repo,
+using the same locked write-grant check as judged-tier staffing. Read-only
+grants are refused with `step_override_missing_repo_grant`. Other existing
+override checks still apply to the routed Agent; if its identity
 changes before instantiation, `implementation_route_agent_renamed` is returned.
 
 ## Critical classification

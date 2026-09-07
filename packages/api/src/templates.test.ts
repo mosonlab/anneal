@@ -660,6 +660,7 @@ test("step override structural refusals happen before template reads and carry s
 test("direct Route overrides implementation while non-direct templates refuse Route lines", async () => {
   let templateName = "direct-engineer-workflow";
   let lockedRouteAgentName = "senior-dev-astra-medium";
+  let routeReadOnly = false;
   const revalidator = {
     id: "agent-revalidator", name: "spec-revalidator-luna-xhigh", projectId: "project-1", archivedAt: null,
     model: "openai-codex/gpt-5.6-luna:xhigh", foundationalPrompt: "foundation", rolePrompt: "role",
@@ -709,7 +710,7 @@ test("direct Route overrides implementation while non-direct templates refuse Ro
     taskTemplate: { findFirst: async () => ({ ...template, name: templateName }) },
     repo: { findFirst: async () => ({ id: "repo-1", name: "Repo", defaultBranch: "main" }) },
     agent: { findFirst: async () => routed },
-    agentRepoAccess: { count: async () => 1 },
+    agentRepoAccess: { count: async ({ where }: { where: { permissions?: string } }) => routeReadOnly && where.permissions === "GIT_WRITE" ? 0 : 1 },
     task: {
       create: async ({ data }: { data: Record<string, unknown> }) => {
         const task = { id: `task-${created.length + 1}`, ...data };
@@ -744,6 +745,16 @@ test("direct Route overrides implementation while non-direct templates refuse Ro
   assert.deepEqual(created.map((task) => task.chainIndex), [1, 2]);
   assert.deepEqual(created.map((task) => task.chainLayer), [1, 2]);
   assert.deepEqual(created.map((task) => task.targetBranch), ["main", result.branchName]);
+
+  routeReadOnly = true;
+  await assertTemplateRefusal(
+    () => instantiateTemplate(db, "project-1", "template-1", {
+      repoId: "repo-1", variables: {}, name: "read-only route",
+      description: "Route: implementation=senior-dev-astra-medium",
+    }),
+    "step_override_missing_repo_grant",
+  );
+  routeReadOnly = false;
 
   await assertTemplateRefusal(
     () => instantiateTemplate(db, "project-1", "template-1", {
