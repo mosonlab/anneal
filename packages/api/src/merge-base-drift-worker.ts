@@ -368,14 +368,25 @@ const queueRecovery = async (
   // Validation refusals remain visible aggregate rows but do not consume the
   // two executor-drift attempts. Historical TaskActivity rows are deliberately
   // ignored: the migration has no backfill, so absence here means zero.
-  const attempts = await tx.mergeRecoveryAttempt.count({ where: {
-    id: { not: aggregate.id },
-    integratorTaskId: expected.integratorTaskId,
-    repository: expected.repository,
-    prNumber: expected.prNumber,
-    targetBranch: expected.targetBranch,
-    recoveryRunId: { not: null },
-  } });
+  //
+  // The unit is the stop, not the row: automatic validation opens exactly one
+  // row per source stop, while an operator rerun
+  // (`POST /tasks/:taskId/merge-tail/rerun`) opens a further row for a stop
+  // already counted here. Counting rows would let a rerun of a host-caused
+  // gate FAIL spend an automatic recovery the branch never used.
+  const spentStops = await tx.mergeRecoveryAttempt.findMany({
+    where: {
+      sourceStopId: { not: expected.stopId },
+      integratorTaskId: expected.integratorTaskId,
+      repository: expected.repository,
+      prNumber: expected.prNumber,
+      targetBranch: expected.targetBranch,
+      recoveryRunId: { not: null },
+    },
+    distinct: ["sourceStopId"],
+    select: { sourceStopId: true },
+  });
+  const attempts = spentStops.length;
   const decision = classifyDurable({
     expected,
     candidateDecision: classifyCandidate(candidateFacts),

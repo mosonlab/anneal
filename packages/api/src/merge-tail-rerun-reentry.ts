@@ -76,16 +76,18 @@ const priorRequestResult = async (
       || typeof metadata.baseHeadSha !== "string") continue;
     // The recovery attempt row is what makes a replay answerable: an operator
     // note that happens to carry this shape names no attempt bound to this
-    // Regression task and its recovery Run, so it is skipped rather than
-    // answered.
+    // Regression task, so it is skipped rather than answered.
     const aggregate = await tx.mergeRecoveryAttempt.findUnique({
       where: { id: metadata.aggregateId },
-      select: { id: true, attempt: true, recoveryRunId: true, regressionTaskId: true },
+      select: { id: true, attempt: true, regressionTaskId: true },
     });
+    // Only immutable identity may answer a replay. `recoveryRunId` is not:
+    // a readiness requeue and a completed repair both rewrite it on this same
+    // row, and matching on it would let the original `requestId` open a second
+    // rerun once the recovery has moved on.
     if (!aggregate
       || aggregate.regressionTaskId !== taskId
-      || aggregate.attempt !== metadata.attempt
-      || aggregate.recoveryRunId !== metadata.recoveryRunId) continue;
+      || aggregate.attempt !== metadata.attempt) continue;
     return {
       aggregateId: aggregate.id,
       attempt: aggregate.attempt,
@@ -251,6 +253,9 @@ export const requestMergeTailRerun = async (
     aggregateId: reran.id,
     currentBaseSha: recovery.currentBaseSha,
     now: input.now,
+    // The gate FAIL this rerun answers is the host's, so the re-verification is
+    // platform compensation rather than another agent attempt on the branch.
+    budgetGrant: 1,
   });
   if (!queued) {
     // `enterRepair` only answers null on the readiness-requeue path, which this

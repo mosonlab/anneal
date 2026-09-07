@@ -217,6 +217,14 @@ export const enterRepair = async (
     currentBaseSha: string;
     now: Date;
     readinessRequeue?: { staleBaseSha: string; reason: string };
+    /**
+     * A one-shot grant for a re-run the branch did not earn. An operator rerun
+     * of a host-caused gate FAIL is platform compensation, exactly like the
+     * readiness requeue below: without it the queued Run can be born past
+     * `maxSessionsPerTask` — `enqueue` does not refuse there — and the runner
+     * kills it at claim as `budget-exhausted` after the route answered 200.
+     */
+    budgetGrant?: 1;
   },
 ): Promise<{ recoveryRunId: string } | null> => {
   const context = await requireRecoveryRepairIdentity(tx, input.aggregateId);
@@ -266,7 +274,12 @@ export const enterRepair = async (
     }
     return null;
   }
-  const run = attempt?.run ?? await enqueueTaskRun(tx, context.regressionTaskId, input.now);
+  const run = attempt?.run ?? await enqueueTaskRun(
+    tx,
+    context.regressionTaskId,
+    input.now,
+    input.budgetGrant === 1 ? { budgetGrant: 1 } : {},
+  );
   await transitionMergeRecovery(tx, input.aggregateId, MergeRecoveryStatus.REPAIRING, {
     recoveryRunId: run.id,
     currentBaseSha: input.currentBaseSha,

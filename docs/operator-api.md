@@ -1794,10 +1794,11 @@ curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/repair" \
   path; clears the regression and readiness `failureReason`; and records the
   operator activity, its `reason`, and the new attempt number on the regression
   task. It creates no repair task, charges no repair budget, and leaves the
-  `repairAttempt` markers the repair budget counts untouched. Each rerun does
-  consume one of the two automatic base-drift recovery attempts this PR has:
-  after two reruns a *new* base-drift stop on the same PR is refused as
-  exhausted and needs a successor Chain.
+  `repairAttempt` markers the repair budget counts untouched. It spends none of
+  the two automatic base-drift recovery attempts either: those are counted per
+  recovery source stop, and a rerun re-runs a stop that is already counted. The
+  queued Run carries a one-time budget grant, so a rerun does not consume one of
+  the Regression task's `maxSessionsPerTask` attempts.
 - On success, the API returns `200 OK` with `aggregateId` (the new attempt),
   `attempt`, `recoveryRunId` (the queued Regression Run), and the verdict
   `headSha` and `baseHeadSha`. The same `requestId` is idempotent: a replay
@@ -1945,17 +1946,19 @@ occurs inside base-drift recovery, the merge tail is parked in
 `BLOCKED_DOWNSTREAM` with the recovery attempt's `recoveryRunId`. After
 confirming the failing output and stop notice, call
 `POST /tasks/:taskId/merge-tail/repair` on the regression task before
-considering a successor Chain. For a `gate-fail` verdict whose failure is the
-host's and not the branch's — a test outside the change set that timed out
-under load — call `POST /tasks/:taskId/merge-tail/rerun` instead: it re-runs
-the recovery without opening a repair card for a defect that does not exist. The route re-enters the ordinary `review-fix`
-or `gate-fix` round against the recorded head and base, charges the Chain's
-existing repair budget, and moves the aggregate to `REPAIRING`. Once that
-repair genuinely completes, the regression is rerun with the recovery context:
-a PASS proceeds to `awaitAuthorization`; another FAIL parks the tail in
-`BLOCKED_DOWNSTREAM` again and can be re-entered with this route while budget
-remains. A refresh-conflict verdict keeps its existing recovery stop and is
-not re-entered by this route.
+considering a successor Chain. The repair route re-enters the ordinary
+`review-fix` or `gate-fix` round against the recorded head and base, charges
+the Chain's existing repair budget, and moves the aggregate to `REPAIRING`.
+Once that repair genuinely completes, the regression is rerun with the recovery
+context: a PASS proceeds to `awaitAuthorization`; another FAIL parks the tail in
+`BLOCKED_DOWNSTREAM` again and can be re-entered with the repair route while
+budget remains. A refresh-conflict verdict keeps its existing recovery stop and
+is not re-entered by either route.
+
+For a `gate-fail` verdict whose failure is the host's and not the branch's — a
+test outside the change set that timed out under load — call
+`POST /tasks/:taskId/merge-tail/rerun` instead: it re-runs the recovery without
+opening a repair card for a defect that does not exist.
 
 Carry the delivered branch forward in this order. The brief used in step (c)
 must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-from-a-delivered-branch).

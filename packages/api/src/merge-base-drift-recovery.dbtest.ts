@@ -672,6 +672,18 @@ test("an operator rerun requeues a host-caused gate FAIL without opening a repai
   const queued = await db.run.findUniqueOrThrow({ where: { id: result.recoveryRunId } });
   assert.equal(queued.status, "QUEUED");
   assert.equal(queued.taskId, seeded.gateTask.id);
+  // The rerun answers a host failure, not an agent attempt, so it carries its
+  // own budget grant: a Run born past the ceiling is killed at claim as
+  // `budget-exhausted` long after this route answered 200.
+  const priorRun = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.gateTask.id, id: { not: queued.id } },
+    orderBy: { runNumber: "desc" },
+  });
+  assert.equal(queued.budgetGrants, priorRun.budgetGrants + 1);
+  assert.ok(
+    queued.runNumber <= queued.maxRunsPerTask,
+    `rerun Run ${String(queued.runNumber)} exceeds ceiling ${String(queued.maxRunsPerTask)}`,
+  );
   const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.gateTask.id } });
   assert.equal(regression.status, TaskStatus.TODO);
   assert.equal(regression.failureReason, null);

@@ -13,8 +13,9 @@ written.
   cause can be re-run from the API:
   `POST /tasks/:taskId/merge-tail/rerun` on the Regression task opens the next
   recovery attempt against the same head and queues a fresh Regression Run. It
-  opens no repair task and charges no repair budget, and it is bounded at two
-  re-runs per recovery stop.
+  opens no repair task, charges no repair budget, spends none of the two
+  automatic base-drift recovery attempts, and grants the queued Run its own
+  budget, and it is bounded at two re-runs per recovery stop.
 - Retired the `POST /files/mkdir` and `POST /files/move` routes and their
   underlying store operations.
 - Removed `POST /inbox/messages/:messageId/supersede`;
