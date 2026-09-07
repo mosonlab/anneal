@@ -208,7 +208,7 @@ type TaskStepOutputResponse = SerializesTo<TaskStepOutputContract<Date>, TaskSte
 export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
   const { db, runners } = deps;
   // Use the app's shared heartbeat registry. The snapshot is taken before the
-  // PATCH transaction so the DB layer remains a pure persistence boundary.
+  // authorization write inside the PATCH transaction; this reader does no I/O.
   const mergeExecutorLiveness = () => runners.snapshot(new Date());
 
   app.get("/tasks", async (context) => {

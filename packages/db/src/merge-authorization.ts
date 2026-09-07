@@ -113,8 +113,8 @@ const executorOfflineRefusal = async (
 
 /** Close the readiness outage episode in the same transaction as the live
  * operator renewal. The readiness worker cannot own this transition because
- * the confirmation card completes the readiness Task before this approval. */
-const closeExecutorOfflineEpisode = async (tx: Tx, readinessTaskId: string): Promise<void> => {
+ * readiness Step is already complete when the operator renews its authorization. */
+const closeRenewalOfflineEpisode = async (tx: Tx, readinessTaskId: string): Promise<void> => {
   const marker = await tx.taskActivity.findFirst({
     where: {
       taskId: readinessTaskId,
@@ -234,7 +234,7 @@ export const produceMergeAuthorization = async (
     const allowlist = mergeExecutorRunnerIds();
     const blocked = mergeExecutorsBlockingAuthorization(input.executorLiveness?.() ?? [], allowlist);
     if (blocked.length > 0) throw await executorOfflineRefusal(tx, gateTaskId, blocked, now);
-    await closeExecutorOfflineEpisode(tx, gateTaskId);
+    await closeRenewalOfflineEpisode(tx, gateTaskId);
   }
 
   const activity = await tx.taskActivity.create({ data: {

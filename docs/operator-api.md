@@ -2815,7 +2815,9 @@ before writing its `purpose: "confirmation"` authorization. During an outage
 it writes no authorization and defers with the same marker,
 `metadata.state = "requeued-executor-offline"` and
 `metadata.reason = "merge-executor-offline"`; renewal can proceed after a
-later liveness observation finds an allowed executor online.
+later liveness observation finds an allowed executor online. A successful
+renewal closes any earlier offline episode and records the live observation in
+the same approval transaction.
 
 An empty allowlist is unchanged behaviour: with `MERGE_EXECUTOR_RUNNER_IDS`
 unset no executor is named, the check is skipped, and readiness authorizes as

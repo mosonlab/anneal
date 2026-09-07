@@ -19,6 +19,9 @@ import {
   isMergeReadinessStep,
   latestRecordedStop,
   mergeExecutorRunnerIds,
+  mergeExecutorsBlockingAuthorization,
+  MERGE_EXECUTOR_OFFLINE_REASON,
+  MERGE_EXECUTOR_OFFLINE_STATE,
   MergeGateAuthorizationError,
   MERGE_TAIL_KIND,
   parseRegressionVerdict,
@@ -508,8 +511,8 @@ export const requeueRegressionSettlement = (
  */
 export type DaemonSnapshotReader = () => DaemonSnapshot[];
 
-const EXECUTOR_OFFLINE_STATE = "requeued-executor-offline";
-export const MERGE_EXECUTOR_OFFLINE_REASON = "merge-executor-offline";
+const EXECUTOR_OFFLINE_STATE = MERGE_EXECUTOR_OFFLINE_STATE;
+export { MERGE_EXECUTOR_OFFLINE_REASON };
 
 /**
  * How long readiness waits at the door for a merge executor before the tail
@@ -531,10 +534,7 @@ export const executorsBlockingAuthorization = (
 ): string[] => {
   const allowlist = mergeExecutorRunnerIds();
   if (allowlist.length === 0) return [];
-  const online = new Set(
-    daemons().filter((daemon) => daemon.online).map((daemon) => daemon.runnerId),
-  );
-  return allowlist.some((runnerId) => online.has(runnerId)) ? [] : allowlist;
+  return mergeExecutorsBlockingAuthorization(daemons(), allowlist);
 };
 
 const executorOfflineDetail = (executorRunnerIds: string[]): string =>

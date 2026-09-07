@@ -125,7 +125,7 @@ export type TaskPatchRefusal = Refusal;
 export type TaskPatchResult = { task: Task } | TaskPatchRefusal;
 
 export type TaskPatchOptions = {
-  /** Daemon observation captured by the API before the patch transaction. */
+  /** Daemon snapshot reader evaluated at the authorization boundary. */
   mergeExecutorLiveness?: MergeExecutorLivenessReader;
 };
 
