@@ -1933,6 +1933,7 @@ const completeRegressionAfterExternalGitFailure = async (
     completionHead?: string | null;
     recovery?: boolean;
     failureMode?: "task-failed-git" | "transient-provider";
+    expectedLeaseOutcome?: "release" | "handoff";
   } = {},
 ) => {
   await db.taskTemplateStep.update({
@@ -2003,7 +2004,23 @@ const completeRegressionAfterExternalGitFailure = async (
     claimantClass: "runner",
   }, release);
   assert.ok("taskId" in completion, JSON.stringify(completion));
-  assert.deepEqual(releasedChains, [seeded.regression.chainId]);
+  if (options.expectedLeaseOutcome === "handoff") {
+    assert.deepEqual(releasedChains, []);
+    const retry = await db.run.findFirstOrThrow({ where: {
+      taskId: seeded.regression.id,
+      runNumber: seeded.run.runNumber + 1,
+    } });
+    assert.equal(retry.status, "QUEUED");
+    const handoff = await db.mergeLeaseEvent.findFirstOrThrow({ where: {
+      projectId: seeded.project.id,
+      chainId: seeded.regression.chainId!,
+      handedOffRunId: retry.id,
+    } });
+    assert.equal(handoff.state, "HANDOFF_PENDING");
+    assert.equal(handoff.owningTaskId, seeded.regression.id);
+  } else {
+    assert.deepEqual(releasedChains, [seeded.regression.chainId]);
+  }
   return {
     completion,
     run: await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } }),
@@ -2103,7 +2120,10 @@ test("a transient provider drop preserves review-fail instead of queueing a retr
 
 test("a persisted PASS queues another Regression Run after a transient delivery failure", async () => {
   const seeded = await seedRegression();
-  const settled = await completeRegressionAfterExternalGitFailure(seeded, "pass", { completionHead: HEAD });
+  const settled = await completeRegressionAfterExternalGitFailure(seeded, "pass", {
+    completionHead: HEAD,
+    expectedLeaseOutcome: "handoff",
+  });
 
   assert.equal(settled.run.status, "FAILED");
   assert.equal(settled.run.failureClass, "TRANSIENT_PROVIDER");
@@ -2121,7 +2141,9 @@ test("a persisted PASS queues another Regression Run after a transient delivery 
 
 test("a persisted gate-fail queues another Regression Run after a transient delivery failure", async () => {
   const seeded = await seedRegression();
-  const settled = await completeRegressionAfterExternalGitFailure(seeded, "gate-fail");
+  const settled = await completeRegressionAfterExternalGitFailure(seeded, "gate-fail", {
+    expectedLeaseOutcome: "handoff",
+  });
 
   assert.equal(settled.run.status, "FAILED");
   assert.equal(settled.run.failureClass, "TRANSIENT_PROVIDER");
