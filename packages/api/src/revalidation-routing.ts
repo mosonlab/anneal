@@ -54,7 +54,7 @@ export const applyRevalidationRoute = async (
   if (implementation.runs.length > 0) {
     decision = "already-running";
     detail = "implementation already has a Run; assignment unchanged";
-  } else if (override === "stepOverrides" || override === "Route" || (!("unparseable" in brief) && parseImplementationRoute(brief.brief) !== null)) {
+  } else if (override === "stepOverrides" || (!("unparseable" in brief) && parseImplementationRoute(brief.brief) !== null)) {
     decision = "overridden";
     detail = `judged tier overridden by ${override === "stepOverrides" ? "explicit stepOverrides assignee" : "brief Route line"}`;
   } else if ("unparseable" in brief) {
