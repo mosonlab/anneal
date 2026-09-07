@@ -21,6 +21,7 @@ import {
   MERGE_TAIL_KIND,
   transitionMergeRecovery,
 } from "./merge-tail.js";
+import { writeMarker } from "./merge-tail-markers.js";
 import {
   attemptRunBirth,
   CompoundImplementationAssigneeError,
@@ -912,7 +913,13 @@ export type RecoveryIntegratorActivationResult =
   | {
     outcome: "refused";
     refusalCode: typeof MergeRecoveryRefusalCode.ACTIVATION_AUTHORIZATION_STALE;
-  };
+  }
+  /**
+   * The authorization is sound but an operator Hold refuses the integrator's
+   * layer, so its Run cannot be born now. The aggregate holds the pending
+   * authorization and stays short of SUCCEEDED until `chain/resume` replays it.
+   */
+  | { outcome: "withheld"; heldLayer: number | null };
 
 /**
  * The only automatic exit through an unresolved integrator stop. The caller is
@@ -1038,10 +1045,48 @@ export const activateRecoveryIntegratorSuccessor = async (
     true,
   );
   if (activated.nextTaskId !== input.integratorTaskId) {
-    throw new Error("Recovery activation did not resolve the expected merge-integrator successor");
+    // A Hold on the integrator's layer is the one reachable reason activation
+    // resolves nothing here, and it is not a fault: the authorization is
+    // written and valid, only its Run birth is refused. Record the pending
+    // authorization on the aggregate — the single owner of this replay — so
+    // Resume can open the Run instead of the intent being spent and lost.
+    const control = await readChainControl(tx, { projectId: identity.projectId, chainId: identity.chainId });
+    const integrator = await tx.task.findUnique({
+      where: { id: input.integratorTaskId },
+      select: { chainLayer: true, chainIndex: true },
+    });
+    const integratorHeld = integrator !== null && heldPredicate({
+      projectId: identity.projectId,
+      chainId: identity.chainId,
+      layer: integrator.chainLayer,
+      index: integrator.chainIndex,
+    }, control);
+    if (!integratorHeld) {
+      throw new Error("Recovery activation did not resolve the expected merge-integrator successor");
+    }
+    await tx.mergeRecoveryAttempt.update({
+      where: { id: recovery.id },
+      data: { pendingAuthorizationId: authorization.id },
+    });
+    await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", {
+      actorType: "control-plane",
+      body: control.heldLayer === null
+        ? "Recovery authorization recorded for Chain resume; the Chain is held"
+        : `Recovery authorization recorded for Chain resume; the Chain is held after layer ${String(control.heldLayer)}`,
+      metadata: {
+        state: "authorization-withheld",
+        aggregateId: recovery.id,
+        integratorTaskId: input.integratorTaskId,
+        sourceStopId: input.sourceStopId,
+        authorizationActivityId: authorization.id,
+        heldLayer: control.heldLayer,
+      },
+    });
+    return { outcome: "withheld", heldLayer: control.heldLayer };
   }
   await transitionMergeRecovery(tx, recovery.id, MergeRecoveryStatus.SUCCEEDED, {
     authorizationActivityId: authorization.id,
+    pendingAuthorizationId: null,
     failureReason: null,
     refusalCode: null,
     endedAt: now,

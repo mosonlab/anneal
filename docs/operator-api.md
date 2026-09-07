@@ -1918,6 +1918,16 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/hold" \
   resume activation-anchor behavior is unchanged.
 - Resume on a Chain that is not held is a successful idempotent no-op: it
   makes no transition, audit event, or activation.
+- Resume releases a held recovery authorization for replay by the base-drift
+  worker. The aggregate keeps the pending `integrator-authorized` intent until
+  the worker validates its authorization against the current base, acquires the
+  merge Lease, applies the same admission as `POST /tasks/:taskId/start`, and
+  records the new Run's durable handoff. Only that birth moves the aggregate to
+  `succeeded`; `authorization-replayed` TaskActivity records it. A second Resume
+  opens nothing. Contention or an admission refusal keeps the intent pending;
+  after the obstruction is repaired, a later worker tick can consume it even
+  though the Chain control is already released. Admission refusals are recorded
+  in the integrator task's activity.
 - Refusals: `404 Not Found` when the Task does not exist; `409 Conflict`
   when the Task belongs to no Chain.
 
@@ -2255,6 +2265,36 @@ backoff and the refusal, returns the attempt to `VALIDATING`, and records a
 successor Chain is required. Every other base-drift refusal keeps its
 abandon-only card, because there is no class counter for `re-validate` to
 reset.
+
+#### When the merge-integrator Run itself fails after recovery
+
+A canonical integrator step defers its `base-drift` question to the recovery
+worker, so while that stop stands there is no card to answer and both
+`POST /tasks/:taskId/retry` and `POST /tasks/:taskId/start` answer
+`Merge integrator stopped on base-drift; answer the stop question before
+starting another run`. The completion that records a failed integrator Run
+therefore decides the exit, with no operator input:
+
+- An **external failure** — transport, credential-mint transport or API 5xx —
+  records a pending authorization on the recovery aggregate. After the failed
+  Run's Lease release finishes, the recovery worker reads the current base.
+  If the authorized base is current, it acquires a new Lease and replays the
+  bound `integrator-authorized` intent with a durable handoff. Otherwise it
+  queues fresh base-drift recovery without a stale integrator Run. Recovery
+  Runs and external replays share the automatic recovery ceiling (2) across
+  stops for the same integrator, repository, PR and target. A Hold or admission
+  refusal preserves the pending intent without opening an abandon-only card.
+- **Anything else** is a deterministic refusal — the merge API answered
+  forbidden, unprocessable or not-found — and stops. The question the canonical
+  stop deferred is opened on the same `merge-stop:<stopId>` key family the
+  recovery worker uses, so an operator has something to answer; the activity is
+  in state `question-opened`. The same happens once the re-queue ceiling is
+  spent; this execution allowance has no class counter to reset, so its card
+  offers abandon only.
+
+In both cases the merge Lease handed to that Run is released by this same
+completion, because the Run ended without completing its merge. See
+[Merge lease](#merge-lease).
 
 #### Re-entering after a base-drift recovery FAIL
 
@@ -2649,6 +2689,16 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/merge-target" \
 ```sh
 curl "$BASE_URL/merge-lease" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
+
+A merge Lease handed to a queued merge-integrator Run is released by that Run's
+own completion whenever it ends without merging and leaves no ordinary retry
+Run. The same path records the failure and settles its `HANDOFF_PENDING`
+`MergeLeaseEvent` as `RELEASED`, with TaskActivity stating that the Run ended
+without merging. An ordinary retry retains the Lease and transfers the durable
+handoff to its successor Run. Recovery replays wait for the old release to
+settle, then acquire a new Lease before their Run becomes claimable. If the
+completion release fails, it records a deferred release for reconciliation; the
+pending recovery waits until that release settles.
 
 Operator-scoped and read-only; runner, merge-executor and session credentials
 are refused with 403 before origin or the ledger is read. It runs

@@ -279,7 +279,7 @@ export const makeAgentOsClient = (config: ExecutorConfig, fetchImpl: typeof fetc
    */
   const complete = async (
     claimed: MechanicalClaim,
-    completion: { succeeded: boolean; outcome: MergeOutcome | null; failureReason?: string },
+    completion: { succeeded: boolean; outcome: MergeOutcome | null; failureReason?: string; external?: boolean },
     redact: (value: unknown) => string,
   ): Promise<void> => {
     const body = {
@@ -287,9 +287,13 @@ export const makeAgentOsClient = (config: ExecutorConfig, fetchImpl: typeof fetc
       fencingToken: claimed.fencingToken,
       outcome: completion.succeeded
         ? { case: "succeeded" }
-        // A crashed executor persisted no merge result, which is exactly the
-        // output its step requires; the control plane may attempt it again.
-        : {
+        // Preserve environmental failures for automatic recovery; deterministic
+        // crashes still report the missing mechanical result.
+        : completion.external ? {
+          case: "provider-failure",
+          reason: completion.failureReason ?? "merge executor transport failed",
+          envelope: { version: 1, phase: "EXECUTE", agentExited: false, transient: true, exitCode: null },
+        } : {
           case: "required-output-unsatisfied",
           reason: completion.failureReason ?? "merge executor crashed",
         },
