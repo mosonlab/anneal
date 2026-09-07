@@ -280,6 +280,7 @@ export const applyCanonicalInstallation = async (
             name: true,
             isDefault: true,
             mergeTailRepairAgentId: true,
+            tiers: { select: { tier: true, agentId: true }, orderBy: { tier: "asc" } },
             entries: {
               select: { outputKind: true, assigneeAgentId: true, include: true },
               orderBy: { outputKind: "asc" },
@@ -310,6 +311,11 @@ export const applyCanonicalInstallation = async (
           },
           select: { id: true },
         });
+        if (profile.tiers.length > 0) {
+          await tx.staffingProfileTier.createMany({
+            data: profile.tiers.map((tier) => ({ profileId: created.id, ...tier })),
+          });
+        }
         if (profile.entries.length > 0) {
           await tx.staffingProfileEntry.createMany({
             data: profile.entries.map((entry) => ({ profileId: created.id, ...entry })),
