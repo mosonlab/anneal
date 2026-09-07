@@ -574,7 +574,7 @@ const blockedRecordFor = (seed: Seed): string => JSON.stringify({
 test("two ready candidates form one detached train with ordered claim metadata and lease marker", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
-  const tick = await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  const tick = await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
 
   assert.equal(tick.claimed, 2);
   assert.equal(tick.authorized, 0);
@@ -652,7 +652,7 @@ test("train reservation is visible before external Lease acquisition and has no 
     }
   };
 
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   assert.equal(observedChainId, seed.candidates[0]!.chainId);
   assert.equal(typeof observedTrainId, "string");
   const train = await trainTaskFor(seed);
@@ -664,11 +664,11 @@ test("train reservation is visible before external Lease acquisition and has no 
 test("a two-prefix passing train authorizes positions one and two and repairs the failing prefix against its predecessor", async () => {
   process.env.MERGE_TRAIN_WIDTH = "3";
   const seed = await seedTrainCandidates(3);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   const body = recordFor(seed, ["pass", "pass", "fail"], 2);
   const { train } = await finishTrainRun(seed, body);
 
-  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   assert.equal(settled.authorized, 2);
   assert.equal(settled.stopped, 0);
   assert.equal(settled.requeued, 0);
@@ -721,10 +721,10 @@ test("a two-prefix passing train authorizes positions one and two and repairs th
 test("a blocked train candidate enters the refresh-conflict stop with its recorded reason", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   const { train } = await finishTrainRun(seed, blockedRecordFor(seed));
 
-  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   assert.equal(settled.authorized, 1);
   assert.equal(settled.stopped, 1);
   const blocked = seed.candidates[1]!;
@@ -750,12 +750,12 @@ test("a blocked train candidate enters the refresh-conflict stop with its record
 test("a no-verdict prefix returns to ready while a blocked candidate stops", async () => {
   process.env.MERGE_TRAIN_WIDTH = "3";
   const seed = await seedTrainCandidates(3);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   const noVerdict = seed.candidates[1]!;
   const blocked = seed.candidates[2]!;
   await finishTrainRun(seed, recordFor(seed, ["pass", "no-verdict"], 1, { blocked: [blocked] }));
 
-  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   assert.equal(settled.authorized, 1);
   assert.equal(settled.stopped, 1);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: noVerdict.readiness.id } })).status, TaskStatus.TODO);
@@ -778,14 +778,14 @@ test("a no-verdict prefix returns to ready while a blocked candidate stops", asy
 test("a skipped train candidate returns to ready with no Regression rerun", async () => {
   process.env.MERGE_TRAIN_WIDTH = "3";
   const seed = await seedTrainCandidates(3);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   const skipped = seed.candidates[2]!;
   await finishTrainRun(seed, recordFor(seed, ["pass"], 1, {
     blocked: [seed.candidates[1]!],
     skipped: [skipped],
   }));
 
-  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   assert.equal(settled.authorized, 1);
   assert.equal(settled.stopped, 1);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: skipped.readiness.id } })).status, TaskStatus.TODO);
@@ -799,10 +799,10 @@ test("a skipped train candidate returns to ready with no Regression rerun", asyn
 test("an aborted train releases its lease, records every candidate, and returns them to ready without Regression re-runs", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   await finishTrainRun(seed, null, RunStatus.LOST);
 
-  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   assert.equal(settled.authorized, 0);
   assert.equal(settled.requeued, 0);
   assert.equal(settled.stopped, 0);
@@ -823,7 +823,7 @@ test("terminal train settlement leaves one release obligation that restart recon
   process.env.MERGE_TRAIN_WIDTH = "2";
   for (const terminal of ["settled", "aborted"] as const) {
     const seed = await seedTrainCandidates(2);
-    await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+    await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
     if (terminal === "settled") await finishTrainRun(seed, recordFor(seed, ["pass", "pass"], 2));
     else await finishTrainRun(seed, null, RunStatus.LOST);
 
@@ -831,7 +831,7 @@ test("terminal train settlement leaves one release obligation that restart recon
       acquire: acquireChainLease,
       release: async () => ({ outcome: "unreachable", detail: "process exited before confirming release" }),
     });
-    await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, releaseBeforeRestart);
+    await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, releaseBeforeRestart, () => []);
 
     const pending = await db.mergeLeaseEvent.findFirstOrThrow({ where: {
       projectId: seed.project.id,
@@ -861,7 +861,7 @@ test("terminal train settlement leaves one release obligation that restart recon
 test("a stale train base authorizes nothing and releases the held lease", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   await finishTrainRun(seed, recordFor(seed, ["pass", "pass"], 2));
 
   const staleBase = "9".repeat(40);
@@ -872,6 +872,7 @@ test("a stale train base authorizes nothing and releases the held lease", async 
     5,
     releaseChainLease,
     runWithMergeLease,
+    () => [],
   );
   assert.equal(settled.authorized, 0);
   assert.equal(settled.requeued, 0);
@@ -891,10 +892,10 @@ test("a stale train base authorizes nothing and releases the held lease", async 
 test("an active train keeps the repository busy across a later readiness tick", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(3);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   const pending = await trainTaskFor(seed);
 
-  const secondTick = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  const secondTick = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   assert.deepEqual(secondTick, { claimed: 0, authorized: 0, requeued: 0, stopped: 0 });
   assert.equal(await db.task.count({ where: {
     projectId: seed.project.id,
@@ -916,7 +917,7 @@ test("an acquiring reservation resumes into its sole queued Run with the switch 
   const { task, candidates } = await reserveAcquiringTrain(seed);
   process.env.MERGE_TRAIN_WIDTH = "0";
 
-  const resumed = await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  const resumed = await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   assert.deepEqual(resumed, { claimed: 0, authorized: 0, requeued: 0, stopped: 0 });
   const current = await db.task.findUniqueOrThrow({ where: { id: task.id } });
   assert.equal(current.status, TaskStatus.TODO);
@@ -937,7 +938,7 @@ test("an acquiring reservation resumes into its sole queued Run with the switch 
 test("a detached train with an existing Run cannot retry after lease loss", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   const train = await trainTaskFor(seed);
   const prior = await db.run.findFirstOrThrow({ where: { taskId: train.id }, orderBy: { runNumber: "desc" } });
 
@@ -959,14 +960,14 @@ test("one drifted candidate uses a train and avoids a per-chain Regression rerun
   process.env.MERGE_TRAIN_WIDTH = "3";
   const staleEvidenceBase = "9".repeat(40);
   const seed = await seedTrainCandidates(1, { evidenceBaseSha: staleEvidenceBase });
-  const formed = await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  const formed = await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   assert.equal(formed.claimed, 1);
   assert.equal(formed.authorized, 0);
   const train = await trainTaskFor(seed);
   assert.match(train.description, /merge-train\.sh/u);
   await finishTrainRun(seed, recordFor(seed, ["pass"], 1));
 
-  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   assert.equal(settled.authorized, 1);
   assert.equal(settled.requeued, 0);
   assert.equal(settled.stopped, 0);
@@ -990,13 +991,13 @@ test("one drifted candidate uses a train and avoids a per-chain Regression rerun
 test("a changed PR head aborts the train before it can authorize a stale candidate", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   const changedHead = "e".repeat(40);
   await finishTrainRun(seed, recordFor(seed, ["pass", "pass"], 2));
 
   const settled = await readinessTick(db, readerFor(seed, {
     headShaByPr: new Map([[seed.candidates[0]!.prNumber, changedHead]]),
-  }), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  }), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   assert.equal(settled.authorized, 0);
   assert.equal(settled.requeued, 0);
   assert.equal(settled.stopped, 0);
@@ -1015,14 +1016,14 @@ test("a changed PR head aborts the train before it can authorize a stale candida
 test("a trailing second-read refusal preserves the passing prefix and returns only that candidate to ready", async () => {
   process.env.MERGE_TRAIN_WIDTH = "3";
   const seed = await seedTrainCandidates(3);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   const trailing = seed.candidates[2]!;
   await finishTrainRun(seed, recordFor(seed, ["pass", "pass", "fail"], 2));
 
   const changedHead = "f".repeat(40);
   const settled = await readinessTick(db, readerFor(seed, {
     headShaByPr: new Map([[trailing.prNumber, changedHead]]),
-  }), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  }), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
 
   assert.equal(settled.authorized, 2);
   assert.equal(settled.stopped, 0);
@@ -1044,11 +1045,11 @@ test("a trailing second-read refusal preserves the passing prefix and returns on
 test("an unapproved gated candidate stops alone and truncates the authorized prefix", async () => {
   process.env.MERGE_TRAIN_WIDTH = "3";
   const seed = await seedTrainCandidates(3);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   await db.task.update({ where: { id: seed.candidates[1]!.readiness.id }, data: { approvalGate: true } });
   const { train } = await finishTrainRun(seed, recordFor(seed, ["pass", "pass", "pass"], 3));
 
-  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   // The gate is a per-candidate refusal: position 1 keeps its proven
   // authorization against the shorter prefix, position 2 stops on its own
   // refusal, and position 3 goes back to the next train untouched.
@@ -1090,11 +1091,11 @@ test("an unapproved gated candidate stops alone and truncates the authorized pre
 test("a gate refusal returns a later failing candidate to ready instead of repairing it", async () => {
   process.env.MERGE_TRAIN_WIDTH = "3";
   const seed = await seedTrainCandidates(3);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   await db.task.update({ where: { id: seed.candidates[1]!.readiness.id }, data: { approvalGate: true } });
   const { train } = await finishTrainRun(seed, recordFor(seed, ["pass", "pass", "fail"], 2));
 
-  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   // Position 3's `fail` prefix was gated on top of the refused position 2, so
   // it carries no verdict about the candidate itself: it returns to `ready`
   // for a later train rather than entering the budgeted gate-fix repair.
@@ -1121,9 +1122,9 @@ test("a gate refusal returns a later failing candidate to ready instead of repai
 test("a settled train closes its own card while an aborted train keeps its review state", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   await finishTrainRun(seed, recordFor(seed, ["pass", "pass"], 2));
-  await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
 
   const settledTrain = await db.task.findUniqueOrThrow({ where: { id: (await trainTaskFor(seed)).id } });
   assert.equal(settledTrain.status, TaskStatus.DONE);
@@ -1140,9 +1141,9 @@ test("a settled train closes its own card while an aborted train keeps its revie
 test("an aborted train keeps its diagnostic review state and reason", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   await finishTrainRun(seed, null, RunStatus.LOST);
-  await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
 
   const aborted = await db.task.findUniqueOrThrow({ where: { id: (await trainTaskFor(seed)).id } });
   assert.equal(aborted.status, TaskStatus.REVIEW);
@@ -1157,7 +1158,7 @@ test("an aborted train keeps its diagnostic review state and reason", async () =
 test("the queued merge-train Run is claimed with the ordered candidate list", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   const train = await trainTaskFor(seed);
 
   const claimed = await claimRun(db, {
@@ -1186,7 +1187,7 @@ test("the queued merge-train Run is claimed with the ordered candidate list", as
 test("a train settled while its Run is still active stays closed when that Run completes", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   const train = await trainTaskFor(seed);
   const claimed = await claimRun(db, {
     body: { runnerId: "merge-train-runner", leaseSeconds: 60, contractVersion: RUN_COMPLETION_CONTRACT_VERSION },
@@ -1206,7 +1207,7 @@ test("a train settled while its Run is still active stays closed when that Run c
     body: recordFor(seed, ["pass", "pass"], 2),
     commitSha: PREFIXES[0]!,
   } });
-  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   assert.equal(settled.authorized, 2);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: train.id } })).status, TaskStatus.DONE);
 
@@ -1235,7 +1236,7 @@ test("a train settled while its Run is still active stays closed when that Run c
 test("an aborted train keeps its review state when its still-active Run completes", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   const train = await trainTaskFor(seed);
   const claimed = await claimRun(db, {
     body: { runnerId: "merge-train-runner", leaseSeconds: 60, contractVersion: RUN_COMPLETION_CONTRACT_VERSION },
@@ -1251,7 +1252,7 @@ test("an aborted train keeps its review state when its still-active Run complete
     body: JSON.stringify({ schemaVersion: 1, baseSha: BASE }),
     commitSha: PREFIXES[0]!,
   } });
-  await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   const aborted = await db.task.findUniqueOrThrow({ where: { id: train.id } });
   assert.equal(aborted.status, TaskStatus.REVIEW);
 
@@ -1279,10 +1280,10 @@ test("an aborted train keeps its review state when its still-active Run complete
 test("a settled train card cannot emit merge-train claim metadata on a later claim", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   const train = await trainTaskFor(seed);
   await finishTrainRun(seed, recordFor(seed, ["pass", "pass"], 2));
-  await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
 
   await db.task.update({ where: { id: train.id }, data: { status: TaskStatus.TODO } });
   const revived = await db.run.create({ data: {
@@ -1313,13 +1314,13 @@ test("a settled train card cannot emit merge-train claim metadata on a later cla
 test("a contended merge Lease defers the train with a durable, operator-visible record", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   await finishTrainRun(seed, recordFor(seed, ["pass", "pass"], 2));
 
   leaseAcquisition = async () => ({ outcome: "contended", holder: {
     holder: "another-chain", task: "task-9", reason: "chain merge tail", acquiredAt: TEST_NOW.toISOString(), sha: "e".repeat(40),
   } });
-  const deferred = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  const deferred = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   leaseAcquisition = undefined;
 
   assert.deepEqual(deferred, { claimed: 0, authorized: 0, requeued: 0, stopped: 0 });
@@ -1350,18 +1351,18 @@ test("a contended merge Lease defers the train with a durable, operator-visible 
   assert.equal(alerted, "alerted");
   assert.equal(await db.inboxMessage.count({ where: { dedupeKey: { startsWith: "merge-lease-contention:" } } }), 1);
   // The train itself is untouched and settles on a later tick.
-  const resumed = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 2_000), 5, releaseChainLease, runWithMergeLease);
+  const resumed = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 2_000), 5, releaseChainLease, runWithMergeLease, () => []);
   assert.equal(resumed.authorized, 2);
 });
 
 test("an unreachable merge Lease names the transport failure instead of retrying silently", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   await finishTrainRun(seed, recordFor(seed, ["pass", "pass"], 2));
 
   leaseAcquisition = async () => ({ outcome: "unreachable", detail: "origin refused the lease ref" });
-  const deferred = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  const deferred = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   leaseAcquisition = undefined;
 
   assert.deepEqual(deferred, { claimed: 0, authorized: 0, requeued: 0, stopped: 0 });
@@ -1387,7 +1388,7 @@ test("a routine lease handoff does not block new train formation", async () => {
     handedOffAt: TEST_NOW,
   } });
 
-  const tick = await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  const tick = await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   assert.equal(tick.claimed, 2);
   assert.equal(tick.authorized, 0, "the candidates were reserved for one train");
   assert.equal(await db.task.count({ where: {
@@ -1403,7 +1404,7 @@ test("the readiness tick honours its claim budget on the train path", async () =
   for (const candidate of seed.candidates) {
     await db.taskStepOutput.delete({ where: { taskId: candidate.regression.id } });
   }
-  const tick = await readinessTick(db, readerFor(seed), TEST_NOW, 2, releaseChainLease, runWithMergeLease);
+  const tick = await readinessTick(db, readerFor(seed), TEST_NOW, 2, releaseChainLease, runWithMergeLease, () => []);
   assert.equal(tick.claimed, 2);
 });
 
@@ -1420,7 +1421,7 @@ test("train order follows when the Regression evidence was persisted, not its la
       WHERE "taskId" = ${candidate.regression.id}
     `;
   }
-  await readinessTick(db, readerFor(seed), TEST_NOW, 3, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 3, releaseChainLease, runWithMergeLease, () => []);
 
   const metadata = (await trainTaskMarkerFor((await trainTaskFor(seed)).id)).metadata as Record<string, unknown>;
   assert.deepEqual(metadata.candidates, [seed.candidates[3]!, seed.candidates[2]!].map((candidate) => ({
@@ -1434,7 +1435,7 @@ test("train order follows when the Regression evidence was persisted, not its la
 test("one fresh candidate remains on the existing single-candidate authorization path", async () => {
   process.env.MERGE_TRAIN_WIDTH = "3";
   const seed = await seedTrainCandidates(1);
-  const tick = await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  const tick = await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
 
   assert.deepEqual(tick, { claimed: 1, authorized: 1, requeued: 0, stopped: 0 });
   assert.equal(await db.task.count({ where: { projectId: seed.project.id, description: { contains: "merge-train.sh" } } }), 0);
@@ -1453,30 +1454,30 @@ test("one fresh candidate remains on the existing single-candidate authorization
 test("agent activity cannot replace the control-plane train ownership marker", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   const { train } = await finishTrainRun(seed, recordFor(seed, ["pass", "pass"], 2));
   await db.taskActivity.create({ data: {
     taskId: train.id, actorType: "agent", body: "Untrusted marker-shaped annotation",
     metadata: { kind: TRAIN_MARKER_KIND, schemaVersion: 1, state: "aborted", trainTaskId: train.id },
   } });
-  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   assert.equal(settled.authorized, 2);
 });
 
 test("overlapping settlement ticks cannot reacquire or release the same train generation", { timeout: 20_000 }, async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
-  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
   await finishTrainRun(seed, recordFor(seed, ["pass", "pass"], 2));
   let acquired!: () => void;
   const acquisition = new Promise<void>((resolve) => { acquired = resolve; });
   let resume!: () => void;
   const paused = new Promise<void>((resolve) => { resume = resolve; });
   observeLeaseAcquisition = async () => { acquired(); await paused; };
-  const first = readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  const first = readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   try {
     await acquisition;
-    const second = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_001), 5, releaseChainLease, runWithMergeLease);
+    const second = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_001), 5, releaseChainLease, runWithMergeLease, () => []);
     assert.equal(second.authorized, 0);
     assert.equal(leasedTargets.length, 2, "one formation and one settlement acquisition");
   } finally {
@@ -1506,7 +1507,7 @@ test("a readiness claim is released when the repository mutex is already held", 
   }, { timeout: 25_000 });
   try {
     await taken;
-    const tick = await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+    const tick = await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
     assert.equal(tick.claimed, 1);
     assert.equal(tick.authorized, 0);
     const readiness = await db.task.findUniqueOrThrow({ where: { id: candidate.readiness.id } });
@@ -1517,4 +1518,37 @@ test("a readiness claim is released when the repository mutex is already held", 
     releaseMutex();
     await holder;
   }
+});
+
+
+test("a train deferral preserves the open executor-offline episode", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(1, { evidenceBaseSha: "9".repeat(40) });
+  const candidate = seed.candidates[0]!;
+  const episodeStartedAt = new Date(TEST_NOW.getTime() - 60_000).toISOString();
+  const marker = await db.taskActivity.create({ data: {
+    taskId: candidate.readiness.id,
+    actorType: "control-plane",
+    body: "Merge readiness withheld its authorization: merge-executor-offline",
+    metadata: { kind: "mergeTail.readiness", state: "requeued-executor-offline", episodeStartedAt },
+  } });
+  await db.mergeLeaseEvent.create({ data: {
+    projectId: seed.project.id,
+    chainId: candidate.chainId,
+    state: MergeLeaseEventState.RELEASE_DEFERRED,
+    owningTaskId: candidate.regression.id,
+    failureDetail: "Release transport unavailable",
+  } });
+
+  let livenessReads = 0;
+  const result = await readinessTick(db, readerFor(seed), TEST_NOW, 5,
+    releaseChainLease, runWithMergeLease, () => { livenessReads += 1; return []; });
+  assert.equal(result.authorized, 0);
+  assert.equal(result.requeued, 0, "base drift defers for a train without rerunning Regression");
+  assert.equal(livenessReads, 0, "a deferred tick observes no executor liveness");
+  const persisted = await db.taskActivity.findUniqueOrThrow({ where: { id: marker.id } });
+  assert.equal((persisted.metadata as Record<string, unknown>).episodeStartedAt, episodeStartedAt);
+  assert.notEqual((persisted.metadata as Record<string, unknown>).episodeClosed, true);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.regression.id } })).status, TaskStatus.DONE);
+  assert.equal(await db.run.count({ where: { taskId: candidate.regression.id } }), 1);
 });
