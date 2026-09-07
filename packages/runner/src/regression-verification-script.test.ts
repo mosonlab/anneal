@@ -22,6 +22,7 @@ type Fixture = {
   gateLog: string;
   argvLog: string;
   fetchLog: string;
+  npmLog: string;
 };
 
 const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, {
@@ -71,7 +72,8 @@ const fixture = (): Fixture => {
   const gateLog = join(root, "gate.log");
   const argvLog = join(root, "argv.log");
   const fetchLog = join(root, "fetch.log");
-  for (const path of [leaseLog, gateLog, argvLog, fetchLog]) writeFileSync(path, "");
+  const npmLog = join(root, "npm.log");
+  for (const path of [leaseLog, gateLog, argvLog, fetchLog, npmLog]) writeFileSync(path, "");
   // Pass-through unless a test asks for failures, so every other case still
   // reaches real git. `git fetch` is the only reachable transient network call
   // in this script, and it is what the retry budget exists for.
@@ -101,6 +103,10 @@ exec "$REGRESSION_FIXTURE_GIT" "$@"
 printf 'node %s\\n' "$*" >> "$REGRESSION_FIXTURE_ARGV_LOG"
 exec "$REGRESSION_FIXTURE_NODE" "$@"
 `);
+  executable(join(bin, "npm"), `#!/bin/sh
+printf '%s\\n' "$*" >> "$REGRESSION_FIXTURE_NPM_LOG"
+exit "${"$"}{REGRESSION_FIXTURE_NPM_EXIT:-0}"
+`);
   executable(join(bin, "merge-lease"), `#!/bin/sh
 printf '%s\\n' "$*" >> "$REGRESSION_FIXTURE_LEASE_LOG"
 exit "${"$"}{REGRESSION_FIXTURE_LEASE_EXIT:-0}"
@@ -122,7 +128,7 @@ exit "${"$"}{REGRESSION_FIXTURE_GATE_EXIT:-0}"
     if (/^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+)$/u.test(name)) delete inheritedEnvironment[name];
   }
   return {
-    root, work, origin, baseSha, branchSha, output, leaseLog, gateLog, argvLog, fetchLog,
+    root, work, origin, baseSha, branchSha, output, leaseLog, gateLog, argvLog, fetchLog, npmLog,
     env: {
       ...inheritedEnvironment,
       PATH: `${bin}:${process.env.PATH ?? ""}`,
@@ -136,6 +142,7 @@ exit "${"$"}{REGRESSION_FIXTURE_GATE_EXIT:-0}"
       REGRESSION_FIXTURE_GATE_LOG: gateLog,
       REGRESSION_FIXTURE_ARGV_LOG: argvLog,
       REGRESSION_FIXTURE_FETCH_LOG: fetchLog,
+      REGRESSION_FIXTURE_NPM_LOG: npmLog,
       REGRESSION_FIXTURE_GIT: execFileSync("/usr/bin/env", ["sh", "-c", "command -v git"], { encoding: "utf8" }).trim(),
       REGRESSION_FIXTURE_NODE: process.execPath,
       GIT_AUTHOR_NAME: "regression-fixture",
@@ -219,6 +226,56 @@ test("prepare refreshes before semantic review without acquiring the merge lease
   assert.equal(git(seeded.work, "merge-base", "--is-ancestor", seeded.baseSha, "HEAD"), "");
   assert.equal(readFileSync(seeded.leaseLog, "utf8"), "", "prepare held no lease");
   assert.equal(existsSync(seeded.output), false, "prepare emitted no final output");
+});
+
+// The workspace generated its Prisma client at provisioning, before the refresh
+// merge moved the tree. Without regeneration the first typecheck of the recheck
+// reports the stale client as a defect in the code being verified.
+const advanceBase = (seeded: Fixture, file: string, content: string): void => {
+  const main = join(seeded.root, `main-${file.replace(/[^a-z0-9]+/giu, "-")}`);
+  git(seeded.root, "clone", "--branch", "main", seeded.origin, main);
+  mkdirSync(dirname(join(main, file)), { recursive: true });
+  writeFileSync(join(main, file), content);
+  git(main, "add", file);
+  git(main, "commit", "-m", `advance ${file}`);
+  git(main, "push", "origin", "main");
+};
+
+test("prepare regenerates the Prisma client when the refresh changes a schema", () => {
+  const seeded = fixture();
+  advanceBase(seeded, "packages/db/prisma/schema.prisma", "// refreshed schema\n");
+  const prepared = run(seeded, "prepare");
+  assert.equal(prepared.status, 0, prepared.stderr);
+  assert.match(prepared.stdout, /^REGRESSION PREPARE: ready [0-9a-f]{40} [0-9a-f]{40}\n$/u);
+  assert.equal(readFileSync(seeded.npmLog, "utf8"), "run db:generate\n");
+});
+
+test("prepare leaves the Prisma client alone when the refresh changes no schema", () => {
+  const seeded = fixture();
+  advanceBase(seeded, "drift.txt", "drift\n");
+  const prepared = run(seeded, "prepare");
+  assert.equal(prepared.status, 0, prepared.stderr);
+  assert.equal(readFileSync(seeded.npmLog, "utf8"), "");
+});
+
+test("prepare fails loudly when the refreshed Prisma client cannot be regenerated", () => {
+  const seeded = fixture();
+  advanceBase(seeded, "packages/db/prisma/schema.prisma", "// refreshed schema\n");
+  seeded.env.REGRESSION_FIXTURE_NPM_EXIT = "1";
+  const prepared = run(seeded, "prepare");
+  assert.equal(prepared.status, 1);
+  assert.match(prepared.stderr, /cannot regenerate the Prisma client for the refreshed tree/u);
+  assert.equal(existsSync(seeded.output), false, "a broken workspace publishes no verdict");
+});
+
+test("a semantic-stale refresh regenerates the Prisma client for the newer target", () => {
+  const seeded = fixture();
+  assert.equal(run(seeded, "prepare").status, 0);
+  advanceBase(seeded, "packages/db/prisma/schema.prisma", "// later schema\n");
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 77, finalized.stderr);
+  assert.match(finalized.stdout, /^REGRESSION FINALIZE: semantic-stale /u);
+  assert.equal(readFileSync(seeded.npmLog, "utf8"), "run db:generate\n");
 });
 
 test("finalize publishes the dispatch PASS handoff before readiness acquires the lease", () => {

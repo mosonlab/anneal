@@ -53,7 +53,7 @@ const member = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   updatedAt: "2026-08-28T01:00:00.000Z", scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: "chain-1", chainIndex: null,
   chainName: "Release", assigneeAgent: null, chainProgress: null, latestRun: null, strandedSalvageBranches: [], taskCost: null, budgetRemaining: true, leaseLossRefunds: 0,
-  blockedOn: null, mergeOutcome: null, repairOf: null, chainAggregate: null, ...overrides,
+  blockedOn: null, mergeOutcome: null, repairOf: null, chainAggregate: null, baseline: null, readinessRequeues: 0, readinessGrants: 0, ...overrides,
 });
 
 const aggregate = (position: number | null, done: number, stepCount = 12): ChainAggregate => ({

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { parseRunOutputEvidence, type FailureEnvelope, type RunOutcome } from "@anneal/db";
 
 import {
-  ControlPlaneError,
+  controlPlaneErrorFor,
   type CancellationRequest,
   type Completion,
   type ControlPlane,
@@ -165,11 +165,9 @@ export const createRoutedControlPlaneDouble = (
       body: JSON.stringify(body),
     });
     const responseBody = await response.text();
-    if (!response.ok) {
-      let code: string | undefined;
-      try { code = (JSON.parse(responseBody) as { code?: string }).code; } catch { /* non-JSON error */ }
-      throw new ControlPlaneError(response.status, responseBody, code);
-    }
+    // The production seam's own parse, so a routed double raises the error a
+    // runner would actually see, refusal detail included.
+    if (!response.ok) throw controlPlaneErrorFor(response.status, responseBody);
     return (responseBody.trim() ? JSON.parse(responseBody) : {}) as T;
   };
 

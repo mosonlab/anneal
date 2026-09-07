@@ -4,6 +4,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import { DependencyProvisioning, InboxStatus, MERGE_TAIL_KIND, PrismaClient } from "@anneal/db";
 
+import { blockedLockCount, waitForBlockedLocks } from "./blocked-locks-wait.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb, testDatabaseUrl } from "./testdb.js";
 
@@ -47,24 +48,6 @@ const call = async (
   });
   return { status: response.status, body: response.status === 204 ? null : await response.json() };
 });
-
-const blockedLockCount = async (): Promise<number> => {
-  const [row] = await db.$queryRaw<Array<{ count: number }>>`
-    SELECT count(*)::int AS "count"
-    FROM pg_stat_activity
-    WHERE datname = current_database() AND wait_event_type = 'Lock'
-  `;
-  return row?.count ?? 0;
-};
-
-const waitForBlockedLocks = async (minimum: number): Promise<void> => {
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
-    if (await blockedLockCount() >= minimum) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  assert.fail(`timed out waiting for ${minimum} blocked database lock(s)`);
-};
 
 const seedBareProject = (label: string) => db.project.create({
   data: { name: label, slug: `${label}-${Date.now()}-${Math.round(performance.now() * 1000)}` },
@@ -796,10 +779,10 @@ test("archive waits for detached repair completion and closes the notice it emit
   });
   try {
     await locked;
-    const baseline = await blockedLockCount();
+    const baseline = await blockedLockCount(db);
     const archiving = call("POST", `/tasks/${context.task.id}/archive`);
     try {
-      await waitForBlockedLocks(baseline + 1);
+      await waitForBlockedLocks(db, baseline + 1);
     } finally {
       releaseProducer();
     }

@@ -120,15 +120,39 @@ const processAlive = (pid: number): boolean => {
   try { process.kill(pid, 0); return true; } catch { return false; }
 };
 
+/**
+ * How long a real child of this suite may take to reach what a test waits for.
+ *
+ * Bounded on purpose: a descendant that never dies has to fail rather than hang
+ * the gate forever. What it has to cover is a real provider child's node
+ * startup, sized for the loaded gate worker rather than an idle host
+ * (CONTRIBUTING.md, "Test timing on the gate worker"). Each wait below returns
+ * the moment its condition holds, so these budgets cost nothing on a run that
+ * passes.
+ */
+const CHILD_START_BUDGET_MS = 60_000;
+/** A process being killed has already started, so only signal delivery and
+ *  reaping remain — a shorter budget still leaves room for a starved reaper. */
+const CHILD_EXIT_BUDGET_MS = 30_000;
+/** The node:test bound for a case that launches real provider children. It is
+ *  the outer bound, and every such case uses it directly: it has to exceed the
+ *  waits inside the case by a wide margin, or the case dies of the outer budget
+ *  while an inner wait was still going to succeed. The widest case waits
+ *  CHILD_START_BUDGET_MS then CHILD_EXIT_BUDGET_MS in series (90s), so this
+ *  clears the inner waits by a further 90s. Bounded so a child that never
+ *  answers is still reported as a failure. */
+const SPAWNING_TEST_TIMEOUT_MS = 180_000;
+
 const waitForProcessExit = async (pid: number): Promise<boolean> => {
-  for (let waited = 0; waited < 3_000; waited += 25) {
+  const deadline = Date.now() + CHILD_EXIT_BUDGET_MS;
+  while (Date.now() < deadline) {
     if (!processAlive(pid)) return true;
     await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 25));
   }
-  return false;
+  return !processAlive(pid);
 };
 
-test("cancellation drains a Run-owned descendant that starts a separate process group", { timeout: 20_000 }, async () => {
+test("cancellation drains a Run-owned descendant that starts a separate process group", { timeout: SPAWNING_TEST_TIMEOUT_MS }, async () => {
   const fixture = await mkdtemp(join(tmpdir(), "agentos-run-drain-"));
   const binary = join(fixture, "provider.mjs");
   const pidFile = join(fixture, "descendant.pid");
@@ -151,7 +175,8 @@ test("cancellation drains a Run-owned descendant that starts a separate process 
     spec.workingDirectory = fixture;
     spec.env = { PATH: process.env.PATH ?? "/usr/bin:/bin", AGENTOS_RUN_ID: spec.claim.run.id };
     const handle = await adapters.CODEX.start(spec, () => undefined);
-    for (let waited = 0; waited < 3_000; waited += 25) {
+    const descendantDeadline = Date.now() + CHILD_START_BUDGET_MS;
+    while (Date.now() < descendantDeadline) {
       try {
         descendantPid = Number.parseInt((await readFile(pidFile, "utf8")).trim(), 10);
         break;
@@ -194,6 +219,13 @@ test("buildPrompt appends operator notes after the task context", () => {
     operatorNotes: ["Please preserve the existing API shape.", "The deployment window closes at 5pm."],
   });
   assert.match(prompt, /Task: Ship it[\s\S]*Do the work[\s\S]*Operator notes:\n- Please preserve the existing API shape\.\n- The deployment window closes at 5pm\./u);
+});
+
+test("buildPrompt states an amendment that landed after the specification was materialized", () => {
+  const note = "Task task-9 had its brief amended at 2026-09-06T18:47:00.000Z, after .chain/feature/x/spec.md was materialized.";
+  const prompt = buildPrompt({ ...claim, specificationAmendment: note });
+  assert.match(prompt, new RegExp(`Do the work[\\s\\S]*Specification of record amended after materialization:\\n- ${note.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`, "u"));
+  assert.doesNotMatch(buildPrompt(claim), /Specification of record amended after materialization/u);
 });
 
 test("buildPrompt labels approval-gate feedback separately from bounded operator notes", () => {
@@ -941,7 +973,7 @@ const launch = async (
   return { evidence, report: JSON.parse(line) as { bytes: number; longestArg: number; sha256: string }, events };
 };
 
-test("every runner launches with the largest legal chain prompt and receives all of it", { timeout: 60_000 }, async () => {
+test("every runner launches with the largest legal chain prompt and receives all of it", { timeout: SPAWNING_TEST_TIMEOUT_MS }, async () => {
   const maximal: ClaimedTask = {
     ...claim,
     priorOutputs: Array.from({ length: MAX_PRIOR_OUTPUTS }, (_, index) => priorOutput(index)),
@@ -959,7 +991,7 @@ test("every runner launches with the largest legal chain prompt and receives all
   }
 });
 
-test("every runner is handed the prompt and the resume input byte-exact at the process boundary", { timeout: 30_000 }, async () => {
+test("every runner is handed the prompt and the resume input byte-exact at the process boundary", { timeout: SPAWNING_TEST_TIMEOUT_MS }, async () => {
   // Scope, stated once: the child is the stub above, so this proves what Anneal
   // writes and spawns — the full prompt on stdin, digest-identical, and an argv
   // that never carries it. Whether the vendor CLI then trims a trailing newline
@@ -1430,7 +1462,7 @@ const rootReportingStub = [
   "",
 ].join("\n");
 
-test("a scrubbing run-as launcher cannot strip the isolation roots from any session", { timeout: 60_000 }, async () => {
+test("a scrubbing run-as launcher cannot strip the isolation roots from any session", { timeout: SPAWNING_TEST_TIMEOUT_MS }, async () => {
   const fixture = await mkdtemp(join(tmpdir(), "agentos-runas-scrub-"));
   const stub = join(fixture, "agent-stub.sh");
   for (const { fixtureRoot } of hostSkillSentinels) {
@@ -1532,7 +1564,7 @@ test("a scrubbing run-as launcher cannot strip the isolation roots from any sess
   }
 });
 
-test("PI preflight fails closed when the CLI omits an isolation capability", { timeout: 30_000 }, async () => {
+test("PI preflight fails closed when the CLI omits an isolation capability", { timeout: SPAWNING_TEST_TIMEOUT_MS }, async () => {
   const fixture = await mkdtemp(join(tmpdir(), "agentos-pi-capability-"));
   const stub = join(fixture, "pi-stub.sh");
   await writeFile(stub, [
@@ -1558,7 +1590,7 @@ test("PI preflight fails closed when the CLI omits an isolation capability", { t
   }
 });
 
-test("PI preflight verifies every isolation capability before authentication", { timeout: 30_000 }, async () => {
+test("PI preflight verifies every isolation capability before authentication", { timeout: SPAWNING_TEST_TIMEOUT_MS }, async () => {
   const fixture = await mkdtemp(join(tmpdir(), "agentos-pi-capability-"));
   const stub = join(fixture, "pi-stub.sh");
   await writeFile(stub, [
@@ -2007,7 +2039,7 @@ test("Claude preflight fails closed when the CLI omits user-source isolation", a
   assert.equal(result.authMode, null);
 });
 
-test("Claude preflight still requires a logged-in session after verifying isolation", { timeout: 30_000 }, async () => {
+test("Claude preflight still requires a logged-in session after verifying isolation", { timeout: SPAWNING_TEST_TIMEOUT_MS }, async () => {
   const fixture = await mkdtemp(join(tmpdir(), "agentos-claude-capability-"));
   const stub = join(fixture, "claude-stub.sh");
   await writeFile(stub, [

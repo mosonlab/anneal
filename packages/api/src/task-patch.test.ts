@@ -320,3 +320,185 @@ test("PATCH accepts the same reassignment once the task's Runs are terminal", as
   assert.ok("task" in result);
   assert.deepEqual(fixture.writes, [{ assigneeAgentId: "agent-2" }]);
 });
+
+/**
+ * The chain-binding PATCH decides entirely from rows read under the chain
+ * mutex, so the seam a fake transaction has to provide is small: the chain's
+ * own rows, its Run count, and the predecessor the request names.
+ */
+const bindingFixture = (options: {
+  dispatchAfterTaskId?: string | null;
+  chainRows?: ReadonlyArray<{ id: string; chainLayer: number | null; chainIndex: number | null }>;
+  runCount?: number;
+  predecessors?: ReadonlyArray<{ id: string; name: string; chainId: string | null; archivedAt: Date | null }>;
+  chainId?: string | null;
+} = {}) => {
+  const task = {
+    id: "task-first",
+    projectId: "project-1",
+    templateId: null,
+    templateStepId: null,
+    chainId: options.chainId === undefined ? "chain-1" : options.chainId,
+    description: "work",
+    name: "First step",
+    approvalGate: false,
+    archivedAt: null,
+    status: TaskStatus.TODO as TaskStatus,
+    dispatchAfterTaskId: options.dispatchAfterTaskId ?? null,
+    dispatchAfter: null,
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: null,
+    repoId: null,
+    scheduleKind: null,
+    maxSessionsPerTask: 5,
+    templateStep: null,
+  };
+  const writes: Array<Record<string, unknown>> = [];
+  const activities: Array<Record<string, unknown>> = [];
+  const tx = {
+    $queryRaw: async () => [{ id: task.id }],
+    task: {
+      findUnique: async () => task,
+      findUniqueOrThrow: async () => task,
+      findMany: async () => options.chainRows ?? [
+        { id: task.id, chainLayer: 1, chainIndex: 1 },
+        { id: "task-second", chainLayer: 2, chainIndex: 2 },
+      ],
+      findFirst: async ({ where }: { where: { id: string } }) =>
+        (options.predecessors ?? []).find((candidate) => candidate.id === where.id) ?? null,
+      update: async ({ data }: { data: Record<string, unknown> }) => {
+        writes.push(data);
+        return { ...task, ...data };
+      },
+    },
+    run: { count: async () => options.runCount ?? 0 },
+    taskActivity: {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        activities.push(data);
+        return { id: `activity-${activities.length}` };
+      },
+    },
+  };
+  const db = {
+    ...tx,
+    $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+  } as unknown as PrismaClient;
+  return { db, writes, activities };
+};
+
+const donePredecessor = {
+  id: "task-done",
+  name: "Predecessor",
+  chainId: "chain-0",
+  archivedAt: null,
+};
+
+test("an unstarted chain is re-pointed at a DONE predecessor and records the change", async () => {
+  const fixture = bindingFixture({
+    dispatchAfterTaskId: "task-old",
+    predecessors: [donePredecessor],
+  });
+
+  const result = await patchTask(fixture.db, "task-first", { dispatchAfterTaskId: "task-done" });
+
+  assert.ok("task" in result);
+  assert.equal(result.task.dispatchAfterTaskId, "task-done");
+  assert.deepEqual(fixture.writes, [{ dispatchAfterTaskId: "task-done" }]);
+  assert.deepEqual(fixture.activities, [{
+    taskId: "task-first",
+    actorType: "operator",
+    body: "Chain binding changed by operator request: predecessor task-old → task-done",
+    metadata: {
+      chainId: "chain-1",
+      previousDispatchAfterTaskId: "task-old",
+      dispatchAfterTaskId: "task-done",
+    },
+  }]);
+});
+
+test("null releases the binding without starting the chain", async () => {
+  const fixture = bindingFixture({ dispatchAfterTaskId: "task-old" });
+
+  const result = await patchTask(fixture.db, "task-first", { dispatchAfterTaskId: null });
+
+  assert.ok("task" in result);
+  assert.equal(result.task.dispatchAfterTaskId, null);
+  assert.deepEqual(fixture.writes, [{ dispatchAfterTaskId: null }]);
+  assert.equal(fixture.activities.length, 1);
+  assert.equal(
+    fixture.activities[0]!.body,
+    "Chain binding changed by operator request: predecessor task-old → none",
+  );
+});
+
+test("restating the binding a chain already has writes no activity", async () => {
+  const fixture = bindingFixture({ dispatchAfterTaskId: "task-old", runCount: 3 });
+
+  const result = await patchTask(fixture.db, "task-first", { dispatchAfterTaskId: "task-old" });
+
+  assert.ok("task" in result);
+  assert.deepEqual(fixture.activities, []);
+});
+
+test("a chain with a Run keeps its binding, as does a later step and a standalone task", async () => {
+  const cases = [
+    { fixture: bindingFixture({ runCount: 1, predecessors: [donePredecessor] }), label: "started chain" },
+    {
+      fixture: bindingFixture({
+        chainRows: [
+          { id: "task-zero", chainLayer: 1, chainIndex: 1 },
+          { id: "task-first", chainLayer: 2, chainIndex: 2 },
+        ],
+        predecessors: [donePredecessor],
+      }),
+      label: "later step",
+    },
+    { fixture: bindingFixture({ chainId: null, predecessors: [donePredecessor] }), label: "standalone task" },
+  ];
+  for (const { fixture, label } of cases) {
+    const result = await patchTask(fixture.db, "task-first", { dispatchAfterTaskId: "task-done" });
+    assert.ok("reason" in result, label);
+    assert.equal(result.reason, "chain_binding_immutable_after_start", label);
+    assert.equal(refusalResponse(result).status, 409, label);
+    assert.deepEqual(fixture.writes, [], label);
+    assert.deepEqual(fixture.activities, [], label);
+  }
+});
+
+test("a first step whose layer is still null carries the binding", async () => {
+  // The stored layer is authoritative, with the chain index as the legacy
+  // fallback: SQL NULLS LAST ordering would have picked the layered row.
+  const fixture = bindingFixture({
+    dispatchAfterTaskId: "task-old",
+    chainRows: [
+      { id: "task-second", chainLayer: 2, chainIndex: 2 },
+      { id: "task-first", chainLayer: null, chainIndex: 1 },
+    ],
+    predecessors: [donePredecessor],
+  });
+
+  const result = await patchTask(fixture.db, "task-first", { dispatchAfterTaskId: "task-done" });
+
+  assert.ok("task" in result);
+  assert.deepEqual(fixture.writes, [{ dispatchAfterTaskId: "task-done" }]);
+});
+
+test("an archived, foreign, standalone, or same-chain predecessor is an invalid target", async () => {
+  const cases = [
+    { id: "task-archived", predecessors: [{ ...donePredecessor, id: "task-archived", archivedAt: new Date() }] },
+    { id: "task-foreign", predecessors: [] },
+    // A standalone predecessor never dispatches a bound successor.
+    { id: "task-loose", predecessors: [{ ...donePredecessor, id: "task-loose", chainId: null }] },
+    { id: "task-second", predecessors: [{ ...donePredecessor, id: "task-second", chainId: "chain-1" }] },
+    { id: "task-first", predecessors: [{ ...donePredecessor, id: "task-first", chainId: "chain-1" }] },
+  ];
+  for (const { id, predecessors } of cases) {
+    const fixture = bindingFixture({ predecessors });
+    const result = await patchTask(fixture.db, "task-first", { dispatchAfterTaskId: id });
+    assert.ok("reason" in result, id);
+    assert.equal(result.reason, "chain_binding_target_invalid", id);
+    assert.equal(refusalResponse(result).status, 400, id);
+    assert.deepEqual(fixture.writes, [], id);
+    assert.deepEqual(fixture.activities, [], id);
+  }
+});

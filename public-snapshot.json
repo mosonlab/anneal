@@ -157,6 +157,8 @@
     { "glob": "scripts/operator-api-docs.test.mjs", "purpose": "executable Chain Hold and Resume operator-handbook contract tests" },
     { "glob": "packages/runner/runtime-tools/git-credential-runner.sh", "purpose": "answers a session's git credentials from the runner account's own home, which the agent adapters relocate" },
     { "glob": "packages/runner/runtime-tools/regression-verification.sh", "purpose": "token-free regression refresh, exact-head gate dispatch and verdict persistence" },
+    { "glob": "packages/runner/runtime-tools/merge-train.sh", "purpose": "merge train runtime tool entrypoint: builds, gates and records cumulative prefixes for an ordered candidate list" },
+    { "glob": "packages/runner/runtime-tools/merge-train.mjs", "purpose": "merge train runtime tool implementation: cumulative-prefix build, gate and result persistence" },
     { "glob": "scripts/merge-integrator-real-checks.mjs", "purpose": "redacted real-infrastructure merge-integrator checks" },
     { "glob": "scripts/merge-integrator-system-test.mjs", "purpose": "redacted end-to-end merge-integrator system harness" },
     { "glob": "scripts/os-isolation/patch-runner-plists.sh", "purpose": "OS isolation: launchd RUNNER_RUN_AS_PREFIX wiring" },
@@ -356,6 +358,16 @@
     {
       "category": "pii-email",
       "glob": "packages/runner/src/regression-verification-script.test.ts",
+      "reason": "synthetic Git author identity in disposable fixture repositories; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
+    },
+    {
+      "category": "pii-email",
+      "glob": "packages/runner/src/merge-train-script.test.ts",
+      "reason": "synthetic Git author identity in disposable fixture repositories; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
+    },
+    {
+      "category": "pii-email",
+      "glob": "packages/runner/src/merge-train-output-handoff.test.ts",
       "reason": "synthetic Git author identity in disposable fixture repositories; `example.invalid` is a reserved domain (RFC 2606) that cannot be registered or receive mail, so it names no person"
     },
     {
