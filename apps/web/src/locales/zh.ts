@@ -1064,6 +1064,7 @@ export const zh = {
   "tasks.notice.moveNotAllowed": "无法将 {name} 移至{status}",
   "tasks.pill.approval": "需审批",
   "tasks.pill.cron": "cron",
+  "tasks.pill.readinessRequeue": "已重排 {n} 次 · 追加 {grants} 次尝试",
   "tasks.pill.repair": "修复 {kind}",
   "tasks.pill.template": "模板",
   "tasks.pill.webhook": "webhook",

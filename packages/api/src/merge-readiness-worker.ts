@@ -17,6 +17,7 @@ import {
   parseRegressionVerdict,
   requireMergeGateAuthorization,
   REGRESSION_VERIFICATION_OUTPUT_KINDS,
+  recordReadinessRequeue,
   recoveryContext,
   resolveChainTarget,
   writeMarker,
@@ -336,6 +337,17 @@ export const requeueRegressionSettlement = (
         }
         return { ownership: "released", leaseOutcome: { kind: "stop", taskId: input.regressionTaskId } };
       }
+      // The counter shares this transaction with the grant it counts, so a
+      // rolled-back settlement leaves neither behind, and a refused requeue
+      // returns above without granting or counting anything.
+      await recordReadinessRequeue(tx, {
+        readinessTaskId: input.readinessTaskId,
+        regressionTaskId: input.regressionTaskId,
+        staleBaseSha: input.staleBaseSha,
+        currentBaseSha: input.currentBaseSha,
+        budgetGrant: 1,
+        reason: input.reason,
+      });
       await writeMarker(tx, input.regressionTaskId, "readiness", {
         actorType: "control-plane",
         body: `Merge readiness returned to regression: ${input.reason}; ${input.staleBaseSha} -> ${input.currentBaseSha}`,

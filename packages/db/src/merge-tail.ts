@@ -437,6 +437,7 @@ const DEFENSE_EXACT = new Set([
   "packages/db/src/merge-recovery-revalidate.ts",
   "packages/db/src/merge-tail.ts",
   "packages/db/src/merge-tail-markers.ts",
+  "packages/db/src/readiness-requeue.ts",
   "packages/db/src/canonical-output-schema.ts",
   "packages/db/src/template-sources.ts",
   "packages/db/src/agent-contract.ts",

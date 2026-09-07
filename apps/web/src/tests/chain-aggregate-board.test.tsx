@@ -20,7 +20,7 @@ const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null, approvalGate: false, templateId: null,
   source: "MANUAL", chainId: null, chainIndex: null, chainName: null, assigneeAgent: null,
   chainProgress: null, latestRun: null, strandedSalvageBranches: [], taskCost: null, spendCapUsage: null, budgetRemaining: true, leaseLossRefunds: 0, blockedOn: null, mergeOutcome: null,
-  repairOf: null, chainAggregate: null, ...overrides,
+  repairOf: null, chainAggregate: null, readinessRequeues: 0, readinessGrants: 0, ...overrides,
 });
 
 const aggregate = (overrides: Partial<ChainAggregate> = {}): ChainAggregate => ({

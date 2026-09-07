@@ -1071,6 +1071,7 @@ export const en = {
   "tasks.notice.moveNotAllowed": "Cannot move {name} to {status}",
   "tasks.pill.approval": "Approval",
   "tasks.pill.cron": "cron",
+  "tasks.pill.readinessRequeue": "Requeued {n} · +{grants} attempts",
   "tasks.pill.repair": "Repair {kind}",
   "tasks.pill.template": "Template",
   "tasks.pill.webhook": "webhook",
