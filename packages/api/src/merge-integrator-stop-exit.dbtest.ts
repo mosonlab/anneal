@@ -596,12 +596,11 @@ test("ordinary mechanical retry transfers its one pending handoff without releas
   assert.deepEqual(releasedLeaseTargets, []);
 });
 
-test("a non-canonical integrator's existing question is not opened again", async () => {
-  const seeded = await seedIntegratorChain(db, { label: "noncanonical-failure", shape: "twelve-step-readiness" });
+test("a legacy integrator failure opens its deferred question only once", async () => {
+  const seeded = await seedIntegratorChain(db, { label: "legacy-integrator-failure", shape: "twelve-step-readiness" });
   const authorization = await authorize(seeded.readinessTask!.id, BASE);
   const source = await mechanicalBaseDriftStop(seeded, authorization.id);
-  const question = await stopQuestion(seeded);
-  assert.ok(question);
+  assert.equal(await stopQuestion(seeded), null, "legacy integrator roles also defer base-drift questions");
   const stop = await db.$transaction((tx) => latestRecordedStop(tx, seeded.integratorTask!.id));
   assert.ok(stop);
   await db.mergeRecoveryAttempt.create({ data: {
@@ -612,7 +611,14 @@ test("a non-canonical integrator's existing question is not opened again", async
     integratorTaskId: seeded.integratorTask!.id, runId: source.id, external: false,
     failureReason: "forbidden", now: new Date(),
   }));
-  assert.deepEqual(result, { kind: "none" });
+  const question = await stopQuestion(seeded);
+  assert.ok(question);
+  assert.deepEqual(result, { kind: "question-opened", questionId: question.id });
+  const replay = await db.$transaction((tx) => settleFailedIntegratorRun(tx, {
+    integratorTaskId: seeded.integratorTask!.id, runId: source.id, external: false,
+    failureReason: "forbidden", now: new Date(),
+  }));
+  assert.deepEqual(replay, { kind: "question-opened", questionId: null });
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.integratorTask!.id, kind: "MULTIPLE_CHOICE" } }), 1);
 });
 
