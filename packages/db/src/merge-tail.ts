@@ -32,6 +32,7 @@ export const MERGE_TAIL_KIND = {
   repairResult: "mergeTail.repairResult",
   requeue: "mergeTail.requeue",
   readiness: "mergeTail.readiness",
+  train: "mergeTail.train",
 } as const;
 
 /**
@@ -176,7 +177,7 @@ export const RECOVERY_TRANSITIONS: Record<MergeRecoveryStatus, ReadonlySet<Merge
     MergeRecoveryStatus.SUCCEEDED,
   ]),
   [MergeRecoveryStatus.BLOCKED_DOWNSTREAM]: new Set([MergeRecoveryStatus.REPAIRING]),
-  [MergeRecoveryStatus.SUCCEEDED]: new Set(),
+  [MergeRecoveryStatus.SUCCEEDED]: new Set([MergeRecoveryStatus.AWAITING_AUTHORIZATION]),
   [MergeRecoveryStatus.FAILED]: new Set([MergeRecoveryStatus.VALIDATING]),
 };
 
@@ -388,6 +389,19 @@ export const parseRegressionVerdict = (
 
 export type MergeTrainVerdict = "pass" | "fail" | "no-verdict";
 export type MergeTrainWidth = 1 | 2 | 3;
+
+/**
+ * The ordered candidate binding written into a merge-train Task marker and
+ * handed to the runtime tool through the claim contract. `taskId` is the
+ * candidate's merge-readiness Task; the Regression Task identity that staffs
+ * the detached train is carried separately by the train marker.
+ */
+export type MergeTrainCandidate = {
+  taskId: string;
+  chainId: string;
+  headSha: string;
+  branch: string;
+};
 
 export type MergeTrainPrefix = {
   index: number;
@@ -656,6 +670,7 @@ const DEFENSE_EXACT = new Set([
   "packages/db/src/gate-attestation.ts",
   "packages/db/src/merge-integrator-db.ts",
   "packages/db/src/merge-recovery-revalidate.ts",
+  "packages/db/src/merge-recovery-intent.ts",
   "packages/db/src/merge-tail.ts",
   "packages/db/src/merge-tail-markers.ts",
   "packages/db/src/readiness-requeue.ts",

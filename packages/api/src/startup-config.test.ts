@@ -9,11 +9,14 @@ import {
   COMPOSE_DATABASE_DEFAULTS,
   COMPOSE_PUBLISHED_PORT,
   DEFAULT_API_PORT,
+  DEFAULT_MERGE_TRAIN_WIDTH,
   DEVELOPER_PREVIEW,
   LOOPBACK_HOST,
+  MAX_MERGE_TRAIN_WIDTH,
   StartupConfigError,
   evaluateStartupConfig,
   loadStartupConfig,
+  mergeTrainWidth,
 } from "./startup-config.js";
 import { spawnedSourceEntrypointArgv, spawnedStartupEnvironment } from "./test-startup-environment.js";
 
@@ -94,6 +97,45 @@ test("an unusable listener port is refused", () => {
       refusalReasons(generatedEnvironment({ API_PORT: port })),
       ["api-port-invalid:API_PORT"],
       `API_PORT=${port} was accepted`,
+    );
+  }
+});
+
+test("merge train width defaults to zero and is included in validated startup config", () => {
+  const verdict = evaluateStartupConfig(generatedEnvironment({ MERGE_TRAIN_WIDTH: undefined }));
+  assert.ok(verdict.ok);
+  assert.equal(verdict.config.mergeTrainWidth, DEFAULT_MERGE_TRAIN_WIDTH);
+});
+
+test("merge train width accepts each integer from zero through its configured maximum", () => {
+  for (let width = DEFAULT_MERGE_TRAIN_WIDTH; width <= MAX_MERGE_TRAIN_WIDTH; width += 1) {
+    const verdict = evaluateStartupConfig(generatedEnvironment({ MERGE_TRAIN_WIDTH: String(width) }));
+    assert.ok(verdict.ok, `MERGE_TRAIN_WIDTH=${width} was refused`);
+    assert.equal(verdict.config.mergeTrainWidth, width);
+  }
+});
+
+test("an invalid merge train width is refused with a named startup reason", () => {
+  for (const width of ["4", "-1", "1.5", "", "00", "width"]) {
+    assert.deepEqual(
+      refusalReasons(generatedEnvironment({ MERGE_TRAIN_WIDTH: width })),
+      ["merge-train-width-invalid:MERGE_TRAIN_WIDTH"],
+      `MERGE_TRAIN_WIDTH=${width} was accepted`,
+    );
+  }
+});
+
+test("the ambient merge train width reader refuses an unparseable value", () => {
+  assert.equal(mergeTrainWidth({}), DEFAULT_MERGE_TRAIN_WIDTH);
+  assert.equal(mergeTrainWidth({ MERGE_TRAIN_WIDTH: " 2 " }), 2);
+  // A width the startup verdict would refuse must never be read as the legacy
+  // path: the worker would silently resume per-chain drift recovery.
+  for (const width of ["4", "-1", "1.5", "", "00", "width"]) {
+    assert.throws(
+      () => mergeTrainWidth({ MERGE_TRAIN_WIDTH: width }),
+      (error: unknown) => error instanceof StartupConfigError
+        && error.message.includes("merge-train-width-invalid:MERGE_TRAIN_WIDTH"),
+      `MERGE_TRAIN_WIDTH=${width} was read instead of refused`,
     );
   }
 });

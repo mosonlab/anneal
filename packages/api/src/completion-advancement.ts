@@ -38,6 +38,12 @@ export type CompletionAdvancementFacts = {
   mergeTailAuxiliary: boolean;
   /** `settleMergeTailCompletion` already decided this Task's next state. */
   mergeTailHandled: boolean;
+  /** This Task is a detached merge-train card whose control-plane marker has
+   *  already reached `settled` or `aborted`, so the readiness tick has written
+   *  the Task's terminal state. The train session publishes its record before
+   *  it finishes, so the settlement routinely commits while this Run is still
+   *  active; a completion that parked the card here would overwrite it. */
+  mergeTrainSettled: boolean;
   /** Why this repair completion cannot be settled: the chain's recovery
    *  aggregate does not name the Run the repair repaired. Set only for a
    *  successful repair completion, and never for an ordinary Step. */
@@ -80,6 +86,9 @@ export type CompletionAdvancement =
     }
   /** The merge tail already settled this Task's state. */
   | { case: "merge-tail-settled" }
+  /** The merge train's settlement already wrote this detached card's terminal
+   *  state; the completion records the Run and leaves the Task alone. */
+  | { case: "merge-train-control-plane-settled" }
   /** A gated chain step succeeded: park it in REVIEW and open the gate
    *  question. */
   | { case: "ask-approval-gate-question" }
@@ -113,6 +122,10 @@ const parkFailureReason = (facts: CompletionAdvancementFacts): string | null => 
 
 export const completionAdvancement = (facts: CompletionAdvancementFacts): CompletionAdvancement => {
   const { task } = facts;
+  // Asked first: the readiness tick owns a settled train card's status in
+  // either outcome, and neither ordering of settlement and completion may
+  // undo it.
+  if (facts.mergeTrainSettled) return { case: "merge-train-control-plane-settled" };
   if (facts.durableNegativeRegressionVerdict && task.templateId) {
     return { case: "repair-after-negative-regression" };
   }
@@ -162,6 +175,9 @@ export const completionActivityBody = (facts: CompletionAdvancementFacts): strin
   const run = `Run ${facts.runNumber}`;
   if (facts.durableNegativeRegressionVerdict) {
     return `${run} failed after publishing a negative Regression verdict; repair queued`;
+  }
+  if (facts.mergeTrainSettled) {
+    return `${run} ${facts.succeeded ? "succeeded" : "failed"}; the merge train settlement already decided this card`;
   }
   if (facts.outputRefusal) return `${run} succeeded but canonical task output was refused`;
   if (facts.succeeded && facts.mergeTailAuxiliary && !facts.mergeTailHandled && facts.repairBindingRefusal) {

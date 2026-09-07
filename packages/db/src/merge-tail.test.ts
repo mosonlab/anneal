@@ -35,6 +35,7 @@ test("merge recovery state transitions and operator phases are explicit", () => 
     "AWAITING_AUTHORIZATION->BLOCKED_DOWNSTREAM",
     "AWAITING_AUTHORIZATION->SUCCEEDED",
     "BLOCKED_DOWNSTREAM->REPAIRING",
+    "SUCCEEDED->AWAITING_AUTHORIZATION",
     "FAILED->VALIDATING",
   ]);
   for (const from of statuses) {

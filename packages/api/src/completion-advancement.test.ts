@@ -27,6 +27,7 @@ const facts = (overrides: Partial<CompletionAdvancementFacts> = {}): CompletionA
   outputRefusal: null,
   mergeTailAuxiliary: false,
   mergeTailHandled: false,
+  mergeTrainSettled: false,
   repairBindingRefusal: null,
   auxiliaryTargetTaskId: null,
   mergeTailRequeue: false,
@@ -138,6 +139,16 @@ const rows: { name: string; facts: CompletionAdvancementFacts; expected: Complet
     expected: { case: "merge-tail-settled" },
   },
   {
+    name: "a settled merge train card keeps the status its settlement wrote",
+    facts: facts({ mergeTrainSettled: true }),
+    expected: { case: "merge-train-control-plane-settled" },
+  },
+  {
+    name: "a failed Run on a settled merge train card still leaves the settlement standing",
+    facts: facts({ succeeded: false, mergeTrainSettled: true, reportedFailureReason: "exit 1" }),
+    expected: { case: "merge-train-control-plane-settled" },
+  },
+  {
     name: "a standalone success parks the task for review",
     facts: facts(),
     expected: { case: "park-task", status: "REVIEW", failureReason: null },
@@ -196,6 +207,7 @@ test("every advancement case has a row", () => {
     "complete-and-activate-successors",
     "mechanical-merge-already-recorded",
     "merge-tail-settled",
+    "merge-train-control-plane-settled",
     "park-task",
     "reject-repair-binding",
     "repair-after-negative-regression",
@@ -213,6 +225,13 @@ test("a negative Regression verdict on a Task with no template parks rather than
       reportedFailureReason: "stream closed",
     })),
     { case: "park-task", status: "REVIEW", failureReason: "stream closed" },
+  );
+});
+
+test("a merge train card whose settlement has not run yet still parks", () => {
+  assert.deepEqual(
+    completionAdvancement(facts({ mergeTrainSettled: false })),
+    { case: "park-task", status: "REVIEW", failureReason: null },
   );
 });
 
