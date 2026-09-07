@@ -231,7 +231,7 @@ export const RunDiagnostics = ({ metrics, baseline, costUsd, runTerminationReaso
       </div>
     );
   }
-  const { phases, tokens, tools, termination } = metrics;
+  const { phases, tokens, tools, termination, ttft } = metrics;
   // An upper-bound model-active duration gives a lower-bound output rate.
   const bounded = (text: string, bound: "upperBound" | "lowerBound"): string => metrics.modelActiveIsUpperBound && text !== UNKNOWN
     ? t(`taskDetail.diagnostics.rate.${bound}`, { value: text })
@@ -271,6 +271,11 @@ export const RunDiagnostics = ({ metrics, baseline, costUsd, runTerminationReaso
         <div className="text-[11.5px] text-muted-foreground">{t("taskDetail.diagnostics.phases")}</div>
         <PhaseBar phases={phases} />
       </div>
+      <DiagnosticsRow k={t("taskDetail.diagnostics.ttft.title")}>
+        <Stat k={t("taskDetail.diagnostics.ttft.p50")} v={durationMs(ttft?.p50Ms)} />
+        <Stat k={t("taskDetail.diagnostics.ttft.p90")} v={durationMs(ttft?.p90Ms)} />
+        <Stat k={t("taskDetail.diagnostics.ttft.samples")} v={String(ttft?.samples ?? 0)} />
+      </DiagnosticsRow>
       <DiagnosticsRow k={t("taskDetail.diagnostics.tokens.title")}>
         <Stat k={t("taskDetail.diagnostics.tokens.input")} v={compactTokens(tokens.input)} />
         <Stat k={t("taskDetail.diagnostics.tokens.cachedRead")} v={compactTokens(tokens.cachedRead)} />
