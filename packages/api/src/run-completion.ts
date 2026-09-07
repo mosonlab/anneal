@@ -28,6 +28,7 @@ import {
   Prisma,
   type PrismaClient,
   PushStatus,
+  readLatestMarker,
   readMarkers,
   recordIntegratorStop,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
@@ -855,7 +856,12 @@ export const completeRun = async (
     // train session persists its record before `session.finish`, so settlement
     // commonly commits while this Run is still active; the card's terminal
     // state is the tick's, not this completion's, in either direction.
-    const trainMarker = run.task ? latestMarker(tailMarkers, "train") : null;
+    // Agent activity can carry marker-shaped metadata but cannot settle a
+    // train. Read the control plane's latest state independently of the recent
+    // activity window so session chatter cannot hide an existing settlement.
+    const trainMarker = run.task && !run.task.templateId && !run.task.chainId
+      ? await readLatestMarker(tx, run.task.id, "train", "control-plane")
+      : null;
     const mergeTrainSettled = Boolean(run.task
       && trainMarker?.raw.trainTaskId === run.task.id
       && (trainMarker.state === "settled" || trainMarker.state === "aborted"));

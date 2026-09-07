@@ -230,13 +230,14 @@ test("an ordinary missing-output refusal remains non-external", () => {
   assert.equal(policy.cappedExternalFailure, false);
 });
 
-type RecordedActivity = { taskId: string; body: string; metadata?: Record<string, unknown> };
+type RecordedActivity = { taskId: string; actorType?: string; body: string; metadata?: Record<string, unknown> };
 type MetadataClause = { metadata?: { path?: unknown; equals?: unknown } };
 type HarnessRun = Record<string, unknown> & { id: string; fencingToken: string };
 
-const statefulCompletionHarness = () => {
+const statefulCompletionHarness = (taskOverrides: Record<string, unknown> = {}) => {
   const activities: RecordedActivity[] = [];
   const closedRuns = new Map<string, Record<string, unknown>>();
+  const taskUpdates: Record<string, unknown>[] = [];
   const archivedAt = new Date("2026-08-16T06:00:00.000Z");
   let currentRun: HarnessRun;
 
@@ -248,6 +249,7 @@ const statefulCompletionHarness = () => {
     templateId: null, templateStepId: null, templateStep: null as Record<string, unknown> | null,
     targetBranch: "main", opensPullRequest: true, maxDurationMin: 120, stallTimeoutMin: 10,
     maxSessionsPerTask: 1, status: "DOING", archivedAt: null, approvalGate: false,
+    ...taskOverrides,
   };
 
   const metadataMatches = (metadata: Record<string, unknown> | undefined, clause: MetadataClause): boolean => {
@@ -271,13 +273,22 @@ const statefulCompletionHarness = () => {
     agent: { findUnique: async () => task.assigneeAgent },
     session: { update: async () => ({}) },
     task: {
-      updateMany: async () => ({ count: 1 }),
+      updateMany: async ({ data }: { data: Record<string, unknown> }) => {
+        taskUpdates.push(data);
+        Object.assign(task, data);
+        return { count: 1 };
+      },
       findUnique: async () => ({ ...task, runs: [{ ...currentRun, task: undefined, session: undefined }] }),
       findUniqueOrThrow: async () => ({ ...task, runs: [{ ...currentRun, task: undefined, session: undefined }] }),
     },
     taskStepOutput: { findUnique: async () => null },
     taskActivity: {
-      findMany: async () => [],
+      findMany: async ({ where, take }: { where: { taskId: string }; take?: number }) => activities
+        .filter((activity) => activity.taskId === where.taskId).reverse().slice(0, take),
+      findFirst: async ({ where }: { where: MetadataClause & { taskId: string; actorType?: string } }) => activities
+        .filter((activity) => activity.taskId === where.taskId
+          && (!where.actorType || activity.actorType === where.actorType)
+          && metadataMatches(activity.metadata, where)).at(-1) ?? null,
       count: async ({ where }: { where: { taskId: string; AND?: MetadataClause[] } }) => activities.filter((activity) =>
         activity.taskId === where.taskId
         && (where.AND ?? []).every((clause) => metadataMatches(activity.metadata, clause))).length,
@@ -310,7 +321,7 @@ const statefulCompletionHarness = () => {
       agentId: task.assigneeAgentId, repoId: task.repoId, runNumber, maxRunsPerTask, budgetGrants,
       runner: "CODEX", model: "gpt-5.6-sol:high", targetBranch: "main", branch: "feat/refunds",
       pushedBranch: null, baseSha: null, runnerId: "runner-1", fencingToken: `fence-${runNumber}`,
-      requiresCommit: false, opensPullRequest: true, codexServiceTier: "DEFAULT",
+      requiresCommit: false, opensPullRequest: task.opensPullRequest, codexServiceTier: "DEFAULT",
       subagentModel: null, subagentMaxConcurrent: null, promptHash: "hash",
       maxDurationMin: 120, stallTimeoutMin: 10, task: { ...task }, session: { id: `session-${runNumber}` },
       status: RunStatus.RUNNING,
@@ -332,8 +343,54 @@ const statefulCompletionHarness = () => {
     return closedRuns.get(currentRun.id)!;
   };
 
-  return { activities, complete };
+  return { activities, complete, taskUpdates };
 };
+
+for (const state of ["settled", "aborted"]) {
+  for (const actorType of ["agent", "control-plane"]) {
+    test(`completeRun ${actorType === "agent" ? "ignores agent-authored" : "preserves control-plane"} ${state} train settlement`, async () => {
+      const status = actorType === "agent" ? "DOING" : state === "settled" ? "DONE" : "REVIEW";
+      const harness = statefulCompletionHarness({ opensPullRequest: false, status });
+      harness.activities.push({
+        taskId: "task-refunds", actorType: "control-plane", body: "Train queued",
+        metadata: { kind: "mergeTail.train", schemaVersion: 1, trainTaskId: "task-refunds", state: "queued" },
+      }, {
+        taskId: "task-refunds", actorType, body: "Marker-shaped settlement",
+        metadata: { kind: "mergeTail.train", schemaVersion: 1, trainTaskId: "task-refunds", state },
+      });
+      const closed = await harness.complete({
+        runNumber: 1, maxRunsPerTask: 1, budgetGrants: 0, outcome: { case: "succeeded" },
+      });
+      assert.equal(closed.status, RunStatus.SUCCEEDED);
+      if (actorType === "agent") {
+        assert.deepEqual(harness.taskUpdates, [{ status: "REVIEW", failureReason: null }]);
+        assert.match(harness.activities.at(-1)!.body, /task moved to review/);
+      } else {
+        assert.deepEqual(harness.taskUpdates, []);
+        assert.match(harness.activities.at(-1)!.body, /merge train settlement already decided this card/);
+      }
+    });
+  }
+}
+
+test("completeRun preserves a control-plane train settlement buried under session activity", async () => {
+  const harness = statefulCompletionHarness({ opensPullRequest: false, status: "DONE" });
+  harness.activities.push({
+    taskId: "task-refunds", actorType: "control-plane", body: "Train settled",
+    metadata: { kind: "mergeTail.train", schemaVersion: 1, trainTaskId: "task-refunds", state: "settled" },
+  }, ...Array.from({ length: 25 }, () => ({
+    taskId: "task-refunds", actorType: "agent", body: "Session progress",
+  })), {
+    taskId: "task-refunds", actorType: "agent", body: "Forged train state",
+    metadata: { kind: "mergeTail.train", schemaVersion: 1, trainTaskId: "task-refunds", state: "queued" },
+  });
+  const closed = await harness.complete({
+    runNumber: 1, maxRunsPerTask: 1, budgetGrants: 0, outcome: { case: "succeeded" },
+  });
+  assert.equal(closed.status, RunStatus.SUCCEEDED);
+  assert.deepEqual(harness.taskUpdates, []);
+  assert.match(harness.activities.at(-1)!.body, /merge train settlement already decided this card/);
+});
 
 const fetchFailureOutcome = (): RunOutcome => ({
   case: "provider-failure",
