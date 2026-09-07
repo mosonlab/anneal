@@ -9,6 +9,7 @@ import {
   DependencyProvisioning,
   enqueueTaskRun,
   PrismaClient,
+  RunnerPreference,
   RunStatus,
   TaskStatus,
 } from "@anneal/db";
@@ -277,6 +278,11 @@ test("quiet-window SQL excludes active mechanical Steps and preserves agent and 
   const chain = await seedIntegratorChain(db, { label: "blocker-scope", shape: "canonical-compound-readiness", gatedReadiness: true });
   assert.ok(chain.integratorTask);
   assert.ok(chain.readinessTask);
+  // Compound implementation Run birth requires a Codex/gpt-capable Agent;
+  // the shared merge-tail fixture uses Claude for its Regression predecessor.
+  await db.agent.update({ where: { id: chain.agent.id }, data: {
+    model: "gpt-6-astra:medium", runnerPreference: RunnerPreference.CODEX,
+  } });
   const implementationStep = await db.taskTemplateStep.create({ data: {
     taskTemplateId: chain.template.id, stepIndex: 0, layer: 0, name: "Implementation",
     assigneeType: AssigneeType.AGENT, assigneeAgentId: chain.agent.id,
