@@ -129,6 +129,38 @@ export const decideInvocation = async (startup, mode) => {
       throw new DeployFailure("stale-deploy-owner-recovered", `pid-${lock.recovered.pid ?? "unknown"}`);
     }
     if (mode === "prune-history") return { mode, lock, retryEscalation: null };
+    const admitTarget = async ({ targetCommit, retryEscalation, supersededEscalation }) => {
+      if (typeof startup.evaluateCadence !== "function") {
+        return {
+          mode,
+          targetCommit,
+          lock,
+          retryEscalation,
+          supersededEscalation,
+        };
+      }
+      let cadence;
+      try {
+        cadence = await startup.evaluateCadence(targetCommit);
+      } catch (error) {
+        await startup.persistFailure(failureOf(error));
+        await lock.release();
+        return { mode, exitCode: 1 };
+      }
+      if (cadence?.coalesced) {
+        startup.log(`NOOP coalescing next-eligible=${cadence.nextEligibleAt}`);
+        await lock.release();
+        return { mode, exitCode: 0 };
+      }
+      return {
+        mode,
+        targetCommit,
+        lock,
+        retryEscalation,
+        supersededEscalation,
+        ...(cadence === undefined ? {} : { cadence }),
+      };
+    };
     const escalation = await startup.checkEscalation();
     if (escalation.active) {
       const superseded = escalation.supersedable
@@ -139,13 +171,11 @@ export const decideInvocation = async (startup, mode) => {
         return { mode, exitCode: 2 };
       }
       // The marker stays on disk as history; the new commit is a new question.
-      return {
-        mode,
+      return await admitTarget({
         targetCommit: superseded.targetCommit,
-        lock,
         retryEscalation: null,
         supersededEscalation: superseded.fact,
-      };
+      });
     }
     let targetCommit;
     try {
@@ -155,13 +185,11 @@ export const decideInvocation = async (startup, mode) => {
       await lock.release();
       return { mode, exitCode: 1 };
     }
-    return {
-      mode,
+    return await admitTarget({
       targetCommit,
-      lock,
       retryEscalation: escalation.retryEscalation ?? null,
       supersededEscalation: null,
-    };
+    });
   } catch (error) {
     await lock.release();
     throw error;
