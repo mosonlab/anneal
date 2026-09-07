@@ -188,7 +188,7 @@ const dependencyProvisioningManifestMissing = (envelope: FailureEnvelope): boole
   && envelope.stderrSummary === DEPENDENCY_PROVISIONING_MANIFEST_MISSING;
 
 const authPatternFor = (phase: FailureEnvelope["phase"]): RegExp =>
-  phase === "EXECUTE" ? CLI_AUTH_PATTERN : GIT_AUTH_PATTERN;
+  phase === "DELIVER" ? GIT_AUTH_PATTERN : CLI_AUTH_PATTERN;
 
 const envelopeFailureClass = (envelope: FailureEnvelope): FailureClass => {
   // The one runner verdict still honoured, and only because it is the single
@@ -230,13 +230,14 @@ const envelopeFailureClass = (envelope: FailureEnvelope): FailureClass => {
   // not be retried into a lockout just because the same message also mentions a
   // dropped connection.
   if (authPatternFor(envelope.phase).test(verdict)
-    || (envelope.phase !== "EXECUTE" && deterministicAccessRefusal(verdict))) {
+    || (envelope.phase !== "EXECUTE"
+      && (GIT_AUTH_PATTERN.test(verdict) || deterministicAccessRefusal(verdict)))) {
     return FailureClass.AUTH_REQUIRED;
   }
-  // The runner owns every phase after provisioning starts, including a failure
-  // before an agent process can launch. Transport wording is intentionally not
-  // consulted here: an unknown provider or toolchain message remains transient
-  // by phase, while the short access-refusal list is the only text veto.
+  // The runner owns every non-EXECUTE phase, including a failure before an
+  // agent process can launch. Transport wording is intentionally not consulted
+  // here: an unknown provider or toolchain message remains transient by phase,
+  // while the short access-refusal list is the only text veto.
   if (envelope.phase !== "EXECUTE") return FailureClass.TRANSIENT_PROVIDER;
   // Typed markers outrank text. `timedOut` is set from the runner's own
   // `CommandTimeoutError` and `transient` from its typed network predicate;

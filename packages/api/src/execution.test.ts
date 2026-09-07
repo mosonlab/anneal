@@ -93,14 +93,23 @@ test("typed EXECUTE transience alone does not become a textual refund", () => {
   assert.equal(isTextMatchedTransientProviderFailure(evidence, verdict.failureClass), false);
 });
 
-test("the CLI auth vocabulary remains scoped to EXECUTE", () => {
-  const verdict = classifyEnvelope(envelope({
-    phase: "PROVISION",
-    providerError: "not-authenticated: the CLI's own login check did not pass (exit 2)",
-  }));
-  assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
-  assert.equal(verdict.retryable, true);
-  assert.equal(verdict.externalFailure, true);
+test("the CLI auth vocabulary remains available throughout plumbing phases", () => {
+  const formerCliRefusals = [
+    "authentication_failed",
+    "401: authentication is required",
+    "Missing authentication for the provider",
+    "No API key found for the provider",
+    "the provider CLI is not logged in",
+    "not-authenticated: the CLI's own login check did not pass (exit 2)",
+  ];
+  for (const phase of ["PROVISION", "COMPLETE"] as const) {
+    for (const providerError of formerCliRefusals) {
+      const verdict = classifyEnvelope(envelope({ phase, providerError }));
+      assert.equal(verdict.failureClass, FailureClass.AUTH_REQUIRED, `${phase}: ${providerError}`);
+      assert.equal(verdict.retryable, false, `${phase}: ${providerError}`);
+      assert.equal(verdict.externalFailure, true, `${phase}: ${providerError}`);
+    }
+  }
 
   const executeVerdict = classifyEnvelope(envelope({
     providerError: "not-authenticated: the CLI's own login check did not pass (exit 2)",
