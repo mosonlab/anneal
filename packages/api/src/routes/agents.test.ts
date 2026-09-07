@@ -81,6 +81,7 @@ test("agent archive and unarchive are idempotent and preserve the original archi
         // R6: archive also reads the staffing profiles naming this Agent. No
         // profile names it here, so the archive proceeds.
         staffingProfileEntry: { findMany: async () => [] },
+        staffingProfileTier: { findMany: async () => [] },
       }),
       run: {
         findMany: async () => archivedAt ? [{
