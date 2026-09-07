@@ -113,6 +113,7 @@ export const recordReadinessRequeue = async (
     budgetGrant: number;
     reason: string;
     recoveryAggregateId?: string;
+    baseDrift?: boolean;
   },
 ): Promise<ReadinessRequeue> => {
   if (!Number.isInteger(input.budgetGrant) || input.budgetGrant < 0) {
@@ -141,6 +142,7 @@ export const recordReadinessRequeue = async (
       ordinal: requeue.ordinal,
       reason: input.reason,
       regressionTaskId: input.regressionTaskId,
+      baseDrift: input.baseDrift ?? false,
       ...(input.recoveryAggregateId ? { recoveryAggregateId: input.recoveryAggregateId } : {}),
       staleBaseSha: input.staleBaseSha,
       currentBaseSha: input.currentBaseSha,

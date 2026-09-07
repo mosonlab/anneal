@@ -86,6 +86,7 @@ export {
   isPinnedBaseCommitError,
   isWorkflowRefusalError,
   LEASE_LOSS_REFUND_CAP,
+  LEASE_LOSS_REFUND_EXHAUSTED_PREFIX,
   leaseLossRefundAvailable,
   leaseLossRefundDecision,
   nativeImplementationSubagentRunConfig,

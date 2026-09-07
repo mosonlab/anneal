@@ -132,10 +132,16 @@ for (const condition of ["base-advanced", "train-base-stale", "stale-head", "anc
           },
         },
         taskActivity: {
-          findMany: async () => Array.from({ length: ceiling }, (_, index) => ({ metadata: {
-            kind: "mergeReadiness.requeue", ordinal: index + 1,
+          findMany: async () => [...Array.from({ length: ceiling }, (_, index) => ({ metadata: {
+            kind: "mergeReadiness.requeue", ordinal: index + 1, baseDrift: true,
             ...(withRecovery ? { recoveryAggregateId: "recovery-1" } : {}),
-          } })),
+          } })), { metadata: {
+            kind: "mergeReadiness.requeue", ordinal: 50, baseDrift: false,
+            ...(withRecovery ? { recoveryAggregateId: "recovery-1" } : {}),
+          } }, { metadata: {
+            kind: "mergeReadiness.requeue", ordinal: 51, baseDrift: true,
+            recoveryAggregateId: "past-recovery",
+          } }],
           create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return data; },
         },
         inboxMessage: { upsert: async () => ({}) },
@@ -157,6 +163,7 @@ for (const condition of ["base-advanced", "train-base-stale", "stale-head", "anc
         now: new Date(), recovery: withRecovery ? recovery : null,
       }).body(tx, claim);
       assert.equal(result.value.applied, true);
+      if (baseDrift) assert.equal(result.value.stopped, true);
       for (const id of ["regression-1", "readiness-1"]) {
         const last = updates.filter((update) => update.where.id === id).at(-1)?.data;
         assert.equal(last?.status, TaskStatus.REVIEW);

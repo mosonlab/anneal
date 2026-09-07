@@ -10,6 +10,7 @@ import {
   MERGE_INTEGRATOR_KIND,
   holdChain,
   InboxStatus,
+  LEASE_LOSS_REFUND_EXHAUSTED_PREFIX,
   integratorBindingRefusalFor,
   latestTargetCorrection,
   loadIntegratorTask,
@@ -628,7 +629,7 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         return refusal("conflict", "Task already has an active run");
       }
       const resetLeaseLossRefunds = task.status === TaskStatus.REVIEW
-        && task.failureReason?.includes("Lease-loss refunds exhausted") === true
+        && task.failureReason?.includes(LEASE_LOSS_REFUND_EXHAUSTED_PREFIX) === true
         && task.templateStep !== null
         && stepRole(task.templateStep) === "regression";
       const opened = await openRun(tx, taskId, { kind: "retry", readyAt: now });

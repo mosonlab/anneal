@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
   InboxStatus,
+  LEASE_LOSS_REFUND_EXHAUSTED_PREFIX,
   RunnerKind,
   RunnerPreference,
   type PrismaClient,
@@ -760,7 +761,7 @@ test("operator retry resets an exhausted lease-loss counter for Regression", asy
     }, {
       runner: RunnerKind.CLAUDE,
       outputKind: "regression-verification-v2",
-    }, { leaseLossRefunds: 3, taskStatus: "REVIEW", failureReason: "Lease-loss retry refused: Lease-loss refunds exhausted" });
+    }, { leaseLossRefunds: 3, taskStatus: "REVIEW", failureReason: `Lease-loss retry refused: ${LEASE_LOSS_REFUND_EXHAUSTED_PREFIX} after 3 platform-refunded attempts; raise maxSessionsPerTask and retry` });
     assert.equal(response.status, 201, JSON.stringify(await response.json()));
     assert.equal(created?.leaseLossRefunds, 0);
     assert.equal(last.leaseLossRefunds, 3, "the historical source Run remains unchanged");
@@ -785,7 +786,7 @@ test("operator retry does not reset the lease-loss counter on an ordinary task",
       runnerPreference: RunnerPreference.CLAUDE,
       foundationalPrompt: "foundation",
       rolePrompt: "role",
-    }, null, { leaseLossRefunds: 3, taskStatus: "REVIEW", failureReason: "Lease-loss retry refused: Lease-loss refunds exhausted" });
+    }, null, { leaseLossRefunds: 3, taskStatus: "REVIEW", failureReason: `Lease-loss retry refused: ${LEASE_LOSS_REFUND_EXHAUSTED_PREFIX} after 3 platform-refunded attempts; raise maxSessionsPerTask and retry` });
     assert.equal(response.status, 201);
     assert.equal(created?.leaseLossRefunds, 3);
     assert.equal(last.leaseLossRefunds, 3);
@@ -811,7 +812,7 @@ test("a refused Regression retry leaves its lease-loss counter and reset activit
     }, {
       leaseLossRefunds: 3,
       taskStatus: "REVIEW",
-      failureReason: "Lease-loss retry refused: Lease-loss refunds exhausted",
+      failureReason: `Lease-loss retry refused: ${LEASE_LOSS_REFUND_EXHAUSTED_PREFIX} after 3 platform-refunded attempts; raise maxSessionsPerTask and retry`,
       maxSessionsPerTask: 1,
     });
     assert.equal(response.status, 409);

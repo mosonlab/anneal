@@ -413,10 +413,12 @@ export const requeueRegressionSettlement = (
       where: readinessRequeueActivityWhere(input.readinessTaskId),
       select: { metadata: true },
     }) : [];
-    const aggregateId = input.recovery?.aggregateId;
-    const spent = readinessRequeueTotals(aggregateId
-      ? rows.filter((row) => asJsonObject(row.metadata)?.recoveryAggregateId === aggregateId)
-      : rows).readinessRequeues;
+    const aggregateId = input.recovery?.aggregateId ?? null;
+    const spent = readinessRequeueTotals(rows.filter((row) => {
+      const metadata = asJsonObject(row.metadata);
+      return metadata?.baseDrift === true
+        && (metadata.recoveryAggregateId ?? null) === aggregateId;
+    })).readinessRequeues;
     const ceiling = input.recovery ? MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES : READINESS_BASE_DRIFT_REQUEUE_LIMIT;
     if (baseDrift && spent >= ceiling) {
       const name = input.recovery ? "base-drift-recovery-requeue-limit" : "readiness-base-drift-requeue-limit";
@@ -428,7 +430,7 @@ export const requeueRegressionSettlement = (
         reason: `${name}: ${spent} requeues reached ceiling ${ceiling}`,
         at: input.now,
       });
-      return { ownership: "released", leaseOutcome: stopped.leaseOutcome };
+      return { stopped: true, ownership: "released", leaseOutcome: stopped.leaseOutcome };
     }
     // The prior Regression run succeeded; the control plane invalidated its
     // exact-base evidence after a remote read. This retry is therefore external
@@ -470,6 +472,7 @@ export const requeueRegressionSettlement = (
         staleBaseSha: input.staleBaseSha,
         currentBaseSha: input.currentBaseSha,
         budgetGrant: 1,
+        baseDrift,
         reason: input.reason,
       });
       await writeMarker(tx, input.regressionTaskId, "readiness", {
@@ -1109,7 +1112,8 @@ const applyReadinessDecision = async (
         recovery,
       }), claim);
       if (application.kind === "settled" && application.outcome.value.applied) {
-        result.requeued += 1;
+        if (application.outcome.value.stopped) result.stopped += 1;
+        else result.requeued += 1;
       }
       return application;
     },

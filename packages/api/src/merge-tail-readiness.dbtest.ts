@@ -40,6 +40,7 @@ import {
   READINESS_EXCEPTION_REQUEUE_LIMIT,
   READINESS_EXCEPTION_REQUEUE_STATE,
   readinessTick,
+  requeueRegressionSettlement,
   type DaemonSnapshotReader,
 } from "./merge-readiness-worker.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
@@ -785,6 +786,50 @@ test("consecutive pre-authorization requeues are counted on the readiness card",
   assert.equal(regressionCard.readinessGrants, 0);
 });
 
+test("non-drift requeues and past recovery rows do not spend the standalone drift ceiling", async () => {
+  const seeded = await seedReadiness();
+  for (const condition of ["stale-head", "ancestry-refused", "stale-head"] as const) {
+    const prior = await db.run.findFirstOrThrow({
+      where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+    });
+    await db.run.update({ where: { id: prior.id }, data: { status: RunStatus.SUCCEEDED, leaseExpiresAt: null } });
+    // Exercise the real settlement and Run birth in one transaction; this
+    // isolated fixture supplies the already-owned readiness claim.
+    await db.$transaction(async (tx) => {
+      const claim = {
+        settle: async (client: typeof tx, input: { apply: (client: typeof tx) => Promise<{ value: unknown }> }) => ({
+          settled: true, claim: "released", value: (await input.apply(client)).value,
+        }),
+      } as unknown as import("./readiness-claim.js").ReadinessClaimHandle;
+      await requeueRegressionSettlement({
+        readinessTaskId: seeded.readiness.id, regressionTaskId: seeded.regression.id,
+        staleBaseSha: BASE, currentBaseSha: BASE, condition, reason: condition,
+        now: new Date(), recovery: null,
+      }).body(tx, claim);
+    });
+  }
+  await db.taskActivity.create({ data: {
+    taskId: seeded.readiness.id, actorType: "control-plane", body: "prior recovery drift",
+    metadata: { kind: MERGE_READINESS_REQUEUE_KIND, ordinal: 4, baseDrift: true, recoveryAggregateId: "past-recovery" },
+  } });
+  const prior = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+  });
+  assert.equal(prior.leaseLossRefunds, LEASE_LOSS_REFUND_CAP);
+  await db.run.update({ where: { id: prior.id }, data: { status: RunStatus.SUCCEEDED, headSha: HEAD, leaseExpiresAt: null } });
+  await db.taskStepOutput.update({ where: { taskId: seeded.regression.id }, data: { runId: prior.id } });
+  await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.DONE } });
+  assert.deepEqual(await readinessTick(
+    db, reader([], snapshot({ baseSha: "d".repeat(40) })), new Date(), 5,
+    releaseChainLease, runWithMergeLease, executorsOnline,
+  ), { claimed: 1, authorized: 0, requeued: 1, stopped: 0 });
+  const next = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+  });
+  assert.equal(next.runNumber, prior.runNumber + 1);
+  assert.equal(next.leaseLossRefunds, LEASE_LOSS_REFUND_CAP);
+});
+
 test("a readiness requeue reaches its independent ceiling without spending lease-loss refunds", async () => {
   const seeded = await seedReadiness();
   const drifts = ["c", "d", "e", "f"].map((letter) => letter.repeat(40));
@@ -822,7 +867,8 @@ test("a readiness requeue reaches its independent ceiling without spending lease
       runWithMergeLease,
       executorsOnline,
     );
-    assert.equal(tick.requeued, 1, `requeue intent ${index + 1}`);
+    assert.equal(tick.requeued, index < READINESS_BASE_DRIFT_REQUEUE_LIMIT ? 1 : 0);
+    assert.equal(tick.stopped, index < READINESS_BASE_DRIFT_REQUEUE_LIMIT ? 0 : 1);
     if (index < READINESS_BASE_DRIFT_REQUEUE_LIMIT) {
       const next = await db.run.findFirstOrThrow({
         where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
@@ -993,7 +1039,8 @@ test("a recovery requeue uses its aggregate ceiling and records a named stop", a
       runWithMergeLease,
       executorsOnline,
     );
-    assert.equal(tick.requeued, 1, `requeue intent ${index + 1}`);
+    assert.equal(tick.requeued, index < MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES ? 1 : 0);
+    assert.equal(tick.stopped, index < MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES ? 0 : 1);
     if (index < MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES) continue;
 
     const reason = `base-drift-recovery-requeue-limit: ${MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES} requeues reached ceiling ${MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES}`;

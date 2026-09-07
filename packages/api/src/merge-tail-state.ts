@@ -359,6 +359,7 @@ export const enterRepair = async (
       currentBaseSha: input.currentBaseSha,
       budgetGrant: 1,
       reason: requeue.reason,
+      baseDrift: requeue.baseDrift,
     });
   } else {
     await writeMarker(tx, context.integratorTaskId, "baseDriftRecovery", {

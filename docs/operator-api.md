@@ -2758,6 +2758,8 @@ not an environment setting. When the ceiling is reached, readiness makes no
 further Run birth, parks the Regression and readiness tasks in `REVIEW`, and
 records the named stop reason
 `readiness-base-drift-requeue-limit: <count> requeues reached ceiling <limit>`.
+Only base-drift requeues outside a recovery spend this standalone ceiling;
+other requeue classes and requeues belonging to past recovery attempts do not.
 
 Inside a base-drift recovery, the requeues use the recovery aggregate's
 existing `MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES` ceiling of two instead of the

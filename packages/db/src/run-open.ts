@@ -56,6 +56,7 @@ export const EXTERNAL_FAILURE_REFUND_CAP = 3;
  * one bounds a runner that keeps disappearing.
  */
 export const LEASE_LOSS_REFUND_CAP = 3;
+export const LEASE_LOSS_REFUND_EXHAUSTED_PREFIX = "Lease-loss refunds exhausted";
 
 /** Whether a task carrying `leaseLossRefunds` may still be refunded once more. */
 export const leaseLossRefundAvailable = (leaseLossRefunds: number | null | undefined): boolean =>
@@ -1158,7 +1159,7 @@ export const openRun = async (
     return openRunRefusal(
       "lease-loss-refunds-exhausted",
       "conflict",
-      `Lease-loss refunds exhausted after ${priorRefunds} platform-refunded attempts;`
+      `${LEASE_LOSS_REFUND_EXHAUSTED_PREFIX} after ${priorRefunds} platform-refunded attempts;`
         + " raise maxSessionsPerTask and retry",
       { leaseLossRefunds: priorRefunds, cap: LEASE_LOSS_REFUND_CAP },
       { taskId: task.id, taskName: task.name },
