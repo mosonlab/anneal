@@ -66,7 +66,6 @@ import {
 import { createRunLease, deliverUnderLease, type RunLease, type RunLeaseClock } from "./run-lease.js";
 import { openSessionConfig, type SessionConfigLease } from "./session-config-lease.js";
 import { readRegressionOutputHandoff, type RegressionOutputHandoffBlock } from "./regression-output-handoff.js";
-import { readTaskOutputReceipt } from "./task-output-receipt.js";
 import {
   captureWorkspaceResult, captureWorkspaceSnapshot, cleanupAgentScratch, materializeRuntimeTools, provisionAgentScratch, provisionSessionConfig,
   provisionWorkspace, reuseWorkspace, workspaceEnvironment, writeSessionCredentials,
@@ -883,14 +882,6 @@ export const executeClaim = async (
         }
         const { output } = product;
         postDeliveryDisconnectTolerated = true;
-        let localReceipt = null;
-        let localReceiptReadError: string | null = null;
-        try {
-          localReceipt = await readTaskOutputReceipt(config, workspace);
-          if (!localReceipt) localReceiptReadError = "Local task output receipt is absent";
-        } catch (error: unknown) {
-          localReceiptReadError = errorMessage(error);
-        }
         sink({
           source: "RUNNER",
           type: "POST_DELIVERY_DISCONNECT_ACCEPTED",
@@ -899,8 +890,6 @@ export const executeClaim = async (
             commitSha: output.commitSha,
             providerError: evidence.providerError,
             terminalEventSeen: evidence.terminalEventSeen,
-            localReceipt,
-            localReceiptReadError,
           },
         });
       } catch (error: unknown) {

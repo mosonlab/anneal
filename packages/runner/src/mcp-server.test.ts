@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -8,7 +8,6 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { handleRequest, invokeTool, readCredentials, TOOLS, type SessionCredentials } from "./mcp-server.js";
-import { parseTaskOutputReceipt, taskOutputReceiptPath } from "./task-output-receipt.js";
 
 type Received = { method: string; url: string; authorization: string | undefined; body: string };
 
@@ -125,30 +124,7 @@ test("tools carry the session token and fencing token to the session endpoints",
     ]);
     assert.ok(received.every((hit) => hit.authorization === "Bearer agos_session_test"));
     assert.ok(received.every((hit) => JSON.parse(hit.body).fencingToken === "1:run-1:token"));
-    const commitSha = String(JSON.parse(received[0]!.body).commitSha);
-    assert.match(commitSha, /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u);
-    assert.deepEqual(parseTaskOutputReceipt(await readFile(taskOutputReceiptPath(credentials.workspacePath), "utf8")), {
-      runId: "run-1",
-      kind: "spec",
-      commitSha,
-    });
-  });
-});
-
-test("task_output stays successful when the local delivery receipt cannot be written", async () => {
-  await withApi(() => ({ status: 200, body: JSON.stringify({ id: "output-1" }) }), async (credentials, received) => {
-    await mkdir(join(credentials.workspacePath, ".agentos", "task-output-receipt.json"), { recursive: true });
-    const diagnostics: string[] = [];
-    const originalError = console.error;
-    console.error = (...values: unknown[]) => { diagnostics.push(values.map(String).join(" ")); };
-    try {
-      const result = await invokeTool(credentials, "task_output", { kind: "result", body: "delivered" });
-      assert.match(result.content[0]!.text, /Output persisted as 'result'/u);
-    } finally {
-      console.error = originalError;
-    }
-    assert.equal(received.length, 1, "the durable API write must not be retried");
-    assert.match(diagnostics.join("\n"), /Unable to write task output receipt/u);
+    assert.match(String(JSON.parse(received[0]!.body).commitSha), /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u);
   });
 });
 
