@@ -124,6 +124,12 @@ export type GitHubReader = {
   ) => Promise<Buffer>;
 };
 
+/** Required repository capabilities for resolver fallback ancestry verification. */
+export type BranchAncestryReader = {
+  readBranchHead: (repository: string, branch: string, signal: AbortSignal) => Promise<string>;
+  compareCommits: NonNullable<GitHubReader["compareCommits"]>;
+};
+
 /** Read-only capability used by merge evidence workers that never fetch repository files. */
 export type PullRequestReader = Pick<GitHubReader, "readPullRequest" | "compareCommits">;
 
@@ -275,7 +281,7 @@ export const createGitHubReader = (
   token: string,
   fetchImpl: typeof fetch = fetch,
   retryOptions: GitHubReadRetryOptions = {},
-): GitHubReader => {
+): GitHubReader & BranchAncestryReader => {
   if (typeof token !== "string" || token.trim() === "") throw new GitHubReadConfigurationError();
   const wait = retryOptions.wait ?? abortableDelay;
   const waitBeforeRetry = async (delayMs: number, signal?: AbortSignal | null): Promise<void> => {
@@ -328,6 +334,19 @@ export const createGitHubReader = (
     }
   };
   return {
+    readBranchHead: async (repository, branch, signal) => {
+      const [owner, name, ...rest] = repository.split("/");
+      if (!owner || !name || rest.length > 0) throw new GitHubReadError(`malformed repository ${repository}`, "response");
+      const response = await request(
+        `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/git/ref/heads/${branch.split("/").map(encodeURIComponent).join("/")}`,
+        { method: "GET", signal, headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" } },
+      );
+      const object = asObject(asObject(await response.json())?.object);
+      if (object?.type !== "commit" || typeof object.sha !== "string" || !/^[0-9a-f]{40}$/u.test(object.sha)) {
+        throw new GitHubReadError("branch response has no exact commit head", "response");
+      }
+      return object.sha;
+    },
     readPullRequest: async (repository, prNumber, baseRef, signal) => {
       const [owner, name] = repository.split("/");
       if (!owner || !name) throw new GitHubReadError(`malformed repository ${repository}`, "response");

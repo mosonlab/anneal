@@ -2020,6 +2020,44 @@ curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/repair" \
   -d '{"requestId":"reenter-recovery-repair-001","reason":"Fix the regression found during base-drift recovery"}'
 ```
 
+#### Automatic refresh-conflict repair settlement
+
+An automatic `refresh-conflict` repair normally supplies a `resolvedHeadSha`
+from the resolver's versioned output. If that output is malformed or a
+resolved output is missing `resolvedHeadSha`, settlement reads the current
+Chain branch head from the repository once before deciding whether to refuse
+the repair. The merge tail adopts that head only when repository ancestry
+checks verify that it is a descendant of
+both the repair marker's `headSha` (the starting head) and `baseHeadSha` (the
+target base). It then continues recovery with that verified head, preserving
+a resolved merge commit that the resolver pushed even when its result payload
+was malformed.
+
+Adoption rebinds the repair Run's `headSha` and the repair task's
+`TaskStepOutput.commitSha` to the repository-verified head. The Regression
+handoff requires both durable bindings to match the resolved head. Existing
+output text is preserved; if no output exists, settlement creates an empty
+body using the repair Step's output kind (or `result` for a detached repair).
+These bindings record control-plane repository evidence, not a new runner
+publication report.
+
+The repository reads share a 20-second deadline within a completion
+transaction budget of 60 seconds, leaving time to persist a timeout refusal
+and its activity. Completion holds the Run row lock while checking ancestry.
+
+The fallback is recorded as a `TaskActivity` on the repair task. The
+activity names the fallback, the rejected result key (for example `body` or
+`resolvedHeadSha`), and the adopted head. Inspect it with
+`GET /tasks/:taskId/activity`. When the fallback cannot adopt a head, the
+`repairResult` history continues to carry the invalid-output reason and
+`rejectedKey` on the repair and Regression tasks.
+
+If the repository read fails, the read error is recorded and the repair fails
+as the existing invalid-output path does. A branch head that is not descended
+from both expected heads is also refused; no unverified head is adopted. The
+existing refusals for stale `startHeadSha` or `targetHeadSha` bindings and for
+an explicit resolver `unable` outcome are unchanged.
+
 ### POST `/tasks/:taskId/merge-tail/rerun`
 
 - Required path parameter: `taskId`, naming the Chain's Regression
