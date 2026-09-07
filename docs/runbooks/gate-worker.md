@@ -103,10 +103,13 @@ ships.
 A full gate can consume a host. The dispatcher cannot know the
 candidate-selected profile before running it, so it rations fixed, measured
 host capacity rather than trying to resize from live CPU or memory readings.
-An explicitly configured primary worker contributes two slots and an explicitly
-configured fallback contributes one. The explicit `--server` form contributes
-one dispatcher slot. The local machine contributes no automatic capacity; it
-adds `AGENTOS_GATE_LOCAL_SLOTS` slots only for an invocation that passes
+An explicitly configured primary worker contributes
+`AGENTOS_GATE_PRIMARY_SLOTS` slots (1 or 2, two when the variable is unset, and
+always the same number as that worker's own `~/gate/worker-capacity`; any other
+value is a usage error at dispatch start) and an explicitly configured fallback
+contributes one. The explicit `--server` form contributes one dispatcher slot.
+The local machine contributes no automatic capacity; it adds
+`AGENTOS_GATE_LOCAL_SLOTS` slots only for an invocation that passes
 `--allow-local` or sets `AGENTOS_GATE_ALLOW_LOCAL=1`. The count defaults to one
 when `AGENTOS_GATE_LOCAL_SLOTS` is unset and is capped at 1024; configured slots
 are named `local-1` through `local-N` (there is no bare `local` slot). Each
@@ -169,13 +172,13 @@ AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" AGENTOS_GATE_SERVER=pr
   exits 76 rather than 75. Waiting for a lock nobody can take is waiting for
   nothing, and reporting it as a full queue hides what to fix.
 
-The dispatcher accounts for `remote-1`, `remote-1-2`, `remote-2`, and, when
-local dispatch is enabled, `local-1` through `local-N` in the slot directory
-described below, outside any repository. A direct `merge-gate.sh` bypasses that
-accounting. A direct `remote-gate.sh` bypasses the local lock too, but it cannot
-exceed worker capacity: every installed `run-gate.sh` contends for the
-worker-wide `~/gate/.full-gate.lock` and, only on a capacity-two host,
-`~/gate/.full-gate-2.lock`. Each is held with `flock` for the real process
+The dispatcher accounts for `remote-1`, `remote-1-2` (only with two primary
+slots), `remote-2`, and, when local dispatch is enabled, `local-1` through
+`local-N` in the slot directory described below, outside any repository. A
+direct `merge-gate.sh` bypasses that accounting. A direct `remote-gate.sh`
+bypasses the local lock too, but it cannot exceed worker capacity: every
+installed `run-gate.sh` contends for the worker-wide `~/gate/.full-gate.lock`
+and, only on a capacity-two host, `~/gate/.full-gate-2.lock`. Each is held with `flock` for the real process
 lifetime. If an SSH connection drops while its remote process survives, that
 process keeps its worker slot and a later invocation waits instead of exceeding
 the configured capacity.
@@ -189,7 +192,9 @@ whose `worker-capacity` says one produced an ssh session that simply never
 returned. The dispatcher also reads the capacity the worker states in its own
 output and logs `gate-dispatch: warning — the primary worker reports
 worker-capacity N but this dispatcher configures M primary slot(s)` when they
-disagree. That warning changes nothing on its own; it names the drift.
+disagree. That warning changes nothing on its own; it names the drift, which the operator
+resolves by setting `RUNNER_GATE_PRIMARY_SLOTS` (below) to the worker's
+capacity or by changing the worker's `worker-capacity`.
 
 Local slots are accounted per runner account: the account that owns
 `AGENTOS_RUNNER_HOME` owns the shared slot directory at
@@ -367,9 +372,16 @@ single-server mode with one remote slot. When
 `RUNNER_GATE_FALLBACK_SERVER=<ssh-alias>` is also configured, the fallback must
 be a different destination; the runner exposes the pair as
 `AGENTOS_GATE_PRIMARY_SERVER` and `AGENTOS_GATE_FALLBACK_SERVER` and does not
-set `AGENTOS_GATE_SERVER`. This gives the primary two remote slots
-(`remote-1`, `remote-1-2`) and the fallback one (`remote-2`), tried in that
-order before polling. To contribute local capacity, also set
+set `AGENTOS_GATE_SERVER`. It also passes the primary slot count as
+`AGENTOS_GATE_PRIMARY_SLOTS`, taken from `RUNNER_GATE_PRIMARY_SLOTS` (1 or 2,
+default 2; any other value stops the runner at startup naming the variable).
+That number must equal the primary worker's `~/gate/worker-capacity`: a
+dispatcher configuring more slots than the worker will run only produces an
+ssh session holding a dispatcher slot while it waits for the worker's execution
+lock. With the default this gives the primary two remote slots (`remote-1`,
+`remote-1-2`) and the fallback one (`remote-2`), tried in that order before
+polling; with `RUNNER_GATE_PRIMARY_SLOTS=1` the primary has `remote-1` alone.
+To contribute local capacity, also set
 `RUNNER_GATE_LOCAL_SLOTS=<positive integer, at most 1024>` on the runner. The
 runner then enables local dispatch and passes the count as
 `AGENTOS_GATE_LOCAL_SLOTS`; local slots are tried before the configured remote

@@ -1274,6 +1274,19 @@ test("RUNNER_GATE_FALLBACK_SERVER selects a runner-owned two-host environment", 
       AGENTOS_GATE_PRIMARY_SERVER: "gate-self",
       AGENTOS_GATE_FALLBACK_SERVER: "agentos-gate",
     });
+    // The primary worker's slot count is part of the two-host topology only:
+    // single-server mode has one slot and nothing to state.
+    const singleOneSlot = buildChildEnvironment(
+      { ...config, gatePrimarySlots: 1 }, { ...claim, secrets }, scratch, "/work",
+    );
+    assert.equal(Object.hasOwn(singleOneSlot, "AGENTOS_GATE_PRIMARY_SLOTS"), false);
+    const dualOneSlot = buildChildEnvironment(
+      { ...config, gateFallbackServer: "agentos-gate", gatePrimarySlots: 1 },
+      { ...claim, secrets: { ...secrets, AGENTOS_GATE_PRIMARY_SLOTS: "2" } },
+      scratch,
+      "/work",
+    );
+    assert.deepEqual(dualOneSlot, { ...dual, AGENTOS_GATE_PRIMARY_SLOTS: "1" });
     const launch = launchArgv(
       { binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" }, runAsPrefix: config.runAsPrefix },
       "CODEX", [], dual,

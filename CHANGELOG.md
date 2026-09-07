@@ -9,6 +9,11 @@ written.
 
 ## Unreleased
 
+- The runner's dispatcher slot count for the primary gate worker follows
+  `RUNNER_GATE_PRIMARY_SLOTS` (1 or 2, default 2) instead of always being two,
+  and sessions receive it as `AGENTOS_GATE_PRIMARY_SLOTS` in the two-host gate
+  topology. Set it to the primary worker's own `~/gate/worker-capacity`, or a
+  dispatch holds a slot while it waits on that worker's execution lock.
 - Retired the `POST /files/mkdir` and `POST /files/move` routes and their
   underlying store operations.
 - Removed `POST /inbox/messages/:messageId/supersede`;

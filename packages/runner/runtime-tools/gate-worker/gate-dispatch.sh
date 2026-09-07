@@ -10,12 +10,14 @@
 #   @SCRIPT_DIR@/gate-dispatch.sh <oid> --server <one-server>
 #
 # The slot model rations measured host capacity, not arbitrary processes. An
-# explicitly configured primary worker contributes two fixed slots and an
-# explicitly configured fallback worker contributes one. The explicit --server
-# form remains one slot. With no remote configured, --allow-local selects a
-# local-only dispatch. The local machine contributes the configured number of
-# slots only when --allow-local (or AGENTOS_GATE_ALLOW_LOCAL=1) says this
-# invocation may spend its resources, and those slots are tried before remotes.
+# explicitly configured primary worker contributes AGENTOS_GATE_PRIMARY_SLOTS
+# slots (1 or 2, two when unset), which must be the same number as that worker's
+# own ~/gate/worker-capacity, and an explicitly configured fallback worker
+# contributes one. The explicit --server form remains one slot. With no remote
+# configured, --allow-local selects a local-only dispatch. The local machine
+# contributes the configured number of slots only when --allow-local (or
+# AGENTOS_GATE_ALLOW_LOCAL=1) says this invocation may spend its resources, and
+# those slots are tried before remotes.
 #
 # The accounting is one lock file per configured slot under the runner account's
 # cache: AGENTOS_RUNNER_HOME/.cache/gate-dispatch/ in a Run, otherwise
@@ -84,6 +86,7 @@ if [ -n "${AGENTOS_GATE_SERVER:-}" ]; then
   SINGLE_SERVER=1
 fi
 ALLOW_LOCAL="${AGENTOS_GATE_ALLOW_LOCAL:-0}"
+PRIMARY_SLOT_COUNT="${AGENTOS_GATE_PRIMARY_SLOTS-2}"
 LOCAL_SLOT_COUNT="${AGENTOS_GATE_LOCAL_SLOTS-1}"
 POLL_SECONDS="${GATE_DISPATCH_POLL_SECONDS:-30}"
 TIMEOUT_MINUTES="${GATE_DISPATCH_TIMEOUT_MINUTES:-60}"
@@ -173,9 +176,19 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# The primary worker's capacity is stated twice — here and in its own
+# ~/gate/worker-capacity — and a dispatcher counting more slots than the worker
+# will run only produces an ssh session waiting on the worker's execution lock.
+# So the count is configuration, not a constant, and a value the worker could
+# never match is refused instead of being read as the default two.
+case "$PRIMARY_SLOT_COUNT" in
+  1|2) ;;
+  *) die "AGENTOS_GATE_PRIMARY_SLOTS must be 1 or 2, got: $PRIMARY_SLOT_COUNT" ;;
+esac
+
 if [ -z "$PRIMARY_SERVER" ]; then
   PRIMARY_SLOTS=()
-elif [ "$SINGLE_SERVER" -eq 1 ]; then
+elif [ "$SINGLE_SERVER" -eq 1 ] || [ "$PRIMARY_SLOT_COUNT" -eq 1 ]; then
   PRIMARY_SLOTS=(remote-1)
 else
   PRIMARY_SLOTS=(remote-1 remote-1-2)
