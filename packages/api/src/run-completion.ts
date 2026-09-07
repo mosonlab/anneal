@@ -715,25 +715,37 @@ export const completeRun = async (
         && failureClass !== null
         && isTextMatchedTransientProviderFailure(body.outcome.envelope, failureClass));
     const retryAt = failureClass && retryable ? new Date(now.getTime() + retryDelayMs(run.runNumber, failureClass)) : null;
-    // A negative Regression verdict is durable control-plane evidence even
-    // when the provider stream drops before its terminal event. Qualify this
-    // exception at the same canonical boundary as an ordinary successful
-    // completion: the output must belong to this Run, its JSON body and
-    // authored commit must be valid, and the completion must name that exact
-    // head. PASS is deliberately excluded; advancing after a failed transport
-    // completion needs its own policy decision.
-    const failedRegressionVerdict = !succeeded && failureClass === FailureClass.PROTOCOL_ERROR && retryable
-      && run.taskId && run.task && isRegressionVerificationOutputKind(run.task.templateStep?.outputKind)
+    // A negative Regression verdict survives a later external failure, including
+    // delivery or salvage failure before completion can report a head. Keep the
+    // existing retryable protocol-error case too. The canonical qualifier owns
+    // Run identity, JSON validation and exact authored-head binding; only an
+    // unreported head may fall back to persisted evidence. PASS stays excluded.
+    // The legacy output kind deliberately keeps its existing failure path.
+    const persistedV2RegressionStep = run.task?.templateStep?.outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND;
+    const externalRegressionFailure = external && persistedV2RegressionStep;
+    const retryableProtocolRegressionFailure = failureClass === FailureClass.PROTOCOL_ERROR && retryable
+      && isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind);
+    const failedRegressionVerdict = !succeeded
+      && (externalRegressionFailure || retryableProtocolRegressionFailure)
+      && run.taskId && run.task
       ? await regressionVerdictForRun(tx, {
           task: run.task,
           runId: run.id,
           runHeadSha: body.headSha ?? null,
+          allowPersistedHeadWhenUnreported: externalRegressionFailure,
         })
       : null;
     const durableNegativeRegressionVerdict = Boolean(
       failedRegressionVerdict?.status === "ok"
-      && failedRegressionVerdict.verdict.outcome !== "pass",
+      && failedRegressionVerdict.verdict.outcome !== "pass"
+      && ((retryableProtocolRegressionFailure && body.headSha === failedRegressionVerdict.headSha)
+        || (externalRegressionFailure
+          && (failedRegressionVerdict.verdict.outcome === "review-fail"
+            || failedRegressionVerdict.verdict.outcome === "refresh-conflict"))),
     );
+    const completionHeadSha = durableNegativeRegressionVerdict && failedRegressionVerdict?.status === "ok"
+      ? failedRegressionVerdict.headSha
+      : body.headSha ?? null;
     // Completion always mutates its Task, including terminal non-retryable
     // failures. Run is already locked above; acquire the Task/chain mutex now
     // before reading capped-refund history so two completion decisions cannot
@@ -987,7 +999,7 @@ export const completeRun = async (
         basePublishedAt: (body.pushedBranch ?? run.pushedBranch)
           ? basePublishedStamp({ baseSha: body.baseSha ?? run.baseSha, basePublishedAt: run.basePublishedAt }, now)
           : run.basePublishedAt,
-        headSha: body.headSha ?? null,
+        headSha: completionHeadSha,
         salvageParentSha: body.salvageParentSha ?? null,
         pushStatus: body.pushStatus,
         pushRemote: body.pushRemote ?? null,
@@ -1213,7 +1225,7 @@ export const completeRun = async (
         id: run.id,
         agentId: run.agentId,
         branch: body.branch ?? run.branch,
-        headSha: body.headSha ?? null,
+        headSha: completionHeadSha,
         sessionId: run.session.id,
       };
       switch (advancement.case) {
@@ -1385,6 +1397,7 @@ export const completeRun = async (
           // in prose.
           metadata: jsonValue({
             exitCode: body.exitCode, outcome: body.outcome.case, failureClass, pushStatus: body.pushStatus, pullRequestUrl: body.pullRequestUrl,
+            ...(durableNegativeRegressionVerdict ? { failureReason, headSha: completionHeadSha } : {}),
             ...(retryRefusal ? runBirthRefusalMetadata(retryRefusal) : {}),
           }),
         },

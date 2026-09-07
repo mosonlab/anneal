@@ -2139,6 +2139,57 @@ curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/rerun" \
   -d '{"requestId":"rerun-recovery-gate-001","reason":"The failing test is outside this branch and timed out under host load"}'
 ```
 
+### Regression verdict precedence after an external Run failure
+
+A Regression verification Run can persist its `regression-verification-v2`
+output and then fail for an external reason: for example, a task-failed Git
+operation during target refresh or WIP salvage, or a provider stream failure.
+Completion qualifies the persisted semantic result before deciding whether to
+retry or settle the Task as an ordinary external failure. This ordering
+preserves the result the Run already authored.
+Only persisted v2 `review-fail` and `refresh-conflict` results receive this new
+external-failure precedence; `gate-fail` and a Run with no such output
+keep the existing external-failure path, including the legacy protocol-error
+handling.
+
+The persisted result is control-plane evidence only when all of these bindings
+hold:
+
+- the `TaskStepOutput` belongs to the same Run (`runId`),
+- its body is valid `regression-verification-v2` JSON and its authored commit
+  is present, and
+- the verdict's `headSha`, the output's `commitSha`, and the Run's exact head
+  agree.
+
+When completion has no `headSha`, this external-failure path uses the output's
+authored `commitSha` as the persisted head for validation. A repair then binds
+to that head, so the operator does not need to carry the branch forward manually. A result from another Run, a
+malformed body, a missing authored commit, or a mismatched head is refused and
+does not control the Chain. Run text and `TaskActivity` rows never synthesize a
+verdict.
+
+For a validated negative result, the merge tail uses the persisted semantic
+outcome even though the Run itself records an external failure. `review-fail`
+queues the normal `review-fix` repair and `refresh-conflict` queues the
+`refresh-conflict` repair, both against the persisted head and its recorded
+base. The external failure remains visible as a diagnostic
+`TaskActivity` on the Regression task; inspect it with
+`GET /tasks/:taskId/activity`. It is diagnostic history, not a replacement for
+the persisted verdict and not another source of semantic authority.
+
+Inside a base-drift recovery Run, the same validation and precedence apply,
+but the settlement is the recovery stop carrying the persisted verdict's
+reason. It does not open an automatic repair from the failed Run. The recovery
+attempt and its existing Regression, Merge readiness, and merge-integrator
+tasks remain in the documented recovery-stop state, so the recovery ceiling
+and `POST /tasks/:taskId/merge-tail/repair` re-entry rules continue to apply.
+
+A persisted `pass` is excluded from this failed-completion rule. An external
+failure after a PASS never advances the Chain or creates a repair on the basis
+of that PASS. Advancement uses the ordinary successful-completion path, with
+the exact head named by completion and a persisted gate verdict for that same
+head.
+
 ### Settling a chain whose repair cannot bind
 
 Two merge-tail mechanisms can overlap on one Chain: a base-drift recovery
