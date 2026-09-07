@@ -230,7 +230,7 @@ test("post-merge verification accepts our identified merge after a concurrent ba
   assert.deepEqual(await execute(fake.deps), { outcome: "merged", mergeCommitSha: MERGE_COMMIT });
 });
 
-test("post-merge verification stops after a concurrent base advance without positive merge identity", async () => {
+test("post-merge verification stops after a concurrent base advance when the direct read cannot settle it either", async () => {
   const concurrentMergeSha = "d".repeat(40);
   const mismatchedMergeSha = "e".repeat(40);
   const cases = [
@@ -251,6 +251,11 @@ test("post-merge verification stops after a concurrent base advance without posi
           snapshot: { ...mergedSnapshot({ mergeCommit }), baseRefOid: concurrentMergeSha },
         },
       ],
+      // Neither pull-request-side predicate holds, so the stop below is the
+      // direct read's verdict: it is stated here rather than left to the fake's
+      // default, because a successful read of the authorized parents would
+      // instead complete the run as merged.
+      directCommit: { status: "error", reason: "landed commit read failed: network: request timed out" },
     });
 
     const verdict = stopped(await execute(fake.deps));

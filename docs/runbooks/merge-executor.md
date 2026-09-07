@@ -76,7 +76,7 @@ changes a file below `.github/workflows/`.
 | Administration | Read | Mandatory | GraphQL `READ_QUERY`: `repository.branchProtectionRules` and each rule's required-check policy. An unreadable rule is not treated as no protection. |
 | Checks | Read | Mandatory | GraphQL `READ_QUERY`: `commit.statusCheckRollup.contexts` entries of type `CheckRun`. |
 | Commit statuses | Read | Mandatory | GraphQL `READ_QUERY`: `commit.statusCheckRollup.contexts` entries of type `StatusContext`. |
-| Contents | Read and write | Mandatory | REST `GET /repos/{owner}/{repo}/git/commits/{head}` and `GET /git/trees/{tree}?recursive=1`; REST `POST /git/trees` (`createSanitizedTree`) and `POST /git/commits` (`createMergeCommit`); GraphQL `updateRefs` (`updateBaseRef`). |
+| Contents | Read and write | Mandatory | REST `GET /repos/{owner}/{repo}/git/commits/{head}`, `GET /git/trees/{tree}?recursive=1`, and `GET /repos/{owner}/{repo}/compare/{mergeSha}...{baseRef}` (`readLandedCommit`); REST `POST /git/trees` (`createSanitizedTree`) and `POST /git/commits` (`createMergeCommit`); GraphQL `updateRefs` (`updateBaseRef`). |
 | Merge queues | Read and write | Mandatory | GraphQL `READ_QUERY`: `repository.mergeQueue` and `pullRequest.mergeQueueEntry`; GraphQL `dequeuePullRequest` (`dequeuePullRequest`). Read failure is never interpreted as no queue. |
 | Metadata | Read | Mandatory | GraphQL `READ_QUERY`: repository identity, ref, object IDs, and ordinary repository metadata used to bind all other reads. GitHub includes Metadata read as the App baseline. |
 | Pull requests | Read and write | Mandatory | GraphQL `READ_QUERY`: PR state, head/base, mergeability, merge commit, author, auto-merge, and queue state; GraphQL `disablePullRequestAutoMerge` (`disablePullRequestAutoMerge`). |
@@ -134,12 +134,15 @@ are exactly the authorized base and head, in that order, and the commit is
 reachable from the authorized base ref — the same mechanical criterion an
 operator applies by hand.
 
-An operator decision is needed only when one of those three facts is missing, or
-when the direct read fails or times out. The run then stops
-`base-drift-post-merge` as before, and the Inbox message's evidence carries
-`directParentCheck` with the parents and reachability that were read, or with
-the read's error, so the question says why the mechanical check did not settle
-it. Answer `accept` only after establishing those same three facts yourself: a
+An operator decision is needed when one of those three facts is missing, or when
+the direct read fails or times out. The run then stops `base-drift-post-merge`
+as before, and the Inbox message's evidence carries `directParentCheck` with the
+parents and reachability that were read, or with the read's error, so the
+question says why the mechanical check did not settle it. The same condition
+also stops the run when the pull-request read itself failed: neither
+projection-side predicate can be evaluated then, so no direct read is taken and
+the evidence names the failed read under `reason` with no `directParentCheck` at
+all. Answer `accept` only after establishing those same three facts yourself: a
 commit whose parents are not the authorized base and head is an unauthorized
 merge, not a reporting failure.
 
