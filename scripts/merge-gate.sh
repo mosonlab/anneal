@@ -1111,7 +1111,16 @@ done
 # own step with its own verdict, so a server that never arrives fails as
 # plainly as it did when the wait was on this line.
 say "Starting a throwaway PostgreSQL (${POSTGRES_IMAGE}, tmpfs data directory, durability off)"
+# The two labels are what lets a later gate on this worker prove this one is
+# dead. The EXIT trap in scripts/gate-worker/verdict.sh removes this container
+# when the gate ends any way it can trap; an OOM kill, a SIGKILL or a power cut
+# leaves it running with its tmpfs held, and `--rm` only deletes a container
+# that stops. run-gate.sh's reaper removes such a container only when this pid
+# is not alive and this worktree is gone, so both facts have to travel with the
+# container rather than being guessed from its name or its age.
 docker run -d --rm --name "${CONTAINER}" \
+  --label agentos.merge-gate.pid="$$" \
+  --label agentos.merge-gate.worktree="${REPO_ROOT}" \
   -e POSTGRES_USER=agentos -e POSTGRES_PASSWORD=gate-scratch-fixture-password-000000 \
   -e POSTGRES_DB=agentos_gate \
   -e PGDATA=/var/lib/postgresql/data \

@@ -21,7 +21,7 @@
 // file the gate sources needs neither.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import nodeTest from "node:test";
@@ -159,36 +159,113 @@ test("GROUP-SHAPE added operational suites share the install-free group", () => 
 // The two helpers host-sizing.sh is owed. `note` is the gate's log format, not
 // the sizing's, so the fixture supplies a silent one and reads the derived
 // values back itself.
-const runHostSizing = (hostShare) => {
+//
+// `cores` fixes what the sizing observes. host-sizing.sh asks node for the
+// host's core count, so a case that wants a stated host puts a node on PATH
+// that answers with that number and delegates everything else to the real one.
+// Asserting against `availableParallelism()` instead would restate the
+// implementation's own input and prove nothing about a machine nobody ran on:
+// the 16-vCPU worker the brief sizes for is not the machine this suite runs on.
+const fixedCoreNode = (t, cores) => {
+  const dir = mkdtempSync(join(tmpdir(), "gate-host-cores-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const patch = join(dir, "cores.cjs");
+  writeFileSync(patch, `require("node:os").availableParallelism = () => ${cores};\n`);
+  writeFileSync(
+    join(dir, "node"),
+    `#!/usr/bin/env bash\nexec ${JSON.stringify(process.execPath)} --require ${JSON.stringify(patch)} "$@"\n`,
+  );
+  chmodSync(join(dir, "node"), 0o755);
+  return dir;
+};
+
+const runHostSizing = (hostShare, coreBin) => {
   const env = { ...process.env };
+  if (coreBin) env.PATH = `${coreBin}:${env.PATH ?? ""}`;
   if (hostShare === undefined) delete env.AGENTOS_GATE_HOST_SHARE;
   else env.AGENTOS_GATE_HOST_SHARE = hostShare;
   const harness = `
 die() { printf '%s\\n' "$*" >&2; exit 1; }
 note() { :; }
 . ${JSON.stringify(hostSizingPath)}
-printf 'GATE_HOST_SHARE=%s\\nGATE_CPUS=%s\\n' "$GATE_HOST_SHARE" "$GATE_CPUS"
+printf 'GATE_HOST_SHARE=%s\\nGATE_CPUS=%s\\nGATE_UNIT_LANES=%s\\nGATE_DB_LANES=%s\\n' \
+  "$GATE_HOST_SHARE" "$GATE_CPUS" "$GATE_UNIT_LANES" "$GATE_DB_LANES"
 `;
   return spawnSync("bash", ["-c", harness], { encoding: "utf8", env });
 };
+
+const sizing = (result) =>
+  Object.fromEntries(
+    result.stdout
+      .trim()
+      .split("\n")
+      .map((line) => {
+        const [name, value] = line.split("=");
+        return [name, Number(value)];
+      }),
+  );
 
 test("HOST-SHARE defaults to half the host while explicit and invalid values keep their precedence", () => {
   const cores = availableParallelism();
 
   const defaultShare = runHostSizing(undefined);
   assert.equal(defaultShare.status, 0, defaultShare.stderr);
-  assert.equal(
-    defaultShare.stdout,
-    `GATE_HOST_SHARE=2\nGATE_CPUS=${Math.max(1, Math.floor(cores / 2))}\n`,
-  );
+  assert.equal(sizing(defaultShare).GATE_HOST_SHARE, 2);
+  assert.equal(sizing(defaultShare).GATE_CPUS, Math.max(1, Math.floor(cores / 2)));
 
   const wholeHost = runHostSizing("1");
   assert.equal(wholeHost.status, 0, wholeHost.stderr);
-  assert.equal(wholeHost.stdout, `GATE_HOST_SHARE=1\nGATE_CPUS=${cores}\n`);
+  assert.equal(sizing(wholeHost).GATE_HOST_SHARE, 1);
+  assert.equal(sizing(wholeHost).GATE_CPUS, cores);
 
-  const invalid = runHostSizing("3");
-  assert.notEqual(invalid.status, 0);
-  assert.match(invalid.stderr, /AGENTOS_GATE_HOST_SHARE must be 1 or 2, got 3/);
+  // The share is the worker's own `host-share` setting now, not a restatement
+  // of its slot count, so a gate worker sharing its host with runners can hand
+  // the gate a quarter of it. Stated against this host's own core count rather
+  // than a fixed 16, so the arithmetic is the thing under test on any machine:
+  // on the 16-vCPU worker the brief describes, a share of two is 8 lanes of the
+  // 16 a share of one would take.
+  const half = runHostSizing("2");
+  const quarter = runHostSizing("4");
+  assert.equal(quarter.status, 0, quarter.stderr);
+  assert.equal(sizing(half).GATE_UNIT_LANES, Math.max(1, Math.floor(cores / 2)));
+  assert.equal(sizing(quarter).GATE_UNIT_LANES, Math.max(1, Math.floor(cores / 4)));
+  assert.equal(sizing(half).GATE_DB_LANES, Math.max(2, Math.floor(cores / 2)));
+
+  // A share of zero would divide the host by nothing, and a fraction or a word
+  // is not a number of shares at all. `00` is the same zero written with
+  // padding: it used to slip past the bare `0` pattern here and reach the
+  // division as `Number("00")`, whose Infinity lanes killed the gate with the
+  // FAIL code over a worker's own setting file.
+  for (const refused of ["0", "00", "1.5", "two"]) {
+    const invalid = runHostSizing(refused);
+    assert.notEqual(invalid.status, 0, `AGENTOS_GATE_HOST_SHARE=${refused} was accepted`);
+    assert.match(
+      invalid.stderr,
+      new RegExp(`AGENTOS_GATE_HOST_SHARE must be a whole number of shares, at least 1, got ${refused}`),
+    );
+  }
+});
+
+test("on the 16-vCPU worker a host share of two gives each gate half the machine", (t) => {
+  // The stated case, on a stated host: two concurrent gates on a 16-vCPU worker
+  // each size for 8 of its processors, so the two of them add up to the one
+  // machine they are running on rather than to two.
+  const bin = fixedCoreNode(t, 16);
+
+  const half = runHostSizing("2", bin);
+  assert.equal(half.status, 0, half.stderr);
+  assert.deepEqual(sizing(half), {
+    GATE_HOST_SHARE: 2,
+    GATE_CPUS: 8,
+    GATE_UNIT_LANES: 8,
+    GATE_DB_LANES: 8,
+  });
+
+  // The same host undivided, so the halving above is the share's doing and not
+  // the fixture's.
+  const whole = runHostSizing("1", bin);
+  assert.equal(whole.status, 0, whole.stderr);
+  assert.equal(sizing(whole).GATE_CPUS, 16);
 });
 
 // Enough of the gate for the engine to run: the two output helpers it owes the
