@@ -2,7 +2,7 @@ import { RUN_STATUS_IS_ACTIVE } from "@anneal/db/board-contract";
 import { type ChainControlActionKind, chainControlAction } from "./chain-aggregate";
 import { formatDateTime, formatT } from "./format";
 import { cronProse } from "./schedule";
-import type { BoardLatestRun, BoardTask, ChainAggregate, RunStatus, TaskStatus } from "./types";
+import type { BoardClaimRefusal, BoardLatestRun, BoardTask, ChainAggregate, RunStatus, TaskStatus } from "./types";
 
 /** The board's five columns, in the order they are read. Backlog is first: it is
  *  where work waits before it is queued, and the scheduler never picks anything
@@ -319,7 +319,16 @@ export type OverBaselineMetric = "cost" | "duration" | "both";
 export type CardBadge =
   | { kind: "stalled" }
   | { kind: "over-baseline"; metric: OverBaselineMetric; sampleSize: number }
-  | { kind: "retries"; n: number; max: number };
+  | { kind: "retries"; n: number; max: number }
+  | ({ kind: "claim-refusal" } & BoardClaimRefusal);
+
+/** Convert the projected refusal into the same anomaly row item used by task
+ *  cards. Presence is the server's explicit signal; absence is unknown and
+ *  must never produce a warning. */
+export const claimRefusalBadge = (run: BoardLatestRun | null | undefined): CardBadge | null => {
+  const refusal = run?.claimRefusal ?? null;
+  return refusal === null ? null : { kind: "claim-refusal", ...refusal };
+};
 
 const ms = (instant: string): number => new Date(instant).getTime();
 
@@ -362,10 +371,12 @@ const overBaseline = (task: Pick<BoardTask, "baseline">, run: BoardLatestRun, no
 export const cardBadges = (task: Pick<BoardTask, "latestRun" | "baseline">, now: number): CardBadge[] => {
   const run = task.latestRun;
   if (run === null) return [];
+  const refusal = claimRefusalBadge(run);
   const stalled = run.phase === "executing" && run.lastProgressEventAt !== null
     && now - ms(run.lastProgressEventAt) > STALLED_AFTER_MS;
   const over = overBaseline(task, run, now);
   return [
+    ...(refusal === null ? [] : [refusal]),
     ...(stalled ? [{ kind: "stalled" } as const] : []),
     ...(over === null ? [] : [over]),
     // Run numbers are dense and one-based, so the newest run's number is how

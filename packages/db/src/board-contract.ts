@@ -510,6 +510,15 @@ export type RunPhase =
   | "cleanup"
   | "finished";
 
+/** A mechanical Run claim the API refused because the completion contracts
+ * carried by the two independently released processes differ. */
+export type BoardClaimRefusal<DateTime = string> = {
+  code: "mechanical_contract_mismatch";
+  executorVersion: number | null;
+  apiVersion: number;
+  since: DateTime;
+};
+
 export type BoardLatestRun<DateTime = string> = {
   id: string;
   runNumber: number;
@@ -536,6 +545,10 @@ export type BoardLatestRun<DateTime = string> = {
    *  same signal its stall timeout is measured from. Null when none was ever
    *  reported. */
   lastProgressEventAt: DateTime | null;
+  /** The latest queued Run's mechanical claim refusal, when one was recorded
+   *  for this Task at or after that Run's creation. Absent for every other
+   *  Run or when no such refusal exists. */
+  claimRefusal?: BoardClaimRefusal<DateTime>;
   /** The Run's own attempt ceiling for its Task, snapshotted at Run birth.
    *  A card's retry count is read against this and never against the Task's
    *  configured budget of the moment, which grants may already have raised. */
