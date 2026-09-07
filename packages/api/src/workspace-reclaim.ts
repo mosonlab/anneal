@@ -3,7 +3,8 @@ import { resolve } from "node:path";
 import {
   ACTIVE_RUN_STATUSES,
   basePublishedStamp,
-  CleanupStatus, FailureClass, leaseLossRefundDecision, openRun, resolveRunBranches, runOwnedHead, RunStatus,
+  CleanupStatus, FailureClass, leaseLossRefundDecision, openRun, resolveRunBranches, runBirthRefusalMetadata,
+  runOwnedHead, RunStatus,
   SessionExecutionStatus, type Prisma, type PrismaClient,
 } from "@anneal/db";
 
@@ -541,7 +542,7 @@ export const repairReplacementAfterSalvage = async (
             taskId: run.taskId,
             actorType: "control-plane",
             body: `Late-salvage replacement was revoked and not requeued: ${refusal.message}`,
-            metadata: { refusal: refusal.code },
+            metadata: runBirthRefusalMetadata(refusal),
           } });
           return "repaired";
         default: {

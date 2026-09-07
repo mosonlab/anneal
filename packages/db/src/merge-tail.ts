@@ -42,6 +42,14 @@ export const MERGE_TAIL_KIND = {
  */
 export const MAX_MERGE_TAIL_REPAIR_ATTEMPTS = 3;
 
+/**
+ * How many times an operator may re-run one stopped base-drift recovery
+ * through `POST /tasks/:taskId/merge-tail/rerun`. A gate FAIL the branch did
+ * not cause can repeat while its host is loaded, so one retry is not enough;
+ * an unbounded re-run would hide a gate failure that is real.
+ */
+export const MAX_MERGE_TAIL_OPERATOR_RERUNS = 2;
+
 export const MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES = 2;
 
 /**

@@ -54,6 +54,8 @@ export type RunnerConfig = {
   gateFallbackServer?: string;
   /** Optional local gate capacity exposed to agent sessions. */
   gateLocalSlots?: number;
+  /** Dispatcher slots on the primary gate worker; must equal its worker-capacity. */
+  gatePrimarySlots?: number;
   /** Proxy variables captured once, when the daemon starts. */
   proxyEnvironment?: NodeJS.ProcessEnv;
   /** Repository-owned baseline used to provision Codex session config roots. */
@@ -103,6 +105,18 @@ const positiveIntegerAtMost = (name: string, value: string, maximum: number): nu
   }
   if (parsed > maximum) throw new Error(`${name} must be a positive integer no greater than ${maximum}`);
   return parsed;
+};
+
+/**
+ * The dispatcher's primary slot count is the same number as the primary
+ * worker's own `~/gate/worker-capacity`, which run-gate.sh allows to be 1 or 2.
+ * Anything else would put the two copies out of step, so it is refused here
+ * rather than rounded into a default the operator never asked for.
+ */
+const gatePrimarySlotCount = (value: string | undefined): number => {
+  if (value === undefined) return 2;
+  if (value !== "1" && value !== "2") throw new Error("RUNNER_GATE_PRIMARY_SLOTS must be 1 or 2");
+  return Number(value);
 };
 
 const positiveFiniteNumber = (name: string, value: string): number => {
@@ -155,6 +169,7 @@ export const loadRunnerConfig = ({ cpuCount = cpus().length }: { cpuCount?: numb
   const gateLocalSlots = process.env.RUNNER_GATE_LOCAL_SLOTS === undefined
     ? undefined
     : positiveIntegerAtMost("RUNNER_GATE_LOCAL_SLOTS", process.env.RUNNER_GATE_LOCAL_SLOTS, MAX_GATE_LOCAL_SLOTS);
+  const gatePrimarySlots = gatePrimarySlotCount(process.env.RUNNER_GATE_PRIMARY_SLOTS);
   const claimMaxLoadAverage = positiveFiniteNumber(
     "RUNNER_CLAIM_MAX_LOAD_AVERAGE",
     process.env.RUNNER_CLAIM_MAX_LOAD_AVERAGE ?? String(cpuCount * 1.5),
@@ -184,6 +199,7 @@ export const loadRunnerConfig = ({ cpuCount = cpus().length }: { cpuCount?: numb
     ...(gateServer ? { gateServer } : {}),
     ...(gateFallbackServer ? { gateFallbackServer } : {}),
     ...(gateLocalSlots !== undefined ? { gateLocalSlots } : {}),
+    gatePrimarySlots,
     proxyEnvironment: runnerProxyEnvironment(),
     sessionConfigBaselineRoot: process.env.RUNNER_SESSION_CONFIG_BASELINE_ROOT ?? defaultSessionConfigBaselineRoot(),
     workspaceRoot,

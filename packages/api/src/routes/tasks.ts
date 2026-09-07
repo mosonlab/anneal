@@ -4,7 +4,8 @@ import {
   chainControlReadProjection,
   chainRunHistoryRefusal,
   deleteChain,
-  enqueueTaskRun,
+  enqueueTaskRunInternal,
+  errorForOpenRunRefusal,
   gateSlotOf,
   MERGE_INTEGRATOR_KIND,
   holdChain,
@@ -18,8 +19,10 @@ import {
   mergeRecoveryPhase,
   observedChainPullRequests,
   openRun,
+  parksInsteadOfRaising,
   Prisma,
   projectMergeOutcome,
+  recordRunBirthRefusal,
   requestConfirmationCard,
   resumeChain,
   runOwnsMergeOutcome,
@@ -85,6 +88,7 @@ import { refusalFor, type Refusal } from "../refusal.js";
 import { activityInput } from "../run-lifecycle.js";
 import { OPERATOR_NOTE_METADATA_FIELD } from "../run-claim.js";
 import { requestMergeTailRepair } from "../merge-tail-repair-reentry.js";
+import { requestMergeTailRerun } from "../merge-tail-rerun-reentry.js";
 import { computeNextOccurrence, validateSchedule } from "../scheduler.js";
 import { patchTask, taskInput, taskPatch } from "../task-patch.js";
 import { isLiveStatus, lockTask, lockTaskMutationRows, reactivationBlocked } from "../task-write.js";
@@ -175,7 +179,7 @@ const chainHoldInput = z.object({
 const chainResumeInput = z.object({
   requestId: z.string().trim().min(1).max(200),
 }).strict();
-const mergeTailRepairInput = z.object({
+const mergeTailReentryInput = z.object({
   requestId: z.string().trim().min(1).max(200),
   reason: z.string().trim().min(1).max(4_000).optional(),
 }).strict();
@@ -527,8 +531,20 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
   });
   app.post("/tasks/:taskId/merge-tail/repair", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    const body = await readJson(context.req.raw, mergeTailRepairInput);
+    const body = await readJson(context.req.raw, mergeTailReentryInput);
     const result = await serializable(db, (tx) => requestMergeTailRepair(tx, {
+      taskId,
+      requestId: body.requestId,
+      ...(body.reason === undefined ? {} : { reason: body.reason }),
+      now: new Date(),
+    }));
+    if ("message" in result) return refusalJson(context, result);
+    return context.json(result);
+  });
+  app.post("/tasks/:taskId/merge-tail/rerun", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const body = await readJson(context.req.raw, mergeTailReentryInput);
+    const result = await serializable(db, (tx) => requestMergeTailRerun(tx, {
       taskId,
       requestId: body.requestId,
       ...(body.reason === undefined ? {} : { reason: body.reason }),
@@ -611,7 +627,16 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         return refusal("conflict", "Task already has an active run");
       }
       const opened = await openRun(tx, taskId, { kind: "retry", readyAt: now });
-      if (!opened.ok) return opened.refusal;
+      if (!opened.ok) {
+        // Retry has no park of its own — a refused retry ordinarily leaves the
+        // task exactly as the operator found it. A spend cap is the exception:
+        // it is the operator's own limit, and the REVIEW naming the cap and the
+        // total is the only thing that says which cap to raise.
+        if (parksInsteadOfRaising(opened.refusal)) {
+          await recordRunBirthRefusal(tx, taskId, opened.refusal);
+        }
+        return opened.refusal;
+      }
       const run = opened.run;
       await tx.task.update({ where: { id: taskId }, data: { status: TaskStatus.TODO, failureReason: null } });
       await tx.taskActivity.create({ data: { taskId, actorType: "operator", body: `Run ${run.runNumber} queued by operator retry` } });
@@ -631,7 +656,17 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         if (!admission.task) return admission.refusal;
         if (admission.refusal) return admission.refusal;
         const task = admission.task;
-        const run = await enqueueTaskRun(tx, taskId);
+        // Not `enqueueTaskRun`: raising the refusal aborts this transaction, so
+        // a spend-cap park written inside it would be rolled back and Start
+        // would enforce the cap silently. Every other refusal keeps raising —
+        // its family is what maps to this route's status code.
+        const opened = await enqueueTaskRunInternal(tx, taskId, new Date(), null);
+        if (!opened.ok) {
+          if (!parksInsteadOfRaising(opened.refusal)) throw errorForOpenRunRefusal(opened.refusal);
+          await recordRunBirthRefusal(tx, taskId, opened.refusal);
+          return opened.refusal;
+        }
+        const run = opened.run;
         const recovering = task.status === TaskStatus.BACKLOG;
         if (recovering) {
           await tx.task.update({ where: { id: taskId }, data: { status: TaskStatus.TODO } });

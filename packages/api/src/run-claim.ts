@@ -31,6 +31,7 @@ import {
 import { heldPredicate, heldSql, heldWhere } from "@anneal/db/chain-hold";
 import type { ClaimContract, ClaimRefusal } from "@anneal/db/claim-contract";
 import {
+  dispatchDrainingRefusal,
   MECHANICAL_CONTRACT_MISMATCH_DEDUPE_KEY_PREFIX,
   mechanicalContractMismatch,
 } from "@anneal/db/claim-contract";
@@ -39,6 +40,7 @@ import { z } from "zod";
 import { issueSessionToken } from "./auth.js";
 import { isCanonicalBlindFindingsStep, previousRunHandoffForClaim } from "./canonical-task-output.js";
 import { chainStepPresence } from "./chain-step-omission.js";
+import { activeDispatchDrain } from "./dispatch-drain.js";
 import { makeFencingToken } from "./execution.js";
 import { openMergeTailStopNotice } from "./merge-tail-actions.js";
 import { hasOpenOperatorAlert, openOperatorAlert } from "./operator-alert.js";
@@ -302,6 +304,12 @@ export const claimRun = async (
     // before a deploy can acquire the exclusive half, and claims arriving
     // during a deploy return no work without observing candidates.
     if (!await deployBarrierAllowsClaim(tx)) return null;
+    // The dispatch drain of a deploy that has been waiting past its budget.
+    // It is read before any candidate for the same reason as the barrier: the
+    // answer is about the platform, so nothing is inspected, parked, or
+    // charged to a task's session budget on the way to giving it.
+    const drain = await activeDispatchDrain(tx, now);
+    if (drain) return dispatchDrainingRefusal(drain);
     const candidateWhere = {
       where: {
         status: RunStatus.QUEUED,

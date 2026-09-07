@@ -12,7 +12,7 @@ import {
 } from "./chain-activation.js";
 import { heldBeforeFirstLayer } from "./chain-hold.js";
 import { compare, denseOrdinals, layerOf } from "./chain-order.js";
-import { enqueueTaskRunInternal, errorForOpenRunRefusal } from "./run-open.js";
+import { enqueueTaskRunInternal, errorForOpenRunRefusal, parksInsteadOfRaising, recordRunBirthRefusal } from "./run-open.js";
 import { lockAgentRepoGrant, lockChainRows, lockChainStructure } from "./locks.js";
 import { markerFromMetadata } from "./merge-tail-markers.js";
 import { stepRole } from "./step-role.js";
@@ -614,6 +614,10 @@ export const resumeChain = async (
         if (hasSavepoint) {
           await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
           await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
+          // After the rollback, so the park survives the discarded births.
+          if (parksInsteadOfRaising(opened.refusal)) {
+            await recordRunBirthRefusal(tx, task.id, opened.refusal);
+          }
           return refusal("conflict", opened.refusal.message);
         }
         throw errorForOpenRunRefusal(opened.refusal);

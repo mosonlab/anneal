@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { setImmediate as scheduleImmediate } from "node:timers/promises";
 import { test } from "node:test";
 
-import { runPollingLoop, type PollingLoopConfig } from "./polling-loop.js";
+import { runPollingLoop, type ClaimOutcome, type PollingLoopConfig } from "./polling-loop.js";
 
 const config: PollingLoopConfig = {
   pollIntervalMs: 100,
@@ -46,10 +46,10 @@ test("overload skips claims, waits, reclaims on schedule, and recovers once", as
       if (claimCalls === 1) {
         await new Promise<void>((resolve) => { finishFirstClaim = resolve; });
         firstClaimFinished = true;
-        return true;
+        return "executed";
       }
       stopping = true;
-      return false;
+      return "idle";
     },
     shouldStop: () => stopping,
     log: (line) => logs.push(line),
@@ -89,7 +89,7 @@ test("zero load admits a claim without transition logs", async () => {
     reclaim: async () => undefined,
     claim: async () => {
       claimCalls += 1;
-      return false;
+      return "idle";
     },
     shouldStop: () => stopping,
     wait: async (delayMs) => {
@@ -121,7 +121,7 @@ test("a reclaim failure is reported without stopping later polls", async () => {
     },
     claim: async () => {
       claimCalls += 1;
-      return false;
+      return "idle";
     },
     shouldStop: () => stopping,
     wait: async (delayMs) => {
@@ -151,7 +151,7 @@ test("a claim failure is reported without stopping later polls", async () => {
     claim: async () => {
       claimCalls += 1;
       if (claimCalls === 1) throw failure;
-      return false;
+      return "idle";
     },
     shouldStop: () => stopping,
     wait: async (delayMs) => {
@@ -164,4 +164,35 @@ test("a claim failure is reported without stopping later polls", async () => {
   assert.equal(claimCalls, 2);
   assert.deepEqual(waits, [config.pollIntervalMs, config.pollIntervalMs]);
   assert.deepEqual(errors, [["Runner poll failed", failure]]);
+});
+
+test("a dispatch drain logs one line on entry and one on exit while polling continues", async () => {
+  const outcomes: ClaimOutcome[] = ["draining", "draining", "idle", "draining", "idle"];
+  let stopping = false;
+  let claimCalls = 0;
+  const waits: number[] = [];
+  const logs: string[] = [];
+
+  await runPollingLoop({ ...config, workspaceReclaimIntervalMs: 60_000 }, {
+    readLoadAverage: () => 0,
+    reclaim: async () => undefined,
+    claim: async () => {
+      const outcome = outcomes[claimCalls]!;
+      claimCalls += 1;
+      if (claimCalls === outcomes.length) stopping = true;
+      return outcome;
+    },
+    shouldStop: () => stopping,
+    wait: async (delayMs) => { waits.push(delayMs); },
+    log: (line) => logs.push(line),
+  });
+
+  assert.equal(claimCalls, outcomes.length, "the runner keeps polling — and heartbeating — through the drain");
+  assert.deepEqual(waits, outcomes.map(() => config.pollIntervalMs));
+  assert.deepEqual(logs, [
+    "Runner claim draining: the control plane is refusing claims until a pending deploy lands",
+    "Runner claim drain refusal ended",
+    "Runner claim draining: the control plane is refusing claims until a pending deploy lands",
+    "Runner claim drain refusal ended",
+  ]);
 });

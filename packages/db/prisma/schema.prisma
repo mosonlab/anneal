@@ -1286,6 +1286,22 @@ model SessionEvent {
   @@index([sessionId, at])
 }
 
+/// A platform-wide stop on new dispatch, opened by an auto-deploy whose
+/// quiet-window wait outlived its budget and deleted by that same deploy on
+/// every exit path. While an unexpired row exists every claim is refused, so
+/// the Runs already executing can finish and the release can land.
+///
+/// `expiresAt` is the fail-safe rather than a schedule: a claim treats an
+/// expired row as absent, so a deploy process that died mid-wait cannot drain
+/// the fleet indefinitely.
+model DispatchDrain {
+  id          String   @id @default(cuid())
+  reason      String
+  requestedBy String
+  startedAt   DateTime @default(now())
+  expiresAt   DateTime
+}
+
 model RunnerBackendState {
   runner                  RunnerKind @id
   cliVersion              String?

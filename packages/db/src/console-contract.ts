@@ -322,12 +322,23 @@ export type BackendStatus = {
   circuitReason: string | null;
 };
 
+/** The dispatch drain in force when `/runners` answered, if any. Timestamps
+ *  are ISO strings, like every other timestamp on this response. */
+export type DispatchDrainStatus = {
+  reason: string;
+  startedAt: string;
+  expiresAt: string;
+};
+
 export type RunnersResponse = {
   checkedAt: string;
   online: number;
   total: number;
   daemons: DaemonStatus[];
   backends: BackendStatus[];
+  /** Null when dispatch is admitting Runs. A non-null value is why every
+   *  daemon below is idle: they are being refused, not dead. */
+  dispatchDrain: DispatchDrainStatus | null;
 };
 
 /**
