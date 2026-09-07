@@ -237,7 +237,12 @@ const checkedResult = async (reason, run) => {
     return { code: 1, stderr: String(error), stdout: "" };
   });
   if (result.code !== 0) {
-    const diagnosis = (result.stderr || result.stdout || "").trim().slice(-2_000).replaceAll(/\s+/gu, " ");
+    const capturedTail = (result.stderr || result.stdout || "").trim().slice(-2_000);
+    // Artifact retry classification needs the terminal exception and fatal
+    // diagnostic on separate lines to distinguish source transport failures.
+    const diagnosis = reason === "release-artifact-build-failed"
+      ? capturedTail
+      : capturedTail.replaceAll(/\s+/gu, " ");
     fail(reason, `exit-${result.code}${diagnosis ? `: ${diagnosis}` : ""}`);
   }
   log(`PASS ${reason}`);

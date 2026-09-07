@@ -32,6 +32,7 @@ import type {
 } from "@prisma/client";
 
 import type { ExecutionMode } from "./merge-integrator-db.js";
+import type { MergeTrainClaimMetadata } from "./merge-tail-markers.js";
 import type { RegressionRepairHandoff } from "./merge-tail.js";
 
 /**
@@ -93,6 +94,8 @@ export type ClaimTask = {
   stallTimeoutMin: number;
   maxSessionsPerTask: number;
   templateStep: ClaimTemplateStep | null;
+  /** Present for a detached merge-train Task; absent on legacy claims. */
+  mergeTrain?: MergeTrainClaimMetadata | null;
 };
 
 export type ClaimAgent = {

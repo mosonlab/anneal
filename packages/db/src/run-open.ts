@@ -1027,9 +1027,16 @@ export const openRun = async (
       repo: true,
       templateStep: { include: { taskTemplate: { select: { name: true } } } },
       runs: { orderBy: { runNumber: "desc" }, take: 1 },
+      activity: { where: { actorType: "control-plane", metadata: { path: ["kind"], equals: "mergeTail.train" } },
+        take: 1, select: { id: true } },
     },
   });
   if (!task) return openRunRefusal("task-not-found", "not-found", "Task not found");
+  // A train's only Run owns one immutable candidate list. Platform refunds,
+  // completion retries, and manual retries must not create a second consumer.
+  if (task.chainId === null && task.templateStep === null && task.runs.length > 0 && task.activity?.length) {
+    return openRunRefusal("run-budget-exhausted", "conflict", "A merge-train task cannot be retried; readiness must form a new train");
+  }
   if (task.assigneeType !== AssigneeType.AGENT) {
     return openRunRefusal("task-assignee-type-invalid", "invalid-request", `Task ${task.id} cannot open a Run without an Agent assignee`);
   }
