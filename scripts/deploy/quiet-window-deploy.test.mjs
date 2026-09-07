@@ -1040,7 +1040,7 @@ test("retryable escalation self-clears after a successful deployment outcome", a
   assert.deepEqual(state.logs, ["SELF-CLEAR escalation reason=quiet-window-query-failed attempts=2"]);
 });
 
-test("repeated retryable failures persist attempts atomically through the cap and then block", async (t) => {
+test("repeated retryable failures persist attempts atomically through the cap and then wait", async (t) => {
   const state = escalationFixture(t, {
     outcome: "failure",
     reason: "remote-main-unreadable",
@@ -1050,7 +1050,7 @@ test("repeated retryable failures persist attempts atomically through the cap an
   for (const expected of [ESCALATION_RETRY_CAP - 1, ESCALATION_RETRY_CAP]) {
     const persisted = writeEscalationWithAttempts({
       escalationPath: state.escalationPath,
-      record: { outcome: "failure", reason: "remote-main-unreadable" },
+      record: { outcome: "failure", reason: "remote-main-unreadable", to: "unknown" },
       retryableReasons: RETRYABLE_ESCALATION_REASONS,
     });
     assert.equal(persisted.attempts, expected);
@@ -3343,3 +3343,59 @@ test("a wait longer than the drain deadline extends its row instead of opening a
   assert.equal(opened, 1);
   assert.equal(renewals, 2);
 });
+
+
+test("capped source read failure waits under the lock, retries, and backs off again", async (t) => {
+  let time = Date.parse("2026-09-07T12:00:00.000Z");
+  const marker = escalationFixture(t, {
+    reason: "remote-main-read-timeout", to: "unknown", attempts: 5,
+    retryAfter: new Date(time + 300_000).toISOString(),
+  });
+  let targetReads = 0;
+  const state = startupFixture({
+    checkEscalation: () => checkExistingEscalation({ ...marker.options, now: () => new Date(time) }),
+    readRemoteMain: async () => {
+      targetReads += 1;
+      throw new DeployFailure("remote-main-read-timeout", "read timeout");
+    },
+    persistFailure: async (failure) => writeEscalationWithAttempts({ ...marker.options,
+      record: { reason: failure.reason, detail: failure.detail, to: "unknown" },
+      now: () => new Date(time) }),
+  });
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
+  assert.equal(targetReads, 0);
+  assert.equal(state.calls.at(-1), "release-lock");
+  time += 300_000;
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 1 });
+  assert.equal(targetReads, 1);
+  const persisted = JSON.parse(readFileSync(marker.escalationPath, "utf8"));
+  assert.equal(persisted.attempts, 6);
+  assert.equal(Date.parse(persisted.retryAfter), time + 600_000);
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
+  assert.equal(targetReads, 1);
+});
+
+for (const noop of [false, true]) {
+  test(`expired capped marker clears after successful ${noop ? "no-op" : "deployment"}`, async (t) => {
+    const marker = escalationFixture(t, {
+      reason: "remote-main-read-timeout", to: "unknown", attempts: 5,
+      retryAfter: "2026-09-07T12:05:00.000Z",
+    });
+    const startup = startupFixture({ checkEscalation: () => checkExistingEscalation({
+      ...marker.options, now: () => new Date("2026-09-07T12:05:00.000Z"),
+    }) });
+    const invocation = await decideInvocation(startup.startup, "upgrade");
+    assert.equal(invocation.targetCommit, revisions.to);
+    const { host, attempt } = fixture();
+    attempt.establish({ retryEscalation: invocation.retryEscalation });
+    if (noop) host.checkAlreadyDeployed = async () => ({ skip: "already-deployed" });
+    host.selfClearEscalation = async (deployment) => selfClearEscalation({
+      ...marker.options, retryEscalation: deployment.fact("retryEscalation"),
+      notify: async (record) => marker.notifications.push(record),
+    });
+    assert.equal((await executeUpgrade(host, attempt)).ok, true);
+    assert.equal(existsSync(marker.escalationPath), false);
+    assert.equal(marker.notifications.at(-1).reason, "escalation-self-cleared");
+    await invocation.lock.release();
+  });
+}

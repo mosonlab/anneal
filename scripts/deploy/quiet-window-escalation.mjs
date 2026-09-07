@@ -10,6 +10,36 @@ import {
 
 const fail = (reason, detail = "") => { throw new DeployFailure(reason, detail); };
 
+const RETRY_BACKOFF_INITIAL_MS = 5 * 60_000;
+const RETRY_BACKOFF_MAX_MS = 60 * 60_000;
+const retryBackoffMs = (attempts, retryCap = ESCALATION_RETRY_CAP) =>
+  Math.min(RETRY_BACKOFF_MAX_MS, RETRY_BACKOFF_INITIAL_MS * 2 ** (attempts - retryCap));
+
+// Older capped markers predate retryAfter. Derive their deadline from the
+// marker itself, never from the current tick (which would postpone it forever).
+const retryDeadline = (record, attempts, retryCap) => {
+  if (Object.hasOwn(record, "retryAfter")) {
+    return typeof record.retryAfter === "string" ? Date.parse(record.retryAfter) : NaN;
+  }
+  const escalatedAt = typeof record.escalatedAt === "string" ? Date.parse(record.escalatedAt) : NaN;
+  return escalatedAt + retryBackoffMs(attempts, retryCap);
+};
+
+// Only these source-transport diagnostics earn retries for an artifact build.
+// A generic timeout could be a test, dependency install or compiler failure;
+// require clone/fetch context for that otherwise ambiguous diagnostic.
+const ARTIFACT_SOURCE_TRANSPORT_DETAILS = [
+  /gnutls_handshake\(\) failed/iu,
+  /\bSSL_ERROR_SYSCALL\b/u,
+  /could not fetch\s+.+?\s+from promisor remote/iu,
+  /\b(?:git\s+(?:clone|fetch)|source[- ](?:clone|fetch))\b[^\r\n]*\bread[ -](?:timeout|timed out)\b/iu,
+];
+const isRetryableFailure = (record, retryableReasons) =>
+  retryableReasons?.has(record?.reason)
+  || (record?.reason === "release-artifact-build-failed"
+    && typeof record.detail === "string"
+    && ARTIFACT_SOURCE_TRANSPORT_DETAILS.some((pattern) => pattern.test(record.detail)));
+
 const OID = /^[0-9a-f]{40}$/u;
 
 /** The deploy records this sentinel in `to` when the attempt failed before it
@@ -33,8 +63,8 @@ const escalationTarget = (record) => {
 /** Classify a marker into the three escalation classes.
  *
  * - `retryable-transient`: an external cause on the shipped allowlist. The
- *   marker self-clears after a successful attempt while under the retry cap,
- *   and latches like today once the cap is reached — the allowlist owns this
+ *   marker self-clears after a successful attempt, with capped exponential
+ *   backoff once the retry cap is reached — the allowlist owns this
  *   class entirely, so a new commit does not change its answer.
  * - `commit-scoped`: the failure was determined by the commit the marker names
  *   (its build, its migration, its verification). A different commit is a
@@ -51,7 +81,7 @@ export const escalationScope = ({ record, retryableReasons, hostScopedReasons })
   // spending retry attempts on an unclassifiable failure.
   const target = escalationTarget(record);
   if (target.kind === "malformed") return "host-scoped";
-  if (retryableReasons?.has(reason)) return "retryable-transient";
+  if (isRetryableFailure(record, retryableReasons)) return "retryable-transient";
   if (hostScopedReasons.has(reason) || (hostScopedReasons.has("service-control-failed") && reason.startsWith("service-control-failed:"))) return "host-scoped";
   return target.kind === "commit" ? "commit-scoped" : "host-scoped";
 };
@@ -68,6 +98,7 @@ export const checkExistingEscalation = async ({
   retryableReasons,
   hostScopedReasons,
   retryCap = ESCALATION_RETRY_CAP,
+  now = () => new Date(),
 }) => {
   if (!(hostScopedReasons instanceof Set)) throw new TypeError("hostScopedReasons-required");
   const marker = readEscalationRecord({ path: escalationPath });
@@ -75,7 +106,7 @@ export const checkExistingEscalation = async ({
   const attempts = escalationAttempts(marker.record);
   if (escalationScope({ record: marker.record, retryableReasons, hostScopedReasons }) === "retryable-transient"
     && attempts !== null
-    && attempts < retryCap) {
+    && (attempts < retryCap || now().getTime() >= retryDeadline(marker.record, attempts, retryCap))) {
     // A previous escalation may have been persisted while its Inbox delivery
     // was unavailable. Retry that delivery, but do not turn a notification
     // outage into a deploy refusal; the self-clear notification below still
@@ -126,7 +157,12 @@ export const checkExistingEscalation = async ({
       }),
     };
   }
-  log(`STOP escalation-active scope=${scope} path=${escalationPath}`);
+  const deadline = scope === "retryable-transient" && attempts !== null && attempts >= retryCap
+    ? retryDeadline(current.record, attempts, retryCap) : NaN;
+  const wait = Number.isFinite(deadline)
+    ? ` retry-after=${new Date(deadline).toISOString()} remaining-wait-seconds=${Math.max(0, Math.ceil((deadline - now().getTime()) / 1000))}`
+    : "";
+  log(`STOP escalation-active scope=${scope}${wait} path=${escalationPath}`);
   return { active: true };
 };
 
@@ -182,9 +218,9 @@ export const selfClearEscalation = async ({
 
 /** Compute the next one-based attempt count from the marker being replaced. */
 export const escalationAttemptCount = ({ record, previous, retryableReasons }) => {
-  if (!retryableReasons.has(record?.reason)) return null;
+  if (!isRetryableFailure(record, retryableReasons)) return null;
   if (Number.isSafeInteger(previous?.attempts) && previous.attempts > 0) return previous.attempts + 1;
-  if (previous && retryableReasons.has(previous.reason)) return 2;
+  if (previous && isRetryableFailure(previous, retryableReasons)) return 2;
   if (Number.isSafeInteger(record?.attempts) && record.attempts > 0) return record.attempts;
   return 1;
 };
@@ -195,7 +231,7 @@ export const writeEscalationWithAttempts = ({
   escalationPath,
   record,
   retryableReasons,
-  now,
+  now = () => new Date(),
 }) => {
   let previous = null;
   try {
@@ -205,7 +241,14 @@ export const writeEscalationWithAttempts = ({
     if (!(error instanceof DeployFailure)) throw error;
   }
   const attempts = escalationAttemptCount({ record, previous, retryableReasons });
-  const persisted = attempts === null ? record : { ...record, attempts };
-  writeEscalationRecord({ path: escalationPath, record: persisted, now });
+  const timestamp = now();
+  const persisted = attempts === null ? record : {
+    ...record,
+    attempts,
+    ...(attempts >= ESCALATION_RETRY_CAP
+      ? { retryAfter: new Date(timestamp.getTime() + retryBackoffMs(attempts)).toISOString() }
+      : {}),
+  };
+  writeEscalationRecord({ path: escalationPath, record: persisted, now: () => timestamp });
   return persisted;
 };
