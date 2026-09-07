@@ -205,10 +205,10 @@ const stopNotice = async (
   }, update: {} });
 };
 
-/** A platform requeue must persist a named park if Run birth is refused. */
-export const requeueMergeTailRun = async (tx: DbTx, taskId: string, now: Date) => {
+/** Readiness checks its drift ceiling before calling; persist any Run-birth refusal. */
+export const requeueMergeTailRun = async (tx: DbTx, taskId: string, now: Date, readinessBaseDrift: boolean) => {
   const attempt = await attemptRunBirth(tx, (client) => openRun(client, taskId, {
-    kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1,
+    kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1, ...(readinessBaseDrift ? { readinessBaseDrift: true } : {}),
   }));
   if (attempt.outcome === "refused") {
     const { refusal } = attempt;
@@ -233,7 +233,7 @@ export const enterRepair = async (
     aggregateId: string;
     currentBaseSha: string;
     now: Date;
-    readinessRequeue?: { staleBaseSha: string; reason: string };
+    readinessRequeue?: { staleBaseSha: string; reason: string; baseDrift: boolean };
     /**
      * A one-shot grant for a re-run the branch did not earn. An operator rerun
      * of a host-caused gate FAIL is platform compensation, exactly like the
@@ -277,7 +277,7 @@ export const enterRepair = async (
       },
     });
   }
-  const attempt = requeue ? await requeueMergeTailRun(tx, context.regressionTaskId, input.now) : null;
+  const attempt = requeue ? await requeueMergeTailRun(tx, context.regressionTaskId, input.now, requeue.baseDrift) : null;
   if (attempt && attempt.outcome !== "opened") {
     if (attempt.outcome === "refused" && attempt.refusal.disposition !== "held") {
       await transitionMergeRecovery(tx, input.aggregateId, MergeRecoveryStatus.BLOCKED_DOWNSTREAM, {
@@ -354,10 +354,12 @@ export const enterRepair = async (
     await recordReadinessRequeue(tx, {
       readinessTaskId: context.readinessTaskId,
       regressionTaskId: context.regressionTaskId,
+      recoveryAggregateId: context.aggregateId,
       staleBaseSha: requeue.staleBaseSha,
       currentBaseSha: input.currentBaseSha,
       budgetGrant: 1,
       reason: requeue.reason,
+      baseDrift: requeue.baseDrift,
     });
   } else {
     await writeMarker(tx, context.integratorTaskId, "baseDriftRecovery", {

@@ -6,6 +6,8 @@ import {
   type ChangedFile,
   DependencyProvisioning,
   INTEGRATOR_SENTINEL_MODEL,
+  LEASE_LOSS_REFUND_CAP,
+  MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
   MergeLeaseEventState,
   MergeRecoveryStatus,
   MERGE_READINESS_REQUEUE_KIND,
@@ -33,14 +35,17 @@ import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 import { executorsOnline } from "./merge-executor-daemon-fixture.js";
 import {
   MERGE_EXECUTOR_OFFLINE_WAIT_MS,
+  READINESS_BASE_DRIFT_REQUEUE_LIMIT,
   READINESS_CLAIM_LEASE_MS,
   READINESS_EXCEPTION_REQUEUE_LIMIT,
   READINESS_EXCEPTION_REQUEUE_STATE,
   readinessTick,
+  requeueRegressionSettlement,
   type DaemonSnapshotReader,
 } from "./merge-readiness-worker.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createRunnerRegistry } from "./runners.js";
+import { completeRun } from "./run-completion.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -248,6 +253,103 @@ const seedReadiness = async () => {
   return { project, repo, regression, readiness, integrator };
 };
 
+/** Build the exact history that used to make a later readiness requeue refuse.
+ * Each replacement is opened by reconciliation after a genuinely expired Run
+ * lease, so the final queued Run carries three platform refunds rather than a
+ * fixture-only counter. */
+const exhaustedLeaseLossRun = async (
+  seeded: Awaited<ReturnType<typeof seedReadiness>>,
+) => {
+  let current = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+  });
+  const start = new Date("2026-09-07T00:00:00.000Z");
+  for (let loss = 0; loss < LEASE_LOSS_REFUND_CAP; loss += 1) {
+    const at = new Date(start.getTime() + loss * 60 * 60_000);
+    await db.run.update({ where: { id: current.id }, data: {
+      status: RunStatus.RUNNING,
+      heartbeatAt: null,
+      startedAt: new Date(at.getTime() - 30 * 60_000),
+      leaseExpiresAt: new Date(at.getTime() - 60_000),
+    } });
+    assert.ok(await reconcileDatabaseRuns(db, at, releaseChainLease) > 0, `lease loss ${loss + 1}`);
+    current = await db.run.findFirstOrThrow({
+      where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+    });
+    assert.equal(current.leaseLossRefunds, loss + 1);
+  }
+  return current;
+};
+
+/** Exercise the separate capped external-failure retry path on the exhausted
+ * task. Its replacement must carry the lease-loss history unchanged. */
+const externalRetryAfterLeaseLosses = async (
+  seeded: Awaited<ReturnType<typeof seedReadiness>>,
+  queued: Awaited<ReturnType<typeof exhaustedLeaseLossRun>>,
+) => {
+  const runnerId = `readiness-external-${queued.id}`;
+  const fencingToken = `readiness-external-fence-${queued.id}`;
+  await db.run.update({ where: { id: queued.id }, data: {
+    status: RunStatus.RUNNING,
+    runnerId,
+    fencingToken,
+    leaseGeneration: 1,
+    heartbeatAt: new Date(),
+    leaseExpiresAt: new Date(Date.now() + 600_000),
+  } });
+  await db.session.create({ data: {
+    runId: queued.id,
+    projectId: seeded.project.id,
+    agentId: seeded.regression.assigneeAgentId!,
+    taskId: seeded.regression.id,
+    runner: "CODEX",
+    executionStatus: "RUNNING",
+  } });
+  await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.DOING } });
+
+  const completion = await completeRun(db, {
+    runId: queued.id,
+    claimantClass: "runner",
+    body: {
+      runnerId,
+      fencingToken,
+      exitCode: 1,
+      pushStatus: "NOT_REQUESTED",
+      cleanupStatus: "SUCCEEDED",
+      workspaceRetained: false,
+      outcome: {
+        case: "provider-failure",
+        reason: "provider transport failed",
+        envelope: {
+          version: 1,
+          phase: "EXECUTE",
+          runnerClass: "TRANSIENT_PROVIDER",
+          exitCode: 1,
+          signal: null,
+          terminationReason: null,
+          terminalEventSeen: false,
+          terminalSuccess: false,
+          agentExited: false,
+          providerError: null,
+          stderrSummary: "provider transport failed",
+          stdoutSummary: null,
+          timedOut: false,
+          transient: true,
+          timeoutMs: null,
+        },
+      },
+    },
+  });
+  assert.ok(!("reason" in completion), JSON.stringify(completion));
+  assert.equal(completion.retryCreated, true);
+  const retry = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+  });
+  assert.equal(retry.leaseLossRefunds, LEASE_LOSS_REFUND_CAP);
+  assert.equal(retry.budgetGrants, queued.budgetGrants + 1);
+  return retry;
+};
+
 const assertDeferredReleaseAndRetry = async (
   seeded: Awaited<ReturnType<typeof seedReadiness>>,
   now: Date,
@@ -420,6 +522,79 @@ test("base drift invalidates a head-bound PASS and returns the chain to regressi
   assert.equal(compensated.maxRunsPerTask, 6);
   assert.equal(compensated.budgetGrants, 1);
   assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId], "base drift requeue releases before the next v2 Regression run");
+});
+
+test("an exhausted lease-loss history does not reject a valid PASS after lease contention", async () => {
+  const seeded = await seedReadiness();
+  const exhausted = await exhaustedLeaseLossRun(seeded);
+  assert.equal(exhausted.leaseLossRefunds, LEASE_LOSS_REFUND_CAP);
+  assert.equal(
+    await db.run.count({ where: { taskId: seeded.regression.id, status: RunStatus.LOST } }),
+    LEASE_LOSS_REFUND_CAP,
+  );
+
+  // The external provider retry is a separate refund class. It carries the
+  // lease-loss history forward, so readiness still sees the exhausted value.
+  const externalRetry = await externalRetryAfterLeaseLosses(seeded, exhausted);
+  await db.run.update({ where: { id: externalRetry.id }, data: {
+    status: RunStatus.SUCCEEDED,
+    headSha: HEAD,
+    leaseExpiresAt: null,
+  } });
+  await db.taskStepOutput.update({ where: { taskId: seeded.regression.id }, data: {
+    runId: externalRetry.id,
+    body: JSON.stringify({
+      schemaVersion: 1,
+      outcome: "pass",
+      headSha: HEAD,
+      baseHeadSha: BASE,
+      gateVerdict: "PASS",
+    }),
+    commitSha: HEAD,
+  } });
+  await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.DONE } });
+
+  const holder = {
+    holder: "runner@other-chain",
+    task: "other-chain-readiness",
+    reason: "other chain holds the merge Lease",
+    acquiredAt: "2026-09-07T03:00:00.000Z",
+    sha: "c".repeat(40),
+  };
+  const contended: MergeLeaseAcquirer = async () => ({ outcome: "contended", holder });
+  const started = new Date("2026-09-07T04:00:00.000Z");
+  assert.deepEqual(
+    await readinessTick(db, reader(), started, 5, releaseChainLease, leaseRunner(contended), executorsOnline),
+    { claimed: 1, authorized: 0, requeued: 0, stopped: 0 },
+  );
+
+  const driftedBase = "d".repeat(40);
+  assert.deepEqual(
+    await readinessTick(
+      db,
+      reader([], snapshot({ baseSha: driftedBase })),
+      new Date(started.getTime() + READINESS_CLAIM_LEASE_MS * 2),
+      5,
+      releaseChainLease,
+      runWithMergeLease,
+      executorsOnline,
+    ),
+    { claimed: 1, authorized: 0, requeued: 1, stopped: 0 },
+  );
+
+  const requeued = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+  });
+  assert.equal(requeued.leaseLossRefunds, LEASE_LOSS_REFUND_CAP);
+  assert.equal(requeued.budgetGrants, externalRetry.budgetGrants + 1);
+  assert.equal(
+    await db.taskActivity.count({
+      where: { taskId: seeded.regression.id, metadata: { path: ["refusal"], equals: "lease-loss-refunds-exhausted" } },
+    }),
+    0,
+  );
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.TODO);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.TODO);
 });
 
 test("base drift after lease acquisition is rechecked before authorization", async () => {
@@ -611,6 +786,118 @@ test("consecutive pre-authorization requeues are counted on the readiness card",
   assert.equal(regressionCard.readinessGrants, 0);
 });
 
+test("non-drift requeues and past recovery rows do not spend the standalone drift ceiling", async () => {
+  const seeded = await seedReadiness();
+  for (const condition of ["stale-head", "ancestry-refused", "stale-head"] as const) {
+    const prior = await db.run.findFirstOrThrow({
+      where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+    });
+    await db.run.update({ where: { id: prior.id }, data: { status: RunStatus.SUCCEEDED, leaseExpiresAt: null } });
+    // Exercise the real settlement and Run birth in one transaction; this
+    // isolated fixture supplies the already-owned readiness claim.
+    await db.$transaction(async (tx) => {
+      const claim = {
+        settle: async (client: typeof tx, input: { apply: (client: typeof tx) => Promise<{ value: unknown }> }) => ({
+          settled: true, claim: "released", value: (await input.apply(client)).value,
+        }),
+      } as unknown as import("./readiness-claim.js").ReadinessClaimHandle;
+      await requeueRegressionSettlement({
+        readinessTaskId: seeded.readiness.id, regressionTaskId: seeded.regression.id,
+        staleBaseSha: BASE, currentBaseSha: BASE, condition, reason: condition,
+        now: new Date(), recovery: null,
+      }).body(tx, claim);
+    });
+  }
+  await db.taskActivity.create({ data: {
+    taskId: seeded.readiness.id, actorType: "control-plane", body: "prior recovery drift",
+    metadata: { kind: MERGE_READINESS_REQUEUE_KIND, ordinal: 4, baseDrift: true, recoveryAggregateId: "past-recovery" },
+  } });
+  const prior = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+  });
+  assert.equal(prior.leaseLossRefunds, LEASE_LOSS_REFUND_CAP);
+  await db.run.update({ where: { id: prior.id }, data: { status: RunStatus.SUCCEEDED, headSha: HEAD, leaseExpiresAt: null } });
+  await db.taskStepOutput.update({ where: { taskId: seeded.regression.id }, data: { runId: prior.id } });
+  await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.DONE } });
+  assert.deepEqual(await readinessTick(
+    db, reader([], snapshot({ baseSha: "d".repeat(40) })), new Date(), 5,
+    releaseChainLease, runWithMergeLease, executorsOnline,
+  ), { claimed: 1, authorized: 0, requeued: 1, stopped: 0 });
+  const next = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+  });
+  assert.equal(next.runNumber, prior.runNumber + 1);
+  assert.equal(next.leaseLossRefunds, LEASE_LOSS_REFUND_CAP);
+});
+
+test("a readiness requeue reaches its independent ceiling without spending lease-loss refunds", async () => {
+  const seeded = await seedReadiness();
+  const drifts = ["c", "d", "e", "f"].map((letter) => letter.repeat(40));
+
+  for (const [index, currentBaseSha] of drifts.entries()) {
+    const prior = await db.run.findFirstOrThrow({
+      where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+    });
+    await db.run.update({ where: { id: prior.id }, data: {
+      status: RunStatus.SUCCEEDED,
+      headSha: HEAD,
+      leaseExpiresAt: null,
+    } });
+    if (index > 0) {
+      await db.taskStepOutput.update({ where: { taskId: seeded.regression.id }, data: {
+        runId: prior.id,
+        body: JSON.stringify({
+          schemaVersion: 1,
+          outcome: "pass",
+          headSha: HEAD,
+          baseHeadSha: drifts[index - 1],
+          gateVerdict: "PASS",
+        }),
+        commitSha: HEAD,
+      } });
+      await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.DONE } });
+    }
+
+    const tick = await readinessTick(
+      db,
+      reader([], snapshot({ baseSha: currentBaseSha })),
+      new Date(`2026-09-07T${String(10 + index).padStart(2, "0")}:00:00.000Z`),
+      5,
+      releaseChainLease,
+      runWithMergeLease,
+      executorsOnline,
+    );
+    assert.equal(tick.requeued, index < READINESS_BASE_DRIFT_REQUEUE_LIMIT ? 1 : 0);
+    assert.equal(tick.stopped, index < READINESS_BASE_DRIFT_REQUEUE_LIMIT ? 0 : 1);
+    if (index < READINESS_BASE_DRIFT_REQUEUE_LIMIT) {
+      const next = await db.run.findFirstOrThrow({
+        where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+      });
+      assert.equal(next.leaseLossRefunds, 0, `lease-loss count ${index + 1}`);
+      continue;
+    }
+
+    const [readiness, regression] = await Promise.all([
+      db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } }),
+      db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } }),
+    ]);
+    const reason = `readiness-base-drift-requeue-limit: ${READINESS_BASE_DRIFT_REQUEUE_LIMIT} requeues reached ceiling ${READINESS_BASE_DRIFT_REQUEUE_LIMIT}`;
+    assert.equal(readiness.status, TaskStatus.REVIEW);
+    assert.equal(regression.status, TaskStatus.REVIEW);
+    assert.equal(readiness.failureReason, reason);
+    assert.equal(regression.failureReason, reason);
+    assert.equal(
+      await db.run.count({ where: { taskId: seeded.regression.id } }),
+      READINESS_BASE_DRIFT_REQUEUE_LIMIT + 1,
+    );
+    const stop = await db.taskActivity.findFirstOrThrow({ where: {
+      taskId: seeded.regression.id,
+      metadata: { path: ["state"], equals: "stopped" },
+    } });
+    assert.match(stop.body, new RegExp(reason.replaceAll(" ", "\\s+"), "u"));
+  }
+});
+
 test("a requeue that carries a recovery aggregate is counted the same way", async () => {
   const seeded = await seedReadiness();
   const driftedBase = "d".repeat(40);
@@ -682,6 +969,115 @@ test("a requeue that carries a recovery aggregate is counted the same way", asyn
   assert.ok(regressionCard);
   assert.equal(regressionCard.readinessRequeues, 0);
   assert.equal(regressionCard.readinessGrants, 0);
+});
+
+test("a recovery requeue uses its aggregate ceiling and records a named stop", async () => {
+  const seeded = await seedReadiness();
+  const sourceRun = await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
+  const stop = await db.taskActivity.create({ data: {
+    taskId: seeded.integrator.id,
+    actorType: "control-plane",
+    body: "merge stopped on base drift",
+    metadata: { kind: MERGE_TAIL_KIND.readiness, state: "stopped" },
+  } });
+  const authorization = await db.taskActivity.create({ data: {
+    taskId: seeded.readiness.id,
+    actorType: "control-plane",
+    body: "merge authorized",
+    metadata: { kind: MERGE_TAIL_KIND.readiness, state: "authorized" },
+  } });
+  const aggregate = await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: seeded.integrator.id,
+    sourceStopId: stop.id,
+    attempt: 1,
+    status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
+    boundSourceRunId: sourceRun.id,
+    authorizationActivityId: authorization.id,
+    recoveryRunId: sourceRun.id,
+    readinessTaskId: seeded.readiness.id,
+    regressionTaskId: seeded.regression.id,
+    repository: "acme/widgets",
+    prNumber: 41,
+    targetBranch: "main",
+    authorizedHeadSha: HEAD,
+    authorizedBaseSha: BASE,
+    observedBaseSha: BASE,
+    currentBaseSha: BASE,
+  } });
+  const driftedBases = ["d", "e", "f"].map((letter) => letter.repeat(40));
+
+  for (const [index, currentBaseSha] of driftedBases.entries()) {
+    const prior = await db.run.findFirstOrThrow({
+      where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+    });
+    if (index > 0) {
+      await db.run.update({ where: { id: prior.id }, data: {
+        status: RunStatus.SUCCEEDED,
+        headSha: HEAD,
+        leaseExpiresAt: null,
+      } });
+      await db.taskStepOutput.update({ where: { taskId: seeded.regression.id }, data: {
+        runId: prior.id,
+        body: JSON.stringify({
+          schemaVersion: 1,
+          outcome: "pass",
+          headSha: HEAD,
+          baseHeadSha: driftedBases[index - 1],
+          gateVerdict: "PASS",
+        }),
+        commitSha: HEAD,
+      } });
+      await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.DONE } });
+    }
+
+    const tick = await readinessTick(
+      db,
+      reader([], snapshot({ baseSha: currentBaseSha })),
+      new Date(`2026-09-07T${String(14 + index).padStart(2, "0")}:00:00.000Z`),
+      5,
+      releaseChainLease,
+      runWithMergeLease,
+      executorsOnline,
+    );
+    assert.equal(tick.requeued, index < MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES ? 1 : 0);
+    assert.equal(tick.stopped, index < MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES ? 0 : 1);
+    if (index < MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES) continue;
+
+    const reason = `base-drift-recovery-requeue-limit: ${MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES} requeues reached ceiling ${MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES}`;
+    const [updatedAggregate, readiness, regression, integrator] = await Promise.all([
+      db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } }),
+      db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } }),
+      db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } }),
+      db.task.findUniqueOrThrow({ where: { id: seeded.integrator.id } }),
+    ]);
+    assert.equal(updatedAggregate.status, MergeRecoveryStatus.BLOCKED_DOWNSTREAM);
+    assert.equal(updatedAggregate.failureReason, reason);
+    assert.equal(readiness.status, TaskStatus.REVIEW);
+    assert.equal(readiness.failureReason, reason);
+    assert.equal(regression.status, TaskStatus.REVIEW);
+    assert.equal(regression.failureReason, reason);
+    assert.equal(integrator.status, TaskStatus.REVIEW);
+    assert.equal(
+      await db.run.count({ where: { taskId: seeded.regression.id } }),
+      MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES + 1,
+    );
+
+    const requeues = await db.taskActivity.findMany({
+      where: {
+        taskId: seeded.readiness.id,
+        actorType: "control-plane",
+        metadata: { path: ["kind"], equals: MERGE_READINESS_REQUEUE_KIND },
+      },
+    });
+    const recoveryRequeues = requeues.filter((row) => (
+      (row.metadata as Record<string, unknown>).recoveryAggregateId === aggregate.id
+    ));
+    assert.equal(recoveryRequeues.length, MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES);
+    assert.equal(
+      (await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" } })).leaseLossRefunds,
+      0,
+    );
+  }
 });
 
 test("future readiness waits but the readiness role is claimed regardless of ordinal", async () => {

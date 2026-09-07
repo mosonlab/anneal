@@ -35,6 +35,7 @@ export type {
   RunPhaseMetrics,
   RunStatus,
   RunTerminationMetrics,
+  RunTtftMetrics,
   RunTokenMetrics,
   RunToolMetrics,
   RunToolNameMetrics,

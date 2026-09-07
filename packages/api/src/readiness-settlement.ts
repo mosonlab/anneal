@@ -17,7 +17,7 @@ export type ReadinessSettlementKind = "stop" | "requeue" | "defer" | "authorize"
 export type ReadinessSettlementBody = (
   tx: Prisma.TransactionClient,
   claim: ReadinessClaimHandle,
-) => Promise<TransactionLeaseOutcome<{ applied: boolean }>>;
+) => Promise<TransactionLeaseOutcome<{ applied: boolean; stopped?: boolean }>>;
 
 export type ReadinessSettlement = {
   kind: ReadinessSettlementKind;
@@ -28,6 +28,7 @@ export type ReadinessSettlement = {
 type ReadinessSettlementApply = (
   tx: Prisma.TransactionClient,
 ) => Promise<{
+  stopped?: boolean;
   ownership: ReadinessLeaseOwnership;
   leaseOutcome: LeaseOutcome;
 }>;
@@ -48,7 +49,7 @@ export const readinessSettlement = (
       at: input.at,
       apply: async (client) => {
         const applied = await input.apply(client);
-        return { value: applied.leaseOutcome, ownership: applied.ownership };
+        return { value: { leaseOutcome: applied.leaseOutcome, stopped: applied.stopped }, ownership: applied.ownership };
       },
     });
     if (!settlement.settled) {
@@ -61,8 +62,8 @@ export const readinessSettlement = (
       throw new Error("Readiness settlement retained a finished claim");
     }
     return {
-      value: { applied: true },
-      leaseOutcome: settlement.value,
+      value: { applied: true, ...(settlement.value.stopped ? { stopped: true } : {}) },
+      leaseOutcome: settlement.value.leaseOutcome,
     };
   },
 });
@@ -72,7 +73,7 @@ export type ReadinessSettlementApplication =
   | {
     kind: "settled";
     outcome: {
-      value: { applied: boolean };
+      value: { applied: boolean; stopped?: boolean };
       leaseOutcome: HeldLeaseOutcome;
     };
   };
@@ -108,8 +109,8 @@ const continueLease = (): { kind: "continue" } => ({ kind: "continue" });
 
 const preAcquireOutcome = (
   settlement: ReadinessSettlement,
-  outcome: TransactionLeaseOutcome<{ applied: boolean }>,
-): TransactionLeaseOutcome<{ applied: boolean }> => {
+  outcome: TransactionLeaseOutcome<{ applied: boolean; stopped?: boolean }>,
+): TransactionLeaseOutcome<{ applied: boolean; stopped?: boolean }> => {
   if (!outcome.value.applied || settlement.kind === "defer") {
     return { ...outcome, leaseOutcome: continueLease() };
   }
@@ -117,7 +118,7 @@ const preAcquireOutcome = (
 };
 
 const settled = (
-  outcome: { value: { applied: boolean }; leaseOutcome: HeldLeaseOutcome },
+  outcome: { value: { applied: boolean; stopped?: boolean }; leaseOutcome: HeldLeaseOutcome },
 ): ReadinessSettlementApplication => ({ kind: "settled", outcome });
 
 /**
