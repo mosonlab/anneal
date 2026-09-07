@@ -1,4 +1,4 @@
-import type { MergeRecoveryAttempt, Prisma } from "@prisma/client";
+import type { MergeRecoveryAttempt, Prisma, PrismaClient } from "@prisma/client";
 
 import {
   asJsonObject,
@@ -370,4 +370,67 @@ export const recoveryContext = (row: MergeRecoveryAttempt | null): RecoveryConte
     integratorTaskId: row.integratorTaskId,
     recoveryRunId: row.recoveryRunId,
   };
+};
+
+export const MERGE_EXECUTOR_OFFLINE_STATE = "requeued-executor-offline";
+export const MERGE_EXECUTOR_OFFLINE_REASON = "merge-executor-offline";
+export const executorOfflineDetail = (executorRunnerIds: readonly string[]): string =>
+  `${MERGE_EXECUTOR_OFFLINE_REASON}: no merge executor in ${executorRunnerIds.join(", ")} is online`;
+
+export type ExecutorOfflineMarker = { id: string; createdAt: Date; metadata: Prisma.JsonValue };
+
+/** The newest skipped authorization on this readiness Step, the outage anchor. */
+export const latestExecutorOfflineMarker = async (
+  db: PrismaClient | Prisma.TransactionClient,
+  readinessTaskId: string,
+): Promise<ExecutorOfflineMarker | null> => db.taskActivity.findFirst({
+  where: {
+    taskId: readinessTaskId,
+    metadata: { path: ["state"], equals: MERGE_EXECUTOR_OFFLINE_STATE },
+  },
+  orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  select: { id: true, createdAt: true, metadata: true },
+});
+
+/**
+ * When the outage this marker belongs to began, or `null` once that outage has
+ * ended. An episode ends on an observed fact rather than after an elapsed time:
+ * readiness closes it on the tick that finds an executor online or settles the
+ * Step some other way, and on the stop it writes at the ceiling. Elapsed time
+ * cannot decide this -- `MERGE_READINESS_POLL_INTERVAL_MS` sets the distance
+ * between two skipped authorizations of one outage, so any fixed gap an
+ * interval can exceed would restart the wait every tick and let an executor
+ * stay offline forever without ever reaching the ceiling.
+ */
+export const openEpisodeStart = (marker: ExecutorOfflineMarker | null): Date | null => {
+  if (!marker) return null;
+  const metadata = marker.metadata as {
+    episodeStartedAt?: unknown;
+    episodeClosed?: unknown;
+  } | null;
+  if (metadata?.episodeClosed === true) return null;
+  const recorded = metadata?.episodeStartedAt;
+  if (typeof recorded !== "string") return marker.createdAt;
+  const started = new Date(recorded);
+  return Number.isNaN(started.getTime()) ? marker.createdAt : started;
+};
+
+/** Caller owns the mutation fence; this body never opens a transaction. */
+export const closeExecutorOfflineEpisodeTx = async (
+  tx: Prisma.TransactionClient, readinessTaskId: string, observation: string,
+): Promise<void> => {
+  const marker = await latestExecutorOfflineMarker(tx, readinessTaskId);
+  if (!marker || openEpisodeStart(marker) === null) return;
+  const metadata = (marker.metadata ?? {}) as Prisma.JsonObject;
+  await tx.taskActivity.update({
+    where: { id: marker.id },
+    data: { metadata: { ...metadata, episodeClosed: true } },
+  });
+  await tx.taskActivity.create({ data: {
+    taskId: readinessTaskId,
+    actorType: "control-plane",
+    body: `Merge readiness executor-offline episode ended: ${observation}`,
+    metadata: { kind: MERGE_TAIL_KIND.readiness, state: "executor-offline-closed", observation },
+  } });
+
 };

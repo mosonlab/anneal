@@ -22,6 +22,7 @@ import {
   stopStateRefusal,
   type Task,
   TaskStatus,
+  type MergeExecutorLivenessReader,
   usd,
 } from "@anneal/db";
 import { compare } from "@anneal/db/chain-order";
@@ -122,6 +123,11 @@ export type TaskPatchInput = z.infer<typeof taskPatch>;
 export type TaskPatchRefusal = Refusal;
 
 export type TaskPatchResult = { task: Task } | TaskPatchRefusal;
+
+export type TaskPatchOptions = {
+  /** Daemon snapshot reader evaluated at the authorization boundary. */
+  mergeExecutorLiveness?: MergeExecutorLivenessReader;
+};
 
 /**
  * The trail a plain field edit leaves. `writeTask` records status moves and gate
@@ -355,6 +361,7 @@ export const patchTask = async (
   db: PrismaClient,
   taskId: string,
   body: TaskPatchInput,
+  options: TaskPatchOptions = {},
 ): Promise<TaskPatchResult> => {
   const before = await db.task.findUniqueOrThrow({ where: { id: taskId } });
   // Held for the whole route: whichever of the three write paths below runs
@@ -702,6 +709,9 @@ export const patchTask = async (
             card: plan.gate.card,
             inboxDecisionId: decisionRow.id,
             channel: "patch",
+            ...(options.mergeExecutorLiveness === undefined
+              ? {}
+              : { executorLiveness: options.mergeExecutorLiveness }),
           }, new Date());
         }
       }

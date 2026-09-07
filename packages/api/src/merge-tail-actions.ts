@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   ACTIVE_RUN_STATUSES,
+  MERGE_EXECUTOR_OFFLINE_REASON,
   asJsonObject,
   errorForOpenRunRefusal,
   findCanonicalAgent,
@@ -564,7 +565,7 @@ type CompletionOwnedStopMergeTailInput = Exclude<StopMergeTailInput, ReadinessSt
 
 const stopNotice = async (
   tx: DbTx,
-  input: { taskId: string; body: string; dedupeKey: string; agentId?: string; sessionId?: string },
+  input: { taskId: string; body: string; dedupeKey: string; agentId?: string; sessionId?: string; reopen?: boolean },
 ): Promise<void> => {
   await tx.inboxMessage.upsert({ where: { dedupeKey: input.dedupeKey }, create: {
     from: "AGENT",
@@ -574,7 +575,7 @@ const stopNotice = async (
     kind: "TEXT",
     body: input.body,
     dedupeKey: input.dedupeKey,
-  }, update: {} });
+  }, update: input.reopen ? { status: "OPEN", answeredAt: null, body: input.body } : {} });
 };
 
 /**
@@ -635,7 +636,8 @@ export async function stopMergeTail(
       });
       if (!recovery) {
         const dedupeKey = `merge-readiness-stop:${input.readinessTaskId}:${createHash("sha256").update(input.reason).digest("hex")}`;
-        await stopNotice(tx, { taskId: input.regressionTaskId, body, dedupeKey });
+        await stopNotice(tx, { taskId: input.regressionTaskId, body, dedupeKey,
+          reopen: input.reason.startsWith(`${MERGE_EXECUTOR_OFFLINE_REASON}:`) });
       }
     }
     if (input.phase === "readiness") {

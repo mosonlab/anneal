@@ -2942,16 +2942,28 @@ Response fields:
 
 ### Readiness authorization and merge executor liveness
 
-Merge readiness writes an authorization only while a merge executor can claim
-it. Before the leased `authorize` decision is applied, readiness checks the
-runner ids in `MERGE_EXECUTOR_RUNNER_IDS` against the same daemon liveness
-`GET /runners` reports: at least one of them must be `online`. If none is,
-nothing is authorized. A single candidate checked before acquisition takes no
-Merge Lease; a check after acquisition, including train settlement, releases
-the held Lease. Readiness settles as a requeue of itself, leaving the regression evidence and its Run untouched, and
-writes a TaskActivity on the readiness task with `metadata.state =
+Every readiness tick reads `executorsBlockingAuthorization(daemons)`, whatever
+its decision kind, against the runner ids in `MERGE_EXECUTOR_RUNNER_IDS` and
+the same daemon liveness `GET /runners` reports. An authorization is written
+only while at least one configured executor is `online`; the check is repeated
+after Merge Lease acquisition, before the authorization is settled. If every
+configured executor is offline, nothing is authorized. A single candidate
+checked before acquisition takes no Merge Lease; a check after acquisition,
+including train settlement, releases the held Lease.
+
+An online observation closes an open per-Step executor-offline episode even
+when that tick's decision is `skip` or another non-`authorize` result. The
+worker records a TaskActivity naming the observation, and the close is fenced
+by the readiness claim, so a tick that loses its claim cannot close the
+episode. The exception stop path closes the episode under the same claim. When
+an `authorize` decision is blocked because every configured executor is
+offline, readiness settles as a requeue of itself, leaving the Regression
+evidence and its Run untouched, and writes a TaskActivity on the readiness
+task with `metadata.state =
 "requeued-executor-offline"`, `metadata.reason = "merge-executor-offline"` and
 the executor runner ids it checked. The next tick asks again.
+An offline observation does not change the ordinary outcome of `skip` or
+`defer` decisions.
 
 That wait is bounded by the 15 minutes after which the registry forgets a
 daemon altogether, and it is measured per outage: the wait starts at the first
@@ -2961,9 +2973,37 @@ the next tick that finds an executor online, settles the Step some other way, or
 stops at the ceiling -- and never merely because time passed between two skipped
 authorizations, so `MERGE_READINESS_POLL_INTERVAL_MS` cannot lengthen or reset
 the wait. An executor still offline at the ceiling stops the tail like any
-other readiness stop: the regression and readiness tasks move to `REVIEW` with
-a `failureReason` naming `merge-executor-offline` and the runner ids. Recover by bringing the executor back and calling
-`POST /tasks/:taskId/retry`.
+other readiness stop: the Regression and readiness tasks move to `REVIEW`
+with a `failureReason` naming `merge-executor-offline` and the runner ids. A
+later readiness tick that observes an allowed executor online automatically
+re-arms that ceiling stop: it returns readiness from `REVIEW` to `TODO` and
+restores the parked Regression to `DONE` with its existing evidence,
+records the exit as a TaskActivity, and closes the current `merge-readiness-stop:`
+Inbox notice (and any legacy `merge-tail-stop:` notice). The worker on that same tick
+follows the ordinary authorization path against the current base. The re-arm
+itself opens no new Regression Run and never bypasses
+the exact `(headSha, baseHeadSha)` check; existing base-drift requeue handling
+applies if the base has moved.
+
+The operator's evidence-renewal path applies the same executor allowlist check
+before writing its `purpose: "confirmation"` authorization. During an outage
+it writes no authorization and defers with the same marker,
+`metadata.state = "requeued-executor-offline"` and
+`metadata.reason = "merge-executor-offline"`; renewal can proceed after a
+later liveness observation finds an allowed executor online. Episode closure
+remains owned by the readiness worker under its claim.
+
+The separate Inbox process reads `GET /runners` before its decision transaction.
+It requires `OPERATOR_TOKEN` and uses `RUNNER_API_URL` (default
+`http://127.0.0.1:3000`), validated as an exact numeric IPv4 loopback HTTP
+origin with an explicit port and no userinfo, path, query, or fragment.
+`MERGE_EXECUTOR_API_URL` is not used by Inbox. Redirects are refused and the
+request has a two-second timeout. Missing credentials, a refused destination,
+HTTP errors, an unreachable API, and malformed responses are logged and refuse
+renewal while leaving its card open. These unreadable observations carry
+`observation: "unreadable"` and a diagnostic `cause` in the refusal TaskActivity
+with state `requeued-executor-unobservable`; they do not open or close an outage
+episode. An omitted reader similarly refuses with cause `no-reader`.
 
 An empty allowlist is unchanged behaviour: with `MERGE_EXECUTOR_RUNNER_IDS`
 unset no executor is named, the check is skipped, and readiness authorizes as

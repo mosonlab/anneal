@@ -2,10 +2,10 @@
   "version": 1,
   "policy": "developer-preview-loopback-http-origin",
   "documentation": [
-    "One table, three implementations. `apps/web/src/lib/local-origin.ts` validates WEB_API_URL",
+    "One table, four implementations. `apps/web/src/lib/local-origin.ts` validates WEB_API_URL",
     "before the Vite dev/preview proxy exists, `packages/runner/src/local-origin.ts` validates",
     "RUNNER_API_URL before the runner builds a client, and the runner-only deploy target applies",
-    "the same rule before requests. None may drift, so all three parsers use the cases below.",
+    "the same rule before requests. Inbox uses packages/db/src/local-origin.ts before its liveness fetch.",
     "In Developer Preview the only accepted destination is the exact numeric IPv4 loopback",
     "HTTP origin `http://127.0.0.1:<port>`: lowercase scheme, literal host 127.0.0.1, an",
     "explicit port in 1-65535 with no leading zero, and no userinfo, path (not even a bare",
@@ -13,7 +13,7 @@
     "reader already does that and indentation is not a policy difference.",
     "Everything else is Unsupported and refused. The reason codes are diagnostic only: the",
     "accept decision is a single anchored regex, and classification runs in the fixed",
-    "precedence below so that one value always yields one reason in both implementations."
+    "precedence below so that one value always yields one reason in all implementations."
   ],
   "reasonPrecedence": [
     "destination-empty",

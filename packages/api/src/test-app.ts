@@ -10,6 +10,7 @@ import type { MergeLeaseHolderReader, ReleaseMergeLease } from "./merge-lease.js
 import type { preflightOnboardingRepository, RepositoryPreflight } from "./onboarding-preflight.js";
 import type { ProjectBootstrapLoaders } from "./project-bootstrap.js";
 import type { SpecificationReader } from "./specification-fidelity.js";
+import type { RunnerRegistry } from "./runners.js";
 import { defaultWorkspaceRoot } from "./workspace-root.js";
 
 // Symlink aliases (/tmp vs /private/tmp, a symlinked home) must not slip a
@@ -85,6 +86,7 @@ export const createApp = (db: PrismaClient, options: {
   releaseMergeLease?: ReleaseMergeLease;
   readMergeLeaseHolder?: MergeLeaseHolderReader;
   specificationReader?: SpecificationReader | null;
+  runnerRegistry?: RunnerRegistry;
 } = {}) => {
   const configured = options.workspaceRoot ?? process.env.RUNNER_WORKSPACE_ROOT;
   if (!configured) {
@@ -107,6 +109,7 @@ export const createApp = (db: PrismaClient, options: {
     readMergeLeaseHolder: options.readMergeLeaseHolder ?? (async () => ({ outcome: "none" })),
     specificationReader: options.specificationReader ?? null,
     repositoryReader: options.repositoryReader,
+    ...(options.runnerRegistry === undefined ? {} : { runnerRegistry: options.runnerRegistry }),
   });
 };
 
