@@ -45,6 +45,15 @@ export type RoleSource = {
 };
 export type AgentSources = { foundationalPrompt: string; roles: RoleSource[] };
 
+/** Canonical role slugs aligned with the model/effort already running in production. */
+export const CANONICAL_ROLE_RENAMES = [
+  ["regression-verifier-luna-xhigh", "regression-verifier-luna-max"],
+  ["code-reviewer-opus-high", "code-reviewer-opus-medium"],
+  ["merge-resolver-opus-medium", "merge-resolver-luna-max"],
+  ["plan-reviser-opus-high", "plan-reviser-opus-medium"],
+  ["plan-executor-astra-medium", "plan-executor-astra-low"],
+] as const;
+
 export type PersistedRoleStructure = {
   /**
    * Present on rows read by canonical identity. `name` and `title` are now

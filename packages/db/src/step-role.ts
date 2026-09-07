@@ -47,10 +47,11 @@ export const stepRole = (step: TemplateStepLike): StepRole | null => {
 };
 
 /** A Step's output protocol generation is the `-vN` suffix on its output kind,
- *  and nothing else. Template identity used to override it through a retired
- *  graph marker, but a rollover preserves the output protocol unless outputKind
- *  itself changes, so the only production caller (`canonicalOutputSchema`)
- *  deliberately passed template identity in as absent. The `taskTemplate` fields
- *  stay on `TemplateStepLike` for the role predicates that still read them. */
-export const stepGeneration = (step: TemplateStepLike): string =>
-  step.outputKind.match(VERSION_SUFFIX)?.[1] ?? "v1";
+ *  except for the bare revalidation kind, whose required route decision is the
+ *  v2 contract without changing the kind used to identify the step. The
+ *  `taskTemplate` fields stay on `TemplateStepLike` for role predicates that
+ *  still read them. */
+export const stepGeneration = (step: TemplateStepLike): string => {
+  if (step.outputKind === "revalidation") return "v2";
+  return step.outputKind.match(VERSION_SUFFIX)?.[1] ?? "v1";
+};

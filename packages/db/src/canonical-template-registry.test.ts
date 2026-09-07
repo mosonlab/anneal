@@ -83,7 +83,7 @@ test("a matching no-history pull-request row is current, never a rollover", () =
       stepIndex: 3,
       name: "Blind code review",
       layer: 2,
-      agentName: "code-reviewer-opus-high",
+      agentName: "code-reviewer-opus-medium",
       approvalGate: false,
       optional: false,
       outputKind: "blind-findings",

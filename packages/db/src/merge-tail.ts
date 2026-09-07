@@ -585,7 +585,7 @@ export type ResolverParse = { status: "ok"; result: ResolverResult } | ResolverR
 const resolverRejection = (key: string, reason: string): ResolverRejection => ({
   status: "invalid",
   key,
-  reason: `merge-resolver-opus-medium ${reason}`,
+  reason: `merge-resolver-luna-max ${reason}`,
 });
 
 /**
@@ -723,7 +723,7 @@ const DEFENSE_EXACT = new Set([
   "packages/api/src/github-read.ts",
   "packages/api/src/index.ts",
   "packages/api/src/app.ts",
-  "agents/roles/merge-resolver-opus-medium.md",
+  "agents/roles/merge-resolver-luna-max.md",
   "agents/roles/merge-integrator.md",
 ]);
 

@@ -27,7 +27,7 @@ import {
  * is the Agent's canonical identity; an operator-edited `name` never addresses
  * one of these.
  */
-export const REGRESSION_VERIFIER_AGENT_NAME = "regression-verifier-luna-xhigh";
+export const REGRESSION_VERIFIER_AGENT_NAME = "regression-verifier-luna-max";
 export const SPEC_REVALIDATOR_AGENT_NAME = "spec-revalidator-luna-xhigh";
 
 /** The sync report counter one adoption increments. */

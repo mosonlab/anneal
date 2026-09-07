@@ -397,8 +397,8 @@ test("ordinary sync covers active canonical Agents in every Project and preserve
     production: compatibleCustomized,
   });
   assert.deepEqual(customized, { ...compatibleCustomized, customizedFields: ["model", "runnerPreference"], runtimeConfigDriftNoticeFingerprint: expectedFingerprint });
-  assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "plan-executor-astra-medium" } }), 0);
-  assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "regression-verifier-luna-xhigh" } }), 0);
+  assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "plan-executor-astra-low" } }), 0);
+  assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "regression-verifier-luna-max" } }), 0);
   assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "spec-revalidator-luna-xhigh" } }), 0);
   const summary = parseCanonicalSyncSummary(synced.output);
   assertSummaryShape(summary);
@@ -406,6 +406,68 @@ test("ordinary sync covers active canonical Agents in every Project and preserve
   assert.equal(summary.projects[project.slug]!.runtimeDriftNotices, 1);
   assert.equal(summary.projects[project.slug]!.updatedRoles["senior-dev-astra-medium"], 1);
   assert.equal(summary.projects[canonicalProject.slug]!.updatedRoles.default, 1);
+});
+
+test("sync adopts renamed canonical roles in place without duplicating Agents", async (t) => {
+  const project = await createProject(`a2-role-renames-${randomBytes(4).toString("hex")}`);
+  const renames = [
+    ["regression-verifier-luna-max", "regression-verifier-luna-xhigh"],
+    ["code-reviewer-opus-medium", "code-reviewer-opus-high"],
+    ["merge-resolver-luna-max", "merge-resolver-opus-medium"],
+    ["plan-reviser-opus-medium", "plan-reviser-opus-high"],
+    ["plan-executor-astra-low", "plan-executor-astra-medium"],
+  ] as const;
+  const agents = await createAgents(project, renames.map(([current]) => current));
+  const ids = new Map<string, string>(renames.map(([current]) => {
+    const id = agents.get(current);
+    assert.ok(id);
+    return [current, id];
+  }));
+  const idFor = (current: string): string => {
+    const id = ids.get(current);
+    if (!id) throw new Error(`missing test Agent ${current}`);
+    return id;
+  };
+  for (const [current, previous] of renames) {
+    await prisma.agent.update({
+      where: { id: idFor(current) },
+      data: { canonicalRole: previous, name: previous },
+    });
+  }
+  // A pre-canonicalRole row is also eligible for the legacy-name adoption.
+  await prisma.agent.update({
+    where: { id: idFor("plan-executor-astra-low") },
+    data: { canonicalRole: null },
+  });
+  // Operator-owned identity and runtime overrides remain untouched while the
+  // canonicalRole moves to the new source slug.
+  await prisma.agent.update({
+    where: { id: idFor("merge-resolver-luna-max") },
+    data: {
+      name: "operator-resolver",
+      model: "gpt-5.6-sol:high",
+      runnerPreference: RunnerPreference.CODEX,
+      customizedFields: ["name", "model", "runnerPreference"],
+    },
+  });
+  const beforeCount = await prisma.agent.count({ where: { projectId: project.id } });
+  t.after(async () => deleteProject(project.id));
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.equal(await prisma.agent.count({ where: { projectId: project.id } }), beforeCount);
+  for (const [current] of renames) {
+    const row = await prisma.agent.findUniqueOrThrow({
+      where: { projectId_canonicalRole: { projectId: project.id, canonicalRole: current } },
+    });
+    assert.equal(row.id, idFor(current));
+  }
+  assert.equal(await prisma.agent.count({ where: { projectId: project.id, canonicalRole: { in: renames.map(([, previous]) => previous) } } }), 0);
+  const operator = await prisma.agent.findUniqueOrThrow({ where: { id: idFor("merge-resolver-luna-max") } });
+  assert.deepEqual(
+    { name: operator.name, model: operator.model, runnerPreference: operator.runnerPreference },
+    { name: "operator-resolver", model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
+  );
 });
 
 test("foreign structural drift refuses only that Project and still syncs canonical and healthy Projects", async (t) => {
@@ -631,7 +693,7 @@ test("partial template rows synchronize across Projects, leave missing rows vali
     (await canonicalTemplate("pr-engineer-workflow")).steps[0]!.prompt);
   assert.equal(await prisma.taskTemplate.count({ where: { projectId: partial.id, name: { in: ["compound-engineer-workflow", "direct-engineer-workflow"] } } }), 0);
   assert.equal(await prisma.taskTemplate.count({ where: { projectId: empty.id } }), 0);
-  assert.equal(await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: compoundStep10.id } }).then(({ assigneeAgentId }) => assigneeAgentId), transitionAgents.get("regression-verifier-luna-xhigh"));
+  assert.equal(await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: compoundStep10.id } }).then(({ assigneeAgentId }) => assigneeAgentId), transitionAgents.get("regression-verifier-luna-max"));
   assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: compoundStep6.id } })).baseFromStepIndex, 5);
   assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: compoundStep11.id } })).name, "Merge authorization");
   assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: directStep1.id } })).assigneeAgentId, transitionAgents.get("spec-revalidator-luna-xhigh"));
@@ -653,7 +715,7 @@ test("partial template rows synchronize across Projects, leave missing rows vali
 
 test("full installation fills only the addressed Project's missing inventory and is idempotent", async (t) => {
   const project = await createProject(`a2-install-full-${randomBytes(4).toString("hex")}`);
-  const existingNames = ["senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-high", "senior-dev-astra-medium"] as const;
+  const existingNames = ["senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-medium", "senior-dev-astra-medium"] as const;
   const directNames = await templateAssigneeNames("direct-engineer-workflow");
   const initialNames = [...new Set([...existingNames, ...directNames])];
   const agents = await createAgents(project, initialNames);
@@ -1006,7 +1068,7 @@ test("summary reports every Project, nested canonical keys, lexical slugs, and f
     },
   });
   const regressionStepIndex = templateSources.get("compound-engineer-workflow")!
-    .find(({ agentName }) => agentName === "regression-verifier-luna-xhigh")!.stepIndex;
+    .find(({ agentName }) => agentName === "regression-verifier-luna-max")!.stepIndex;
   const regressionStep = await prisma.taskTemplateStep.findUniqueOrThrow({
     where: { taskTemplateId_stepIndex: { taskTemplateId: compound.id, stepIndex: regressionStepIndex } },
   });

@@ -1,7 +1,7 @@
 ---
 stepIndex: 7
 layer: 6
-agent: code-reviewer-opus-high
+agent: code-reviewer-opus-medium
 approvalGate: false
 optional: true
 outputKind: blind-findings

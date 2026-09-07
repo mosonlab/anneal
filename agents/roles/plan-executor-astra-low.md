@@ -1,7 +1,7 @@
 ---
-name: plan-executor-astra-medium
+name: plan-executor-astra-low
 title: Plan Executor
-model: gpt-6-astra:medium
+model: gpt-6-astra:low
 runner: codex
 inboxAccess: true
 collaborators: []

@@ -9,7 +9,13 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 
 import { catalogRunnerForModel } from "../src/agent-contract.js";
-import { loadAgentSources, roleSourceStructureDifferences, type AgentSources, type RoleSource } from "../src/agent-sources.js";
+import {
+  CANONICAL_ROLE_RENAMES,
+  loadAgentSources,
+  roleSourceStructureDifferences,
+  type AgentSources,
+  type RoleSource,
+} from "../src/agent-sources.js";
 import { findCanonicalAgent } from "../src/canonical-agent-lookup.js";
 import {
   canonicalStepAdoptions,
@@ -219,6 +225,41 @@ const createSpecialCanonicalAgent = async (
       ...(permissions === null ? {} : { permissions }),
     })) })).count;
   return { created: true, grants };
+};
+
+/**
+ * Adopt the role identity in place before ordinary sync resolves source roles.
+ * The first deployment after a slug rename still has the old canonicalRole on
+ * the production row. Updating that column preserves the row id and every
+ * template binding; finding a second row already claiming the new role is a
+ * migration error rather than a reason to create a duplicate Agent.
+ */
+const migrateRenamedCanonicalRoles = async (
+  tx: Prisma.TransactionClient,
+  project: ProjectRow,
+): Promise<void> => {
+  for (const [from, to] of CANONICAL_ROLE_RENAMES) {
+    const existingByRole = await tx.agent.findUnique({
+      where: { projectId_canonicalRole: { projectId: project.id, canonicalRole: from } },
+      select: { id: true },
+    });
+    const existing = existingByRole ?? await tx.agent.findFirst({
+      where: { projectId: project.id, canonicalRole: null, name: from },
+      select: { id: true },
+    });
+    if (!existing) continue;
+    const target = await tx.agent.findUnique({
+      where: { projectId_canonicalRole: { projectId: project.id, canonicalRole: to } },
+      select: { id: true, name: true },
+    });
+    if (target && target.id !== existing.id) {
+      throw projectError(
+        project,
+        `Agent role rename ${from} -> ${to} would collide with Agent ${target.name} (${target.id})`,
+      );
+    }
+    await tx.agent.update({ where: { id: existing.id }, data: { canonicalRole: to } });
+  }
 };
 
 const migrateSpecialCanonicalAgents = async (
@@ -689,7 +730,10 @@ export const main = async (
           }
 
           if (project.id === canonicalProject.id) {
+            await migrateRenamedCanonicalRoles(tx, project);
             await migrateSpecialCanonicalAgents(tx, canonicalProject, sources, rolesByRole, projectCounters);
+          } else {
+            await migrateRenamedCanonicalRoles(tx, project);
           }
           await synchronizeAgents(
             tx,
