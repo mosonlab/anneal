@@ -24,4 +24,3 @@ Change 8 (added 2026-09-06 from the OSS-compare audit finding C-13, before this 
 Acceptance (added with Change 8): unit tests cover a two-candidate prefix in which position 2 executes with the live base already at `P_1` and is published rather than stopped; a train candidate whose live base is an unrelated commit still stopping as `base-drift`; a train candidate whose live base is a prefix commit of a different `publishHead` still stopping as `base-drift`; and the merged-commit parent check passing against `P_1` for position 2. A non-train authorization whose live base moved still stops as `base-drift`, with its existing test unchanged.
 
 Route: implementation=senior-dev-astra-medium - the executor's exact-head authorization and replay classification are a defense-list path whose hazards the unit fixtures cannot fully witness
-
