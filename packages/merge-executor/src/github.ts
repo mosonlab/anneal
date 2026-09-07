@@ -98,6 +98,19 @@ export type MergeResponse =
 export type DisarmResult = { ok: true } | { ok: false; reason: string };
 
 /**
+ * The landed merge commit, read from the repository itself rather than from the
+ * pull-request projection.
+ *
+ * `reachableFromMain` is reachability from the authorized base ref — `main` in
+ * the deployments this check exists for — and is named after the question an
+ * operator answers by hand. Every unreadable field is an `error`: a read that
+ * did not positively produce both facts is never a confirmation.
+ */
+export type DirectCommitRead =
+  | { status: "ok"; parents: string[]; reachableFromMain: boolean }
+  | { status: "error"; reason: string };
+
+/**
  * A failed GraphQL call, carrying the one distinction a *mutation*'s caller
  * cannot do without: `lost` means no answer arrived or the answer could not be
  * read, so the mutation may still have been applied and only a read-back
@@ -562,6 +575,44 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
     return { status: "merged", sha: mergeSha };
   };
 
+  /**
+   * Reads the landed merge commit directly, so a stale pull-request projection
+   * is not the only evidence the executor can offer about its own merge.
+   *
+   * One comparison answers both mechanical questions: `base_commit` is the
+   * commit object for `mergeCommitSha`, carrying its parents, and
+   * `merge_base_commit` equals that same sha exactly when the commit is an
+   * ancestor of the base ref — the API's spelling of
+   * `git merge-base --is-ancestor`. The call is bounded by the same read
+   * deadline as every other GitHub read here, so a timeout arrives as a failed
+   * read rather than as a missing answer that could be mistaken for a pass.
+   */
+  const readLandedCommit = async (
+    reference: Pick<PullRequestRef, "owner" | "name" | "baseRef">,
+    mergeCommitSha: string,
+  ): Promise<DirectCommitRead> => {
+    const result = await restJson({
+      url: `${options.restUrl}/repos/${reference.owner}/${reference.name}/compare/${mergeCommitSha}...${reference.baseRef}`,
+      method: "GET",
+    });
+    if (!result.ok) return { status: "error", reason: `landed commit read failed: ${result.reason}` };
+    const commit = asRecord(result.value.base_commit);
+    if (!commit) return { status: "error", reason: "comparison carried no base_commit" };
+    if (asString(commit.sha) !== mergeCommitSha) {
+      return { status: "error", reason: `comparison base_commit is ${JSON.stringify(commit.sha)}, not the merge commit` };
+    }
+    if (!Array.isArray(commit.parents)) return { status: "error", reason: "base_commit.parents is not a list" };
+    const parents: string[] = [];
+    for (const entry of commit.parents) {
+      const sha = asString(asRecord(entry)?.sha);
+      if (sha === null) return { status: "error", reason: "base_commit.parents carries an entry without a sha" };
+      parents.push(sha);
+    }
+    const mergeBase = asString(asRecord(result.value.merge_base_commit)?.sha);
+    if (mergeBase === null) return { status: "error", reason: "comparison carried no merge_base_commit sha" };
+    return { status: "ok", parents, reachableFromMain: mergeBase === mergeCommitSha };
+  };
+
   const disableAutoMerge = async (pullRequestId: string): Promise<DisarmResult> => {
     const result = await graphql(DISABLE_AUTO_MERGE_MUTATION, { pullRequestId });
     return "error" in result ? { ok: false, reason: result.error } : { ok: true };
@@ -572,5 +623,5 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
     return "error" in result ? { ok: false, reason: result.error } : { ok: true };
   };
 
-  return { readPullRequest, mergePullRequest, disableAutoMerge, dequeuePullRequest, graphql };
+  return { readPullRequest, readLandedCommit, mergePullRequest, disableAutoMerge, dequeuePullRequest, graphql };
 };

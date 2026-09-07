@@ -121,6 +121,28 @@ ref update. Before re-authorizing, read the base ref: if it is a two-parent
 merge commit whose parents are the authorized base and head, the merge landed
 and the stop is a reporting failure, not a merge failure.
 
+### When a landed merge stops `base-drift-post-merge`
+
+Once the ref update is acknowledged, the executor verifies the merge it has just
+landed. It reads the pull request first, which settles the question when the
+projection names the merge commit with the authorized parents, or when the base
+ref is still exactly that commit. Neither holds if GitHub's `mergeCommit`
+projection lags, or if the base ref has already moved because a later merge
+landed. The executor then reads the merge commit itself, once and under the
+ordinary GitHub read deadline, and records the run as merged when its parents
+are exactly the authorized base and head, in that order, and the commit is
+reachable from the authorized base ref — the same mechanical criterion an
+operator applies by hand.
+
+An operator decision is needed only when one of those three facts is missing, or
+when the direct read fails or times out. The run then stops
+`base-drift-post-merge` as before, and the Inbox message's evidence carries
+`directParentCheck` with the parents and reachability that were read, or with
+the read's error, so the question says why the mechanical check did not settle
+it. Answer `accept` only after establishing those same three facts yourself: a
+commit whose parents are not the authorized base and head is an unauthorized
+merge, not a reporting failure.
+
 ## Run the capture wizard
 
 First complete the ordinary local setup so the root `.env` exists at mode 0600

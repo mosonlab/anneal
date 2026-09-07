@@ -9,6 +9,14 @@ written.
 
 ## Unreleased
 
+- The merge executor verifies its own landed merge from the commit when
+  GitHub's pull-request projection cannot. A merge commit whose parents are
+  exactly the authorized base and head and which is reachable from the
+  authorized base ref now completes the run instead of parking the chain tail on
+  a `base-drift-post-merge` question an operator answered by checking the same
+  two parent shas. Any missing fact, and any failed or timed-out read, still
+  stops `base-drift-post-merge`; the Inbox evidence gains a `directParentCheck`
+  field naming what was read.
 - Retired the `POST /files/mkdir` and `POST /files/move` routes and their
   underlying store operations.
 - Removed `POST /inbox/messages/:messageId/supersede`;
