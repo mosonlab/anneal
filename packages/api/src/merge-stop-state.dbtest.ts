@@ -31,6 +31,7 @@ import { evidenceTick } from "./merge-evidence-worker.js";
 import { baseDriftRecoveryTick } from "./merge-base-drift-worker.js";
 import { seedIntegratorChain, type IntegratorChain } from "./merge-integrator-fixture.js";
 import { recordMergeLeaseHold } from "./merge-lease-hold.js";
+import { createRunnerRegistry } from "./runners.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -79,7 +80,12 @@ const call = async (method: string, path: string, body?: unknown, token = OPERAT
   process.env.MERGE_EXECUTOR_TOKEN = EXECUTOR;
   process.env.MERGE_EXECUTOR_RUNNER_IDS = "merge-executor-1";
   try {
+    // These stop/renewal scenarios assume an available executor, including
+    // PATCH approval's liveness check before it preserves the authorization.
+    const runnerRegistry = createRunnerRegistry();
+    runnerRegistry.note("merge-executor-1", {}, new Date());
     const response = await createApp(db, {
+      runnerRegistry,
       releaseMergeLease: async (target) => {
         if (target) {
           releasedChainLeases.push(target.chainId);
