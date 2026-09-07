@@ -423,6 +423,35 @@ test("completeRun persists three capped refunds and refuses the fourth", async (
   assert.match(harness.activities.find(({ metadata }) => metadata?.capReached === true)?.body ?? "", /refund cap was reached/i);
 });
 
+test("completeRun caps unknown plumbing-phase transport refunds without text evidence", async () => {
+  const harness = statefulCompletionHarness();
+  const reason = "git failed (128): gnutls_handshake() failed: The TLS connection was non-properly terminated.";
+  const outcome: RunOutcome = {
+    case: "provider-failure",
+    reason,
+    envelope: envelope({
+      phase: "DELIVER",
+      runnerClass: FailureClass.TOOL_FAILED,
+      terminalSuccess: true,
+      stderrSummary: reason,
+    }),
+  };
+  let budget = { maxRunsPerTask: 1, budgetGrants: 0 };
+  for (let runNumber = 1; runNumber <= EXTERNAL_FAILURE_REFUND_CAP + 1; runNumber += 1) {
+    const closed = await harness.complete({ runNumber, ...budget, outcome });
+    const expectedGrants = Math.min(runNumber, EXTERNAL_FAILURE_REFUND_CAP);
+    assert.equal(closed.failureClass, FailureClass.TRANSIENT_PROVIDER);
+    assert.equal(closed.budgetGrants, expectedGrants);
+    assert.equal(closed.maxRunsPerTask, 1 + expectedGrants);
+    budget = { maxRunsPerTask: Number(closed.maxRunsPerTask), budgetGrants: Number(closed.budgetGrants) };
+  }
+  assert.equal(
+    harness.activities.filter(({ metadata }) => metadata?.kind === "externalFailureRefund.granted").length,
+    EXTERNAL_FAILURE_REFUND_CAP,
+  );
+  assert.ok(harness.activities.some(({ metadata }) => metadata?.capReached === true));
+});
+
 test("completeRun refunds a target-fetch block and preserves its git diagnostic", async () => {
   const harness = statefulCompletionHarness();
   const reason = "A step finished without a handoff [target-fetch-failed]: fatal: could not read Username";
@@ -563,10 +592,10 @@ const outcomeRows: ReadonlyArray<{
       envelope: envelope({ phase: "PROVISION", agentExited: false, terminationReason: "runner exception" }),
     },
     succeeded: false,
-    failureClass: FailureClass.TASK_FAILED,
+    failureClass: FailureClass.TRANSIENT_PROVIDER,
     // The runner's plumbing failed, so the attempt buys the task one instead of
-    // spending one. `agentExited` says that, not a flag the runner asserts.
-    retryable: false, externalFailure: true, timedOut: false,
+    // spending one. The phase says that, not a phrase the runner asserts.
+    retryable: true, externalFailure: true, timedOut: false,
   },
   {
     name: "a hung push, which the envelope types as a timeout its text does not name",
@@ -623,7 +652,7 @@ test("a delivery failure is not read as an agent that exited without finishing",
       stderrSummary: "remote rejected the push",
     }),
   });
-  assert.equal(verdict.failureClass, FailureClass.TASK_FAILED);
+  assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
   assert.equal(verdict.externalFailure, true, "the agent finished; the push is the runner's plumbing");
 });
 
@@ -718,7 +747,7 @@ for (const outcome of ["review-fail", "refresh-conflict"]) {
         },
       });
       assert.equal(closed.headSha, accepted ? baseSha : reportedHead ?? null);
-      assert.equal(closed.failureClass, FailureClass.TASK_FAILED);
+      assert.equal(closed.failureClass, FailureClass.TRANSIENT_PROVIDER);
       assert.equal(harness.activities.some((activity) => activity.metadata?.failureReason === reason), accepted);
     });
   }

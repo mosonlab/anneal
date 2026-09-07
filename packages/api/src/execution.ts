@@ -145,8 +145,11 @@ const DETERMINISTIC_ACCESS_PATTERNS = [
   /bad credentials/i,
 ] as const;
 
+const deterministicAccessRefusal = (text: string): boolean =>
+  DETERMINISTIC_ACCESS_PATTERNS.some((pattern) => pattern.test(text));
+
 export const transientNetworkText = (text: string): boolean => {
-  if (DETERMINISTIC_ACCESS_PATTERNS.some((pattern) => pattern.test(text))) return false;
+  if (deterministicAccessRefusal(text)) return false;
   return TRANSIENT_NETWORK_PATTERNS.some((pattern) => pattern.test(text));
 };
 
@@ -167,8 +170,8 @@ const transientProviderText = (envelope: FailureEnvelope): boolean => {
 /**
  * Whether a TRANSIENT_PROVIDER verdict was reached from one of the external
  * transport/outage phrases, rather than from a typed runner marker. The
- * completion path uses this evidence to cap the new EXECUTE-phase refunds;
- * keeping it as a helper leaves the completion wire verdict unchanged.
+ * completion path uses this evidence to cap EXECUTE-phase refunds; every
+ * non-EXECUTE transient is capped by its runner-owned phase instead.
  */
 export const isTextMatchedTransientProviderFailure = (
   envelope: FailureEnvelope,
@@ -185,7 +188,7 @@ const dependencyProvisioningManifestMissing = (envelope: FailureEnvelope): boole
   && envelope.stderrSummary === DEPENDENCY_PROVISIONING_MANIFEST_MISSING;
 
 const authPatternFor = (phase: FailureEnvelope["phase"]): RegExp =>
-  phase === "DELIVER" ? GIT_AUTH_PATTERN : CLI_AUTH_PATTERN;
+  phase === "EXECUTE" ? CLI_AUTH_PATTERN : GIT_AUTH_PATTERN;
 
 const envelopeFailureClass = (envelope: FailureEnvelope): FailureClass => {
   // The one runner verdict still honoured, and only because it is the single
@@ -203,7 +206,8 @@ const envelopeFailureClass = (envelope: FailureEnvelope): FailureClass => {
   // condition is carried on the structured stderr evidence channel so it
   // survives the completion trust boundary without trusting runnerClass.
   if (dependencyProvisioningManifestMissing(envelope)) return FailureClass.PROTOCOL_ERROR;
-  // A termination reason is an account of how *an agent session* was stopped:
+  // In EXECUTE, a termination reason is an account of how *an agent session*
+  // was stopped:
   // a walltime kill, a stall kill, a cancel. `agentExited` is what says there
   // was a session at all, and without one this field is the runner narrating
   // its own crash — `runner.ts`'s catch-all stamps every escaped exception
@@ -215,15 +219,25 @@ const envelopeFailureClass = (envelope: FailureEnvelope): FailureClass => {
   //
   // The string is still kept on the envelope. It is evidence of what the
   // runner did; it is just not evidence that a session was terminated.
-  if (envelope.agentExited && envelope.terminationReason?.trim()) return FailureClass.CANCELLED_OR_TIMED_OUT;
-  if (envelope.exitCode === 127) return FailureClass.BINARY_NOT_FOUND;
+  if (envelope.phase === "EXECUTE" && envelope.agentExited && envelope.terminationReason?.trim()) {
+    return FailureClass.CANCELLED_OR_TIMED_OUT;
+  }
+  if (envelope.phase === "EXECUTE" && envelope.exitCode === 127) return FailureClass.BINARY_NOT_FOUND;
   // The verdict channels. `stdoutSummary` is deliberately absent: it is
   // evidence, kept for the operator and for #114, and never a verdict.
   const verdict = envelopeVerdictText(envelope);
   // Auth outranks transience. A provider error that names an auth failure must
   // not be retried into a lockout just because the same message also mentions a
   // dropped connection.
-  if (authPatternFor(envelope.phase).test(verdict)) return FailureClass.AUTH_REQUIRED;
+  if (authPatternFor(envelope.phase).test(verdict)
+    || (envelope.phase !== "EXECUTE" && deterministicAccessRefusal(verdict))) {
+    return FailureClass.AUTH_REQUIRED;
+  }
+  // The runner owns every phase after provisioning starts, including a failure
+  // before an agent process can launch. Transport wording is intentionally not
+  // consulted here: an unknown provider or toolchain message remains transient
+  // by phase, while the short access-refusal list is the only text veto.
+  if (envelope.phase !== "EXECUTE") return FailureClass.TRANSIENT_PROVIDER;
   // Typed markers outrank text. `timedOut` is set from the runner's own
   // `CommandTimeoutError` and `transient` from its typed network predicate;
   // both are things the runner observed, not phrases it matched.
