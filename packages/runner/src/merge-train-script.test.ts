@@ -118,11 +118,11 @@ if (behavior === "delayed-pass") {
   console.log("MERGE GATE: FAIL (fixture failure)");
   process.exit(1);
 } else if (behavior === "noisy-fail" || behavior === "noisy-pass") {
-  // The real gate is a shell script whose writes block until the tool drains
-  // them. This fixture writes more than a pipe under load will hold, so it has
-  // to end by falling off the bottom rather than through process.exit(): Node's
-  // stdout to a pipe is asynchronous, and exiting discards whatever is still
-  // queued, which is exactly the trailing verdict line the tool classifies.
+  // The real gate is a shell script whose writes block until the reader drains.
+  // This fixture writes far more than a pipe holds, so it must end by falling
+  // off the bottom rather than through process.exit(): Node's stdout to a pipe
+  // is asynchronous, and exiting discards the still-queued tail, which is
+  // exactly the verdict line the tool classifies.
   console.log("run-gate: failure excerpt (last 200 lines per failing step)");
   for (let line = 0; line < 200; line += 1) console.log("noise ".repeat(12) + line);
   if (behavior === "noisy-pass") {
