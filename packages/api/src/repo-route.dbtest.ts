@@ -155,7 +155,7 @@ test("POST repo preflights exact inputs and maps every preflight refusal", async
 
 test("grantAgents filters archived and integrator Agents and preserves mountPath", async () => {
   const project = await createProject("repo-grants");
-  for (const name of ["senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-high", "senior-dev-astra-medium"]) {
+  for (const name of ["senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-medium", "senior-dev-astra-medium"]) {
     await createAgent(project.id, project.environmentId, name);
   }
   await createAgent(project.id, project.environmentId, "archived-agent", new Date());

@@ -281,9 +281,9 @@ test("a fresh seed writes the twelve-step, eight-step, and four-step canonical t
   assert.equal(direct.steps[7]?.assigneeAgent?.name, INTEGRATOR_AGENT_NAME);
   assert.equal(direct.steps[7]?.outputKind, INTEGRATOR_OUTPUT_KIND);
   assert.match(direct.steps[5]?.prompt ?? "", /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" finalize/u);
-  const resolver = await db.agent.findFirstOrThrow({ where: { projectId: step.taskTemplate.projectId, name: "merge-resolver-opus-medium" } });
-  assert.equal(resolver.model, "claude-opus-5:medium");
-  assert.equal(resolver.runnerPreference, "CLAUDE");
+  const resolver = await db.agent.findFirstOrThrow({ where: { projectId: step.taskTemplate.projectId, name: "merge-resolver-luna-max" } });
+  assert.equal(resolver.model, "gpt-5.6-luna:max");
+  assert.equal(resolver.runnerPreference, "CODEX");
 
   const pullRequest = await db.taskTemplate.findUniqueOrThrow({
     where: { projectId_name: { projectId: step.taskTemplate.projectId, name: PR_TEMPLATE_NAME } },
@@ -294,7 +294,7 @@ test("a fresh seed writes the twelve-step, eight-step, and four-step canonical t
     "Implementation", "Code review", "Blind code review", "Apply review fixes",
   ]);
   assert.deepEqual(pullRequest.steps.map(({ assigneeAgent }) => assigneeAgent?.name), [
-    "senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-high", "senior-dev-astra-low",
+    "senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-medium", "senior-dev-astra-low",
   ]);
   assert.deepEqual(pullRequest.steps.map(({ opensPullRequest }) => opensPullRequest), [true, false, false, false]);
   assert.deepEqual(pullRequest.steps.map(({ requiresCommit }) => requiresCommit), [true, false, false, false]);
@@ -334,11 +334,11 @@ test("re-seeding preserves an operator-selected model and runner", async () => {
   assert.deepEqual(spec, { model: "claude-opus-5:medium", runnerPreference: "CLAUDE", customizedFields: ["model", "runnerPreference"] });
 });
 
-test("canonical sync restores step, merge-resolver-opus-medium role, and foundational prompts when structure matches", async () => {
+test("canonical sync restores step, merge-resolver-luna-max role, and foundational prompts when structure matches", async () => {
   assert.equal((await seed()).code, 0);
   const direct = await directTemplate();
   const step = direct.steps[0]!;
-  const agent = await db.agent.findFirstOrThrow({ where: { name: "merge-resolver-opus-medium" } });
+  const agent = await db.agent.findFirstOrThrow({ where: { name: "merge-resolver-luna-max" } });
   await Promise.all([
     db.taskTemplateStep.update({ where: { id: step.id }, data: { prompt: "step prompt drift" } }),
     db.agent.update({ where: { id: agent.id }, data: { foundationalPrompt: "foundation drift", rolePrompt: "role drift" } }),
@@ -348,7 +348,7 @@ test("canonical sync restores step, merge-resolver-opus-medium role, and foundat
   assert.equal(synced.code, 0, synced.output);
   const expectedStep = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))[0]!;
   const sources = await loadAgentSources();
-  const expectedRole = sources.roles.find(({ name }) => name === "merge-resolver-opus-medium")!;
+  const expectedRole = sources.roles.find(({ name }) => name === "merge-resolver-luna-max")!;
   const [persistedStep, persistedAgent] = await Promise.all([
     db.taskTemplateStep.findUniqueOrThrow({ where: { id: step.id } }),
     db.agent.findUniqueOrThrow({ where: { id: agent.id } }),
@@ -545,7 +545,7 @@ test("canonical sync rolls quiescent adjudication-era graphs only after active R
     // The adjudicator role is archived, so the seed no longer creates its
     // Agent row; production still carries the row the old node was bound to.
     const opus = await db.agent.findFirstOrThrow({
-      where: { projectId: template.projectId, name: "code-reviewer-opus-high" },
+      where: { projectId: template.projectId, name: "code-reviewer-opus-medium" },
     });
     const adjudicator = await db.agent.upsert({
       where: { projectId_name: { projectId: template.projectId, name: "review-adjudicator-opus" } },
@@ -673,7 +673,7 @@ test("canonical sync refuses to mutate instantiated canonical steps", async () =
     compound.steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!,
   ];
   const opus = await db.agent.findFirstOrThrow({
-    where: { projectId: direct.projectId, name: "code-reviewer-opus-high" },
+    where: { projectId: direct.projectId, name: "code-reviewer-opus-medium" },
   });
   await Promise.all(regressionSteps.map((step) => db.taskTemplateStep.update({
     where: { id: step.id }, data: { assigneeAgentId: opus.id, prompt: "previous release prompt" },
@@ -699,8 +699,8 @@ test("canonical sync refuses to mutate instantiated canonical steps", async () =
     db.taskTemplateStep.findMany({ where: { id: { in: regressionSteps.map(({ id }) => id) } }, include: { assigneeAgent: true } }),
     db.task.findMany({ where: { id: { in: existingTasks.map(({ id }) => id) } }, include: { assigneeAgent: true } }),
   ]);
-  assert.deepEqual(adoptedSteps.map(({ assigneeAgent }) => assigneeAgent?.name), ["code-reviewer-opus-high", "code-reviewer-opus-high"]);
-  assert.deepEqual(migratedTasks.map(({ assigneeAgent }) => assigneeAgent?.name), ["code-reviewer-opus-high", "code-reviewer-opus-high"]);
+  assert.deepEqual(adoptedSteps.map(({ assigneeAgent }) => assigneeAgent?.name), ["code-reviewer-opus-medium", "code-reviewer-opus-medium"]);
+  assert.deepEqual(migratedTasks.map(({ assigneeAgent }) => assigneeAgent?.name), ["code-reviewer-opus-medium", "code-reviewer-opus-medium"]);
 });
 
 test("canonical sync rejects template structure drift without applying its prompt", async () => {
@@ -1107,8 +1107,8 @@ test("re-seeding a historical nine-step template preserves its in-flight task se
     [1, "Write a spec", "spec-opus-high", AssigneeType.AGENT, "spec", true],
     [2, "Plan", "plan-fable-medium", AssigneeType.AGENT, "plan", false],
     [3, "Plan review", "review-coordinator-astra-medium", AssigneeType.AGENT, "plan-review", false],
-    [4, "Revise plan", "plan-reviser-opus-high", AssigneeType.AGENT, "revised-plan", true],
-    [5, "Implementation", "plan-executor-astra-medium", AssigneeType.AGENT, "implementation", false],
+    [4, "Revise plan", "plan-reviser-opus-medium", AssigneeType.AGENT, "revised-plan", true],
+    [5, "Implementation", "plan-executor-astra-low", AssigneeType.AGENT, "implementation", false],
     [6, "Code review", "review-coordinator-astra-medium", AssigneeType.AGENT, "code-review", false],
     [7, "Apply review fixes", "senior-dev-astra-medium", AssigneeType.AGENT, "fixed-implementation", false],
     [8, "Librarian", "librarian-luna-xhigh", AssigneeType.AGENT, "documentation", false],

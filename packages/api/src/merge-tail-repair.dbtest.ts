@@ -80,12 +80,12 @@ const seedRegression = async (options: RegressionSeedOptions = {}) => {
     model: "gpt-5.6-sol:high", runnerPreference: "CODEX", foundationalPrompt: "foundation", rolePrompt: "role",
   } });
   const [regressionAgent, resolverAgent, fixAgent, reviewAgent, librarianAgent] = await Promise.all([
-    makeAgent("code-reviewer-sol-high"), makeAgent("merge-resolver-opus-medium"), makeAgent("senior-dev-astra-medium"),
+    makeAgent("code-reviewer-sol-high"), makeAgent("merge-resolver-luna-max"), makeAgent("senior-dev-astra-medium"),
     makeAgent("review-coordinator-astra-medium"), makeAgent("librarian-luna-xhigh"),
   ]);
   if (options.renamedResolver) {
     await db.agent.update({ where: { id: resolverAgent.id }, data: {
-      canonicalRole: "merge-resolver-opus-medium",
+      canonicalRole: "merge-resolver-luna-max",
       name: "conflict-resolver",
       customizedFields: ["name"],
     } });
@@ -636,7 +636,7 @@ test("a repair whose whole budget fails retryably still stops the tail", async (
 test("a refresh conflict creates exactly one resolver and its completion re-runs regression", async () => {
   const seeded = await exercise("refresh-conflict");
   const repair = await repairFor(seeded, "refresh-conflict");
-  assert.equal((await db.agent.findUniqueOrThrow({ where: { id: repair.assigneeAgentId! } })).name, "merge-resolver-opus-medium");
+  assert.equal((await db.agent.findUniqueOrThrow({ where: { id: repair.assigneeAgentId! } })).name, "merge-resolver-luna-max");
   assert.equal(await repairCount(seeded), 1);
   await completeRepair(seeded, repair.id, JSON.stringify({
     schemaVersion: 1, outcome: "resolved", startHeadSha: HEAD, targetHeadSha: BASE,
@@ -733,7 +733,7 @@ test("a renamed canonical resolver still receives the refresh-conflict repair", 
   assert.equal(repair.assigneeAgentId, seeded.resolverAgent.id);
   const assignee = await db.agent.findUniqueOrThrow({ where: { id: repair.assigneeAgentId! } });
   assert.equal(assignee.name, "conflict-resolver");
-  assert.equal(assignee.canonicalRole, "merge-resolver-opus-medium");
+  assert.equal(assignee.canonicalRole, "merge-resolver-luna-max");
   assert.equal(await db.inboxMessage.count({
     where: { taskId: seeded.regression.id, body: { startsWith: "Autonomous merge tail stopped:" } },
   }), 0);
@@ -819,7 +819,7 @@ test("a gate-fix prompt renders its failure excerpt while other repair prompts r
   assert.equal(conflictRepair.description, [
     `Resolve the refresh conflict between chain head ${HEAD} and target head ${BASE}.`,
     "merge conflict",
-    `Re-run the merge, preserve both intents under the merge-resolver-opus-medium role contract, commit the resolution, and persist the role's versioned JSON bound to start ${HEAD} and target ${BASE}.`,
+    `Re-run the merge, preserve both intents under the merge-resolver-luna-max role contract, commit the resolution, and persist the role's versioned JSON bound to start ${HEAD} and target ${BASE}.`,
     conflictContext,
   ].join("\n\n"));
 });

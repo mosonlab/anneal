@@ -76,7 +76,7 @@ test("an archived slot Agent falls back and records why on the chain root", asyn
 test("refresh-conflict remains bound to the resolver role without looking up profiles", async () => {
   const observed = fixture({ slot: repairAgent });
   assert.deepEqual(await mergeTailRepairAssignee(observed.tx, { ...input, repairKind: "refresh-conflict" }), {
-    kind: "role", canonicalRole: "merge-resolver-opus-medium",
+    kind: "role", canonicalRole: "merge-resolver-luna-max",
   });
   assert.equal(observed.profiles.length, 0);
 });
