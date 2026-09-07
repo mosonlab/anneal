@@ -3124,8 +3124,10 @@ curl "$BASE_URL/sessions?projectId=$PROJECT_ID&status=failed&runner=CODEX&since=
 - The returned session carries `metrics` for its Run. It has the same shape
   and null semantics as the per-Run `metrics` documented under `GET
   /tasks/:taskId`, including `ttft` and `vsBaseline`; see that definition for
-  the field meanings. The `/sessions` list does not compute or return this
-  field.
+  the field meanings. The response also carries the same task-level `baseline`
+  used by that definition so the shared diagnostics block can show its
+  percentiles. The `/sessions` list does not compute or return these derived
+  fields.
 
 ```sh
 curl "$BASE_URL/sessions/$SESSION_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"

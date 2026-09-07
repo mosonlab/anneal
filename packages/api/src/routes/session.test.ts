@@ -776,13 +776,18 @@ test("GET /sessions/:sessionId carries task-detail metrics while list rows stay 
 
     const detailResponse = await app.request("/sessions/metrics", { headers: { Authorization: "Bearer operator-unit-token" } });
     assert.equal(detailResponse.status, 200);
-    const detail = await detailResponse.json() as { metrics: Record<string, unknown> };
+    const detail = await detailResponse.json() as { metrics: Record<string, unknown>; baseline: unknown };
     assert.deepEqual(Object.keys(detail.metrics).sort(), [
       "modelActiveIsUpperBound", "modelActiveMs", "outputTokensPerSecond", "phases",
       "termination", "tokens", "tools", "ttft", "vsBaseline",
     ]);
     assert.deepEqual((detail.metrics.ttft), { p50Ms: 20, p90Ms: 20, samples: 1 });
     assert.deepEqual(detail.metrics.vsBaseline, { costRatio: 2, durationRatio: 2 });
+    assert.deepEqual(detail.baseline, {
+      sampleSize: 8,
+      costUsd: { sampleSize: 8, p50: 3, p90: 5 },
+      durationMs: { sampleSize: 8, p50: 50_000, p90: 80_000 },
+    });
     assert.deepEqual(detail.metrics.phases, {
       queuedMs: 5_000, provisioningMs: 15_000, executingMs: 100_000, inboxWaitMs: 0, cleanupMs: null,
     });

@@ -148,12 +148,11 @@ const SESSION_DAY_HEADING = "flex items-baseline gap-[9px] border-b border-[colo
 const SESSION_DAY_ROWS = "divide-y divide-[color:var(--border-soft)]";
 
 /** The list projection deliberately omits derived metrics. The detail read
- *  may carry them, plus the optional baseline population used by the shared
- *  diagnostics renderer. Keep this local until the wire contract is enriched
- *  by the API change that owns the route. */
+ *  carries them, plus the baseline population used by the shared diagnostics
+ *  renderer. */
 type SessionWithDiagnostics = Session & {
-  metrics?: RunMetrics | null;
-  baseline?: RunBaseline | null;
+  metrics: RunMetrics | null;
+  baseline: RunBaseline | null;
 };
 
 const sessionDotTone = (tone: PillTone): string | undefined => {

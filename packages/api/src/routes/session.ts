@@ -25,7 +25,7 @@ import {
 } from "@anneal/db";
 import type { PrismaClient } from "@anneal/db";
 import type { Session as SessionContract } from "@anneal/db/board-contract";
-import type { RunMetrics } from "@anneal/db/board-contract";
+import type { RunBaseline, RunMetrics } from "@anneal/db/board-contract";
 import { parseSessionListFilters } from "@anneal/db/session-filter-contract";
 import type { SerializesTo } from "@anneal/db/wire-serialization";
 import { z } from "zod";
@@ -202,6 +202,7 @@ const cancelRunInput = z.object({
 type SessionResponse = SerializesTo<SessionContract<Date, Prisma.Decimal>, SessionContract>;
 type SessionDetailContract<DateTime = string, DecimalValue = string> = SessionContract<DateTime, DecimalValue> & {
   metrics: RunMetrics | null;
+  baseline: RunBaseline | null;
 };
 type SessionDetailResponse = SerializesTo<SessionDetailContract<Date, Prisma.Decimal>, SessionDetailContract>;
 
@@ -739,6 +740,7 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
       return context.json({
         ...chainIdentityFrom([row])(row),
         metrics,
+        baseline,
       } satisfies SessionDetailResponse);
     });
 
