@@ -1,7 +1,6 @@
 import { join } from "node:path";
 
 import { stepRole } from "@anneal/db";
-import type { RegressionRecoveryContext } from "@anneal/db/claim-contract";
 
 import type { ClaimedTask } from "./api.js";
 import type { RunnerConfig, RunnerKind } from "./config.js";
@@ -56,15 +55,8 @@ const toolManifest = (claim: ClaimedTask): string[] => [
   ...manifestLines(),
 ];
 
-const regressionRecoveryContextFor = (
-  claim: Pick<ClaimedTask, "regressionRecoveryContext">,
-): RegressionRecoveryContext | null => {
-  const context = claim.regressionRecoveryContext;
-  return context ?? null;
-};
-
 const recoveryPromptSection = (claim: ClaimedTask): string[] => {
-  const context = regressionRecoveryContextFor(claim);
+  const context = claim.regressionRecoveryContext;
   if (!context) return [];
   return [
     "",
@@ -213,7 +205,7 @@ export const buildChildEnvironment = (
     !PROTECTED_SECRET_ENVIRONMENT.has(name)
     && !name.startsWith("GIT_CONFIG_")
     && !["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"].includes(name)));
-  const recoveryContext = regressionStep ? regressionRecoveryContextFor(claim) : null;
+  const recoveryContext = regressionStep ? claim.regressionRecoveryContext : null;
   return {
     ...taskSecrets,
     // The runner owns all three paths/counts and sets them after task Secrets.

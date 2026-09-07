@@ -122,12 +122,12 @@ merge commit whose parents are the authorized base and head, the merge landed
 and the stop is a reporting failure, not a merge failure.
 
 Automatic pre-merge base-drift recovery reuses the latest persisted regression
-semantic PASS only when the prepared head remains identical to that output's
-head. The recovery Run skips the model semantic recheck and still runs the
+semantic PASS only when the incoming head before target refresh is identical
+to that output's head. The recovery Run skips the model semantic recheck and still runs the
 Merge gate; its v2 result records `semanticVerdict: "reused"` and
-`semanticSourceRunId` naming the prior Run. A changed head (including a target
-refresh merge), missing evidence, or a latest semantic failure requires the
-normal semantic recheck.
+`semanticSourceRunId` naming the prior Run. A changed incoming head, a later base
+move during finalization, missing evidence, or a latest semantic failure requires
+the normal semantic recheck.
 
 ### When a landed merge stops `base-drift-post-merge`
 

@@ -174,7 +174,7 @@ const handoff = (seeded: Fixture): Handoff =>
 
 const recoveryContext = (
   seeded: Fixture,
-  options: { priorOutcome?: "pass" | "gate-fail" | "review-fail" | "refresh-conflict"; priorHeadSha?: string; authorizedHeadSha?: string } = {},
+  options: { priorOutcome?: "pass" | "gate-fail" | "review-fail" | "refresh-conflict"; priorHeadSha?: string; authorizedHeadSha?: string; currentBaseSha?: string } = {},
 ): string => {
   const priorHeadSha = options.priorHeadSha ?? seeded.branchSha;
   const priorOutcome = options.priorOutcome ?? "pass";
@@ -207,7 +207,7 @@ const recoveryContext = (
         };
   return JSON.stringify({
     state: "queued",
-    currentBaseSha: seeded.baseSha,
+    currentBaseSha: options.currentBaseSha ?? seeded.baseSha,
     authorizedHeadSha: options.authorizedHeadSha ?? seeded.branchSha,
     recoveryRunId: seeded.env.AGENTOS_RUN_ID,
     priorOutput: {
@@ -277,36 +277,50 @@ test("prepare refreshes before semantic review without acquiring the merge lease
 
 test("a recovery prepare reuses an exact-head semantic PASS and finalize still runs the gate", () => {
   const seeded = fixture();
-  seeded.env.AGENTOS_REGRESSION_RECOVERY_CONTEXT = recoveryContext(seeded);
+  advanceBase(seeded, "drift.txt", "drift\n");
+  const movedBase = git(seeded.origin, "rev-parse", "refs/heads/main");
+  seeded.env.AGENTOS_REGRESSION_RECOVERY_CONTEXT = recoveryContext(seeded, { currentBaseSha: movedBase });
 
   const prepared = run(seeded, "prepare");
+  const refreshedHead = git(seeded.work, "rev-parse", "HEAD");
+  assert.notEqual(refreshedHead, seeded.branchSha);
+  assert.equal(git(seeded.work, "merge-base", "--is-ancestor", movedBase, refreshedHead), "");
   assert.equal(prepared.status, 0, prepared.stderr);
-  assert.equal(prepared.stdout, `REGRESSION PREPARE: semantic-reused ${seeded.branchSha} from prior-regression-run\n`);
+  assert.equal(prepared.stdout, `REGRESSION PREPARE: semantic-reused ${refreshedHead} from prior-regression-run\n`);
   assert.equal(readFileSync(seeded.gateLog, "utf8"), "", "prepare must not run the gate");
 
   const finalized = run(seeded, "finalize");
   assert.equal(finalized.status, 0, finalized.stderr);
-  assert.equal(readFileSync(seeded.gateLog, "utf8").trim(), `${seeded.branchSha} --master ${seeded.baseSha}`);
   const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
+  assert.equal(verdict.headSha, refreshedHead);
+  assert.equal(readFileSync(seeded.gateLog, "utf8").trim(), `${refreshedHead} --master ${movedBase}`);
   assert.equal(verdict.outcome, "pass");
   assert.equal(verdict.semanticVerdict, "reused");
   assert.equal(verdict.semanticSourceRunId, "prior-regression-run");
 });
 
-test("a recovery prepare falls back to semantic review when the prepared head differs", () => {
+test("a recovery prepare falls back to semantic review when the pre-refresh head differs", () => {
   const seeded = fixture();
+  advanceBase(seeded, "drift.txt", "drift\n");
+  const movedBase = git(seeded.origin, "rev-parse", "refs/heads/main");
   seeded.env.AGENTOS_REGRESSION_RECOVERY_CONTEXT = recoveryContext(seeded, {
     priorHeadSha: "a".repeat(40),
+    currentBaseSha: movedBase,
   });
 
   const prepared = run(seeded, "prepare");
+  const refreshedHead = git(seeded.work, "rev-parse", "HEAD");
+  assert.notEqual(refreshedHead, seeded.branchSha);
+  assert.equal(git(seeded.work, "merge-base", "--is-ancestor", movedBase, refreshedHead), "");
   assert.equal(prepared.status, 0, prepared.stderr);
-  assert.equal(prepared.stdout, `REGRESSION PREPARE: ready ${seeded.branchSha} ${seeded.baseSha}\n`);
+  assert.equal(prepared.stdout, `REGRESSION PREPARE: ready ${refreshedHead} ${movedBase}\n`);
   assert.doesNotMatch(prepared.stdout, /semantic-reused/u);
 
   const finalized = run(seeded, "finalize");
   assert.equal(finalized.status, 0, finalized.stderr);
   const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
+  assert.equal(verdict.headSha, refreshedHead);
+  assert.equal(readFileSync(seeded.gateLog, "utf8").trim(), `${refreshedHead} --master ${movedBase}`);
   assert.equal(verdict.outcome, "pass");
   assert.equal(verdict.semanticVerdict, undefined);
   assert.equal(verdict.semanticSourceRunId, undefined);

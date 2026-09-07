@@ -211,13 +211,12 @@ process.stdout.write(JSON.stringify({ ...value, ...semantic }));
 
 # Decide semantic reuse from the immutable recovery snapshot handed to this
 # Run. The prior output is persisted control-plane evidence; transcript text is
-# deliberately not consulted. The prepared HEAD is supplied only after the
-# normal target refresh so a merge-created or otherwise moved head can never
-# inherit a verdict from a different diff.
+# deliberately not consulted. Compare the incoming head before target refresh;
+# write_state separately binds finalization to the refreshed head.
 recovery_reuse_source() {
-  local prepared_head="$1" context="${AGENTOS_REGRESSION_RECOVERY_CONTEXT:-}" source
+  local incoming_head="$1" context="${AGENTOS_REGRESSION_RECOVERY_CONTEXT:-}" source
   [ -n "$context" ] || return 0
-  source="$(printf '%s' "$context" | PREPARED_HEAD_SHA="$prepared_head" node -e '
+  source="$(printf '%s' "$context" | INCOMING_HEAD_SHA="$incoming_head" node -e '
 let input = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { input += chunk; });
@@ -230,7 +229,7 @@ process.stdin.on("end", () => {
   if (context.state !== "queued" || context.recoveryRunId !== process.env.AGENTOS_RUN_ID) return;
   if (typeof context.currentBaseSha !== "string" || !SHA.test(context.currentBaseSha)) return;
   if (typeof context.authorizedHeadSha !== "string" || !SHA.test(context.authorizedHeadSha)) return;
-  if (context.authorizedHeadSha !== process.env.PREPARED_HEAD_SHA) return;
+  if (context.authorizedHeadSha !== process.env.INCOMING_HEAD_SHA) return;
   if (typeof prior.runId !== "string" || prior.runId.length === 0 || prior.runId === process.env.AGENTOS_RUN_ID) return;
   if (prior.kind !== "regression-verification-v2") return;
   if (typeof prior.commitSha !== "string" || !SHA.test(prior.commitSha)) return;
@@ -258,7 +257,7 @@ process.stdin.on("end", () => {
     if (verdict.semanticVerdict !== "reused" || typeof verdict.semanticSourceRunId !== "string"
       || verdict.semanticSourceRunId.length === 0 || /[\s]/u.test(verdict.semanticSourceRunId)) return;
   }
-  if (prior.commitSha !== verdict.headSha || verdict.headSha !== process.env.PREPARED_HEAD_SHA) return;
+  if (prior.commitSha !== verdict.headSha || verdict.headSha !== process.env.INCOMING_HEAD_SHA) return;
   if (/[\s]/u.test(prior.runId)) return;
   process.stdout.write(prior.runId);
 });
@@ -573,16 +572,17 @@ refresh_onto_target() {
 }
 
 prepare() {
-  local base_head result prepared_head output_dir reuse_source
+  local base_head result prepared_head incoming_head output_dir reuse_source
   output_dir="$(dirname "$OUTPUT_FILE")"
   [ ! -L "$output_dir" ] || die "refusing symlinked regression output directory"
   rm -f -- "$OUTPUT_FILE" || die "cannot clear stale regression output handoff"
+  incoming_head="$(head_sha)" || die "cannot resolve incoming workspace HEAD"
   base_head="$(fetch_base)" || die "cannot refresh target head"
   refresh_onto_target "$base_head"
   result=$?
   [ "$result" -eq 0 ] || return 0
   prepared_head="$(head_sha)" || die "cannot resolve prepared workspace HEAD"
-  reuse_source="$(recovery_reuse_source "$prepared_head")"
+  reuse_source="$(recovery_reuse_source "$incoming_head")"
   if [ -n "$reuse_source" ]; then
     write_state "$prepared_head" "$base_head" reused "$reuse_source"
     printf 'REGRESSION PREPARE: semantic-reused %s from %s\n' "$prepared_head" "$reuse_source"
