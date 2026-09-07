@@ -3,7 +3,11 @@ import test from "node:test";
 
 import { AssigneeType, RunnerPreference } from "@anneal/db";
 
-import { canonicalStaffingEntries, staffingAssigneeRefusal } from "./staffing-profiles.js";
+import {
+  canonicalStaffingEntries,
+  mergeTailRepairAgentRefusal,
+  staffingAssigneeRefusal,
+} from "./staffing-profiles.js";
 
 const step = (
   stepIndex: number,
@@ -47,6 +51,33 @@ test("a control-plane step refuses an agent entry and accepts one that states no
   assert.equal(
     staffingAssigneeRefusal("agent-1", step(1, "Implementation", "implementation"), AGENTS, CONTEXT),
     null,
+  );
+});
+
+test("merge-tail repair slot refuses a foreign or archived Agent", () => {
+  const active = {
+    id: "agent-1",
+    name: "repairer",
+    projectId: "project-1",
+    archivedAt: null,
+    model: "gpt-5.6-luna:max",
+    runnerPreference: RunnerPreference.CODEX,
+  };
+  const archived = { ...active, id: "agent-archived", archivedAt: new Date() };
+  const agents = new Map([
+    [active.id, active],
+    [archived.id, archived],
+  ]);
+
+  assert.equal(mergeTailRepairAgentRefusal(null, agents, { projectId: "project-1" }), null);
+  assert.equal(mergeTailRepairAgentRefusal(active.id, agents, { projectId: "project-1" }), null);
+  assert.equal(
+    mergeTailRepairAgentRefusal("foreign", agents, { projectId: "project-1" })?.code,
+    "staffing_profile_agent_not_found",
+  );
+  assert.equal(
+    mergeTailRepairAgentRefusal(archived.id, agents, { projectId: "project-1" })?.code,
+    "staffing_profile_agent_archived",
   );
 });
 

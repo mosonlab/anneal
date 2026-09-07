@@ -10,16 +10,19 @@
  * profiles existed.
  *
  * Every write takes the Agent-row mutex (`lockAgentRows`) that archive and
- * instantiation take, after the template row. Without it an archive committing
- * between the validity read and the profile write would leave a saved profile
- * pointing at an agent no runner will ever claim.
+ * instantiation take, after the template row. This keeps the identity and
+ * lifecycle checks ordered with other writers; a later archive is handled by
+ * the merge-tail fallback for the repair slot.
  */
 
 import {
   AssigneeType,
   catalogRunnerForModel,
+  canonicalMergeTailRepairAgentRole,
+  findCanonicalAgent,
   integratorBindingRefusal,
   isCompoundImplementationStep,
+  lockAgentRepoGrant,
   lockAgentRows,
   lockTemplateRow,
   Prisma,
@@ -54,11 +57,15 @@ export type CreateStaffingProfileInput = {
   name: string;
   entries: StaffingProfileEntryInput[];
   isDefault?: boolean | undefined;
+  mergeTailRepairAgentId?: string | null | undefined;
+  repoId?: string | undefined;
 };
 
 export type ReplaceStaffingProfileInput = {
   name: string;
   entries: StaffingProfileEntryInput[];
+  mergeTailRepairAgentId?: string | null | undefined;
+  repoId?: string | undefined;
 };
 
 export type StaffingProfileResult = {
@@ -78,6 +85,7 @@ const profileSelect = {
   taskTemplateId: true,
   name: true,
   isDefault: true,
+  mergeTailRepairAgentId: true,
   createdAt: true,
   updatedAt: true,
   entries: {
@@ -92,6 +100,7 @@ type ProfileRow = {
   taskTemplateId: string;
   name: string;
   isDefault: boolean;
+  mergeTailRepairAgentId: string | null;
   createdAt: Date;
   updatedAt: Date;
   entries: StaffingProfileEntryContract[];
@@ -99,6 +108,115 @@ type ProfileRow = {
 
 const readProfile = async (tx: Tx, profileId: string): Promise<ProfileRow> =>
   tx.staffingProfile.findUniqueOrThrow({ where: { id: profileId }, select: profileSelect });
+
+/**
+ * Validate the profile-level repair slot with the same ownership and lifecycle
+ * rules as an entry. Repository access is checked against an explicit or
+ * unambiguous repository context when a new slot is written; a profile has no
+ * repository of its own and may serve chains instantiated against different
+ * Repos.
+ */
+export const mergeTailRepairAgentRefusal = (
+  agentId: string | null,
+  agents: ReadonlyMap<string, ValidationAgent>,
+  context: { projectId: string },
+): StaffingProfileRefusal | null => {
+  if (agentId === null) return null;
+  const agent = agents.get(agentId);
+  if (!agent || agent.projectId !== context.projectId) {
+    return refuse(
+      "staffing_profile_agent_not_found",
+      `Merge-tail repair Agent ${agentId} was not found in this project`,
+    );
+  }
+  if (agent.archivedAt !== null) {
+    return refuse(
+      "staffing_profile_agent_archived",
+      `Merge-tail repair Agent ${agent.name} is archived`,
+    );
+  }
+  return null;
+};
+
+const validateMergeTailRepairAgent = (
+  agentId: string | null,
+  agents: ReadonlyMap<string, ValidationAgent>,
+  context: { projectId: string },
+): void => {
+  const refusal = mergeTailRepairAgentRefusal(agentId, agents, context);
+  if (refusal) throw refusal;
+};
+
+type ProfileRepo = { id: string; name: string };
+
+/** Resolve the repository against which a profile-level repair slot is saved.
+ * A profile has no repository of its own: an explicit context wins, then a
+ * template webhook Repo, then the only Repo in the project. Multiple or zero
+ * candidates are refused so a write cannot claim a grant was checked against
+ * an arbitrary Repo. */
+const profileRepoFor = async (
+  tx: Tx,
+  input: { projectId: string; taskTemplateId: string; repoId?: string },
+): Promise<ProfileRepo> => {
+  if (input.repoId !== undefined) {
+    const repo = await tx.repo.findFirst({
+      where: { id: input.repoId, projectId: input.projectId },
+      select: { id: true, name: true },
+    });
+    if (!repo) {
+      throw refuse(
+        "staffing_profile_repo_not_found",
+        `Repo ${input.repoId} is not in project ${input.projectId}`,
+      );
+    }
+    return repo;
+  }
+
+  const template = await tx.taskTemplate.findUnique({
+    where: { id: input.taskTemplateId },
+    select: { webhookRepoId: true },
+  });
+  if (template?.webhookRepoId !== null && template?.webhookRepoId !== undefined) {
+    const repo = await tx.repo.findFirst({
+      where: { id: template.webhookRepoId, projectId: input.projectId },
+      select: { id: true, name: true },
+    });
+    if (!repo) {
+      throw refuse(
+        "staffing_profile_repo_not_found",
+        `Template ${input.taskTemplateId} webhook Repo ${template.webhookRepoId} is not in project ${input.projectId}`,
+      );
+    }
+    return repo;
+  }
+
+  const repos = await tx.repo.findMany({
+    where: { projectId: input.projectId },
+    orderBy: { id: "asc" },
+    select: { id: true, name: true },
+  });
+  if (repos.length === 1) return repos[0]!;
+  throw refuse(
+    "staffing_profile_repo_required",
+    repos.length === 0
+      ? `Project ${input.projectId} has no Repo to validate the merge-tail repair Agent grant against`
+      : `Project ${input.projectId} has multiple Repos; supply repoId to validate the merge-tail repair Agent grant`,
+  );
+};
+
+const validateMergeTailRepairGrant = async (
+  tx: Tx,
+  agentId: string,
+  repo: ProfileRepo,
+  projectId: string,
+): Promise<void> => {
+  if (!await lockAgentRepoGrant(tx, { projectId, agentId, repoId: repo.id })) {
+    throw refuse(
+      "staffing_profile_missing_repo_grant",
+      `Merge-tail repair Agent ${agentId} has no grant for Repo ${repo.name}`,
+    );
+  }
+};
 
 /** The template graph facts a profile is validated against. */
 type ValidationStep = {
@@ -386,10 +504,24 @@ const requireTemplate = async (
 const requireProfile = async (
   tx: Tx,
   profileId: string,
-): Promise<{ id: string; projectId: string; taskTemplateId: string; name: string; isDefault: boolean }> => {
+): Promise<{
+  id: string;
+  projectId: string;
+  taskTemplateId: string;
+  name: string;
+  isDefault: boolean;
+  mergeTailRepairAgentId: string | null;
+}> => {
   const profile = await tx.staffingProfile.findUnique({
     where: { id: profileId },
-    select: { id: true, projectId: true, taskTemplateId: true, name: true, isDefault: true },
+    select: {
+      id: true,
+      projectId: true,
+      taskTemplateId: true,
+      name: true,
+      isDefault: true,
+      mergeTailRepairAgentId: true,
+    },
   });
   if (!profile) throw refuse("staffing_profile_not_found", `Staffing profile ${profileId} was not found`);
   return profile;
@@ -466,9 +598,20 @@ export const createStaffingProfile = async (
   const name = input.name.trim();
   await assertNameFree(tx, template.id, name);
   const steps = await readSteps(tx, template.id);
-  const agents = await lockedAgents(tx, input.entries.flatMap((entry) => (
-    entry.assigneeAgentId ? [entry.assigneeAgentId] : []
-  )));
+  const agents = await lockedAgents(tx, [
+    ...input.entries.flatMap((entry) => entry.assigneeAgentId ? [entry.assigneeAgentId] : []),
+    ...(input.mergeTailRepairAgentId ? [input.mergeTailRepairAgentId] : []),
+  ]);
+  const repairAgentId = input.mergeTailRepairAgentId ?? null;
+  validateMergeTailRepairAgent(repairAgentId, agents, { projectId });
+  if (repairAgentId !== null) {
+    const repo = await profileRepoFor(tx, {
+      projectId,
+      taskTemplateId: template.id,
+      ...(input.repoId === undefined ? {} : { repoId: input.repoId }),
+    });
+    await validateMergeTailRepairGrant(tx, repairAgentId, repo, projectId);
+  }
   const validated = validateStaffingEntries(input.entries, steps, agents, {
     projectId,
     templateName: template.name,
@@ -478,7 +621,13 @@ export const createStaffingProfile = async (
   // profiles but no default would silently instantiate from canonical.
   const siblingCount = await tx.staffingProfile.count({ where: { taskTemplateId: template.id } });
   const created = await tx.staffingProfile.create({
-    data: { projectId, taskTemplateId: template.id, name, isDefault: false },
+    data: {
+      projectId,
+      taskTemplateId: template.id,
+      name,
+      isDefault: false,
+      mergeTailRepairAgentId: repairAgentId,
+    },
     select: { id: true, taskTemplateId: true },
   });
   await writeEntries(tx, created.id, validated.entries);
@@ -496,14 +645,30 @@ export const replaceStaffingProfile = async (
   const name = input.name.trim();
   await assertNameFree(tx, template.id, name, existing.id);
   const steps = await readSteps(tx, template.id);
-  const agents = await lockedAgents(tx, input.entries.flatMap((entry) => (
-    entry.assigneeAgentId ? [entry.assigneeAgentId] : []
-  )));
+  const requestedRepairAgentId = input.mergeTailRepairAgentId === undefined
+    ? existing.mergeTailRepairAgentId ?? null
+    : input.mergeTailRepairAgentId;
+  const agents = await lockedAgents(tx, [
+    ...input.entries.flatMap((entry) => entry.assigneeAgentId ? [entry.assigneeAgentId] : []),
+    ...(requestedRepairAgentId ? [requestedRepairAgentId] : []),
+  ]);
+  validateMergeTailRepairAgent(requestedRepairAgentId, agents, { projectId: existing.projectId });
+  if (requestedRepairAgentId !== null && input.mergeTailRepairAgentId !== undefined) {
+    const repo = await profileRepoFor(tx, {
+      projectId: existing.projectId,
+      taskTemplateId: template.id,
+      ...(input.repoId === undefined ? {} : { repoId: input.repoId }),
+    });
+    await validateMergeTailRepairGrant(tx, requestedRepairAgentId, repo, existing.projectId);
+  }
   const validated = validateStaffingEntries(input.entries, steps, agents, {
     projectId: existing.projectId,
     templateName: template.name,
   });
-  await tx.staffingProfile.update({ where: { id: existing.id }, data: { name } });
+  await tx.staffingProfile.update({
+    where: { id: existing.id },
+    data: { name, mergeTailRepairAgentId: requestedRepairAgentId },
+  });
   await writeEntries(tx, existing.id, validated.entries);
   return { profile: await readProfile(tx, existing.id), warnings: validated.warnings };
 });
@@ -512,19 +677,46 @@ export const replaceStaffingProfile = async (
 export const resetStaffingProfile = async (
   db: PrismaClient,
   profileId: string,
+  repoId?: string,
 ): Promise<StaffingProfileResult> => serializable(db, async (tx) => {
   const existing = await requireProfile(tx, profileId);
   const template = await requireTemplate(tx, existing.projectId, existing.taskTemplateId);
   const steps = await readSteps(tx, template.id);
   const entries = canonicalStaffingEntries(steps);
-  const agents = await lockedAgents(tx, entries.flatMap((entry) => (
-    entry.assigneeAgentId ? [entry.assigneeAgentId] : []
-  )));
+  const resetRepairRole = canonicalMergeTailRepairAgentRole(template.name);
+  const defaultRepairAgent = resetRepairRole === null ? null : await findCanonicalAgent(tx, {
+    projectId: existing.projectId,
+    canonicalRole: resetRepairRole,
+    activeOnly: false,
+  });
+  if (resetRepairRole !== null && defaultRepairAgent === null) {
+    throw refuse(
+      "staffing_profile_agent_not_found",
+      `Canonical merge-tail repair Agent ${resetRepairRole} was not found in project ${existing.projectId}`,
+    );
+  }
+  const agents = await lockedAgents(tx, [
+    ...entries.flatMap((entry) => entry.assigneeAgentId ? [entry.assigneeAgentId] : []),
+    ...(defaultRepairAgent ? [defaultRepairAgent.id] : []),
+  ]);
+  validateMergeTailRepairAgent(defaultRepairAgent?.id ?? null, agents, { projectId: existing.projectId });
+  if (defaultRepairAgent) {
+    const repo = await profileRepoFor(tx, {
+      projectId: existing.projectId,
+      taskTemplateId: template.id,
+      ...(repoId === undefined ? {} : { repoId }),
+    });
+    await validateMergeTailRepairGrant(tx, defaultRepairAgent.id, repo, existing.projectId);
+  }
   const validated = validateStaffingEntries(entries, steps, agents, {
     projectId: existing.projectId,
     templateName: template.name,
   });
   await writeEntries(tx, existing.id, validated.entries);
+  await tx.staffingProfile.update({
+    where: { id: existing.id },
+    data: { mergeTailRepairAgentId: defaultRepairAgent?.id ?? null },
+  });
   return { profile: await readProfile(tx, existing.id), warnings: validated.warnings };
 });
 
@@ -589,12 +781,25 @@ export const installDefaultStaffingProfile = async (
   const existing = await tx.staffingProfile.count({ where: { taskTemplateId: input.taskTemplateId } });
   if (existing > 0) return;
   const steps = await readSteps(tx, input.taskTemplateId);
+  const sourceTemplate = await tx.taskTemplate.findUnique({
+    where: { id: input.taskTemplateId },
+    select: { name: true },
+  });
+  const repairRole = sourceTemplate === null
+    ? null
+    : canonicalMergeTailRepairAgentRole(sourceTemplate.name);
+  const defaultRepairAgent = repairRole === null ? null : await findCanonicalAgent(tx, {
+    projectId: input.projectId,
+    canonicalRole: repairRole,
+    activeOnly: true,
+  });
   const profile = await tx.staffingProfile.create({
     data: {
       projectId: input.projectId,
       taskTemplateId: input.taskTemplateId,
       name: DEFAULT_STAFFING_PROFILE_NAME,
       isDefault: true,
+      mergeTailRepairAgentId: repairRole === null ? null : defaultRepairAgent?.id ?? null,
     },
     select: { id: true },
   });
@@ -623,6 +828,7 @@ export const copyStaffingProfiles = async (
         taskTemplateId: input.toTaskTemplateId,
         name: source.name,
         isDefault: source.isDefault,
+        mergeTailRepairAgentId: source.mergeTailRepairAgentId,
       },
       select: { id: true },
     });
