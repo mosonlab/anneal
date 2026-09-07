@@ -18,7 +18,7 @@ import {
 } from "@anneal/db";
 
 import { readBoard } from "./board.js";
-import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
+import { GitHubReadError, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";
 import {
   deferredLeaseReleases,
   deferredLeaseReleasesStatement,
@@ -1501,6 +1501,42 @@ test("a later outage waits out its own ceiling rather than the task's whole hist
     );
     assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.TODO);
     assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.DONE);
+  });
+});
+
+test("a deferred read inside an outage keeps the outage's wait", async () => {
+  await withExecutorAllowlist(EXECUTOR_RUNNER_ID, async () => {
+    const seeded = await seedReadiness();
+    const offline = executorsAt(OFFLINE_NOW);
+    assert.equal(
+      (await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, offline)).requeued,
+      1,
+    );
+
+    // A GitHub timeout defers the tick before it can observe the executor at
+    // all, so it says nothing about whether the outage ended: the episode stays
+    // open and the wait keeps its start rather than being handed a new window.
+    const timingOut: PullRequestReader = {
+      readPullRequest: async () => {
+        throw new GitHubReadError("readiness evaluation timed out", "timeout");
+      },
+      compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+    };
+    const midWait = new Date(OFFLINE_NOW.getTime() + 5 * 60_000);
+    await readinessTick(db, timingOut, midWait, 5, releaseChainLease, runWithMergeLease, offline);
+    const markers = await offlineMarkers(seeded.readiness.id);
+    assert.equal(markers.length, 1);
+    assert.notEqual((markers[0]!.metadata as Record<string, unknown>).episodeClosed, true);
+
+    const expired = new Date(OFFLINE_NOW.getTime() + MERGE_EXECUTOR_OFFLINE_WAIT_MS);
+    assert.deepEqual(
+      await readinessTick(db, reader(), expired, 5, releaseChainLease, runWithMergeLease, offline),
+      { claimed: 1, authorized: 0, requeued: 0, stopped: 1 },
+    );
+    assert.match(
+      (await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).failureReason ?? "",
+      /merge-executor-offline/u,
+    );
   });
 });
 

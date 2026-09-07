@@ -1096,10 +1096,15 @@ const runReadinessDecision = async (
     return;
   }
 
-  // Nothing blocks an authorization on this tick: either an executor answered
-  // the liveness read or no allowlist names one. Either way any outage this
-  // Step was waiting out has ended, and the next one starts its own wait.
-  await closeExecutorOfflineEpisode(db, readiness.id);
+  // The outage ends only when this tick observed it ending: an authorization
+  // reached the liveness read and nothing blocked it, or the Step settles for
+  // good and its next readiness starts a wait of its own. A deferred or skipped
+  // tick observed nothing about the executor, so the episode it may be inside
+  // stays open and keeps its start; otherwise one transport timeout inside the
+  // wait would hand the outage a fresh window.
+  if (decision.kind === "authorize" || decision.kind === "requeue-regression" || decision.kind === "stop") {
+    await closeExecutorOfflineEpisode(db, readiness.id);
+  }
 
   // The alert window measures continuous contention, so anything other than
   // another refusal breaks the run. Only an authorization reaches for the
