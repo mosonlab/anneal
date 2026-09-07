@@ -1009,6 +1009,31 @@ malformed canonical output, absent Chain id or final pull request, failed edit,
 unreadable read-back, body mismatch, failed cleanup, or retained tracked
 `.chain/` content is a delivery failure.
 
+### `merge-authorization` output
+
+The `merge-authorization` step records its authorization object in the task
+activity metadata. Its existing fields retain their current meanings. An
+ordinary single-candidate authorization omits `train` and keeps the existing
+shape and behavior. A train authorization may include this optional object:
+
+```json
+{
+  "train": {
+    "publishHead": "<40-hex prefix SHA>",
+    "predecessorOid": "<40-hex predecessor SHA>",
+    "ref": "refs/anneal/train/<publishHead>",
+    "position": 1,
+    "trainTaskId": "<train task id>"
+  }
+}
+```
+
+`publishHead` and `predecessorOid` are 40-hex commit SHAs, `ref` must be
+exactly `refs/anneal/train/<publishHead>`, and `position` is a positive,
+1-based integer. `trainTaskId` identifies the control-plane train task. The
+control plane supplies this object; it is consumed by the merge executor when
+it publishes and replays a cumulative prefix.
+
 ### GET `/projects/:projectId/task-templates`
 
 - Required path parameter: `projectId`.
