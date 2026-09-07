@@ -7,7 +7,7 @@ import {
   isCanonicalAgentStep,
   isCanonicalBlindFindingsStep,
   isLegacyCombinedBlindReviewStep,
-  isCanonicalSolFindingsStep,
+  isCanonicalReviewFindingsStep,
   isCanonicalFixStep,
   canonicalOutputRefusal,
   persistSessionTaskOutput,
@@ -22,7 +22,7 @@ const step = (template: string, stepIndex: number, outputKind: string) => ({
   outputKind,
 });
 
-type ReviewKind = "sol-findings" | "blind-findings";
+type ReviewKind = "review-findings" | "sol-findings" | "blind-findings";
 
 type ReviewTask = {
   id: string;
@@ -53,7 +53,7 @@ const reviewBody = (kind: ReviewKind, reviewedBase = REVIEW_BASE): string => JSO
   reviewedBase,
   reviewedHead: REVIEW_HEAD,
   findings: [],
-  ...(kind === "sol-findings" ? { commandsRun: ["git diff --check"] } : {}),
+  ...(kind !== "blind-findings" ? { commandsRun: ["git diff --check"] } : {}),
 });
 
 const fixedBody = (): string => JSON.stringify({
@@ -79,7 +79,7 @@ const reviewTask = (
 ): ReviewTask => ({
   id,
   templateStep: {
-    stepIndex: kind === "sol-findings" ? 3 : 4,
+    stepIndex: kind !== "blind-findings" ? 3 : 4,
     outputKind: kind,
     taskTemplate: { name: "direct-engineer-workflow" },
   },
@@ -247,7 +247,7 @@ test("blind-findings is a versioned immutable review output and cannot be author
     reviewedHead: headSha,
     findings: [],
   });
-  assert.equal(isCanonicalSolFindingsStep(step("direct-engineer-workflow", 2, "sol-findings")), true);
+  assert.equal(isCanonicalReviewFindingsStep(step("direct-engineer-workflow", 2, "sol-findings")), true);
   assert.equal(canonicalOutputRefusal(blindStep, {
     runId: "run-1",
     kind: "blind-findings",
@@ -267,18 +267,18 @@ test("blind-findings is a versioned immutable review output and cannot be author
 test("immutable findings from a prior Run are accepted only after canonical validation", () => {
   const headSha = "a".repeat(40);
   const baseSha = "b".repeat(40);
-  const reviewBody = (kind: "sol-findings" | "blind-findings", overrides: Record<string, unknown> = {}) => JSON.stringify({
+  const reviewBody = (kind: ReviewKind, overrides: Record<string, unknown> = {}) => JSON.stringify({
     schemaVersion: 1,
     headSha,
     reviewedBase: baseSha,
     reviewedHead: headSha,
     findings: [],
-    ...(kind === "sol-findings" ? { commandsRun: ["git diff --check"] } : {}),
+    ...(kind !== "blind-findings" ? { commandsRun: ["git diff --check"] } : {}),
     ...overrides,
   });
 
-  for (const kind of ["sol-findings", "blind-findings"] as const) {
-    const reviewStep = step("direct-engineer-workflow", kind === "sol-findings" ? 2 : 3, kind);
+  for (const kind of ["review-findings", "sol-findings", "blind-findings"] as const) {
+    const reviewStep = step("direct-engineer-workflow", kind !== "blind-findings" ? 2 : 3, kind);
     const output = (overrides: Partial<{
       runId: string | null;
       kind: string;
@@ -368,12 +368,25 @@ const persistenceRefusal = (
   result: Awaited<ReturnType<typeof persistFixedOutput>>,
 ): string | null => "ok" in result ? (result.ok ? null : result.reason) : result.reason;
 
-test("a fixed-implementation output accepts a sole Sol review sibling", async () => {
-  const result = await persistFixedOutput({
-    reviewTasks: [reviewTask("sol-task", "sol-findings")],
+for (const kind of ["review-findings", "sol-findings"] as const) {
+  test(`a fixed-implementation output accepts the ${kind} review contract`, async () => {
+    const result = await persistFixedOutput({ reviewTasks: [reviewTask("review-task", kind)] });
+    assert.equal(persistenceRefusal(result), null);
   });
 
-  assert.equal(persistenceRefusal(result), null);
+  test(`a ${kind} Step refuses the other review kind even though its role matches`, async () => {
+    const task = reviewTask("review-task", kind);
+    task.stepOutput!.kind = kind === "review-findings" ? "sol-findings" : "review-findings";
+    const result = await persistFixedOutput({ reviewTasks: [task] });
+    assert.match(persistenceRefusal(result) ?? "", /requires exactly one immutable review-findings sibling output/u);
+  });
+}
+
+test("two review kind aliases cannot supply two reports for one review role", async () => {
+  const result = await persistFixedOutput({
+    reviewTasks: [reviewTask("old-review", "sol-findings"), reviewTask("new-review", "review-findings")],
+  });
+  assert.match(persistenceRefusal(result) ?? "", /requires exactly one immutable review-findings sibling output/u);
 });
 
 test("a present blind review sibling without output keeps its exact refusal", async () => {

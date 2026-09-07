@@ -5,6 +5,7 @@ import {
   lockChainRows,
   lockChainStructure,
   openRun,
+  runBirthRefusalMetadata,
   Prisma,
   type PrismaClient,
   ScheduleKind,
@@ -187,13 +188,13 @@ export const fireCronTask = async (
             taskId: task.id,
             actorType: "scheduler",
             body: `Recurring schedule advanced without a Run: ${refusal.message}`,
-            metadata: { recurringTaskId: task.id, copyTaskId: copy.id, refusal: refusal.code },
+            metadata: { ...runBirthRefusalMetadata(refusal), recurringTaskId: task.id, copyTaskId: copy.id },
           },
           {
             taskId: copy.id,
             actorType: "scheduler",
             body: `Created from recurring task ${task.id}; Run birth refused: ${refusal.message}`,
-            metadata: { recurringTaskId: task.id, refusal: refusal.code },
+            metadata: { ...runBirthRefusalMetadata(refusal), recurringTaskId: task.id },
           },
         ] });
         return false;
@@ -253,7 +254,7 @@ export const fireAtTask = async (db: PrismaClient, task: Task, now: Date): Promi
             taskId: task.id,
             actorType: "scheduler",
             body: `Schedule quarantined after Run birth refusal: ${refusal.message}`,
-            metadata: { refusal: refusal.code },
+            metadata: runBirthRefusalMetadata(refusal),
           } });
           return false;
         default: {

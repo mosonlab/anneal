@@ -4,7 +4,7 @@ layer: 3
 agent: code-reviewer-sol-high
 approvalGate: false
 optional: false
-outputKind: sol-findings
+outputKind: review-findings
 priorOutputKinds: [implementation]
 attachmentsFromPrevious: true
 opensPullRequest: false

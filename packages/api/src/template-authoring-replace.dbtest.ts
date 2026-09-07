@@ -99,7 +99,7 @@ const seedTemplate = async (label: string, name = "editable-template") => {
         priorOutputKinds: ["implementation"],
         spawnPolicy: Prisma.JsonNull,
         runner: null,
-        outputKind: "sol-findings",
+        outputKind: "review-findings",
         opensPullRequest: false,
         requiresCommit: false,
         baseFromStepIndex: 1,
@@ -214,7 +214,7 @@ test("replace adds, removes, reorders, and edits every Step field with dense ind
       priorOutputKinds: ["implementation"],
       spawnPolicy: { maxChildren: 1 },
       runner: null,
-      outputKind: "sol-findings",
+      outputKind: "review-findings",
       opensPullRequest: false,
       requiresCommit: false,
       baseFromStepIndex: 1,
@@ -228,7 +228,7 @@ test("replace adds, removes, reorders, and edits every Step field with dense ind
       approvalGate: true,
       optional: false,
       attachmentsFromPrevious: true,
-      priorOutputKinds: ["sol-findings"],
+      priorOutputKinds: ["review-findings"],
       spawnPolicy: null,
       runner: null,
       outputKind: "approval",
@@ -420,7 +420,7 @@ test("replace remaps staffing entries by exact output kind and reports the orpha
       entries: {
         create: [
           { outputKind: "implementation", assigneeAgentId: seed.agents[0]!.id, include: null },
-          { outputKind: "sol-findings", assigneeAgentId: seed.agents[1]!.id, include: null },
+          { outputKind: "review-findings", assigneeAgentId: seed.agents[1]!.id, include: null },
           { outputKind: "documentation", assigneeAgentId: seed.agents[2]!.id, include: null },
         ],
       },
@@ -441,7 +441,7 @@ test("replace remaps staffing entries by exact output kind and reports the orpha
         priorOutputKinds: ["implementation"],
         spawnPolicy: null,
         runner: null,
-        outputKind: "sol-findings",
+        outputKind: "review-findings",
         opensPullRequest: false,
         requiresCommit: false,
         baseFromStepIndex: 1,
@@ -464,14 +464,14 @@ test("replace remaps staffing entries by exact output kind and reports the orpha
     orderBy: { outputKind: "asc" },
   });
   // The surviving kinds keep their exact opinions; the orphan is gone rather
-  // than re-pointed at a step the operator never chose. `sol-findings` became
+  // than re-pointed at a step the operator never chose. `review-findings` became
   // optional in the replacement, so it gains the default opinion instead of
   // staying an optional step the profile says nothing about (R3).
   assert.deepEqual(
     entries.map(({ outputKind, assigneeAgentId, include }) => ({ outputKind, assigneeAgentId, include })),
     [
       { outputKind: "implementation", assigneeAgentId: seed.agents[0]!.id, include: null },
-      { outputKind: "sol-findings", assigneeAgentId: seed.agents[1]!.id, include: true },
+      { outputKind: "review-findings", assigneeAgentId: seed.agents[1]!.id, include: true },
     ],
   );
 });
@@ -484,10 +484,10 @@ test("replace clears an include flag from a step that stopped being optional", a
       taskTemplateId: seed.template.id,
       name: "Default",
       isDefault: true,
-      entries: { create: [{ outputKind: "sol-findings", assigneeAgentId: null, include: false }] },
+      entries: { create: [{ outputKind: "review-findings", assigneeAgentId: null, include: false }] },
     },
   });
-  // The seeded graph already has a non-optional `sol-findings` step; replacing
+  // The seeded graph already has a non-optional `review-findings` step; replacing
   // it with itself is enough to prove the flag cannot survive.
   const result = await request(seed.project.id, seed.template.id, {
     steps: [
@@ -503,7 +503,7 @@ test("replace clears an include flag from a step that stopped being optional", a
         priorOutputKinds: ["implementation"],
         spawnPolicy: null,
         runner: null,
-        outputKind: "sol-findings",
+        outputKind: "review-findings",
         opensPullRequest: false,
         requiresCommit: false,
         baseFromStepIndex: 1,
@@ -515,7 +515,7 @@ test("replace clears an include flag from a step that stopped being optional", a
   assert.deepEqual(
     (await db.staffingProfileEntry.findMany({ where: { profile: { taskTemplateId: seed.template.id } } }))
       .map(({ outputKind, include }) => ({ outputKind, include })),
-    [{ outputKind: "sol-findings", include: null }],
+    [{ outputKind: "review-findings", include: null }],
   );
 });
 
@@ -530,7 +530,7 @@ test("replace clears a staffing opinion the new graph no longer allows", async (
       entries: {
         create: [
           { outputKind: "implementation", assigneeAgentId: seed.agents[0]!.id, include: null },
-          { outputKind: "sol-findings", assigneeAgentId: seed.agents[1]!.id, include: null },
+          { outputKind: "review-findings", assigneeAgentId: seed.agents[1]!.id, include: null },
         ],
       },
     },
@@ -554,7 +554,7 @@ test("replace clears a staffing opinion the new graph no longer allows", async (
         priorOutputKinds: ["implementation"],
         spawnPolicy: null,
         runner: null,
-        outputKind: "sol-findings",
+        outputKind: "review-findings",
         opensPullRequest: false,
         requiresCommit: false,
         baseFromStepIndex: 1,
@@ -567,8 +567,8 @@ test("replace clears a staffing opinion the new graph no longer allows", async (
   const dropped = result.body.warnings
     .filter((warning: { code: string }) => warning.code === "staffing_profile_assignee_dropped");
   assert.equal(dropped.length, 1, JSON.stringify(result.body.warnings));
-  assert.equal(dropped[0].outputKind, "sol-findings");
-  assert.match(dropped[0].message, /Staffing profile Default entry sol-findings lost its Agent/u);
+  assert.equal(dropped[0].outputKind, "review-findings");
+  assert.match(dropped[0].message, /Staffing profile Default entry review-findings lost its Agent/u);
   assert.match(dropped[0].message, /only AGENT steps may be staffed/u);
 
   assert.deepEqual(
@@ -578,7 +578,7 @@ test("replace clears a staffing opinion the new graph no longer allows", async (
     })).map(({ outputKind, assigneeAgentId, include }) => ({ outputKind, assigneeAgentId, include })),
     [
       { outputKind: "implementation", assigneeAgentId: seed.agents[0]!.id, include: null },
-      { outputKind: "sol-findings", assigneeAgentId: null, include: null },
+      { outputKind: "review-findings", assigneeAgentId: null, include: null },
     ],
   );
 });

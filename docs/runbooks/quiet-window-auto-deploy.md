@@ -490,13 +490,52 @@ On crossing the budget the deploy, still waiting:
   scoped to the deployment attempt, so a later attempt with the same revisions
   and the same timing raises its own message rather than reusing this one.
 
-No escalation marker is written, so no `--clear-escalation` is needed and the
-next scheduled deploy is not blocked by the alert. A wait that stays blocked
-re-alerts at most once per hour; an alert that fails to reach the Inbox does
-not consume that hour and is retried on the next poll. Delivery runs beside
-the polling loop, so a stalled notifier never delays acquiring the window. A
-wait that crosses the budget and then finds its window on the next poll still
-alerts and still records its event.
+It also opens a **dispatch drain**: one `DispatchDrain` row naming this host,
+its deploy role and the two commits. While that row is unexpired the control
+plane refuses every claim — agent and mechanical — with `409 Conflict` and code
+`dispatch-draining`, so the Runs already executing finish and no new ones start.
+Running Runs are never interrupted, no chain is held, and the runners keep
+polling and reporting themselves, so `GET /runners` shows them online with
+`dispatchDrain` set rather than lost. The deploy deletes the row on every exit
+path it has — success, failure, escalation and interruption — and a delete that
+fails is logged as `STOP dispatch-drain-delete-failed` and written to the
+escalation record. `expiresAt` is the fail-safe for a deploy process that dies
+mid-wait: the claim route treats an expired row as absent, so the fleet resumes
+by itself **120 minutes** after the deploy last reported itself even if nothing
+deleted it. A wait that is still running pushes that deadline out on each hourly
+alert, so the bound measures silence rather than capping how long one wait may
+drain dispatch. Override it with `DISPATCH_DRAIN_DEADLINE_MINUTES` in
+**`shared/.env`** (an integer from 1 through 1440, validated like the wait budget
+above). A deploy that finds its quiet window inside the budget opens no drain at
+all.
+
+The drain's own lines name the row, so an operator reading the log can match a
+refused claim to the deploy that caused it, to each renewal, and to the moment
+it ended:
+
+```
+HOLD dispatch-draining id=cmt0drain0001 expires=2026-09-07T04:00:00.000Z
+PASS dispatch-drain-cleared id=cmt0drain0001 rows=1
+```
+
+Two things read differently from the outside while a drain is open. The merge
+executor does not recognise the refusal, so it logs `claim loop error` once per
+poll interval for as long as the drain lasts; that noise is expected and stops
+with the drain. And once the deploy holds the deploy barrier the refusal ends —
+the runners log `Runner claim drain refusal ended` and claims answer `204` —
+while `dispatchDrain` stays set in `GET /runners` until the release has landed
+and the deploy deletes its row. If a deploy process was killed before it could
+delete its row and the fleet must claim again before the deadline, delete that
+one row by the id in its `HOLD dispatch-draining` line:
+`DELETE FROM "DispatchDrain" WHERE id = '<id>';`.
+
+No escalation marker is written for the wait itself, so no `--clear-escalation`
+is needed and the next scheduled deploy is not blocked by the alert. A wait
+that stays blocked re-alerts at most once per hour; an alert that fails to
+reach the Inbox does not consume that hour and is retried on the next poll.
+Delivery runs beside the polling loop, so a stalled notifier never delays
+acquiring the window. A wait that crosses the budget and then finds its window
+on the next poll still alerts and still records its event.
 
 The control-plane quiet-window query is **database-wide**: it counts every
 `claimed`, `provisioning`, or `running` Run in the platform database,
@@ -632,19 +671,55 @@ An existing escalation may be retried unattended only for
 `remote-main-unreadable`, `remote-main-read-timeout`,
 `control-plane-version-unreachable`, `control-plane-commit-unavailable`,
 `source-remote-unreadable`, `source-remote-read-timeout`,
-`quiet-window-query-failed`, or `deploy-barrier-unavailable`. Environment,
-authentication, malformed remote state, build, artifact, verification, and
-filesystem-state failures stay operator-latched.
+`quiet-window-query-failed`, or `deploy-barrier-unavailable`. The reason
+`release-artifact-build-failed` is retryable-transient only when its detail
+matches one of these source clone/fetch transport failures:
+`gnutls_handshake() failed`, `SSL_ERROR_SYSCALL`, `could not fetch … from
+promisor remote`, or `read timeout` (case-insensitive). The detail must contain
+the builder's terminal `DeployFailure: release-artifact-source-unavailable:
+exit-128` header and a matching final `fatal:` diagnostic before that exception
+(allowing Node's throw-site display). This identifies the source clone or
+checkout's promisor fetch; earlier recovered transport errors, terminal
+compile/dependency failures, and ambiguous output do not qualify. The allowlist is explicit
+and fail-closed: compile, test, missing-dependency, unknown, and every other
+build detail remains commit-scoped when the marker names a full target commit.
+Environment, authentication, malformed remote state, artifact, verification,
+and filesystem-state failures stay operator-latched.
 
 The initial escalation is attempt 1. Later eligible failures atomically
-replace the marker with an incremented count. Attempts below the fixed cap of
-5 may run again; attempt 5 blocks later ticks like a permanent escalation.
-Admission alone never clears a marker. A full successful deployment, or proof
-that the target is already deployed, must complete before the job reports
-recovery, removes `.agentos-deploy/escalated.json`, and logs
-`SELF-CLEAR escalation reason=<reason> attempts=<n>`. If the recovery
-notification fails, the marker remains. Confirm the SELF-CLEAR entry and
-closed recovery notification before dismissing the original failure.
+replace the marker with an incremented count. Retryable-transient markers at
+attempts 1 through 4 still admit on the next tick without a backoff. At
+attempt 5, the marker carries a `retryAfter` timestamp and waits five minutes
+before its next admission. If that retry fails, later retries wait 10, 20, 40,
+and then 60 minutes; 60 minutes is the cap for all subsequent attempts. The
+marker is the single source of truth for this schedule. A legacy capped marker
+without `retryAfter` derives its first deadline from `escalatedAt` plus the
+delay for its attempt count. At rollout, a pre-existing capped marker whose
+computed deadline has already passed admits one immediate retry on the first
+tick; operators should not expect a fresh five-minute wait after installation.
+While the deadline is in the future, the tick
+stays stopped and logs:
+
+```text
+STOP escalation-active scope=retryable-transient retry-after=<ISO> remaining-wait-seconds=<n> path=<path>
+```
+
+When `retryAfter` has expired, the tick admits a normal full attempt. Admission
+does not clear the marker: only a successful full deployment, or proof that
+the target is already deployed, followed by a successful recovery
+notification removes `.agentos-deploy/escalated.json` and logs
+`SELF-CLEAR escalation reason=<reason> attempts=<n>`. If the attempt fails, it
+replaces the marker with the incremented count and the next backoff. If the
+recovery notification fails, the marker remains. Confirm the SELF-CLEAR entry
+and closed recovery notification before dismissing the original failure.
+
+`host-scoped` markers retain their operator-action requirement and continue to
+stop every later tick until the named cause is repaired and an operator runs
+`--clear-escalation`. A `commit-scoped` marker blocks its recorded commit; if
+`origin/main` advances, the supersession rules below allow a newer target to
+proceed while the marker remains as history. If the recorded commit is still
+the target, it continues to stop that attempt until the cause is repaired and
+an operator runs `--clear-escalation`.
 
 ### Escalation classes
 
@@ -653,14 +728,21 @@ target commit `to` first and its `reason` second:
 
 - **retryable-transient** — a reason on the allowlist above, on a marker whose
   `to` is a full commit oid or the literal `unknown` the deploy records when it
-  failed before determining a target. The retry cap and self-clear rules in
-  this section own it end to end; the commit main points at does not change its
-  answer, in either direction. A transient-looking reason on a marker with any
-  other `to` (missing, or a value that is neither) is host-scoped instead: it
-  spends no retry attempt and blocks every deploy.
+  failed before determining a target. A `release-artifact-build-failed`
+  marker qualifies only for the source clone/fetch transport details listed
+  above; every other build detail is commit-scoped only when the marker names a
+  full target commit. The retry deadline and self-clear rules in this section
+  own a qualifying marker end to end; the commit main points at does not change
+  its answer, in either direction. A transport-detail build failure at the cap
+  therefore blocks newer commits until `retryAfter`, potentially for 60 minutes;
+  `--clear-escalation` is the operator override when deployment must not wait.
+  A transient-looking reason on a marker with
+  any other `to` (missing, or neither a full commit oid nor `unknown`) is
+  host-scoped instead: it spends no retry attempt and blocks every deploy.
 - **commit-scoped** — any other reason on a marker whose `to` is a full commit
-  oid: the failure was determined by that commit (its artifact build, its
-  migration, its verification). It blocks that commit and only that commit.
+  oid: the failure was determined by that commit (its non-transport artifact
+  build, its migration, or its verification). It blocks that commit and only
+  that commit.
 - **host-scoped** — a reason naming host state rather than the commit, or any
   marker whose `to` is missing or is neither a commit oid nor `unknown`,
   whatever its reason. It blocks every deploy.
@@ -713,8 +795,8 @@ read that fails while a commit-scoped marker is latched also stops with
 `STOP escalation-active target-unreadable reason=<reason>`, leaving the marker
 untouched: an unreadable remote cannot prove main moved.
 
-For any host-scoped escalation, an eligible escalation at the cap, or a
-commit-scoped escalation whose commit is still the target,
+For any host-scoped escalation or a commit-scoped escalation whose commit is
+still the target,
 inspect the ledger, logs, pointer identities, service states, and Inbox record;
 repair the named cause, build and verify the artifact again, and rerun
 `--dry-run`.

@@ -1409,6 +1409,47 @@ test("single-server mode remains unaffected by fallback grace", (t) => {
   assert.equal(readFileSync(clock, "utf8"), "1060");
 });
 
+test("one configured primary slot makes a busy remote-1 a fully busy primary", (t) => {
+  // Production sets AGENTOS_GATE_PRIMARY_SLOTS=1 when the worker's own
+  // worker-capacity is 1. The second dispatch must wait out the grace and then
+  // go to the fallback instead of taking remote-1-2 and blocking on the
+  // worker's execution lock, which is what the fixed pair produced.
+  const repo = fixtureRepo(t, {});
+  const cache = busyCache(t, ["remote-1"]);
+  const { env, clock } = dispatchClock(t);
+  const result = runDispatch(repo, cache, [repo.head, "--timeout-minutes", "10"],
+    { ...env, AGENTOS_GATE_PRIMARY_SLOTS: "1" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /primary primary\(1\)/u);
+  assert.match(result.stderr, /trying fallback.*fallback after 6 min; waited 6/u);
+  assert.match(result.stderr, /running on fallback/u);
+  assert.doesNotMatch(result.stderr, /running on primary/u);
+  assert.equal(readFileSync(clock, "utf8"), "1360");
+});
+
+test("two configured primary slots keep the second slot of a busy primary", (t) => {
+  const repo = fixtureRepo(t, {});
+  const { env } = dispatchClock(t);
+  for (const slots of [{}, { AGENTOS_GATE_PRIMARY_SLOTS: "2" }]) {
+    const result = runDispatch(repo, busyCache(t, ["remote-1"]),
+      [repo.head, "--timeout-minutes", "10"], { ...env, ...slots });
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stderr, /primary primary\(2\)/u);
+    assert.match(result.stderr, /running on primary/u);
+    assert.doesNotMatch(result.stderr, /running on fallback/u);
+  }
+});
+
+test("a primary slot count other than 1 or 2 is a usage error before any slot is tried", (t) => {
+  const repo = fixtureRepo(t, {});
+  for (const value of ["", "0", "3", "-1", "1.5", "two"]) {
+    const result = dispatch(t, repo, [repo.head], { AGENTOS_GATE_PRIMARY_SLOTS: value });
+    assert.equal(result.status, 2, result.stderr);
+    assert.match(result.stderr, /AGENTOS_GATE_PRIMARY_SLOTS must be 1 or 2/u);
+    assert.doesNotMatch(result.stderr, /running on/u);
+  }
+});
+
 test("a broken primary slot bypasses the busy-primary grace period", (t) => {
   const repo = fixtureRepo(t, {});
   const cache = busyCache(t, ["remote-1"]);

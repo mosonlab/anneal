@@ -197,9 +197,9 @@ test("a 12-step toy chain sends every claim exactly its declared prior outputs",
 test("an omitted producer kind is satisfied by absence without parking the target", async () => {
   const { template, tasks } = await createFixture([
     { outputKind: "implementation", priorOutputKinds: [] },
-    { outputKind: "sol-findings", priorOutputKinds: ["implementation"] },
+    { outputKind: "review-findings", priorOutputKinds: ["implementation"] },
     { outputKind: "blind-findings", priorOutputKinds: ["implementation"] },
-    { outputKind: "fixed-implementation", priorOutputKinds: ["sol-findings", "blind-findings"] },
+    { outputKind: "fixed-implementation", priorOutputKinds: ["review-findings", "blind-findings"] },
   ], new Set([3]));
   const implementationRun = await db.$transaction((tx) => enqueueTaskRun(tx as never, tasks[0]!.id));
   await db.run.update({ where: { id: implementationRun.id }, data: { status: RunStatus.SUCCEEDED, endedAt: new Date() } });
@@ -226,15 +226,15 @@ test("an omitted producer kind is satisfied by absence without parking the targe
   const body = await response.json() as ClaimedTask;
   assert.equal(response.status, 200);
   assert.equal(body.run.id, targetRun.id);
-  assert.deepEqual(body.priorOutputs.map(({ kind }) => kind), ["sol-findings"]);
+  assert.deepEqual(body.priorOutputs.map(({ kind }) => kind), ["review-findings"]);
 });
 
 test("a present producer without output keeps refusing the declared kind", async () => {
   const { template, tasks } = await createFixture([
     { outputKind: "implementation", priorOutputKinds: [] },
-    { outputKind: "sol-findings", priorOutputKinds: ["implementation"] },
+    { outputKind: "review-findings", priorOutputKinds: ["implementation"] },
     { outputKind: "blind-findings", priorOutputKinds: ["implementation"] },
-    { outputKind: "fixed-implementation", priorOutputKinds: ["sol-findings", "blind-findings"] },
+    { outputKind: "fixed-implementation", priorOutputKinds: ["review-findings", "blind-findings"] },
   ]);
   const implementationRun = await db.$transaction((tx) => enqueueTaskRun(tx as never, tasks[0]!.id));
   await db.run.update({ where: { id: implementationRun.id }, data: { status: RunStatus.SUCCEEDED, endedAt: new Date() } });

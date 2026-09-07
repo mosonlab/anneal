@@ -100,9 +100,12 @@ export const taskRow = (overrides: Record<string, unknown> = {}): Record<string,
   assigneeAgent: { id: "a1", title: "Senior Developer", model: "gpt-5.6-sol:medium", archivedAt: null },
   runs: [{
     id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", budgetGrants: 0,
+    readyAt: new Date("2026-08-16T00:00:00.000Z"), endedAt: new Date("2026-08-16T00:05:00.000Z"),
+    lastProgressEventAt: null, maxRunsPerTask: 5,
     session: {
       costUsd: "0.42", inputTokens: null, cachedInputTokens: null,
-      cacheCreationInputTokens: null, outputTokens: null, startedAt: null, endedAt: null,
+      cacheCreationInputTokens: null, outputTokens: null, executionStatus: "SUCCEEDED",
+      provisionedAt: null, startedAt: null, endedAt: null, cleanupStartedAt: null, cleanupEndedAt: null,
     },
   }],
   ...overrides,

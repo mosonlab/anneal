@@ -30,6 +30,7 @@ export type {
   RunBaseline,
   RunBaselineMetric,
   RunMetrics,
+  RunPhase,
   RunPhaseMetrics,
   RunStatus,
   RunTerminationMetrics,

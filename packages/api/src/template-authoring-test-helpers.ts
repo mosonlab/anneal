@@ -91,7 +91,7 @@ export const seedAuthoringTemplate = async (
         priorOutputKinds: ["implementation"],
         spawnPolicy: Prisma.JsonNull,
         runner: null,
-        outputKind: "sol-findings",
+        outputKind: "review-findings",
         opensPullRequest: false,
         requiresCommit: false,
         baseFromStepIndex: 1,

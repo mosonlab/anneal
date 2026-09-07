@@ -10,6 +10,51 @@ import {
 
 const fail = (reason, detail = "") => { throw new DeployFailure(reason, detail); };
 
+const RETRY_BACKOFF_INITIAL_MS = 5 * 60_000;
+const RETRY_BACKOFF_MAX_MS = 60 * 60_000;
+const retryBackoffMs = (attempts, retryCap = ESCALATION_RETRY_CAP) =>
+  Math.min(RETRY_BACKOFF_MAX_MS, RETRY_BACKOFF_INITIAL_MS * 2 ** (attempts - retryCap));
+
+// Older capped markers predate retryAfter. Derive their deadline from the
+// marker itself, never from the current tick (which would postpone it forever).
+const retryDeadline = (record, attempts, retryCap) => {
+  if (Object.hasOwn(record, "retryAfter")) {
+    return typeof record.retryAfter === "string" ? Date.parse(record.retryAfter) : NaN;
+  }
+  const escalatedAt = typeof record.escalatedAt === "string" ? Date.parse(record.escalatedAt) : NaN;
+  return escalatedAt + retryBackoffMs(attempts, retryCap);
+};
+
+// The unchanged builder throws this terminal reason only for source clone or
+// checkout (including a promisor fetch). Its stderr can also contain earlier,
+// recovered clone errors: inspect the final fatal diagnostic before that error,
+// never arbitrary transport substrings anywhere in the aggregate output.
+const ARTIFACT_SOURCE_TRANSPORT_DETAILS = [
+  /gnutls_handshake\(\) failed/iu,
+  /\bSSL_ERROR_SYSCALL\b/iu,
+  /could not fetch\s+.+?\s+from promisor remote/iu,
+  /\bread[ -](?:timeout|timed out)\b/iu,
+];
+const artifactSourceTransportFailure = (detail) => {
+  if (typeof detail !== "string") return false;
+  const failures = [...detail.matchAll(/^DeployFailure: ([^\r\n]+)$/gmu)];
+  if (failures.length !== 1
+    || !/^release-artifact-source-unavailable: exit-128$/u.test(failures[0][1])) return false;
+  // Node prints the throw site before its uncaught exception header.
+  const diagnosticOutput = detail.slice(0, failures[0].index).trimEnd()
+    .replace(/\nfile:\/\/[^\r\n]+:\d+\r?\n[^\r\n]*\r?\n[ \t]*\^[ \t]*$/u, "");
+  const diagnostics = diagnosticOutput.split(/\r?\n/u);
+  const terminalDiagnostic = diagnostics.at(-1) ?? "";
+  return /^fatal: /u.test(terminalDiagnostic)
+    && ARTIFACT_SOURCE_TRANSPORT_DETAILS.some((pattern) => pattern.test(terminalDiagnostic));
+};
+const isRetryableFailure = (record, retryableReasons) => {
+  if (!(retryableReasons instanceof Set)) throw new TypeError("retryableReasons-required");
+  return retryableReasons.has(record?.reason)
+    || (record?.reason === "release-artifact-build-failed"
+      && artifactSourceTransportFailure(record.detail));
+};
+
 const OID = /^[0-9a-f]{40}$/u;
 
 /** The deploy records this sentinel in `to` when the attempt failed before it
@@ -33,8 +78,8 @@ const escalationTarget = (record) => {
 /** Classify a marker into the three escalation classes.
  *
  * - `retryable-transient`: an external cause on the shipped allowlist. The
- *   marker self-clears after a successful attempt while under the retry cap,
- *   and latches like today once the cap is reached — the allowlist owns this
+ *   marker self-clears after a successful attempt, with capped exponential
+ *   backoff once the retry cap is reached — the allowlist owns this
  *   class entirely, so a new commit does not change its answer.
  * - `commit-scoped`: the failure was determined by the commit the marker names
  *   (its build, its migration, its verification). A different commit is a
@@ -51,7 +96,7 @@ export const escalationScope = ({ record, retryableReasons, hostScopedReasons })
   // spending retry attempts on an unclassifiable failure.
   const target = escalationTarget(record);
   if (target.kind === "malformed") return "host-scoped";
-  if (retryableReasons?.has(reason)) return "retryable-transient";
+  if (isRetryableFailure(record, retryableReasons)) return "retryable-transient";
   if (hostScopedReasons.has(reason) || (hostScopedReasons.has("service-control-failed") && reason.startsWith("service-control-failed:"))) return "host-scoped";
   return target.kind === "commit" ? "commit-scoped" : "host-scoped";
 };
@@ -68,6 +113,7 @@ export const checkExistingEscalation = async ({
   retryableReasons,
   hostScopedReasons,
   retryCap = ESCALATION_RETRY_CAP,
+  now = () => new Date(),
 }) => {
   if (!(hostScopedReasons instanceof Set)) throw new TypeError("hostScopedReasons-required");
   const marker = readEscalationRecord({ path: escalationPath });
@@ -75,7 +121,7 @@ export const checkExistingEscalation = async ({
   const attempts = escalationAttempts(marker.record);
   if (escalationScope({ record: marker.record, retryableReasons, hostScopedReasons }) === "retryable-transient"
     && attempts !== null
-    && attempts < retryCap) {
+    && (attempts < retryCap || now().getTime() >= retryDeadline(marker.record, attempts, retryCap))) {
     // A previous escalation may have been persisted while its Inbox delivery
     // was unavailable. Retry that delivery, but do not turn a notification
     // outage into a deploy refusal; the self-clear notification below still
@@ -126,7 +172,12 @@ export const checkExistingEscalation = async ({
       }),
     };
   }
-  log(`STOP escalation-active scope=${scope} path=${escalationPath}`);
+  const deadline = scope === "retryable-transient" && attempts !== null && attempts >= retryCap
+    ? retryDeadline(current.record, attempts, retryCap) : NaN;
+  const wait = Number.isFinite(deadline)
+    ? ` retry-after=${new Date(deadline).toISOString()} remaining-wait-seconds=${Math.max(0, Math.ceil((deadline - now().getTime()) / 1000))}`
+    : "";
+  log(`STOP escalation-active scope=${scope}${wait} path=${escalationPath}`);
   return { active: true };
 };
 
@@ -182,9 +233,9 @@ export const selfClearEscalation = async ({
 
 /** Compute the next one-based attempt count from the marker being replaced. */
 export const escalationAttemptCount = ({ record, previous, retryableReasons }) => {
-  if (!retryableReasons.has(record?.reason)) return null;
+  if (!isRetryableFailure(record, retryableReasons)) return null;
   if (Number.isSafeInteger(previous?.attempts) && previous.attempts > 0) return previous.attempts + 1;
-  if (previous && retryableReasons.has(previous.reason)) return 2;
+  if (previous && isRetryableFailure(previous, retryableReasons)) return 2;
   if (Number.isSafeInteger(record?.attempts) && record.attempts > 0) return record.attempts;
   return 1;
 };
@@ -195,7 +246,8 @@ export const writeEscalationWithAttempts = ({
   escalationPath,
   record,
   retryableReasons,
-  now,
+  retryCap = ESCALATION_RETRY_CAP,
+  now = () => new Date(),
 }) => {
   let previous = null;
   try {
@@ -205,7 +257,14 @@ export const writeEscalationWithAttempts = ({
     if (!(error instanceof DeployFailure)) throw error;
   }
   const attempts = escalationAttemptCount({ record, previous, retryableReasons });
-  const persisted = attempts === null ? record : { ...record, attempts };
-  writeEscalationRecord({ path: escalationPath, record: persisted, now });
+  const timestamp = now();
+  const persisted = attempts === null ? record : {
+    ...record,
+    attempts,
+    ...(attempts >= retryCap
+      ? { retryAfter: new Date(timestamp.getTime() + retryBackoffMs(attempts, retryCap)).toISOString() }
+      : {}),
+  };
+  writeEscalationRecord({ path: escalationPath, record: persisted, now: () => timestamp });
   return persisted;
 };

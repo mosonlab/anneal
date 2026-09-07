@@ -380,7 +380,7 @@ test("the pull-request workflow has a registered prompt-only generation", async 
   // the retired shape does not read, so it is not a structural difference.
   assert.deepEqual(
     asPersisted(current).map((step, index) => retiredStepShapeDifferences(step, generation.shape[index]!)),
-    [[], ["name", "provisionDependencies"], ["name", "provisionDependencies"], []],
+    [[], ["name", "outputKind", "provisionDependencies"], ["name", "provisionDependencies"], []],
   );
   assert.equal(templatePromptGenerationDigest(current), CANONICAL_SOURCE_PROMPT_GENERATIONS[PR_TEMPLATE_NAME]);
   assert.equal(matchedLegacyGeneration(PR_TEMPLATE_NAME, asPersisted(current)), null);
@@ -463,7 +463,7 @@ test("optional review omission is a registered prompt-only rollover in both temp
     assert.equal(
       legacyGenerationMatches(
         { marker: generation.marker, shape: generation.shape },
-        asPersisted(current).map((step, index) => ({ ...step, name: generation.shape[index]!.name, optional: false })),
+        asPersisted(current).map((step, index) => ({ ...step, name: generation.shape[index]!.name, outputKind: generation.shape[index]!.outputKind, optional: false })),
       ),
       true,
     );
@@ -492,7 +492,7 @@ test("the Astra-low review-fix generation is kept on record and retired from mat
     // trace, which is the reason for the flag.
     assert.deepEqual(
       asPersisted(current).map((step, index) => retiredStepShapeDifferences(step, generation.shape[index]!)),
-      current.map((step) => ["sol-findings", "blind-findings"].includes(step.outputKind) ? ["name"] : []),
+      current.map((step) => step.outputKind === "review-findings" ? ["name", "outputKind"] : step.outputKind === "blind-findings" ? ["name"] : []),
       templateName,
     );
     assert.equal(legacyGenerationMatches(generation, asPersisted(current)), false, templateName);
@@ -618,7 +618,8 @@ test("model-neutral review names roll over exactly the deployed shapes and retai
     const generation = generationOf(templateName, "model-neutral-review-step-names");
     const outgoing = asPersisted(current).map((step) => ({
       ...step,
-      name: step.outputKind === "sol-findings" ? "Code review (Sol)"
+      outputKind: step.outputKind === "review-findings" ? "sol-findings" : step.outputKind,
+      name: step.outputKind === "review-findings" ? "Code review (Sol)"
         : step.outputKind === "blind-findings" ? "Code review (Opus blind)" : step.name,
     }));
     assert.equal(generation.promptDigest, undefined);
@@ -627,10 +628,27 @@ test("model-neutral review names roll over exactly the deployed shapes and retai
     assert.deepEqual(canonicalTemplateIdentity(templateRolloverName(templateName, generation.marker, "row")), {
       canonicalName: templateName, generation: generation.marker,
     });
-    for (const outputKind of ["sol-findings", "blind-findings"] as const) {
+    for (const outputKind of ["review-findings", "blind-findings"] as const) {
       const ordinal = current.findIndex((step) => step.outputKind === outputKind) + 1;
-      assert.equal(current[ordinal - 1]!.name, outputKind === "sol-findings" ? "Code review" : "Blind code review");
+      assert.equal(current[ordinal - 1]!.name, outputKind === "review-findings" ? "Code review" : "Blind code review");
     }
     assert.equal(templatePromptGenerationDigest(outgoing), CANONICAL_SOURCE_PROMPT_GENERATIONS[templateName]);
+  }
+});
+
+
+test("model-neutral output rollover recognizes only the retired graph across all templates", async () => {
+  for (const [templateName, current] of await loadAllTemplateStepSources()) {
+    const name = templateName as CanonicalTemplateRegistryName;
+    const generation = generationOf(name, "pre-model-neutral-review-output");
+    const outgoing = asPersisted(current).map((step) => ({
+      ...step,
+      outputKind: step.outputKind === "review-findings" ? "sol-findings" : step.outputKind,
+      priorOutputKinds: step.priorOutputKinds.map((kind) => kind === "review-findings" ? "sol-findings" : kind),
+      prompt: step.prompt.replaceAll("review-findings", "sol-findings").replaceAll("the code review report", "the Sol report"),
+    }));
+    assert.equal(matchedLegacyGeneration(name, outgoing), generation.marker);
+    assert.equal(matchedLegacyGeneration(name, asPersisted(current)), null);
+    assert.equal(matchedLegacyGeneration(name, outgoing.map((step) => ({ ...step, layer: step.layer! + 1 }))), null);
   }
 });

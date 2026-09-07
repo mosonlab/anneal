@@ -26,6 +26,8 @@ import {
   MergeLeaseEventState,
   mechanicalPrincipalRefusal,
   openRun,
+  type OpenRunRefusal,
+  runBirthRefusalMetadata,
   parseMergeResult,
   Prisma,
   type PrismaClient,
@@ -428,7 +430,7 @@ const activateMergeTailTarget = async (
           taskId,
           actorType: "control-plane",
           body: `Merge-tail target was not queued: ${refusal.message}`,
-          metadata: { refusal: refusal.code },
+          metadata: runBirthRefusalMetadata(refusal),
         } });
         return;
       default: {
@@ -1000,7 +1002,7 @@ export const completeRun = async (
     if (terminal === null || "message" in terminal) return null;
     let retryCreated = false;
     let retryRunId: string | null = null;
-    let retryRefusal: Refusal | null = null;
+    let retryRefusal: OpenRunRefusal | null = null;
     if (!succeeded && retryable && !durableNegativeRegressionVerdict && run.task && run.runNumber < budgetCeiling) {
       const opened = await openRun(tx, run.task.id, {
         kind: "retry-after-completion",
@@ -1356,7 +1358,15 @@ export const completeRun = async (
           actorType: "runner",
           actorId: body.runnerId,
           body: activityBody,
-          metadata: jsonValue({ exitCode: body.exitCode, outcome: body.outcome.case, failureClass, pushStatus: body.pushStatus, pullRequestUrl: body.pullRequestUrl }),
+          // A refused automatic retry is a Run birth this completion parked
+          // the Task for, so it is named here the way every other caller-owned
+          // park names its refusal — with the code an operator filters by, plus,
+          // for a spend cap alone, the cap and the total the message states only
+          // in prose.
+          metadata: jsonValue({
+            exitCode: body.exitCode, outcome: body.outcome.case, failureClass, pushStatus: body.pushStatus, pullRequestUrl: body.pullRequestUrl,
+            ...(retryRefusal ? runBirthRefusalMetadata(retryRefusal) : {}),
+          }),
         },
       });
       if (budgetExhausted) {
