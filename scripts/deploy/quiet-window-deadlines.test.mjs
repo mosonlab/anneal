@@ -411,7 +411,12 @@ test("watchdog expiry during active migration retains the barrier", async () => 
       });
       try {
         return await hangingCommand({
-          timeoutMs: 2_000,
+          // The watchdog above is what this case proves, at 500ms. This outer
+          // ceiling only catches a watchdog that never fires, so it has to
+          // strictly contain the watchdog plus its cleanup on a loaded worker
+          // (CONTRIBUTING.md, "Test timing on the gate worker") — otherwise the
+          // parent reports a timeout the watchdog was about to resolve.
+          timeoutMs: 60_000,
           signal: controller.signal,
           abortFailure: () => failure,
           onTermination: () => barrier.retainUntilEscalationCleared(),
@@ -492,7 +497,17 @@ test("barrier watchdog independently persists an alert during a synchronous pare
     escalationRecord: { outcome: "failure", reason: failure.reason, detail: failure.detail, from: "a", to: "b" },
     onTimeout: () => { interruption.interruptWithFailure(failure); },
   });
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+  // The parent's event loop must stay blocked for the whole wait — that is the
+  // property — so this polls the observable condition with synchronous stalls
+  // instead of guessing one duration the watchdog child will finish inside.
+  // Bounded so a watchdog that never persists fails the assertion below rather
+  // than hanging the suite, and sized for the loaded gate worker rather than an
+  // idle host (CONTRIBUTING.md, "Test timing on the gate worker").
+  const stallDeadline = Date.now() + 30_000;
+  const blocker = new Int32Array(new SharedArrayBuffer(4));
+  while (!existsSync(escalationPath) && Date.now() < stallDeadline) {
+    Atomics.wait(blocker, 0, 0, 100);
+  }
   try {
     assert.equal(existsSync(escalationPath), true, "watchdog child did not persist while parent was stalled");
     const record = JSON.parse(readFileSync(escalationPath, "utf8"));

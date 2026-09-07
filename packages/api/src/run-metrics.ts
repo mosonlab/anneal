@@ -1,5 +1,6 @@
-import type { RunnerKind, SessionExecutionStatus } from "@anneal/db";
+import type { Prisma, RunnerKind, SessionExecutionStatus } from "@anneal/db";
 import type {
+  RunBaseline,
   RunMetrics,
   RunPhaseMetrics,
   RunTerminationMetrics,
@@ -9,6 +10,7 @@ import type {
 } from "@anneal/db/board-contract";
 
 import { inputTokenSplit } from "./costs.js";
+import { vsBaseline } from "./run-baseline.js";
 
 /**
  * Per-run diagnostics: where a run's wall clock went, how its tokens split,
@@ -71,6 +73,9 @@ export type RunMetricsSession = {
   terminationReason: string | null;
   exitCode: number | null;
   signal: string | null;
+  /** The provider-captured amount, which is the same raw column the baseline
+   *  percentiles are computed over. Null is *unreported*, never zero. */
+  costUsd: Prisma.Decimal | string | null;
 };
 
 /** One TOOL_STARTED or TOOL_COMPLETED row. The route projects provider names
@@ -294,12 +299,23 @@ const terminationMetrics = (session: RunMetricsSession | null): RunTerminationMe
   signal: session?.signal ?? null,
 });
 
+/** The reported cost as a number, or null when nothing was reported. A stored
+ *  value that will not parse is unknown rather than 0. */
+const reportedCost = (session: RunMetricsSession | null): number | null => {
+  if (session?.costUsd == null) return null;
+  const value = Number(session.costUsd);
+  return Number.isFinite(value) ? value : null;
+};
+
 /** Compute one run's diagnostics. `now` is injectable so a live run's
- *  executing phase is deterministic under test. */
+ *  executing phase is deterministic under test. `baseline` is the run's own
+ *  template step baseline, or null when the task has no step or too little
+ *  history. */
 export const runMetrics = (input: {
   run: RunMetricsRun;
   session: RunMetricsSession | null;
   toolEvents: readonly RunMetricsToolEvent[];
+  baseline?: RunBaseline | null;
   now?: Date;
 }): RunMetrics => {
   const { run, session } = input;
@@ -327,5 +343,14 @@ export const runMetrics = (input: {
       ? null
       : round(tokens.output / (modelActiveMs / 1_000), 2),
     termination: terminationMetrics(session),
+    // Measured against the same executing phase published above, so the
+    // comparison and the figure it compares can never disagree. A session that
+    // has not ended has no comparable duration: its executing phase is measured
+    // to now, while every baseline sample is a completed run, so the ratio
+    // would report "not finished yet" as "faster than usual". Null instead.
+    vsBaseline: vsBaseline(input.baseline ?? null, {
+      costUsd: reportedCost(session),
+      durationMs: session?.endedAt == null ? null : phases.executingMs,
+    }),
   };
 };

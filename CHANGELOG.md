@@ -16,6 +16,31 @@ written.
   amended after materialization. A `spec.md` rewritten on the branch is still
   refused, and the refusal says whether the current brief also differs. Adds one
   migration.
+- Session events are now bounded end to end. A runner holds at most 32 MiB and
+  20 000 undelivered events per Run. When it fills, the oldest liveness events —
+  streaming deltas, raw provider frames, captured stderr, provider status and
+  tool output — are dropped and an `EVENTS_DROPPED` event records how many and
+  which sequence range were lost. Lifecycle, error and terminal events are never
+  dropped; if the queue is still full once nothing droppable is left, such an
+  event keeps its place, type and sequence number but loses its payload to a
+  `truncated` marker; once every event not in flight is such a marker, the two
+  oldest adjacent markers merge into one `EVENTS_COALESCED` event carrying their
+  summed counts and the sequence range they span, so the queue holds its bounds
+  under any traffic mix while every event it saw is still accounted for.
+  A single event payload above 256 KiB is truncated to a `truncated` marker
+  carrying its original size.
+  `POST /runner/runs/:runId/events` enforces the same per-event cap and a
+  request-body cap, answering 413 with the offending event's index so the runner
+  drops that one event and resends the rest. Heartbeats now carry
+  `eventQueueBytes`.
+- The merge executor verifies its own landed merge from the commit when
+  GitHub's pull-request projection cannot. A merge commit whose parents are
+  exactly the authorized base and head and which is reachable from the
+  authorized base ref now completes the run instead of parking the chain tail on
+  a `base-drift-post-merge` question an operator answered by checking the same
+  two parent shas. Any missing fact, and any failed or timed-out read, still
+  stops `base-drift-post-merge`; the Inbox evidence gains a `directParentCheck`
+  field naming what was read.
 - `PATCH /tasks/:taskId` accepts `dispatchAfterTaskId` on the first step of a
   Chain that has no Run, re-pointing or (with `null`) releasing its Chain
   binding instead of forcing the Chain to be deleted and instantiated again. A
@@ -36,6 +61,11 @@ written.
   stop notices, and an approval decision still closes the gate's sibling cards.
 - The retired `goal-5a0` authorization-marker harness and root
   `test:dependency-gate` script are removed.
+- The runner no longer writes or reads the `.agentos/task-output-receipt.json`
+  delivery receipt, and the `POST_DELIVERY_DISCONNECT_ACCEPTED` event no longer
+  carries its `localReceipt` and `localReceiptReadError` diagnostics. The
+  server-returned output identity alone authorizes that recovery, which is
+  unchanged; the receipt was diagnostic evidence only.
 - Removed the completed one-shot database backfill and post-delivery audit
   CLIs and their root aliases; upgrades from pre-backfill versions are not
   supported. The unused root `db:export-goal-lineage` and
