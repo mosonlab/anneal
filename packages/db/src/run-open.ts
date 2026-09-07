@@ -519,6 +519,7 @@ export type RunBirthTask = Omit<RunBranchTask, "repo"> & { repo: { defaultBranch
  *  applies, which ref this Run would own, and what its predecessor carried. */
 export type RunBirth = {
   intent: OpenRunIntent["kind"];
+  retryFailedRepair?: boolean;
   runNumber: number;
   prior: { branch: string | null; targetBranch: string | null; runNumber: number } | null;
 };
@@ -782,7 +783,7 @@ export const resolveRunBranches = async (
     return { branch: prior?.branch ?? null, targetBranch: prior?.targetBranch ?? task.targetBranch };
   }
   const repoTask = { ...task, repo: task.repo };
-  const declared = await declaredPublishTarget(tx, repoTask, intent, prior);
+  const declared = await declaredPublishTarget(tx, repoTask, birth.retryFailedRepair ? "merge-tail-repair" : intent, prior);
   return {
     branch: declared.branch ?? runOwnedHead(task.id, birth.runNumber),
     targetBranch: declared.targetBranch,
@@ -874,6 +875,7 @@ export type OpenRunIntent =
     sourceRunId: string;
     sourceMaxRunsPerTask: number;
     sourceBudgetGrants: number;
+    retryFailedRepair?: boolean;
     budgetGrant: 0 | 1;
   }
   | {
@@ -1269,10 +1271,12 @@ export const openRun = async (
     }
   }
 
-  // Every intent asks the same module, so no arm can put a Step on a different
-  // branch from the rest of its Chain, and no caller has to fill in a head.
+  // Every intent asks the same module. A no-result repair retry supplies its
+  // repair card branch rule; other intents derive their base from publication evidence.
   const branches = await resolveRunBranches(tx, task, {
     intent: intent.kind,
+    ...(intent.kind === "retry-after-completion" && intent.retryFailedRepair
+      ? { retryFailedRepair: true } : {}),
     runNumber,
     prior: prior ?? null,
   });

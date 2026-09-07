@@ -2386,6 +2386,25 @@ failed: <message>` reason and no refusal code.
 
 ### Recovering a merge tail stopped after its repair budget
 
+An automatic merge-tail repair Run (`refresh-conflict`, `review-fix`, or
+`gate-fix`) that fails before recording its result consumes one session
+of that detached repair Task's `maxSessionsPerTask` budget. For a
+`task-failed` Run, when another session remains, the platform queues the next
+Run of the same repair Task automatically against the recorded start head and
+base pair with the same branch pinning. It records a TaskActivity reading
+`merge-tail repair Run N failed before a result; Run N+1 queued`; the
+Regression step stays in the repair loop. This is the same repair attempt, so
+the requeue spends neither `leaseLossRefunds` nor another per-kind automatic
+repair attempt.
+
+When the repair Task has spent its session budget, the platform keeps the
+existing stop behavior: `stopMergeTail` parks the Regression verification task
+in `REVIEW` with the existing `... repair ... failed without closing the
+repair ...` reason and writes the stop notice. The operator's
+`POST /tasks/:taskId/retry` remains the exit after that budget is spent; raising
+`maxSessionsPerTask` through `PATCH /tasks/:taskId` is required first when the
+retry would otherwise be refused for an exhausted Run budget.
+
 When a regression verdict fails after the automatic repair budget is exhausted,
 the Regression verification task remains parked in `REVIEW`, and a stop notice
 is written to the Inbox. Its `failureReason` is exactly one of these shapes:

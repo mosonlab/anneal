@@ -36,6 +36,7 @@ import {
   PushStatus,
   readLatestMarker,
   readMarkers,
+  readMarkerHistory,
   recordIntegratorStop,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
   runBudgetCeiling,
@@ -812,6 +813,22 @@ export const completeRun = async (
       || (succeeded && !run.task.templateId && !run.task.chainId))
       ? await readMarkers(tx, run.task.id)
       : [];
+    // A task-failed repair with no current-Run result spends its next ordinary
+    // session before the tail stops. Use the immutable Run ceiling, just like
+    // other completion retries; this grants neither a refund nor a new repair.
+    const failedRepairHistory = !succeeded && failureClass === FailureClass.TASK_FAILED
+      && run.taskId && run.runNumber < budgetCeiling
+      ? await readMarkerHistory(tx, run.taskId)
+      : [];
+    const failedRepairMarker = latestMarker(failedRepairHistory, "repairAttempt");
+    const failedRepairOutput = failedRepairMarker?.regressionTaskId && run.taskId
+      ? await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId }, select: { runId: true } })
+      : null;
+    const retryFailedRepair = Boolean(failedRepairMarker?.regressionTaskId
+      && failedRepairMarker.headSha
+      && ["refresh-conflict", "review-fix", "gate-fix"].includes(failedRepairMarker.repairKind ?? "")
+      && failedRepairOutput?.runId !== run.id
+      && !failedRepairHistory.some((marker) => marker.kind === "repairResult" && marker.raw.runId === run.id));
     const succeededMarkers = succeeded ? tailMarkers : [];
     const mergeTailRequeueContext = documentationStepSucceeded && run.task
       ? await mergeTailRequeueContextForRun(tx, { taskId: run.task.id, runId: run.id })
@@ -1034,16 +1051,27 @@ export const completeRun = async (
     let retryCreated = false;
     let retryRunId: string | null = null;
     let retryRefusal: OpenRunRefusal | null = null;
-    if (!succeeded && retryable && !durableNegativeRegressionVerdict && run.task && run.runNumber < budgetCeiling) {
+    if (!succeeded && (retryable || retryFailedRepair) && !durableNegativeRegressionVerdict && run.task && run.runNumber < budgetCeiling) {
       const opened = await openRun(tx, run.task.id, {
         kind: "retry-after-completion",
         sourceRunId: run.id,
         sourceMaxRunsPerTask: run.maxRunsPerTask,
         sourceBudgetGrants: run.budgetGrants,
         budgetGrant: refunded,
+        ...(retryFailedRepair ? { retryFailedRepair: true } : {}),
         readyAt: retryAt ?? now,
       });
-      if (opened.ok) { retryCreated = true; retryRunId = opened.run.id; }
+      if (opened.ok) {
+        retryCreated = true;
+        retryRunId = opened.run.id;
+        if (retryFailedRepair) {
+          await tx.taskActivity.create({ data: {
+            taskId: run.task.id,
+            actorType: "control-plane",
+            body: `merge-tail repair Run ${run.runNumber} failed before a result; Run ${opened.run.runNumber} queued`,
+          } });
+        }
+      }
       else retryRefusal = opened.refusal;
     }
     if (run.taskId) {
