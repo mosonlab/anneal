@@ -1,9 +1,12 @@
-import type { BoardTask, ChainAggregate } from "./types";
+import { RUN_STATUS_IS_ACTIVE } from "@anneal/db/board-contract";
+
+import type { BoardLatestRun, BoardTask, ChainAggregate, UsageCost } from "./types";
 
 /**
  * The one place the client reads an operator-facing answer off a Chain
- * aggregate: which control action is admissible on it, and which Step number
- * its card names.
+ * aggregate: which control action is admissible on it, which Step number its
+ * card names, and what the chain has cost, how long it has run, and how many
+ * repair rounds it took.
  *
  * "Can this Chain be held right now?" used to be answered twice — once by the
  * aggregate card, which read `activation.state`, and once by the Doing column
@@ -86,4 +89,63 @@ export const chainStepPosition = (
   if (fromMember !== null && fromMember !== undefined) return fromMember;
   const done = aggregate.statusCounts.DONE;
   return aggregate.stepCount === 0 ? 0 : Math.min(aggregate.stepCount, done + 1);
+};
+
+/** What a collapsed chain card answers without opening anything. `cost` and
+ *  `leadTimeMs` are `null` when unknown; `repairRounds` is a count, so zero is
+ *  a real answer there. */
+export type ChainAggregateFigures = {
+  cost: UsageCost | null;
+  leadTimeMs: number | null;
+  repairRounds: number;
+};
+
+/** Every run the board rows hold for this chain: each visible member's latest
+ *  run, plus the frontier's and the active repair's, which the aggregate
+ *  carries even when their own rows are off the page. */
+const knownRuns = (aggregate: ChainAggregate, members: readonly BoardTask[]): BoardLatestRun[] =>
+  [
+    ...members.map((member) => member.latestRun),
+    aggregate.frontier.latestRun,
+    aggregate.activeRepair?.latestRun ?? null,
+  ].filter((run): run is BoardLatestRun => run !== null && run !== undefined);
+
+const epoch = (value: string): number => new Date(value).getTime();
+
+/**
+ * The three figures a chain card states, derived from what the page already
+ * holds: no request is made for them.
+ *
+ * `cost` is the server's own total. It sums every member's runs across the
+ * whole chain, whereas `members` are only the rows on this page, so re-summing
+ * `taskCost` client-side would understate a chain whose members are not all
+ * visible.
+ *
+ * `leadTimeMs` runs from the earliest known run start to the chain's most
+ * recent known end, or to `now` while any known run is still active — a queued
+ * frontier counts, since the chain is still going. Each row carries only its
+ * *latest* run, so the start is the earliest the board can prove rather than
+ * the chain's true first run: a Step that has been retried has forgotten when
+ * its first attempt began. `null` when no run has started, and `null` again
+ * when nothing is active and no end was ever recorded — an unmeasured span is
+ * not a zero one.
+ *
+ * `repairRounds` counts the visible repair rows. A detached repair whose own
+ * row is off the page still shows through `activeRepair`, which is the one
+ * round the board can prove when it can see none.
+ */
+export const chainAggregateFigures = (
+  aggregate: ChainAggregate,
+  members: readonly BoardTask[],
+  now = Date.now(),
+): ChainAggregateFigures => {
+  const runs = knownRuns(aggregate, members);
+  const starts = runs.flatMap((run) => (run.startedAt === null ? [] : [epoch(run.startedAt)]));
+  const ends = runs.flatMap((run) => (run.endedAt === null ? [] : [epoch(run.endedAt)]));
+  const active = runs.some((run) => RUN_STATUS_IS_ACTIVE[run.status]);
+  const end = active ? now : ends.length === 0 ? null : Math.max(...ends);
+  const leadTimeMs = starts.length === 0 || end === null ? null : Math.max(0, end - Math.min(...starts));
+  const visibleRepairs = members.filter((member) => member.repairOf !== null).length;
+  const repairRounds = visibleRepairs === 0 && aggregate.activeRepair !== null ? 1 : visibleRepairs;
+  return { cost: aggregate.totalCost, leadTimeMs, repairRounds };
 };
