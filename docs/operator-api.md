@@ -1895,6 +1895,42 @@ Whether a Chain should be allowed to run base-drift recovery and a gate-fix
 repair at the same time is not decided here. This refusal names the overlap and
 stops before spending a Run on work the platform would not accept.
 
+### Readiness evaluation exceptions
+
+An exception thrown while the merge readiness worker evaluates a Chain — a
+killed child process, a killed worker, a service restart mid-tick — is not a
+verdict. The worker returns the readiness task to `TODO` and evaluates it again
+on a later tick, writing one `TaskActivity` on the Regression verification task,
+where the readiness requeue and stop rows already land, whose `metadata.state`
+is `requeued-exception` and whose body reads
+`Merge readiness requeued after evaluation exception <n> of <limit>: readiness
+evaluation exception: <message>`. The Regression evidence and its Run are left
+alone, no stop notice is written, and the merge lease is released exactly as an
+ordinary readiness requeue releases it.
+
+The retry is bounded by `MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT` (default 3),
+read once per worker tick; a value that is not a non-negative integer fails the
+API service at startup. Once that many exception requeues have been spent on the
+same readiness task within the same recovery attempt, the next exception stops
+the tail as before with `failureReason`
+`readiness evaluation failed after <n> exception requeues: <message>`. Outside a
+base-drift recovery that stop parks the regression and readiness tasks in
+`REVIEW` and writes the matching `Autonomous merge readiness stopped:` Inbox
+notice; inside one it takes the recovery stop path instead — the recovery
+attempt becomes `BLOCKED_DOWNSTREAM`, the integrator task is parked as well, and
+the notice reads `Automatic base-drift recovery <n> stopped at readiness:
+<reason>`.
+
+Three readiness failures are not exception requeues and stop the tail on their
+first occurrence. A deliberate refusal — a recovery head-adoption refusal —
+carries a refusal code and stops with `readiness evaluation failed: <message>`.
+A missing, mismatched, or ambiguous operator authorization on a gated readiness
+step is a fail-closed gate decision, not a transient fault, and stops with that
+same reason. A GitHub read that fails for any reason other than a timeout or a
+transport error (those are deferred to the next tick) is a
+`readiness-read-failed` decision, and stops with that same `readiness evaluation
+failed: <message>` reason and no refusal code.
+
 ### Recovering a merge tail stopped after its repair budget
 
 When a regression verdict fails after the automatic repair budget is exhausted,

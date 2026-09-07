@@ -9,6 +9,12 @@ written.
 
 ## Unreleased
 
+- An exception thrown while merge readiness evaluates a Chain now requeues the
+  readiness step instead of stopping the merge tail. The retry is bounded by
+  `MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT` (default 3); past the bound the tail
+  stops with `readiness evaluation failed after <n> exception requeues:
+  <message>`. A deliberate refusal, and a missing or mismatched merge-gate
+  operator authorization, still stop the tail on the first occurrence.
 - Retired the `POST /files/mkdir` and `POST /files/move` routes and their
   underlying store operations.
 - Removed `POST /inbox/messages/:messageId/supersede`;
