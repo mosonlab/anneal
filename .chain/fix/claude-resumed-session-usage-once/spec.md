@@ -1,0 +1,16 @@
+Costs: a resumed Claude session's cumulative result is counted once, not once per resume
+
+Goal: `Session.costUsd` and the token columns for a Claude Run equal what the provider actually charged for that session; resuming a session never multiplies its recorded cost.
+
+Background: the Claude adapter continues a Run by relaunching `claude` with `--resume <providerConversationId>` (`packages/runner/src/adapters/claude.ts` ~70), so one Session accumulates several `FINAL_OUTPUT` events that all carry the same `session_id`. Each Claude `result` reports `total_cost_usd` and `modelUsage` as the running total for the whole session, not the increment of that invocation; only the top-level `usage` block is per-invocation. `sumUsage` (`packages/db/src/usage.ts` ~445-475) folds every FINAL_OUTPUT's cost and, because `modelUsage` is the primary token source (~289), its tokens too. Evidence on 2026-09-07: Run `cmtqvyz950sc8db0iciwov1v7` (chain 0c5514b5 idx2, frontend-dev-opus-high) has 4 result events with identical `total_cost_usd` 30.10718275 and identical `modelUsage` (opus 22.16, fable 7.94) while the per-invocation `usage.output_tokens` differ (98993 / 511 / 1830 / 6180); the stored Session row is `costUsd` 120.4287 = 4 × 30.107, `inputTokens` 145M = 4 × 36M. Since 2026-09-01 four resumed Claude sessions over-record by 142.11 USD of 1141.21 recorded (`cmtqvyz950sc8db0iciwov1v7` +90.3, `cmtqorhdj0akddb0i1829jsy0` +39.0, `cmtpxh0ys0fcfdb3epgfakk0s` +7.7, `cmtqlef8n000pdb0ipoos42ni` +5.1). Codex (`turn.completed`, per turn) and PI (per message) are not affected.
+
+Changes:
+1. Claude usage extraction treats `total_cost_usd` and `modelUsage` as session-cumulative: for FINAL_OUTPUT events sharing one `session_id`, the session total takes the latest event's cumulative figures (cost and modelUsage tokens), not their sum. Events from different `session_id`s within one Session (a fresh session after a failed resume) still add. The per-invocation top-level `usage` block keeps its current meaning.
+2. `recomputeSessionUsage` reproduces the same result from stored events, so a recompute over existing rows corrects them; run it once over Claude Sessions with more than one FINAL_OUTPUT after deploy (list in the Background) and record before/after in the CHANGELOG entry.
+3. `docs/operator-api.md` costs section states the cumulative semantics and that a recompute is idempotent.
+
+Out of scope: Codex and PI accounting; pricing tables; the costs dashboard layout; the per-turn cost attribution of resumed invocations (their increment is derivable from `usage` × price but is not required here).
+
+Constraints: no schema change; a Session with a single result is unchanged to the cent; the advisory lock and recompute path in `usage.ts` ~571-660 stay the single write path.
+
+Acceptance: a unit test feeds three FINAL_OUTPUT payloads with one `session_id` and rising cumulative totals and asserts the session cost equals the last total; a test with two different `session_id`s asserts the two last totals add; a test with one result is unchanged; recompute over a fixture Session with four identical results yields one quarter of the previously summed cost; `npm run test -w @anneal/db` green; `npm run lint` clean.
