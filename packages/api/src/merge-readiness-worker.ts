@@ -360,9 +360,11 @@ export const requeueRegressionSettlement = (
  * The daemon liveness `GET /runners` reports, read by the readiness worker so
  * an authorization is written only while a merge executor can claim it. One
  * reader, one rule: the registry snapshot decides `online`, and this worker
- * never re-derives liveness from a second clock.
+ * never re-derives liveness from a second clock. The reader carries its own
+ * clock because the guard that matters runs under the Merge Lease, seconds
+ * after the timestamp the tick started with, and must read liveness as of then.
  */
-export type DaemonSnapshotReader = (now: Date) => DaemonSnapshot[];
+export type DaemonSnapshotReader = () => DaemonSnapshot[];
 
 const EXECUTOR_OFFLINE_STATE = "requeued-executor-offline";
 export const MERGE_EXECUTOR_OFFLINE_REASON = "merge-executor-offline";
@@ -377,18 +379,27 @@ export const MERGE_EXECUTOR_OFFLINE_REASON = "merge-executor-offline";
 export const MERGE_EXECUTOR_OFFLINE_WAIT_MS = RUNNER_FORGET_MS;
 
 /**
- * The configured merge executors when none of them is online, and empty
- * otherwise. An unconfigured allowlist is empty too: with no executor named,
- * readiness authorizes exactly as it did before this check existed.
+ * How far apart two skipped authorizations can be and still belong to the same
+ * outage. Readiness polls every two seconds and its slowest tick spends the
+ * read budget, so a longer gap means readiness settled some other way in
+ * between -- the executor was back -- and a later outage starts its own wait
+ * rather than inheriting one this task already served.
  */
-export const offlineMergeExecutors = (
+const EXECUTOR_OFFLINE_EPISODE_GAP_MS = 60_000;
+
+/**
+ * The configured merge executors when none of them is online, which is exactly
+ * when an authorization must not be written; empty when one is online, and
+ * empty for an unconfigured allowlist too: with no executor named, readiness
+ * authorizes exactly as it did before this check existed.
+ */
+export const executorsBlockingAuthorization = (
   daemons: DaemonSnapshotReader,
-  now: Date,
 ): string[] => {
   const allowlist = mergeExecutorRunnerIds();
   if (allowlist.length === 0) return [];
   const online = new Set(
-    daemons(now).filter((daemon) => daemon.online).map((daemon) => daemon.runnerId),
+    daemons().filter((daemon) => daemon.online).map((daemon) => daemon.runnerId),
   );
   return allowlist.some((runnerId) => online.has(runnerId)) ? [] : allowlist;
 };
@@ -399,12 +410,20 @@ const executorOfflineDetail = (executorRunnerIds: string[]): string =>
 /**
  * Readiness returning itself to the queue: the regression evidence and its Run
  * are untouched, nothing is authorized, and the next tick asks again.
+ *
+ * The wait surrenders the chain's Merge Lease rather than holding it, which is
+ * what settlement kind `requeue` means here. Holding it would block the whole
+ * delivery line for as long as the outage lasts, and it buys nothing: the
+ * allowlist is global, so while it is offline no chain can be authorized, and
+ * a base that moves some other way is caught by the evidence check on the tick
+ * that finally authorizes.
  */
 const executorOfflineRequeueSettlement = (
   input: {
     readinessTaskId: string;
     regressionTaskId: string;
     executorRunnerIds: string[];
+    episodeStartedAt: Date;
     now: Date;
   },
 ): ReadinessSettlement => readinessSettlement("requeue", {
@@ -420,6 +439,7 @@ const executorOfflineRequeueSettlement = (
         state: EXECUTOR_OFFLINE_STATE,
         reason: MERGE_EXECUTOR_OFFLINE_REASON,
         executorRunnerIds: input.executorRunnerIds,
+        episodeStartedAt: input.episodeStartedAt.toISOString(),
       },
     } });
     await tx.task.update({
@@ -434,10 +454,40 @@ const executorOfflineRequeueSettlement = (
 });
 
 /**
- * The single decision point: an authorization is written only while a merge
- * executor is online. Everything else settles before the Merge Lease is
- * reached, so an outage costs a requeue rather than an authorization that the
- * executor will meet as base drift when it comes back.
+ * When the outage readiness is waiting out began. Every skipped authorization
+ * records the start of its own episode, so a tick inherits the previous
+ * marker's start only while it is contiguous with it. A marker older than that
+ * belongs to an outage that ended -- readiness settled some other way, or the
+ * executor came back and merged -- and the wait restarts from now, rather than
+ * charging this outage for the whole history of the task.
+ */
+const executorOfflineEpisodeStart = async (
+  db: PrismaClient,
+  readinessTaskId: string,
+  now: Date,
+): Promise<Date> => {
+  const latest = await db.taskActivity.findFirst({
+    where: {
+      taskId: readinessTaskId,
+      metadata: { path: ["state"], equals: EXECUTOR_OFFLINE_STATE },
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { createdAt: true, metadata: true },
+  });
+  if (!latest) return now;
+  if (now.getTime() - latest.createdAt.getTime() > EXECUTOR_OFFLINE_EPISODE_GAP_MS) return now;
+  const recorded = (latest.metadata as { episodeStartedAt?: unknown } | null)?.episodeStartedAt;
+  if (typeof recorded !== "string") return latest.createdAt;
+  const started = new Date(recorded);
+  return Number.isNaN(started.getTime()) ? latest.createdAt : started;
+};
+
+/**
+ * The decision an authorization must survive: it is written only while a merge
+ * executor is online, so an outage costs a requeue rather than an authorization
+ * the executor will meet as base drift when it comes back. The wait is bounded
+ * by the current outage; past the ceiling the tail parks in REVIEW naming the
+ * outage, like every other readiness stop.
  */
 const settleExecutorOffline = async (
   db: PrismaClient,
@@ -445,18 +495,11 @@ const settleExecutorOffline = async (
   executorRunnerIds: string[],
   result: ReadinessTickResult,
   runner: ReadinessSettlementRunner,
-): Promise<void> => {
+): Promise<Extract<ReadinessSettlementApplication, { kind: "settled" }>> => {
   const { readiness, regression, recovery, claim } = read;
   const now = read.input.now;
-  const first = await db.taskActivity.findFirst({
-    where: {
-      taskId: readiness.id,
-      metadata: { path: ["state"], equals: EXECUTOR_OFFLINE_STATE },
-    },
-    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-    select: { createdAt: true },
-  });
-  const waitedMs = first ? now.getTime() - first.createdAt.getTime() : 0;
+  const episodeStartedAt = await executorOfflineEpisodeStart(db, readiness.id, now);
+  const waitedMs = now.getTime() - episodeStartedAt.getTime();
   if (waitedMs >= MERGE_EXECUTOR_OFFLINE_WAIT_MS) {
     const stopped = await runner.apply(stopReadinessSettlement({
       readinessTaskId: readiness.id,
@@ -470,17 +513,20 @@ const settleExecutorOffline = async (
       throw new Error("Readiness stop requested a Merge Lease");
     }
     if (stopped.outcome.value.applied) result.stopped += 1;
-    return;
+    return stopped;
   }
   const application = await runner.apply(executorOfflineRequeueSettlement({
     readinessTaskId: readiness.id,
     regressionTaskId: regression.id,
     executorRunnerIds,
+    episodeStartedAt,
     now,
   }), claim);
-  if (application.kind === "settled" && application.outcome.value.applied) {
-    result.requeued += 1;
+  if (application.kind === "acquire-lease") {
+    throw new Error("Readiness executor-offline requeue requested a Merge Lease");
   }
+  if (application.outcome.value.applied) result.requeued += 1;
+  return application;
 };
 
 type ClaimedReadiness = {
@@ -915,15 +961,17 @@ const runReadinessDecision = async (
     : null;
 
   // An authorization nobody can claim is a base-drift stop waiting to happen,
-  // so it is refused here rather than written and left standing: the chain
-  // waits at readiness while its executor is down. This settles before the
-  // Merge Lease is reached, which also ends the contention episode below.
-  const offlineExecutors = decision.kind === "authorize"
-    ? offlineMergeExecutors(daemons, read.input.now)
+  // so it is refused rather than written and left standing: the chain waits at
+  // readiness while its executor is down. The check that decides is the one
+  // under the Lease, below; this one only spares an outage the cost of taking
+  // a Lease every tick, exactly as the pre-acquire read spares a base move one.
+  // Settling here also ends the contention episode below.
+  const blockedExecutors = decision.kind === "authorize"
+    ? executorsBlockingAuthorization(daemons)
     : [];
-  if (offlineExecutors.length > 0) {
+  if (blockedExecutors.length > 0) {
     await forgetContention(db, target, readiness.id, read.input.now, claim);
-    await settleExecutorOffline(db, read, offlineExecutors, result, preAcquireRunner);
+    await settleExecutorOffline(db, read, blockedExecutors, result, preAcquireRunner);
     return;
   }
 
@@ -967,6 +1015,24 @@ const runReadinessDecision = async (
       release: releaseChainLease,
     });
     const leasedDecision = await evaluateReadiness(reader, read.input);
+
+    // Repeat the liveness read too, for the same reason: an executor that went
+    // down while this tick was acquiring the Lease and re-reading GitHub must
+    // not have an authorization written for it. This is the read that decides.
+    const leasedBlockedExecutors = leasedDecision.kind === "authorize"
+      ? executorsBlockingAuthorization(daemons)
+      : [];
+    if (leasedBlockedExecutors.length > 0) {
+      const settlement = await settleExecutorOffline(
+        db,
+        read,
+        leasedBlockedExecutors,
+        result,
+        heldRunner,
+      );
+      return { leaseOutcome: settlement.outcome.leaseOutcome, value: "settled" as const };
+    }
+
     const leasedApplication = await applyReadinessDecision(
       read,
       leasedDecision,

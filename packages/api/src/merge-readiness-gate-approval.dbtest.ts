@@ -5,7 +5,6 @@ import {
   CleanupStatus,
   MERGE_INTEGRATOR_KIND,
   MERGE_TAIL_KIND,
-  mergeExecutorRunnerIds,
   PrismaClient,
   PushStatus,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
@@ -24,23 +23,13 @@ import {
   type WithMergeLease,
 } from "./merge-lease.js";
 import { evidenceTick } from "./merge-evidence-worker.js";
-import { readinessTick, type DaemonSnapshotReader } from "./merge-readiness-worker.js";
+import { executorsOnline } from "./merge-executor-daemon-fixture.js";
+import { readinessTick } from "./merge-readiness-worker.js";
 import { claimRun } from "./run-claim.js";
 import { completeRun, completionInput } from "./run-completion.js";
 import { patchTask } from "./task-patch.js";
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
-
-/** Every configured merge executor reported online, which is what readiness requires before it authorizes. */
-const executorsOnline: DaemonSnapshotReader = (now) => mergeExecutorRunnerIds().map((runnerId) => ({
-  runnerId,
-  online: true,
-  lastSeenAt: now,
-  daemonVersion: null,
-  diskFreeBytes: null,
-  pollIntervalMs: null,
-  workspaceRoot: null,
-}));
 
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });

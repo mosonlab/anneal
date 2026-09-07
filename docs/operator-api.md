@@ -2303,10 +2303,13 @@ writes a TaskActivity on the readiness task with `metadata.state =
 the executor runner ids it checked. The next tick asks again.
 
 That wait is bounded by the 15 minutes after which the registry forgets a
-daemon altogether. An executor still offline then stops the tail like any other
-readiness stop: the regression and readiness tasks move to `REVIEW` with a
-`failureReason` naming `merge-executor-offline` and the runner ids. Recover by
-bringing the executor back and calling `POST /tasks/:taskId/retry`.
+daemon altogether, and it is measured per outage: the wait starts at the first
+skipped authorization of the outage the chain is currently in, not at the first
+one this task ever recorded. An executor still offline at the ceiling stops the
+tail like any other readiness stop: the regression and readiness tasks move to
+`REVIEW` with a `failureReason` naming `merge-executor-offline` and the runner
+ids. Recover by bringing the executor back and calling
+`POST /tasks/:taskId/retry`.
 
 An empty allowlist is unchanged behaviour: with `MERGE_EXECUTOR_RUNNER_IDS`
 unset no executor is named, the check is skipped, and readiness authorizes as

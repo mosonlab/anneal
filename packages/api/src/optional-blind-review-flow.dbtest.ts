@@ -3,28 +3,18 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { mergeExecutorRunnerIds, RunStatus, TaskStatus } from "@anneal/db";
+import { RunStatus, TaskStatus } from "@anneal/db";
 
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import { withMergeLease, type ReleaseMergeLease, type WithMergeLease } from "./merge-lease.js";
-import { readinessTick, type DaemonSnapshotReader } from "./merge-readiness-worker.js";
+import { executorsOnline } from "./merge-executor-daemon-fixture.js";
+import { readinessTick } from "./merge-readiness-worker.js";
 import {
   IMPLEMENTATION_BASE,
   IMPLEMENTATION_HEAD,
   installParallelReviewLifecycle,
 } from "./parallel-review-fixture.js";
 import { createApp } from "./test-app.js";
-
-/** Every configured merge executor reported online, which is what readiness requires before it authorizes. */
-const executorsOnline: DaemonSnapshotReader = (now) => mergeExecutorRunnerIds().map((runnerId) => ({
-  runnerId,
-  online: true,
-  lastSeenAt: now,
-  daemonVersion: null,
-  diskFreeBytes: null,
-  pollIntervalMs: null,
-  workspaceRoot: null,
-}));
 
 
 const {

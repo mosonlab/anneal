@@ -5,7 +5,7 @@ import type { PrismaClient } from "@anneal/db";
 
 import {
   MERGE_EXECUTOR_OFFLINE_WAIT_MS,
-  offlineMergeExecutors,
+  executorsBlockingAuthorization,
   READINESS_CLAIM_LEASE_MS,
   READINESS_READ_BUDGET_MS,
   startReadinessWorker,
@@ -32,20 +32,20 @@ test("readiness reads merge executor liveness from the registry GET /runners rep
   const online = new Date(seenAt.getTime() + 5_000);
 
   withExecutorAllowlist("merge-executor-1", () => {
-    assert.deepEqual(offlineMergeExecutors(registry.snapshot, online), []);
-    assert.deepEqual(offlineMergeExecutors(registry.snapshot, offline), ["merge-executor-1"]);
+    assert.deepEqual(executorsBlockingAuthorization(() => registry.snapshot(online)), []);
+    assert.deepEqual(executorsBlockingAuthorization(() => registry.snapshot(offline)), ["merge-executor-1"]);
     // A daemon that never reported at all is not online either.
-    assert.deepEqual(offlineMergeExecutors(() => [], online), ["merge-executor-1"]);
+    assert.deepEqual(executorsBlockingAuthorization(() => []), ["merge-executor-1"]);
   });
 
   // A second, unrelated daemon does not stand in for the executor.
   withExecutorAllowlist("merge-executor-2", () => {
-    assert.deepEqual(offlineMergeExecutors(registry.snapshot, online), ["merge-executor-2"]);
+    assert.deepEqual(executorsBlockingAuthorization(() => registry.snapshot(online)), ["merge-executor-2"]);
   });
 
   // No allowlist, no check: authorization proceeds as it did before.
   withExecutorAllowlist(undefined, () => {
-    assert.deepEqual(offlineMergeExecutors(() => [], offline), []);
+    assert.deepEqual(executorsBlockingAuthorization(() => []), []);
   });
 });
 

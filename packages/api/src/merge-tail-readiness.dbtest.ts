@@ -6,7 +6,6 @@ import {
   type ChangedFile,
   DependencyProvisioning,
   INTEGRATOR_SENTINEL_MODEL,
-  mergeExecutorRunnerIds,
   MergeLeaseEventState,
   MERGE_TAIL_KIND,
   Prisma,
@@ -27,6 +26,7 @@ import {
   type WithMergeLease,
 } from "./merge-lease.js";
 import type { MergeLeaseTarget } from "./merge-lease-hold.js";
+import { executorsOnline } from "./merge-executor-daemon-fixture.js";
 import {
   MERGE_EXECUTOR_OFFLINE_WAIT_MS,
   READINESS_CLAIM_LEASE_MS,
@@ -37,17 +37,6 @@ import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createRunnerRegistry } from "./runners.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
-
-/** Every configured merge executor reported online, which is what readiness requires before it authorizes. */
-const executorsOnline: DaemonSnapshotReader = (now) => mergeExecutorRunnerIds().map((runnerId) => ({
-  runnerId,
-  online: true,
-  lastSeenAt: now,
-  daemonVersion: null,
-  diskFreeBytes: null,
-  pollIntervalMs: null,
-  workspaceRoot: null,
-}));
 
 let db: PrismaClient;
 before(() => { db = setupTestDb(); });
@@ -1212,12 +1201,24 @@ const executorRegistry = () => {
 // Outside `DaemonSnapshot.online`, which is three poll intervals or 30s.
 const OFFLINE_NOW = new Date(SEEN_AT.getTime() + 31_000);
 const ONLINE_NOW = new Date(SEEN_AT.getTime() + 5_000);
+/** Liveness as the readiness worker reads it: a reader that carries its own clock. */
+const executorsAt = (now: Date): DaemonSnapshotReader => {
+  const snapshot = executorRegistry().snapshot;
+  return () => snapshot(now);
+};
+const offlineMarkers = (readinessTaskId: string) => db.taskActivity.findMany({
+  where: {
+    taskId: readinessTaskId,
+    metadata: { path: ["state"], equals: "requeued-executor-offline" },
+  },
+  orderBy: { createdAt: "asc" },
+});
 
 test("readiness requeues itself rather than authorizing a merge no online executor can claim", async () => {
   await withExecutorAllowlist(EXECUTOR_RUNNER_ID, async () => {
     const seeded = await seedReadiness();
     assert.deepEqual(
-      await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, executorRegistry().snapshot),
+      await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, executorsAt(OFFLINE_NOW)),
       { claimed: 1, authorized: 0, requeued: 1, stopped: 0 },
     );
 
@@ -1226,6 +1227,10 @@ test("readiness requeues itself rather than authorizing a merge no online execut
     assert.equal(await db.run.count({ where: { taskId: seeded.integrator.id } }), 0);
     assert.deepEqual(leasedTargets, []);
 
+    // The wait surrenders the chain lease rather than blocking the delivery
+    // line for the whole outage; nothing can be authorized while it lasts.
+    assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId]);
+
     // The chain waits at readiness, and the regression evidence it waits on is untouched.
     assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.TODO);
     const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
@@ -1233,34 +1238,60 @@ test("readiness requeues itself rather than authorizing a merge no online execut
     assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1);
     assert.equal(await db.taskStepOutput.count({ where: { taskId: seeded.regression.id } }), 1);
 
-    const activity = await db.taskActivity.findFirstOrThrow({ where: {
-      taskId: seeded.readiness.id,
-      metadata: { path: ["state"], equals: "requeued-executor-offline" },
-    } });
-    const metadata = activity.metadata as Record<string, unknown>;
+    const [activity] = await offlineMarkers(seeded.readiness.id);
+    const metadata = activity!.metadata as Record<string, unknown>;
     assert.equal(metadata.reason, "merge-executor-offline");
     assert.deepEqual(metadata.executorRunnerIds, [EXECUTOR_RUNNER_ID]);
-    assert.match(activity.body, /merge-executor-offline/u);
+    assert.match(activity!.body, /merge-executor-offline/u);
+  });
+});
+
+test("an executor that goes down under the merge lease still has no authorization written", async () => {
+  await withExecutorAllowlist(EXECUTOR_RUNNER_ID, async () => {
+    const seeded = await seedReadiness();
+    // The liveness read before the Lease sees the executor; the one that
+    // decides, immediately before the leased authorization, sees it gone.
+    let reads = 0;
+    const snapshot = executorRegistry().snapshot;
+    const goesOffline: DaemonSnapshotReader = () => {
+      reads += 1;
+      return snapshot(reads === 1 ? ONLINE_NOW : OFFLINE_NOW);
+    };
+
+    assert.deepEqual(
+      await readinessTick(db, reader(), ONLINE_NOW, 5, releaseChainLease, runWithMergeLease, goesOffline),
+      { claimed: 1, authorized: 0, requeued: 1, stopped: 0 },
+    );
+    assert.equal(reads, 2);
+    // The Lease was taken and then released with nothing authorized.
+    assert.deepEqual(leasedTargets, [{ projectId: seeded.project.id, chainId: seeded.readiness.chainId }]);
+    assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId]);
+    assert.equal(await db.taskStepOutput.count({ where: { taskId: seeded.readiness.id } }), 0);
+    assert.equal(await db.run.count({ where: { taskId: seeded.integrator.id } }), 0);
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.TODO);
+    assert.equal((await offlineMarkers(seeded.readiness.id)).length, 1);
   });
 });
 
 test("a merge executor that stays offline past the wait stops the tail by name", async () => {
   await withExecutorAllowlist(EXECUTOR_RUNNER_ID, async () => {
     const seeded = await seedReadiness();
-    const snapshotReader = executorRegistry().snapshot;
+    const offline = executorsAt(OFFLINE_NOW);
     assert.equal(
-      (await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, snapshotReader)).requeued,
+      (await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, offline)).requeued,
       1,
     );
-    // The wait is measured from the first recorded requeue, whose row carries a
-    // database clock; pin it so the ceiling is the only thing under test.
+    // The wait is measured from the outage the latest marker belongs to, and
+    // the marker rows carry a database clock: pin the episode so the ceiling is
+    // the only thing under test. Readiness polls every two seconds, so a real
+    // fifteen-minute outage leaves its latest marker one tick behind the stop.
+    const expired = new Date(OFFLINE_NOW.getTime() + MERGE_EXECUTOR_OFFLINE_WAIT_MS);
     await db.taskActivity.updateMany({
       where: { taskId: seeded.readiness.id, metadata: { path: ["state"], equals: "requeued-executor-offline" } },
-      data: { createdAt: OFFLINE_NOW },
+      data: { createdAt: new Date(expired.getTime() - 2_000) },
     });
-    const expired = new Date(OFFLINE_NOW.getTime() + MERGE_EXECUTOR_OFFLINE_WAIT_MS);
     assert.deepEqual(
-      await readinessTick(db, reader(), expired, 5, releaseChainLease, runWithMergeLease, snapshotReader),
+      await readinessTick(db, reader(), expired, 5, releaseChainLease, runWithMergeLease, offline),
       { claimed: 1, authorized: 0, requeued: 0, stopped: 1 },
     );
     for (const taskId of [seeded.readiness.id, seeded.regression.id]) {
@@ -1272,19 +1303,45 @@ test("a merge executor that stays offline past the wait stops the tail by name",
   });
 });
 
+test("a later outage waits out its own ceiling rather than the task's whole history", async () => {
+  await withExecutorAllowlist(EXECUTOR_RUNNER_ID, async () => {
+    const seeded = await seedReadiness();
+    const offline = executorsAt(OFFLINE_NOW);
+    assert.equal(
+      (await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, offline)).requeued,
+      1,
+    );
+
+    // The executor came back and the chain settled some other way -- a base
+    // drift that reran regression for two hours -- before going down again.
+    // Marker rows carry a database clock, so pin the first outage to the tick
+    // that recorded it. The second outage is seconds old: readiness waits.
+    const laterOutage = new Date(OFFLINE_NOW.getTime() + 2 * 60 * 60_000);
+    await db.taskActivity.updateMany({
+      where: { taskId: seeded.readiness.id, metadata: { path: ["state"], equals: "requeued-executor-offline" } },
+      data: { createdAt: OFFLINE_NOW },
+    });
+    assert.deepEqual(
+      await readinessTick(db, reader(), laterOutage, 5, releaseChainLease, runWithMergeLease, offline),
+      { claimed: 1, authorized: 0, requeued: 1, stopped: 0 },
+    );
+    const markers = await offlineMarkers(seeded.readiness.id);
+    assert.equal(markers.length, 2);
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.TODO);
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.DONE);
+  });
+});
+
 test("an online merge executor authorizes the merge exactly as before the check existed", async () => {
   await withExecutorAllowlist(EXECUTOR_RUNNER_ID, async () => {
     const seeded = await seedReadiness();
     assert.deepEqual(
-      await readinessTick(db, reader(), ONLINE_NOW, 5, releaseChainLease, runWithMergeLease, executorRegistry().snapshot),
+      await readinessTick(db, reader(), ONLINE_NOW, 5, releaseChainLease, runWithMergeLease, executorsAt(ONLINE_NOW)),
       { claimed: 1, authorized: 1, requeued: 0, stopped: 0 },
     );
     assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
     assert.equal(await db.run.count({ where: { taskId: seeded.integrator.id } }), 1);
-    assert.equal(await db.taskActivity.count({ where: {
-      taskId: seeded.readiness.id,
-      metadata: { path: ["state"], equals: "requeued-executor-offline" },
-    } }), 0);
+    assert.equal((await offlineMarkers(seeded.readiness.id)).length, 0);
   });
 });
 
@@ -1292,7 +1349,7 @@ test("an unconfigured executor allowlist authorizes whatever the daemon registry
   await withExecutorAllowlist(undefined, async () => {
     const seeded = await seedReadiness();
     assert.deepEqual(
-      await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, executorRegistry().snapshot),
+      await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, executorsAt(OFFLINE_NOW)),
       { claimed: 1, authorized: 1, requeued: 0, stopped: 0 },
     );
     assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);

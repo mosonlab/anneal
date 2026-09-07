@@ -232,7 +232,7 @@ const main = async (): Promise<void> => {
   // control plane and already holds the read credential, rather than inventing
   // a fourth service.
   evidenceTimer = startEvidenceWorker(prisma, githubReader);
-  readinessTimer = startReadinessWorker(prisma, githubReader, runnerRegistry.snapshot);
+  readinessTimer = startReadinessWorker(prisma, githubReader, () => runnerRegistry.snapshot(new Date()));
   baseDriftRecoveryTimer = startBaseDriftRecoveryWorker(prisma, githubReader);
   startupBusy = false;
 };
