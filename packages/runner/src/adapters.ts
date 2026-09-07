@@ -84,6 +84,11 @@ export const buildPrompt = (claim: ClaimedTask): string => [
   "",
   `Task: ${claim.task.name}`,
   claim.task.description,
+  ...(claim.specificationAmendment ? [
+    "",
+    "Specification of record amended after materialization:",
+    `- ${claim.specificationAmendment}`,
+  ] : []),
   ...(claim.operatorNotes.length > 0 ? [
     "",
     "Operator notes:",

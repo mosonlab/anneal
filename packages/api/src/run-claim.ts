@@ -48,6 +48,7 @@ import { runnerBackendAllowsClaim } from "./runner-backend-health.js";
 import { decryptSecret } from "./secrets.js";
 import {
   prepareSpecificationVerification,
+  specificationDigest,
   specificationReadBudgetExhaustedRefusal,
   specificationReadDeadlineExceededRefusal,
   specificationMaterializationForDirectImplementation,
@@ -1125,6 +1126,26 @@ export const claimRun = async (
         candidate.task,
         run.branch,
       );
+      if (specificationMaterialization && priorResume === null) {
+        // Remember what this Run was handed, in the same transaction that
+        // composed it. Every later review claim checks the branch against this
+        // digest, so amending the brief afterwards cannot make a faithful
+        // materialization look tampered with, and no re-derivation from the
+        // description can quietly move the authority.
+        //
+        // Only a first claim materializes anything: a resumed Run keeps its id
+        // and its workspace (`reuseWorkspace` in the runner), so it never
+        // rewrites `.chain/<branch>/spec.md`. Recording this claim's payload
+        // then would move the digest to a brief amended while the Run waited on
+        // its Inbox question, leaving the branch's faithful file to be refused.
+        await tx.run.update({
+          where: { id: run.id },
+          data: { specificationDigest: specificationDigest(specificationMaterialization.body) },
+        });
+      }
+      const specificationAmendment = prepared.status === "ready" && prepared.verification.currentBrief.kind === "amended"
+        ? prepared.verification.currentBrief.note
+        : null;
       return {
         outcome: "claimed" as const,
         claim: {
@@ -1208,6 +1229,7 @@ export const claimRun = async (
           priorOutputs,
           operatorNotes,
           ...(operatorFeedback === null ? {} : { operatorFeedback }),
+          ...(specificationAmendment === null ? {} : { specificationAmendment }),
           previousRunHandoff,
           regressionRepairHandoff: regressionRepairHandoff.status === "ok"
             ? regressionRepairHandoff.handoff
