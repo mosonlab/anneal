@@ -427,7 +427,14 @@ test("Claude excludes host settings and auto-memory with the versioned platform 
   const settingsIndex = claude.indexOf("--settings");
   assert.ok(settingsIndex >= 0);
   assert.equal(claude[settingsIndex + 1], claudePlatformSettingsPath());
-  assert.deepEqual(JSON.parse(await readFile(claudePlatformSettingsPath(), "utf8")), { autoMemoryEnabled: false });
+  const settings = JSON.parse(await readFile(claude[settingsIndex + 1]!, "utf8"));
+  assert.equal(settings.autoMemoryEnabled, false);
+  assert.equal(settings.disableAllHooks, false, "platform settings override project/local hook disabling");
+  assert.equal(settings.hooks.PreToolUse[0].matcher, "^(Agent|Task)$");
+  assert.equal(settings.hooks.PreToolUse[0].hooks[0].type, "command");
+  const prompt = buildPrompt({ ...claim, runner: "CLAUDE" });
+  assert.match(prompt, /opus for implementation.*sonnet only for simple exploration.*haiku only for mechanical scanning/);
+  assert.match(prompt, /Keep simple branch merges and integration verification in the main agent/);
   const env = buildChildEnvironment(
     { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], workspaceRoot: productionRoot, hostProofSlots: 3 },
     { ...claim, runner: "CLAUDE", secrets: { ...claim.secrets, CLAUDE_CONFIG_DIR: "/host/.claude" } },

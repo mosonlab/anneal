@@ -219,9 +219,10 @@ const runRunner = (
   // runner started here is a new run, not a nested one.
   delete childEnvironment.NODE_TEST_CONTEXT;
   // What these two tests are about is the path that hands out databases. The
-  // caller may have turned that off for the suite this file is part of — the
-  // benchmark's serial arm does exactly that — and inheriting it would leave
-  // the tests asserting isolation against a run that was asked not to isolate.
+  // caller may have turned that off for the suite this file is part of — a
+  // caller that runs the suite against one shared schema does exactly that —
+  // and inheriting it would leave the tests asserting isolation against a run
+  // that was asked not to isolate.
   delete childEnvironment.AGENTOS_DBTEST_PROVISION;
 
   return new Promise((resolve, reject) => {

@@ -69,6 +69,9 @@ written.
   stop notices, and an approval decision still closes the gate's sibling cards.
 - The retired `goal-5a0` authorization-marker harness and root
   `test:dependency-gate` script are removed.
+- Removed the `bench-postgres.sh` and `bench-dbtest-concurrency.sh` gate-worker
+  benchmark scripts; gate throughput tuning is closed and the measured ceiling
+  is recorded in operator records outside this repository.
 - The runner no longer writes or reads the `.agentos/task-output-receipt.json`
   delivery receipt, and the `POST_DELIVERY_DISCONNECT_ACCEPTED` event no longer
   carries its `localReceipt` and `localReceiptReadError` diagnostics. The
