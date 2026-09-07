@@ -38,6 +38,10 @@ export type CompletionAdvancementFacts = {
   mergeTailAuxiliary: boolean;
   /** `settleMergeTailCompletion` already decided this Task's next state. */
   mergeTailHandled: boolean;
+  /** Why this repair completion cannot be settled: the chain's recovery
+   *  aggregate does not name the Run the repair repaired. Set only for a
+   *  successful repair completion, and never for an ordinary Step. */
+  repairBindingRefusal: string | null;
   auxiliaryTargetTaskId: string | null;
   mergeTailRequeue: boolean;
   mergeTailRecoverySourceRunId: string | null;
@@ -79,6 +83,11 @@ export type CompletionAdvancement =
   /** A gated chain step succeeded: park it in REVIEW and open the gate
    *  question. */
   | { case: "ask-approval-gate-question" }
+  /** The repair succeeded but the platform cannot bind its completion to the
+   *  chain's recovery: park the repair Task with the reason and reject the
+   *  completion instead of activating a merge-tail target on a broken
+   *  binding. */
+  | { case: "reject-repair-binding"; reason: string }
   /** A chain step or automatic repair succeeded: mark it DONE and queue
    *  whatever it releases. */
   | {
@@ -119,6 +128,12 @@ export const completionAdvancement = (facts: CompletionAdvancementFacts): Comple
   }
   if (facts.succeeded && (task.chainId || facts.mergeTailAuxiliary)) {
     if (facts.mergeTailHandled) return { case: "merge-tail-settled" };
+    // Asked only of a repair the merge tail did not already settle: an unable
+    // or invalid repair stopped the tail on its own terms and carries no
+    // recovery onto a new Run, so its binding no longer decides anything.
+    if (facts.repairBindingRefusal) {
+      return { case: "reject-repair-binding", reason: facts.repairBindingRefusal };
+    }
     if (task.approvalGate) return { case: "ask-approval-gate-question" };
     return {
       case: "complete-and-activate-successors",
@@ -149,6 +164,9 @@ export const completionActivityBody = (facts: CompletionAdvancementFacts): strin
     return `${run} failed after publishing a negative Regression verdict; repair queued`;
   }
   if (facts.outputRefusal) return `${run} succeeded but canonical task output was refused`;
+  if (facts.succeeded && facts.mergeTailAuxiliary && !facts.mergeTailHandled && facts.repairBindingRefusal) {
+    return `${run} succeeded but its repair completion was rejected: ${facts.repairBindingRefusal}`;
+  }
   if (facts.succeeded && (facts.task.templateId || facts.task.chainId || facts.mergeTailAuxiliary)) {
     return `${run} succeeded; chain advanced or awaiting approval`;
   }

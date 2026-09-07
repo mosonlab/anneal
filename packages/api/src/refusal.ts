@@ -51,6 +51,9 @@ const localRefusalStatus = {
   "pinned-base-commit": 409,
   "merge-evidence": 409,
   "merge-confirmation": 409,
+  // A repair completion whose recovery names another Run. The state is one the
+  // platform produced, so it answers a named conflict rather than a 500.
+  "merge-tail-repair-unbound": 409,
   "event-payload-too-large": 413,
   "events-request-too-large": 413,
 } as const satisfies Record<string, RefusalStatus>;

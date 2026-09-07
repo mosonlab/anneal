@@ -54,6 +54,7 @@ const refusalByReason = {
   "pinned-base-commit": { reason: "pinned-base-commit", message: "pinned base" },
   "merge-evidence": { reason: "merge-evidence", message: "merge evidence" },
   "merge-confirmation": { reason: "merge-confirmation", message: "merge confirmation" },
+  "merge-tail-repair-unbound": { reason: "merge-tail-repair-unbound", message: "repair cannot bind" },
   "event-payload-too-large": { reason: "event-payload-too-large", message: "event too large" },
   "events-request-too-large": { reason: "events-request-too-large", message: "events request too large" },
   "inbox-question-not-found": { reason: "inbox-question-not-found", message: "missing question" },
