@@ -2129,9 +2129,9 @@ latest persisted regression output snapshotted before recovery clears it, or
 `null`). The snapshot carries the prior `runId`, `kind`, `body`, and `commitSha`.
 
 `regression-verification.sh prepare` decides once from that snapshot. It reuses
-semantic PASS only when the prepared head, after target refresh, matches the
-prior output's exact head and the latest output records semantic success
-(`pass` or `gate-fail`). A different head, a latest `review-fail` or
+semantic PASS only when the prepared head, after target refresh, matches both
+the authorized recovery head and the prior output's exact head, and the latest
+output is valid v2 evidence of semantic success (`pass` or `gate-fail`). A different head, a latest `review-fail` or
 `refresh-conflict`, or missing or invalid evidence requires the normal semantic
 recheck. A reused verdict skips that recheck; `finalize` still runs the Merge
 gate. The persisted v2 result adds `semanticVerdict: "reused"` and

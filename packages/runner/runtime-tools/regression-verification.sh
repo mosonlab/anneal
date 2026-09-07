@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Token-free mechanical half of canonical regression verification.
 #
-# The model invokes `prepare`, performs only the semantic recheck, then invokes
-# `finalize` (or `review-fail <summary>`). This script owns every git/network,
+# The model invokes `prepare`, performs the semantic recheck unless prepare
+# reuses an exact-head verdict, then invokes `finalize` (or `review-fail
+# <summary>`). This script owns every git/network,
 # gate, verdict transcription, and the local Runner handoff. The Runner owns
 # the fenced control-plane write outside the Agent sandbox. Merge readiness owns
 # the short merge-lease window after a durable exact-head PASS exists, so lease
