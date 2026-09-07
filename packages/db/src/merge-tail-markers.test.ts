@@ -12,6 +12,7 @@ import {
   parseMergeTrainMarker,
   readMarkerHistory,
   readMarkers,
+  readLatestMarker,
   recoveryContext,
   writeMarker,
   type Marker,
@@ -249,4 +250,17 @@ test("alreadyAttempted sees an attempt buried past the recent-state window (app.
   // The failure this site's window exists to prevent: with take 20 the older
   // attempt is invisible and a second automatic repair would be created.
   assert.equal(attempted(recent), false);
+});
+
+
+test("train ownership reads select only control-plane markers", async () => {
+  let observed: unknown;
+  const tx = { taskActivity: { findFirst: async (input: unknown) => {
+    observed = input;
+    return null;
+  } } } as unknown as Prisma.TransactionClient;
+  assert.equal(await readLatestMarker(tx, "train-1", "train", "control-plane"), null);
+  assert.deepEqual((observed as { where: unknown }).where, {
+    taskId: "train-1", actorType: "control-plane", metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.train },
+  });
 });

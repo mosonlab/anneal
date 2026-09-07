@@ -271,9 +271,10 @@ export const readLatestMarker = async (
   tx: Tx,
   taskId: string,
   kind: MarkerKind,
+  actorType?: "control-plane",
 ): Promise<Marker | null> => {
   const row = await tx.taskActivity.findFirst({
-    where: { taskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND[kind] } },
+    where: { taskId, ...(actorType ? { actorType } : {}), metadata: { path: ["kind"], equals: MERGE_TAIL_KIND[kind] } },
     select: { metadata: true },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
   });

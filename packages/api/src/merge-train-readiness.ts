@@ -68,26 +68,44 @@ type TrainHooks = {
     release: ReleaseMergeLease, lease: WithMergeLease, reader: PullRequestReader): Promise<void>;
 };
 
-/** Preserve the owning Task even when a callback fails, so release transport
- * failure still enters the established durable deferral path. */
-const withTrainLease = async <T>(
-  db: PrismaClient, lease: WithMergeLease, target: { projectId: string; chainId: string },
-  regressionTaskId: string, fn: () => Promise<{ value: T; leaseOutcome: HeldLeaseOutcome }>,
-): Promise<void> => {
-  let failed = false;
-  let failure: unknown;
-  await lease(target, async () => {
-    try { return await fn(); }
-    catch (error: unknown) {
-      failed = true;
-      failure = error;
-      return { value: undefined, leaseOutcome: { kind: "stop", taskId: regressionTaskId } };
-    }
-  }, db);
-  if (failed) throw failure;
+const serializable = { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 100_000 } as const;
+
+/** This short-lived mutex fences stale API ticks across external lease calls.
+ * It is distinct from the candidate chain locks acquired by settlement. */
+const tryRepositoryMutex = async (tx: Prisma.TransactionClient, repoId: string): Promise<boolean> => {
+  const [row] = await tx.$queryRaw<Array<{ held: boolean }>>`
+    SELECT pg_try_advisory_xact_lock(hashtextextended(${`anneal:merge-train:${repoId}`}, 0)) AS held
+  `;
+  return row?.held === true;
 };
 
-const serializable = { isolationLevel: Prisma.TransactionIsolationLevel.Serializable, timeout: 100_000 } as const;
+/** Preserve the owning Task on callback failure so release transport failures
+ * enter the existing durable deferral path. The repository mutex remains held
+ * through release, preventing an old tick from releasing a newer train held
+ * under the same first-candidate Chain identity. */
+const withTrainLease = async <T>(
+  db: PrismaClient, lease: WithMergeLease, target: { projectId: string; chainId: string },
+  regressionTaskId: string, trainTaskId: string, repoId: string,
+  fn: () => Promise<{ value: T; leaseOutcome: HeldLeaseOutcome }>,
+): Promise<void> => {
+  await db.$transaction(async (mutexTx) => {
+    if (!await tryRepositoryMutex(mutexTx, repoId)) return;
+    // Use a fresh read after acquisition, not the outer transaction's snapshot.
+    const marker = await readLatestMarker(db, trainTaskId, "train", "control-plane");
+    if (marker?.state !== "queued" && marker?.state !== "acquiring") return;
+    let failed = false;
+    let failure: unknown;
+    await lease(target, async () => {
+      try { return await fn(); }
+      catch (error: unknown) {
+        failed = true;
+        failure = error;
+        return { value: undefined, leaseOutcome: { kind: "stop", taskId: regressionTaskId } };
+      }
+    }, db);
+    if (failed) throw failure;
+  }, { ...serializable, timeout: 300_000 });
+};
 
 const lockCandidates = async (tx: Prisma.TransactionClient, candidates: TrainCandidateBinding[]): Promise<void> => {
   // All train writers take chain locks in the same order, independent of FIFO.
@@ -139,14 +157,14 @@ type PendingTrain = TrainBinding & {
 export const pendingMergeTrains = async (db: PrismaClient | Prisma.TransactionClient): Promise<PendingTrain[]> => {
   const tasks = await db.task.findMany({ where: {
     chainId: null,
-    activity: { some: { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.train } } },
+    activity: { some: { actorType: "control-plane", metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.train } } },
   }, select: { id: true, projectId: true, repoId: true }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
   const pending: PendingTrain[] = [];
   for (const task of tasks) {
-    const marker = await readLatestMarker(db, task.id, "train");
+    const marker = await readLatestMarker(db, task.id, "train", "control-plane");
     if (marker?.state !== "queued" && marker?.state !== "acquiring") continue;
     const parsed = parseMergeTrainMarker(marker.raw);
-    if (parsed.status !== "ok" || !task.repoId || !parsed.marker.regressionTaskId
+    if (parsed.status !== "ok" || parsed.marker.trainTaskId !== task.id || !task.repoId || !parsed.marker.regressionTaskId
       || !parsed.marker.baseSha || !parsed.marker.width || !parsed.marker.candidates) {
       throw new Error(`Merge train ${task.id} has malformed durable ownership metadata`);
     }
@@ -193,7 +211,7 @@ const abortTrain = async (
   db: PrismaClient, train: PendingTrain, reason: string, now: Date, stoppedRead?: ReadyRead,
 ): Promise<boolean> => db.$transaction(async (tx) => {
   await lockCandidates(tx, train.candidates);
-  const current = await readLatestMarker(tx, train.taskId, "train");
+  const current = await readLatestMarker(tx, train.taskId, "train", "control-plane");
   if (current?.state !== "queued" && current?.state !== "acquiring") return false;
   for (const [index, candidate] of train.candidates.entries()) {
     if (stoppedRead?.readiness.id === candidate.taskId) {
@@ -220,7 +238,9 @@ const enqueueReservedTrain = async (
       const readiness = await db.task.findUnique({ where: { id: candidate.taskId }, include: {
         templateStep: { include: { taskTemplate: { select: { name: true } } } }, repo: true,
       } });
-      if (!readiness || await excludedRecovery(db, candidate.taskId)) throw new Error(`Merge train reservation candidate ${candidate.taskId} is no longer eligible`);
+      if (!readiness || readiness.projectId !== train.projectId || readiness.repoId !== train.repoId
+        || readiness.chainId !== candidate.chainId || !isMergeReadinessStep(readiness.templateStep)
+        || await excludedRecovery(db, candidate.taskId)) throw new Error(`Merge train reservation candidate ${candidate.taskId} is no longer eligible`);
       const read = await hooks.read(db, readiness, now);
       if (!read.claimed) {
         if (read.input.stage === "claim-lost") return "waiting";
@@ -238,7 +258,7 @@ const enqueueReservedTrain = async (
     await db.$transaction(async (tx) => {
       await lockCandidates(tx, train.candidates);
       await tx.$queryRaw`SELECT "id" FROM "Repo" WHERE "id" = ${train.repoId} FOR UPDATE`;
-      if ((await readLatestMarker(tx, train.taskId, "train"))?.state !== "acquiring") return;
+      if ((await readLatestMarker(tx, train.taskId, "train", "control-plane"))?.state !== "acquiring") return;
       const unresolved = await tx.mergeLeaseEvent.findFirst({ where: {
         state: { in: [MergeLeaseEventState.RELEASE_DEFERRED, MergeLeaseEventState.HANDOFF_PENDING] },
         owningTask: { repoId: train.repoId },
@@ -299,7 +319,9 @@ const settleTrain = async (
       const readiness = await db.task.findUnique({ where: { id: candidate.taskId }, include: {
         templateStep: { include: { taskTemplate: { select: { name: true } } } }, repo: true,
       } });
-      if (!readiness || await excludedRecovery(db, candidate.taskId)) throw new Error(`Merge train candidate ${candidate.taskId} is no longer eligible`);
+      if (!readiness || readiness.projectId !== train.projectId || readiness.repoId !== train.repoId
+        || readiness.chainId !== candidate.chainId || !isMergeReadinessStep(readiness.templateStep)
+        || await excludedRecovery(db, candidate.taskId)) throw new Error(`Merge train candidate ${candidate.taskId} is no longer eligible`);
       const read = await hooks.read(db, readiness, now);
       if (!read.claimed) {
         if (read.input.stage === "claim-lost") return "waiting";
@@ -333,7 +355,7 @@ const settleTrain = async (
     }
     const counts = await db.$transaction(async (tx) => {
       await lockCandidates(tx, train.candidates);
-      if ((await readLatestMarker(tx, train.taskId, "train"))?.state !== "queued") return { authorized: 0, stopped: 0 };
+      if ((await readLatestMarker(tx, train.taskId, "train", "control-plane"))?.state !== "queued") return { authorized: 0, stopped: 0 };
       for (const read of reads) {
         if (!await evidenceStillMatches(tx, read)) throw new Error(`Merge train candidate ${read.readiness.id} evidence changed during settlement`);
       }
@@ -418,7 +440,7 @@ export const mergeTrainReadinessTick = async (
     ...unresolvedLeases.flatMap((event) => event.owningTask.repoId ? [event.owningTask.repoId] : [])]);
   for (const train of pending) {
     const target = { projectId: train.projectId, chainId: train.candidates[0]!.chainId };
-    await withTrainLease(db, lease, target, train.regressionTaskId, async () => {
+    await withTrainLease(db, lease, target, train.regressionTaskId, train.taskId, train.repoId, async () => {
       const releaseWasDeferred = unresolvedLeases.some((event) => event.state === MergeLeaseEventState.RELEASE_DEFERRED
         && event.owningTask.id === train.regressionTaskId);
       let outcome: "waiting" | "finished";
@@ -432,6 +454,17 @@ export const mergeTrainReadinessTick = async (
     });
   }
 
+  const single = async (read: ClaimedReadiness, decision: ReadinessDecision): Promise<void> => {
+    if (!read.readiness.repoId) {
+      await hooks.single(db, read, decision, result, release, lease, reader);
+      return;
+    }
+    await db.$transaction(async (mutexTx) => {
+      if (!await tryRepositoryMutex(mutexTx, read.readiness.repoId!)) return;
+      if ((await pendingMergeTrains(db)).some((train) => train.repoId === read.readiness.repoId)) return;
+      await hooks.single(db, read, decision, result, release, lease, reader);
+    }, { ...serializable, timeout: 300_000 });
+  };
   const groups = new Map<string, ReadyRead[]>();
   try {
     for await (const candidate of hooks.candidates(db, 100)) {
@@ -441,7 +474,7 @@ export const mergeTrainReadinessTick = async (
       if (!read.claimed) continue;
       result.claimed += 1;
       if (read.input.stage !== "ready" || !candidate.repoId || !read.input.target.resolved) {
-        await hooks.single(db, read, await evaluateReadiness(reader, read.input), result, release, lease, reader);
+        await single(read, await evaluateReadiness(reader, read.input));
         continue;
       }
       const group = groups.get(candidate.repoId) ?? [];
@@ -463,20 +496,20 @@ export const mergeTrainReadinessTick = async (
         continue;
       }
       if (width === 0) {
-        for (const read of group) await hooks.single(db, read, await evaluateReadiness(reader, read.input), result, release, lease, reader);
+        for (const read of group) await single(read, await evaluateReadiness(reader, read.input));
         continue;
       }
       if (group.length === 1 && first.input.regression.baseHeadSha === baseSha) {
-        await hooks.single(db, first, await evaluateReadiness(reader, first.input), result, release, lease, reader);
+        await single(first, await evaluateReadiness(reader, first.input));
         continue;
       }
       const selected = group.slice(0, width);
       const candidates = selected.map((read) => ({ taskId: read.readiness.id, chainId: read.readiness.chainId!,
         headSha: read.input.regression.headSha, branch: read.regression.runs[0]?.branch ?? "" }));
       if (candidates.some((candidate) => !candidate.chainId || !candidate.branch)) {
-        for (const read of selected) await hooks.single(db, read, {
+        for (const read of selected) await single(read, {
           kind: "stop", condition: "merge-train-branch-unavailable", evidence: "Merge train candidate chain branch is unavailable",
-        }, result, release, lease, reader);
+        });
         continue;
       }
       let claimsHeld = true;
@@ -486,6 +519,7 @@ export const mergeTrainReadinessTick = async (
       let reservation: PendingTrain | null = null;
       try {
         reservation = await db.$transaction(async (tx) => {
+          if (!await tryRepositoryMutex(tx, first.readiness.repoId!)) return null;
           await lockCandidates(tx, candidates);
           await tx.$queryRaw`SELECT "id" FROM "Repo" WHERE "id" = ${first.readiness.repoId} FOR UPDATE`;
           if ((await pendingMergeTrains(tx)).some((train) => train.repoId === first.readiness.repoId)) return null;
@@ -514,13 +548,13 @@ export const mergeTrainReadinessTick = async (
         }, serializable);
       } catch (error: unknown) {
         const reason = `Merge train reservation failed: ${error instanceof Error ? error.message : String(error)}`;
-        for (const read of selected) await hooks.single(db, read, {
+        for (const read of selected) await single(read, {
           kind: "stop", condition: "merge-train-reservation-failed", evidence: reason,
-        }, result, release, lease, reader);
+        });
       }
       if (reservation) {
         const train = reservation;
-        await withTrainLease(db, lease, target, first.regression.id, async () => {
+        await withTrainLease(db, lease, target, first.regression.id, train.taskId, train.repoId, async () => {
           const outcome = await enqueueReservedTrain(db, reader, train, now, hooks);
           return { value: outcome, leaseOutcome: outcome === "waiting" ? { kind: "continue" } : { kind: "stop", taskId: first.regression.id } };
         });

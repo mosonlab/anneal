@@ -48,7 +48,10 @@ intent, not an Approval gate. The same transaction reserves every candidate.
 After acquiring the Lease, readiness revalidates the reservation and enqueues
 its sole Run, changing the markers to `queued`. A restart can therefore recover
 the acquisition-to-enqueue window. Existing reservations and queued trains are
-drained even after `MERGE_TRAIN_WIDTH` is changed to zero.
+drained even after `MERGE_TRAIN_WIDTH` is changed to zero. A repository-scoped
+transaction mutex serializes reservation and external lease calls across API
+ticks, including release. This prevents a stale tick from acquiring or releasing
+a newer train under the same first-candidate Chain identity.
 
 Merge readiness acquires the repository's global Merge Lease for the train
 under the first candidate's Chain lease target before the detached Task is

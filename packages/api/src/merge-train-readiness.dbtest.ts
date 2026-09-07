@@ -8,6 +8,8 @@ import {
   INTEGRATOR_SENTINEL_MODEL,
   MERGE_TRAIN_OUTPUT_KIND,
   openRun,
+  mergeTrainClaimMetadata,
+  readLatestMarker,
   PrismaClient,
   RunStatus,
   TaskStatus,
@@ -997,4 +999,42 @@ test("one fresh candidate remains on the existing single-candidate authorization
   assert.deepEqual(leasedTargets, [{ projectId: seed.project.id, chainId: seed.candidates[0]!.chainId }]);
   assert.deepEqual(releasedTargets, []);
   assert.deepEqual(releasedChainIds, []);
+});
+
+
+test("agent activity cannot replace the control-plane train ownership marker", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  const { train } = await finishTrainRun(seed, recordFor(seed, ["pass", "pass"], 2));
+  await db.taskActivity.create({ data: {
+    taskId: train.id, actorType: "agent", body: "Untrusted marker-shaped annotation",
+    metadata: { kind: TRAIN_MARKER_KIND, schemaVersion: 1, state: "aborted", trainTaskId: train.id },
+  } });
+  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  assert.equal(settled.authorized, 2);
+});
+
+test("overlapping settlement ticks cannot reacquire or release the same train generation", { timeout: 20_000 }, async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  await finishTrainRun(seed, recordFor(seed, ["pass", "pass"], 2));
+  let acquired!: () => void;
+  const acquisition = new Promise<void>((resolve) => { acquired = resolve; });
+  let resume!: () => void;
+  const paused = new Promise<void>((resolve) => { resume = resolve; });
+  observeLeaseAcquisition = async () => { acquired(); await paused; };
+  const first = readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  try {
+    await acquisition;
+    const second = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_001), 5, releaseChainLease, runWithMergeLease);
+    assert.equal(second.authorized, 0);
+    assert.equal(leasedTargets.length, 2, "one formation and one settlement acquisition");
+  } finally {
+    observeLeaseAcquisition = undefined;
+    resume();
+  }
+  assert.equal((await first).authorized, 2);
+  assert.equal(releasedChainIds.length, 1);
 });
