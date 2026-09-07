@@ -1246,10 +1246,24 @@ test("the Todo head starts the whole wave from one dialog and names the chain th
       .find((node) => node.textContent?.trim() === en("tasks.activateAll.confirm"));
     assert.ok(confirm);
     await act(async () => confirm.dispatchEvent(new page.dom.window.MouseEvent("click", { bubbles: true })));
-    await Promise.race([
-      deltaStarted,
-      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Delta was held behind Alpha")), 500)),
-    ]);
+    // Bounded so a Delta that really is held behind Alpha fails rather than
+    // hanging, but sized for the loaded gate worker rather than an idle host
+    // (CONTRIBUTING.md, "Test timing on the gate worker"): the property is that Delta
+    // is not waiting on Alpha's pending request, and half a second of wall clock
+    // for a chain of fetch doubles and React renders is a measurement of the
+    // host, not of the page. Cleared on the winning path, or the passing case
+    // leaves a 15s timer holding the event loop open after the suite is done.
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        deltaStarted,
+        new Promise<never>((_resolve, reject) => {
+          deadline = setTimeout(() => reject(new Error("Delta was held behind Alpha")), 15_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(deadline);
+    }
     // Alpha's check is still pending, but the later chains have already taken
     // their own GET-then-POST paths. One refusal or slow request cannot hold the
     // rest of the wave behind it.
