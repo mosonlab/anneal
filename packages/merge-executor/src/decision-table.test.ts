@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { execute, idempotencyKeyFor, matchingProtectionRule, synchronousExecution } from "./decision-table.js";
-import type { DirectCommitRead } from "./github.js";
+import type { DirectCommitRead, RepositorySnapshot } from "./github.js";
 import {
   AUTHORIZED_BASE,
   AUTHORIZED_HEAD,
