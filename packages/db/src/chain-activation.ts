@@ -31,6 +31,8 @@ import {
   enqueueTaskRunInternal,
   gateQuestion,
   isCompoundImplementationStep,
+  parksInsteadOfRaising,
+  runBirthRefusalMetadata,
 } from "./run-open.js";
 
 type Tx = Prisma.TransactionClient;
@@ -372,9 +374,8 @@ const dispatchBoundSuccessor = async (
       // exactly as any other fault: the successor is parked for an operator.
       case "stopped":
       case "fault":
-        await parkBoundSuccessor(tx, predecessor, successor, refusal.message, {
-          refusal: refusal.code,
-        });
+        await parkBoundSuccessor(tx, predecessor, successor, refusal.message,
+          runBirthRefusalMetadata(refusal));
         return;
       default: {
         const unhandled: never = refusal.disposition;
@@ -834,7 +835,11 @@ const activateChainSuccessorInternal = async (
           throw errorForOpenRunRefusal(refusal);
         }
         case "fault":
-          if (options.onRefusal === "raise") {
+          // A spend cap parks the successor even where the caller asked to
+          // raise: raising rolls back the activation transaction, so the park
+          // below — the only record of which cap refused the attempt — would
+          // never reach the operator who has to raise it.
+          if (options.onRefusal === "raise" && !parksInsteadOfRaising(refusal)) {
             // A compound implementation step is bound to one Agent by
             // construction, so a refusal carrying no error of its own is that
             // invariant failing. The operator's answer is the compound-assignee
@@ -858,7 +863,7 @@ const activateChainSuccessorInternal = async (
         taskId: successor.id,
         actorType: "control-plane",
         body: `Predecessor layer completed but Run birth was refused: ${refusal.message}`,
-        metadata: { refusal: refusal.code },
+        metadata: runBirthRefusalMetadata(refusal),
       } });
       continue;
     }

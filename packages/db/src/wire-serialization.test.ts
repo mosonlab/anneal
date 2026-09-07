@@ -117,6 +117,9 @@ const nativeBoardCard = (): NativeBoardCard => ({
   latestRun: null,
   strandedSalvageBranches,
   taskCost: null,
+  // Already the browser shape: both amounts are serialized Decimals on the
+  // native projection too, so the proof has nothing to convert here.
+  spendCapUsage: { capUsd: "1.00", spentUsd: "1.50", exhausted: true },
   mergeOutcome: null,
   repairOf: null,
   budgetRemaining: true,

@@ -7,6 +7,7 @@ import {
   type Run,
   RunnerKind,
   RunnerPreference,
+  TaskStatus,
 } from "@prisma/client";
 
 import { catalogRunnerForModel, DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
@@ -26,6 +27,7 @@ import {
   stopStateFor,
 } from "./merge-integrator-db.js";
 import { runnerFor } from "./model-routing.js";
+import { spendCapExhausted, taskSpendUsd, usd } from "./spend-cap.js";
 import { runOwnedHead } from "./run-head.js";
 import { stepRole } from "./step-role.js";
 
@@ -868,6 +870,7 @@ export type OpenRunRefusal =
   | OpenRunRefusalShape<"task-not-integrator", "invalid-request">
   | OpenRunRefusalShape<"run-budget-exhausted", "conflict">
   | OpenRunRefusalShape<"lease-loss-refunds-exhausted", "conflict">
+  | OpenRunRefusalShape<"spend-cap-exhausted", "conflict">
   | OpenRunRefusalShape<"chain-held", "chain-held">;
 
 /**
@@ -891,6 +894,7 @@ const dispositionByCode = {
   "task-not-integrator": "fault",
   "run-budget-exhausted": "fault",
   "lease-loss-refunds-exhausted": "fault",
+  "spend-cap-exhausted": "fault",
   "chain-held": "held",
 } as const satisfies Record<OpenRunRefusal["code"], OpenRunDisposition>;
 
@@ -1143,6 +1147,55 @@ export const openRun = async (
     }
   }
 
+  // Money, not attempts. `maxSessionsPerTask`, `budgetGrants` and the
+  // lease-loss refund bound all count attempts, so a task whose attempts each
+  // cost more than its operator expected could spend past `Task.spendCap`
+  // without a single decision point reading it. It is read here, after the
+  // hold check — a held chain is queueing nothing and must not be parked in
+  // REVIEW — so every replacement intent crosses it exactly once.
+  //
+  // The consequence is the caller's, as it is for every other refusal code: a
+  // birth attempted through `attemptRunBirth` is rolled back to a savepoint, so
+  // a write made here would not survive on those paths and would be written
+  // twice on the ones where it did. `recordRunBirthRefusal` below is the shared
+  // write, and the callers that used to raise this refusal out of their own
+  // transaction now park the task with it instead — a spend limit crossed
+  // silently by arriving through the wrong caller is the defect this closes.
+  const spendCap = task.spendCap ?? null;
+  if (spendCap !== null) {
+    const costedRuns = await tx.run.findMany({
+      where: { taskId: task.id },
+      select: {
+        model: true,
+        session: {
+          select: {
+            costUsd: true,
+            inputTokens: true,
+            cachedInputTokens: true,
+            cacheCreationInputTokens: true,
+            outputTokens: true,
+            nativeChildUsed: true,
+          },
+        },
+      },
+    });
+    const spentUsd = taskSpendUsd(costedRuns);
+    if (spendCapExhausted(spendCap, spentUsd)) {
+      const cap = usd(spendCap);
+      const spent = usd(spentUsd);
+      const message = `Spend cap $${cap} reached:`
+        + ` $${spent} spent across ${costedRuns.length}`
+        + ` run${costedRuns.length === 1 ? "" : "s"}; raise or clear spendCap to continue`;
+      return openRunRefusal(
+        "spend-cap-exhausted",
+        "conflict",
+        message,
+        { spendCapUsd: cap, spentUsd: spent, runs: costedRuns.length },
+        { taskId: task.id, taskName: task.name },
+      );
+    }
+  }
+
   // Every intent asks the same module, so no arm can put a Step on a different
   // branch from the rest of its Chain, and no caller has to fill in a head.
   const branches = await resolveRunBranches(tx, task, {
@@ -1292,6 +1345,59 @@ export const attemptRunBirth = async (
   if (executeRaw) await executeRaw(`RELEASE SAVEPOINT ${RUN_BIRTH_SAVEPOINT}`);
   return { outcome: "opened", run: opened.run };
 };
+
+/**
+ * What a park says about the refusal it records, for every caller that writes
+ * one. The code is what an operator filters a REVIEW by, and the refusal's own
+ * detail travels with it — for a spend cap that is the formatted `spendCapUsd`
+ * and `spentUsd` the handbook promises an operator reading the park, which the
+ * message states in prose and nothing else recorded. Callers add their own keys
+ * around it; those win, because a caller naming a task or a schedule of its own
+ * knows which row it meant.
+ */
+export const runBirthRefusalMetadata = (
+  refusal: OpenRunRefusal,
+): Record<string, string | number | boolean | null> =>
+  ({ ...refusal.detail, refusal: refusal.code });
+
+/**
+ * The park a Run-birth refusal leaves behind, for the callers that have none of
+ * their own. `reconcile`, `workspace-reclaim`, `scheduler` and the chain
+ * activation paths each write their own REVIEW and named activity, shaped by
+ * what the refusal means to them; the callers that instead *raised* the refusal
+ * wrote nothing, and raising rolls their transaction back, so a refusal that
+ * arrived through one of them left no durable trace at all. This is the write
+ * they were missing. It must be called on a path that goes on to commit —
+ * never before a `throw`, and never inside `attemptRunBirth`'s savepoint.
+ */
+export const recordRunBirthRefusal = async (
+  tx: Tx,
+  taskId: string,
+  refusal: OpenRunRefusal,
+): Promise<void> => {
+  await tx.task.update({
+    where: { id: taskId },
+    data: { status: TaskStatus.REVIEW, failureReason: refusal.message },
+  });
+  await tx.taskActivity.create({
+    data: {
+      taskId,
+      actorType: "control-plane",
+      body: `Run birth refused: ${refusal.message}`,
+      metadata: runBirthRefusalMetadata(refusal),
+    },
+  });
+};
+
+/**
+ * A refusal a caller must park rather than raise. `spend-cap-exhausted` is the
+ * only one: every other code either belongs to a caller that already parks it,
+ * or is an invariant failure whose honest answer is an error. A spend cap is an
+ * operator's own limit, and rolling its refusal back would delete the very
+ * record that tells them which cap to raise.
+ */
+export const parksInsteadOfRaising = (refusal: OpenRunRefusal): boolean =>
+  refusal.code === "spend-cap-exhausted";
 
 export const errorForOpenRunRefusal = (refusal: OpenRunRefusal): Error => {
   if (refusal.reason === "archived-task") {

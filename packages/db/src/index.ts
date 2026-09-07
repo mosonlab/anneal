@@ -67,7 +67,11 @@ export {
   compoundImplementationAssigneeValid,
   deriveRunConfig,
   enqueueTaskRun,
+  enqueueTaskRunInternal,
   errorForOpenRunRefusal,
+  parksInsteadOfRaising,
+  recordRunBirthRefusal,
+  runBirthRefusalMetadata,
   EXTERNAL_FAILURE_REFUND_CAP,
   gateQuestion,
   isArchivedAssigneeError,
@@ -120,6 +124,7 @@ export {
 } from "./inbox-decision.js";
 export * from "./usage.js";
 export * from "./cost.js";
+export * from "./spend-cap.js";
 export * from "./failure-envelope.js";
 export * from "./run-outcome.js";
 export * from "./run-output-evidence.js";
