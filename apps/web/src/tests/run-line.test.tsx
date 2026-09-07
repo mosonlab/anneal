@@ -97,6 +97,27 @@ test("a caller-owned clock leaves the line with neither the duration nor the wor
   assert.doesNotMatch(visibleText(line), /running|\d+m/u);
 });
 
+test("a caller-owned line names no live phase at all, while the aggregate line still does", () => {
+  // The task card's footer reads "Provisioning · 20s"; a line above it saying
+  // "Provisioning" would be the phase twice. The aggregate card's line draws its
+  // own clock and has nothing else to name the phase, so it keeps the word.
+  const provisioning = run({ status: "PROVISIONING", phase: "provisioning", phaseSince: run().startedAt });
+  const waiting = run({ status: "WAITING_INBOX" });
+  const caller = (subject: BoardLatestRun): string => visibleText(parse(renderToStaticMarkup(
+    <LocaleProvider initialLocale="en"><RunLine run={subject} elapsed="caller" /></LocaleProvider>,
+  )));
+  const line = (subject: BoardLatestRun): string => visibleText(parse(renderToStaticMarkup(
+    <LocaleProvider initialLocale="en"><RunLine run={subject} elapsed="line" /></LocaleProvider>,
+  )));
+  assert.equal(caller(provisioning), "run 7");
+  assert.equal(caller(waiting), "run 7");
+  assert.match(line(provisioning), /^run 7 · provisioning · 2[23]m \d+s$/u);
+  assert.match(line(waiting), /^run 7 · waiting inbox · 2[23]m \d+s$/u);
+  // A finished run is not live: its status word is the only thing that says
+  // how it ended, on either line.
+  assert.equal(caller(run({ status: "FAILED" })), "run 7 · failed");
+});
+
 test("the zh run line wraps under the same rules", () => {
   const line = parse(renderToStaticMarkup(
     <LocaleProvider initialLocale="zh"><RunLine run={run()} elapsed="line" showModel /></LocaleProvider>,
