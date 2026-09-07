@@ -1890,6 +1890,60 @@ for a merge gate stop. A `PATCH /tasks/:taskId` request that supplies `status`
 is refused with `Chain task statuses are controlled by chain execution`. Both
 refusals are expected behaviour; do not use them to reopen the old Chain.
 
+#### Base-drift classification retry classes and `re-validate`
+
+Automatic pre-merge base-drift recovery accounts a classification tick that did
+not conclude against one of three classes, and only one of them is budgeted by
+count:
+
+- `waiting` — the Chain's own Run is still active, so the recovery is not
+  classified yet. Bounded by six hours since the first wait, never by count.
+- `transport` — the server-side repository read failed. Bounded by thirty
+  minutes since the first failed read, never by count.
+- `validation` — a classification ran against real facts and could not
+  conclude. Bounded by both `MAX_BASE_DRIFT_VALIDATION_ATTEMPTS` (30) failures
+  and thirty minutes since the first of them, so a burst inside one incident
+  cannot exhaust it.
+
+`waiting` and `transport` hold the next tick on a per-attempt backoff that
+doubles from the worker's two-second tick to a sixty-second cap, stored on the
+attempt as `nextEligibleAt`; `validation` takes no hold and stays eligible at
+the next tick. Each deferral writes a `baseDriftRecovery` activity in state
+`classification-retry` naming the class, its counter, the elapsed time in that
+class, and the next eligible time (`null` for `validation`); a class change is
+recorded there as well.
+
+A read that reached the repository and returned no usable ancestry comparison
+is `transport`, not `validation`: the candidate was never classified, so its
+counted budget does not pay for the upstream's silence.
+
+Crossing a ceiling settles the attempt as `FAILED` with a `refusalCode` naming
+the class, and the `failureReason` states the class and the elapsed time. The
+settle records the failure that crossed the ceiling before it settles, so the
+attempt's counters and the refusal text state the same number of failures, and
+the settle activity carries all three counters:
+
+- `waiting-ceiling` — `waiting-ceiling reached: the chain stayed active for <elapsed> (limit 6h00m); last classification: <reason>`
+- `transport-ceiling` — `transport-ceiling reached: repository reads failed for <elapsed> (limit 30m); last read failure: <reason>`
+- `validation-budget` — `validation-budget exhausted: <n> classification failures over <elapsed> (limit 30 attempts spanning 30m); last classification: <reason>`
+
+A class-ceiling settle opens a stop question offering `re-validate` alongside
+`abandon`, and writes a stop notice keyed
+`merge-base-drift-recovery:<state>:<stopId>` (with an `:r<n>` suffix after the
+n-th `re-validate`). Every base-drift recovery settle — a class ceiling, an
+ordinary ineligibility, or the automatic recovery limit — carries that same
+`:r<n>` generation on its stop question key `merge-stop:<stopId>:r<n>`, so a
+recovery that settles again after a `re-validate` always opens a fresh,
+answerable card instead of deduplicating against the answered one. Answer it
+through
+`POST /inbox/messages/:messageId/decision` with `decision: "re-validate"`. That
+answer resets the counters of the settled class and no other, clears the
+backoff and the refusal, returns the attempt to `VALIDATING`, and records a
+`class-revalidated` activity. The recovery resumes on the same attempt; no
+successor Chain is required. Every other base-drift refusal keeps its
+abandon-only card, because there is no class counter for `re-validate` to
+reset.
+
 #### Re-entering after a base-drift recovery FAIL
 
 If a semantic (`review-fail`) or merge-gate (`gate-fail`) regression FAIL
@@ -2418,6 +2472,27 @@ salvaged work of its own prior attempt. Claim evidence follows the prior same-ta
 publication matching the Run's resolved target ref, including when an intervening
 Run was cancelled without publishing. A different target ref does not receive
 that salvage evidence. Runs that did not salvage omit `salvageParentSha`.
+
+Before a review or fix candidate is claimed, the control plane re-reads the
+specification from the repository. A read that fails transiently defers the
+queued Run at 15s, 30s, then 60s instead of failing it, and the deferral window
+depends on what failed. A window whose every failure was a per-attempt deadline
+hit — a read that is slow, not broken — is extended to a ceiling of 1800000ms
+(30 minutes); any other transient failure in the window keeps the ordinary
+budget of 300000ms (5 minutes) and its `spec-transcription-unreadable` parking
+reason, whose message names the window the episode actually ran alongside that
+budget. Only a per-attempt deadline that this read observed counts as a deadline
+hit; an abort raised by the repository reader itself is an ordinary transient.
+The first deferral that outlives the 5-minute budget opens exactly one
+deduplicated Inbox notice per Task, and none of the later ones do. That notice
+is deduplicated for the Task's lifetime and is never reopened, so a Task that
+meets this condition again after an operator retry raises no second notice;
+parking still announces itself once per Run. At the
+30-minute ceiling the Task is parked in Backlog with the distinct reason
+`spec-read-deadline-exceeded`, whose message names the deadline, the number of
+deferred attempts, and the elapsed window rather than reporting the
+specification as unreadable. Both ceilings are source constants, not
+configuration.
 
 The machine-only `POST /runner/tasks/claim` request may include the optional
 `servedKinds` array of exact `RunnerKind` names. Omitting `servedKinds` means
