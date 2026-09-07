@@ -67,7 +67,7 @@ type TrainHooks = {
   executor: {
     blocking(): string[];
     settleOffline(tx: Prisma.TransactionClient, read: ClaimedReadiness, executorRunnerIds: string[]): Promise<"ready" | "stopped">;
-    closeEpisode(tx: Prisma.TransactionClient, taskId: string): Promise<void>;
+    closeEpisode(tx: Prisma.TransactionClient, read: ClaimedReadiness): Promise<void>;
   };
   candidates(db: PrismaClient, pageSize: number): AsyncGenerator<ReadinessCandidate>;
   discover(db: PrismaClient, task: ReadinessCandidate, now: Date): Promise<ReadinessDiscovery>;
@@ -543,7 +543,7 @@ const settleTrain = async (
         await finishTrainMarker(tx, train, "settled", summaries.join("\n"), now);
         return { authorized: 0, stopped, requeued: reads.length - stopped };
       }
-      for (const read of reads) await hooks.executor.closeEpisode(tx, read.readiness.id);
+      for (const read of reads) await hooks.executor.closeEpisode(tx, read);
       const passing = record.prefixes[authorizedCount - 1];
       const summaries: string[] = [];
       let failed = false;

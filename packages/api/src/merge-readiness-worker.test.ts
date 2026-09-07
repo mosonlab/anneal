@@ -263,3 +263,38 @@ test("an exception requeue returns readiness to TODO and records the retry", asy
   assert.equal(metadata.limit, 3);
   assert.equal(metadata.recoveryAggregateId, null);
 });
+
+test("closing an offline episode cannot mutate a marker after claim loss", async () => {
+  const { closeExecutorOfflineEpisode } = await import("./merge-readiness-worker.js");
+  let reads = 0;
+  const tx = { taskActivity: { findFirst: async () => { reads += 1; throw new Error("unfenced read"); } } };
+  const claim = {
+    settle: async () => ({ settled: false, ownership: "released" }),
+  } as unknown as import("./readiness-claim.js").ReadinessClaimHandle;
+  await closeExecutorOfflineEpisode(tx as unknown as import("@anneal/db").Prisma.TransactionClient,
+    "readiness", claim, "executor observed online");
+  assert.equal(reads, 0);
+});
+
+test("a claimed live observation closes the episode once and records why", async () => {
+  const { closeExecutorOfflineEpisode } = await import("./merge-readiness-worker.js");
+  const marker = { id: "offline", createdAt: new Date(), metadata: { episodeStartedAt: "2026-09-01T00:00:00.000Z" } as Record<string, unknown> };
+  const activities: string[] = [];
+  const tx = { taskActivity: {
+    findFirst: async () => marker,
+    update: async (input: { data: { metadata: Record<string, unknown> } }) => { marker.metadata = input.data.metadata; },
+    create: async (input: { data: { body: string } }) => { activities.push(input.data.body); },
+  } } as unknown as import("@anneal/db").Prisma.TransactionClient;
+  const claim = {
+    settle: async <T>(client: import("@anneal/db").Prisma.TransactionClient,
+      transition: import("./readiness-claim.js").ReadinessClaimTransition<T>) => {
+      assert.equal(transition.kind, "keep");
+      return { settled: true, claim: "retained", value: await transition.apply(client) };
+    },
+  } as unknown as import("./readiness-claim.js").ReadinessClaimHandle;
+  await closeExecutorOfflineEpisode(tx, "readiness", claim, "executor observed online on a skipped tick");
+  await closeExecutorOfflineEpisode(tx, "readiness", claim, "executor observed online on a skipped tick");
+  assert.equal(marker.metadata.episodeClosed, true);
+  assert.equal(activities.length, 1);
+  assert.match(activities[0]!, /executor observed online on a skipped tick/u);
+});
