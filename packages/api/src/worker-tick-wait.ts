@@ -1,5 +1,6 @@
-/** Shared by the merge worker suites, which both drive a real poll interval and
- *  need to observe a tick rather than sleep past one. */
+/** Shared by the three merge worker suites — base-drift, readiness and evidence
+ *  — which each drive a real poll interval and need to observe a tick rather
+ *  than sleep past one. */
 
 const wait = (milliseconds: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -10,10 +11,12 @@ const wait = (milliseconds: number): Promise<void> => new Promise((resolve) => s
  *  CONTRIBUTING.md. */
 export const WORKER_TICK_BUDGET_MS = 30_000;
 
-export const waitUntil = async (predicate: () => boolean, timeoutMs = WORKER_TICK_BUDGET_MS): Promise<void> => {
-  const deadline = Date.now() + timeoutMs;
+export const waitUntil = async (predicate: () => boolean, message?: string): Promise<void> => {
+  const deadline = Date.now() + WORKER_TICK_BUDGET_MS;
   while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error(`condition was not met within ${timeoutMs}ms`);
+    if (Date.now() >= deadline) {
+      throw new Error(message ?? `condition was not met within ${WORKER_TICK_BUDGET_MS}ms`);
+    }
     await wait(25);
   }
 };

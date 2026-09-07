@@ -1247,7 +1247,8 @@ test("the Todo head starts the whole wave from one dialog and names the chain th
     assert.ok(confirm);
     await act(async () => confirm.dispatchEvent(new page.dom.window.MouseEvent("click", { bubbles: true })));
     // Bounded so a Delta that really is held behind Alpha fails rather than
-    // hanging, but sized for the loaded gate worker: the property is that Delta
+    // hanging, but sized for the loaded gate worker rather than an idle host
+    // (CONTRIBUTING.md, "Test timing on the gate worker"): the property is that Delta
     // is not waiting on Alpha's pending request, and half a second of wall clock
     // for a chain of fetch doubles and React renders is a measurement of the
     // host, not of the page. Cleared on the winning path, or the passing case

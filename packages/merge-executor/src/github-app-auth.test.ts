@@ -150,7 +150,8 @@ test("a non-settling private-key read is aborted and named within the configured
   assert.equal(httpCalls, 0);
   // The bound under test is the 10ms timeoutMs above, and the abort is asserted
   // directly. This wall clock only says the read was abandoned rather than
-  // awaited, so it is sized for the loaded gate worker rather than an idle host.
+  // awaited, so it is sized for the loaded gate worker rather than an idle host
+  // (CONTRIBUTING.md, "Test timing on the gate worker").
   assert.ok(Date.now() - startedAt < 30_000);
 });
 

@@ -81,7 +81,8 @@ const runLease = (fixture, args, holder = "machine@fixture", options = {}) =>
     encoding: "utf8",
     // merge-lease.sh does real git work against a real origin. Bounded so a
     // wedged lease still fails the case; the default matches the cases that
-    // already opt in, and is sized for the loaded gate worker, not for an idle host (CONTRIBUTING.md, "Test timing on the gate worker").
+    // already opt in, and is sized for the loaded gate worker rather than an
+    // idle host (CONTRIBUTING.md, "Test timing on the gate worker").
     timeout: options.timeout ?? 60_000,
     env: { ...FIXTURE_ENV, MERGE_LEASE_HOLDER: holder, ...options.env },
   });
@@ -436,7 +437,11 @@ const runOnTerminal = (fixture, command, holder) => {
   ], {
     cwd: fixture.root,
     encoding: "utf8",
-    timeout: 15_000,
+    // The slowest path in this file: merge-lease.sh's real git work plus a
+    // python interpreter and a pty in front of it. Bounded so a wedged lease
+    // under a pty still fails the case, at the same budget as this file's
+    // direct spawns (CONTRIBUTING.md, "Test timing on the gate worker").
+    timeout: 60_000,
     input: "",
     env: { ...FIXTURE_ENV, MERGE_LEASE_HOLDER: holder },
   });

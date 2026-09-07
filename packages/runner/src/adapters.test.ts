@@ -124,12 +124,11 @@ const processAlive = (pid: number): boolean => {
  * How long a real child of this suite may take to reach what a test waits for.
  *
  * Bounded on purpose: a descendant that never dies has to fail rather than hang
- * the gate forever. The number comes from the loaded host, not this laptop. The
- * merge gate runs one workspace suite per CPU while each suite runs its files
- * concurrently, and on a saturated worker a healthy node startup was still
- * short of its first output ten seconds in (CONTRIBUTING.md, "Test timing"). Each
- * wait below returns the moment its condition holds, so these budgets cost
- * nothing on a run that passes.
+ * the gate forever. What it has to cover is a real provider child's node
+ * startup, sized for the loaded gate worker rather than an idle host
+ * (CONTRIBUTING.md, "Test timing on the gate worker"). Each wait below returns
+ * the moment its condition holds, so these budgets cost nothing on a run that
+ * passes.
  */
 const CHILD_START_BUDGET_MS = 60_000;
 /** A process being killed has already started, so only signal delivery and
@@ -145,11 +144,12 @@ const CHILD_EXIT_BUDGET_MS = 30_000;
 const SPAWNING_TEST_TIMEOUT_MS = 180_000;
 
 const waitForProcessExit = async (pid: number): Promise<boolean> => {
-  for (let waited = 0; waited < CHILD_EXIT_BUDGET_MS; waited += 25) {
+  const deadline = Date.now() + CHILD_EXIT_BUDGET_MS;
+  while (Date.now() < deadline) {
     if (!processAlive(pid)) return true;
     await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 25));
   }
-  return false;
+  return !processAlive(pid);
 };
 
 test("cancellation drains a Run-owned descendant that starts a separate process group", { timeout: SPAWNING_TEST_TIMEOUT_MS }, async () => {
@@ -175,7 +175,8 @@ test("cancellation drains a Run-owned descendant that starts a separate process 
     spec.workingDirectory = fixture;
     spec.env = { PATH: process.env.PATH ?? "/usr/bin:/bin", AGENTOS_RUN_ID: spec.claim.run.id };
     const handle = await adapters.CODEX.start(spec, () => undefined);
-    for (let waited = 0; waited < CHILD_START_BUDGET_MS; waited += 25) {
+    const descendantDeadline = Date.now() + CHILD_START_BUDGET_MS;
+    while (Date.now() < descendantDeadline) {
       try {
         descendantPid = Number.parseInt((await readFile(pidFile, "utf8")).trim(), 10);
         break;

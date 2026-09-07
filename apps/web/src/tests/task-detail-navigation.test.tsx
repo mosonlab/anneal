@@ -458,11 +458,11 @@ test("the task-detail Chain card reflects a completed held layer on the next pol
 
     latestChain = completedChain;
     // The page polls the chain on its own real timer, so wait for the poll to
-    // happen rather than for a sleep sized just past the interval: on the
-    // loaded merge-gate worker a descheduled timer callback lands after any
-    // fixed sleep this test could pick. Bounded at 600 polls (~15s idle, and
-    // proportionally longer on a starved host) so a page that stops polling
-    // still fails here instead of hanging the suite.
+    // happen rather than for a sleep sized just past the interval, which a
+    // descheduled timer callback outlasts on a loaded host (CONTRIBUTING.md,
+    // "Test timing on the gate worker"). Bounded at 600 polls so a page that
+    // stops polling still fails at the assertion below instead of hanging the
+    // suite.
     for (let poll = 0; poll < 600 && chainPolls < 2; poll += 1) {
       await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
       await page.settle();

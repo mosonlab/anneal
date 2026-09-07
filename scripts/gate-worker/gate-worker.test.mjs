@@ -330,7 +330,8 @@ exec "$REAL_GIT" "$@"
       encoding: "utf8",
       // Three real git pushes through a shim. Bounded so a wedged push still
       // fails the case, at the same budget as this file's siblings and sized for
-      // the loaded gate worker (CONTRIBUTING.md, "Test timing"), not for an idle host.
+      // the loaded gate worker rather than an idle host (CONTRIBUTING.md,
+      // "Test timing on the gate worker").
       timeout: 60_000,
       env: {
         ...FIXTURE_ENV,
@@ -444,7 +445,10 @@ cp "$1" "$FAKE_SSH_HOME/$destination"
   const result = spawnSync("bash", [join(checkout, "packages", "runner", "runtime-tools", "gate-worker", "gate-dispatch.sh"), candidate, "--server", "fake"], {
     cwd: checkout,
     encoding: "utf8",
-    timeout: 30_000,
+    // The real dispatcher through ssh/scp shims and real git. Bounded so a
+    // wedged dispatch still fails the case, at the same budget as this file's
+    // other real children (CONTRIBUTING.md, "Test timing on the gate worker").
+    timeout: 60_000,
     env: {
       ...FIXTURE_ENV,
       AGENTOS_WORKSPACE_PATH: checkout,
@@ -1240,7 +1244,7 @@ test("the default worker capacity serializes gates from different repositories",
       // The `seq` loop above is what waits for the spawned run-gate.sh children
       // to announce themselves; this only bounds a harness that wedges, so it
       // matches this file's siblings and is sized for
-      // the loaded gate worker (CONTRIBUTING.md, "Test timing"), not for an idle host.
+      // the loaded gate worker (CONTRIBUTING.md, "Test timing on the gate worker"), not for an idle host.
       timeout: 120_000,
       env: {
         ...FIXTURE_ENV,
@@ -1305,7 +1309,7 @@ test("worker capacity two admits exactly two gates and keeps concurrent logs dis
       // The `seq` loop above is what waits for the spawned run-gate.sh children
       // to announce themselves; this only bounds a harness that wedges, so it
       // matches this file's siblings and is sized for
-      // the loaded gate worker (CONTRIBUTING.md, "Test timing"), not for an idle host.
+      // the loaded gate worker (CONTRIBUTING.md, "Test timing on the gate worker"), not for an idle host.
       timeout: 120_000,
       env: {
         ...FIXTURE_ENV,

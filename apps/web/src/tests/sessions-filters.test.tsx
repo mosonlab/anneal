@@ -65,22 +65,21 @@ const listRequests = (page: PageHarness): URLSearchParams[] => page.requests
  * The page owns timers the tests do not drive — a search debounce and a
  * range-boundary refresh — so the newest list request is not necessarily the
  * one the action under test caused. Reading `listRequests(page).at(-1)` after
- * an action therefore asserts against whichever request happened to land last,
- * which is how "the second page carries the cursor" failed a gate on a loaded
- * worker while the branch was correct. Each assertion below names the request
- * it means instead: mark the requests already seen, act, then take the first
- * request after the mark that the action would have issued.
+ * an action asserts against whichever request happened to land last, which
+ * CONTRIBUTING.md, "Test timing on the gate worker" forbids. Each assertion
+ * below names the request it means instead: mark the requests already seen,
+ * act, then take the first request after the mark that the action would have
+ * issued.
  */
 const requestMark = (page: PageHarness): number => listRequests(page).length;
 
 /**
  * How many 25ms polls a wait for such a request may take. Counted rather than
- * clocked because two tests below mock `Date`, and bounded so a timer that
- * never fires fails here rather than hanging the suite. The count is sized for
- * the loaded merge-gate worker (CONTRIBUTING.md, "Test timing"), where a real
- * one-second timer is descheduled well past the fixed sleeps these waits
- * replaced, and costs nothing on a green run, because every wait returns
- * at the first request that matches.
+ * clocked because two tests below mock `Date`. Bounded so a timer that never
+ * fires fails here rather than hanging the suite, and sized for the loaded gate
+ * worker rather than an idle host (CONTRIBUTING.md, "Test timing on the gate
+ * worker"). It costs nothing on a green run: every wait returns at the first
+ * request that matches.
  */
 const REQUEST_POLL_LIMIT = 1_200;
 

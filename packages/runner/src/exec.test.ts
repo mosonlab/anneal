@@ -35,17 +35,19 @@ const alive = (pid: number): boolean => {
 
 /** Bounded so a descendant that is never reaped fails the test instead of
  *  hanging the gate, but sized for the loaded gate worker rather than an idle
- *  laptop (CONTRIBUTING.md, "Test timing"): signal delivery, reaping and the
+ *  laptop (CONTRIBUTING.md, "Test timing on the gate worker"): signal
+ *  delivery, reaping and the
  *  poll's own scheduling all queue behind the load. The loop
  *  returns the moment the pid is gone, so a green run never pays this. */
 const DESCENDANT_DEATH_BUDGET_MS = 30_000;
 
 const waitForDeath = async (pid: number): Promise<boolean> => {
-  for (let waited = 0; waited < DESCENDANT_DEATH_BUDGET_MS; waited += 25) {
+  const deadline = Date.now() + DESCENDANT_DEATH_BUDGET_MS;
+  while (Date.now() < deadline) {
     if (!alive(pid)) return true;
     await new Promise<void>((resolve) => setTimeout(resolve, 25));
   }
-  return false;
+  return !alive(pid);
 };
 
 test("a hung command is timed out and its whole process group dies with it", async () => {

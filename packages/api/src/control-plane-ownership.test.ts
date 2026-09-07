@@ -469,20 +469,19 @@ const childDiagnostic = (tracked: TrackedChild): string => [
  * How long a spawned child may take to reach the behaviour a test waits for.
  *
  * Every child here is a full `node --import tsx` startup of a production
- * entrypoint, and the merge gate runs one workspace suite per CPU while each
- * suite runs its own files concurrently. On a host that saturated, a healthy
- * loser entrypoint has been observed to still be printing its build line ten
- * seconds after it was spawned — the whole of what these waits used to allow.
- * The budget covers process startup under that oversubscription, not the
- * behaviour: a child that is genuinely stuck still fails, with the same
+ * entrypoint, so the budget has to cover process startup rather than the
+ * behaviour under test, and it is sized for the loaded gate worker rather than
+ * an idle host (CONTRIBUTING.md, "Test timing on the gate worker"). It stays
+ * bounded: a child that is genuinely stuck still fails, with the same
  * diagnostic, one minute later instead of ten seconds later.
  */
 const CHILD_WAIT_BUDGET_MS = 60_000;
 
 /** A child being terminated has already started, so only signal delivery, its
- *  own cleanup and reaping remain. It is still a loaded-host number: a graceful
- *  shutdown releases ownership and its lock before it exits, and that work
- *  queues behind the same saturation.
+ *  own cleanup and reaping remain. It is still sized for the loaded gate worker
+ *  rather than an idle host (CONTRIBUTING.md, "Test timing on the gate
+ *  worker"): a graceful shutdown releases ownership and its lock before it
+ *  exits, and that work queues behind the same load.
  *
  *  It must also strictly contain the child's own cleanup budget, or this wait
  *  expires while the child was still going to exit cleanly and reports a
