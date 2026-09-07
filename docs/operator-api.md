@@ -58,6 +58,13 @@ curl "$BASE_URL/version"
 ### GET `/runners`
 
 - Required parameters: none.
+- `dispatchDrain` is `null` while the platform is admitting Runs, and otherwise
+  `{reason, startedAt, expiresAt}`: the platform-wide dispatch drain an
+  auto-deploy opens when its quiet-window wait outlives its budget. `reason`
+  names the waiting host, its deploy role, and the two commits. While it is
+  present every claim is refused, so the daemons below are online and idle
+  rather than lost. An expired drain reads as `null` here and is ignored by the
+  claim route, whether or not its row was deleted.
 
 ```sh
 curl "$BASE_URL/runners" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -2395,6 +2402,15 @@ The machine-only `POST /runner/tasks/claim` request may include the optional
 the runner serves every kind; when it is declared, the control plane offers
 that claim agent Runs only for the listed kinds. Mechanical claims are
 unaffected, and an unknown kind is refused with `400 Bad Request`.
+
+While a dispatch drain is in force, every `POST /runner/tasks/claim` — agent
+and mechanical alike — is refused with `409 Conflict`, code and reason
+`dispatch-draining`, and the drain's `expiresAt`. The refusal is decided before
+any candidate Run is read: it claims nothing, parks no Task, and consumes
+neither `maxSessionsPerTask` nor any transient budget, so a runner that keeps
+polling through the drain loses only the poll. The claim still records the
+runner's telemetry, so `GET /runners` reports it online throughout. A drain
+whose `expiresAt` has passed is treated as absent and admits claims again.
 
 The machine-only `POST /runner/tasks/claim` request used by the merge executor
 also carries the required `contractVersion` field. It is the completion

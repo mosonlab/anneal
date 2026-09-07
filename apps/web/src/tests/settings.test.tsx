@@ -39,6 +39,7 @@ const runnerPayload = (diskFreeBytes = 1024 ** 3): RunnersResponse => ({
     daemonVersion: "0.0.0", diskFreeBytes, pollIntervalMs: 5_000, workspaceRoot: "/tmp/runs",
   }],
   backends: [],
+  dispatchDrain: null,
 });
 
 test("settings and secrets resolve to distinct pages", () => {

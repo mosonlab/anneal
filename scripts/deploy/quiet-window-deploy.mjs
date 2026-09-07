@@ -16,6 +16,7 @@ import {
   statSync,
 } from "node:fs";
 import { constants as fsConstants } from "node:fs";
+import { hostname } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -60,6 +61,7 @@ import {
   deployBarrierTimeoutMsForRole,
   MIGRATION_DEPLOY_TIMEOUT_REASON,
   DEFAULT_QUIET_WINDOW_WAIT_BUDGET_MS,
+  dispatchDrainDeadlineMs,
   QUIET_WINDOW_WAIT_EXCEEDED_REASON,
   quietWindowWaitBudgetMs,
   waitForEscalationClear,
@@ -119,6 +121,10 @@ const RETRYABLE_ESCALATION_REASONS = new Set([
   "source-remote-read-timeout",
   "quiet-window-query-failed",
   "deploy-barrier-unavailable",
+  // The dispatch drain is a database write on the same connection as the
+  // quiet-window query, and it fails for the same transient reasons.
+  "dispatch-drain-create-failed",
+  "dispatch-drain-delete-failed",
 ]);
 
 /** Failures owned by this host rather than by the commit that was being
@@ -484,6 +490,69 @@ const blockingRuns = async (runnerIds = null) => {
   }
 };
 
+/** The platform-wide dispatch drain writer this deploy uses. Both statements
+ * run on the same connection as the quiet-window query, so a drain is only
+ * ever attempted by a deploy that has already proved it can read Runs. */
+const dispatchDrainWriter = Object.freeze({
+  insert: async (record) => {
+    const db = await database();
+    return db.dispatchDrain.create({ data: record, select: { id: true, expiresAt: true } });
+  },
+  remove: async (id) => {
+    const db = await database();
+    const { count } = await db.dispatchDrain.deleteMany({ where: { id } });
+    return count;
+  },
+});
+
+/** What the drain row says about itself: which host and role stopped dispatch,
+ * and which release the platform is being drained for. */
+export const dispatchDrainReason = ({ host, role, from, to }) =>
+  `quiet-window-wait-exceeded host=${host} role=${role} from=${from.slice(0, 12)} to=${to.slice(0, 12)}`;
+
+/**
+ * One dispatch drain's whole lifetime, as a releasable resource.
+ *
+ * The insert starts here and `release` awaits it, so a quiet window that opens
+ * while the row is still being written still deletes that row instead of
+ * leaving the fleet drained until the deadline. Neither write is allowed to be
+ * quiet: a failed insert interrupts the deploy through `onWriteFailure`, which
+ * carries it into the escalation record, and a failed delete is raised out of
+ * `release` into the same place.
+ */
+export const openDispatchDrain = ({ insert, remove, onWriteFailure, log: logImpl = log }) => {
+  let released = false;
+  const opened = insert().then(
+    (row) => {
+      logImpl(`HOLD dispatch-draining id=${row.id} expires=${row.expiresAt.toISOString()}`);
+      return row;
+    },
+    (error) => {
+      const detail = error instanceof Error ? error.name : "write-failed";
+      logImpl(`STOP dispatch-drain-create-failed detail=${detail}`);
+      onWriteFailure(new DeployFailure("dispatch-drain-create-failed", detail));
+      return null;
+    },
+  );
+  return {
+    release: async () => {
+      if (released) return;
+      released = true;
+      const row = await opened;
+      if (row === null) return;
+      let removed;
+      try {
+        removed = await remove(row.id);
+      } catch (error) {
+        const detail = error instanceof Error ? error.name : "write-failed";
+        logImpl(`STOP dispatch-drain-delete-failed id=${row.id} detail=${detail}`);
+        throw new DeployFailure("dispatch-drain-delete-failed", `${row.id}-${detail}`);
+      }
+      logImpl(`PASS dispatch-drain-cleared id=${row.id} rows=${removed}`);
+    },
+  };
+};
+
 export const autoDeployNoticeDedupeKey = (body, dedupeScope = null) =>
   `auto-deploy:${createHash("sha256").update(dedupeScope === null ? body : `${dedupeScope}\n${body}`).digest("hex")}`;
 
@@ -632,48 +701,61 @@ const waitForQuiet = ({
   onRacedBlockingRuns: (runs, progress) => log(quietWindowHoldLine(progress, "acquisition-raced")),
 });
 
-/** A wait that outlives its budget is reported once per alert interval and
- * nothing else: no escalation marker, no change to when the deploy proceeds.
- * Neither the ledger event nor the notification may end the wait, so each
- * failure is logged and the loop keeps polling. */
+/** A wait that outlives its budget stops new dispatch and is reported once per
+ * alert interval, and does nothing else: no escalation marker, no change to
+ * when the deploy proceeds. Neither the ledger event nor the notification may
+ * end the wait, so each failure is logged and the loop keeps polling.
+ *
+ * The drain is opened on the first crossing only, and its resource is handed
+ * to the attempt straight away — before the insert settles — so that every
+ * exit path of this deployment deletes the row this wait asked for. */
 export const createQuietWindowWaitReporter = ({
   attempt,
   revisions,
   notify: notifyImpl = notify,
   log: logImpl = log,
-}) => async (event) => {
-  // The notice is delivered on the escalation notifier's open path, so it says
-  // in its own text that the deploy is still waiting: nothing is broken and no
-  // escalation marker exists to clear.
-  const detail = `still-waiting-elapsed-${event.elapsedSeconds}s-budget-${Math.round(event.budgetMs / 1_000)}s`;
-  logImpl(`HOLD quiet-window-wait-exceeded ${detail} blockers=${event.blockingRuns}`);
-  try {
-    attempt.fact("ledger")?.record("QUIET_WINDOW_WAIT_EXCEEDED", attempt.ledgerMetadata({
-      quietWindowWaitSeconds: event.elapsedSeconds,
-      quietWindowWaitPolls: event.polls,
-      quietWindowWaitPeakBlockingRuns: event.peakBlockingRuns,
-      quietWindowBlockingRunsByRunner: event.blockingRunsByRunner,
-    }));
-  } catch (error) {
-    const failure = failureOf(error);
-    logImpl(`STOP ${failure.reason} detail=${failure.detail}; quiet-window-wait-alert-unrecorded`);
-  }
-  try {
-    await notifyImpl({
-      outcome: "failure",
-      reason: QUIET_WINDOW_WAIT_EXCEEDED_REASON,
-      detail,
-      from: revisions.from,
-      to: revisions.to,
-      dedupeScope: `${attempt.transactionId}:${event.elapsedSeconds}`,
-    });
-  } catch (error) {
-    const failure = failureOf(error);
-    logImpl(`STOP ${failure.reason} detail=${failure.detail}; quiet-window-wait-alert-undelivered`);
-    // An undelivered alert must not consume the hour: the wait retries it.
-    return { delivered: false };
-  }
-  return { delivered: true };
+  openDrain = () => null,
+}) => {
+  let drainRequested = false;
+  return async (event) => {
+    if (!drainRequested) {
+      drainRequested = true;
+      const drain = openDrain();
+      if (drain !== null) attempt.establish({ resources: [drain] });
+    }
+    // The notice is delivered on the escalation notifier's open path, so it says
+    // in its own text that the deploy is still waiting: nothing is broken and no
+    // escalation marker exists to clear.
+    const detail = `still-waiting-elapsed-${event.elapsedSeconds}s-budget-${Math.round(event.budgetMs / 1_000)}s`;
+    logImpl(`HOLD quiet-window-wait-exceeded ${detail} blockers=${event.blockingRuns}`);
+    try {
+      attempt.fact("ledger")?.record("QUIET_WINDOW_WAIT_EXCEEDED", attempt.ledgerMetadata({
+        quietWindowWaitSeconds: event.elapsedSeconds,
+        quietWindowWaitPolls: event.polls,
+        quietWindowWaitPeakBlockingRuns: event.peakBlockingRuns,
+        quietWindowBlockingRunsByRunner: event.blockingRunsByRunner,
+      }));
+    } catch (error) {
+      const failure = failureOf(error);
+      logImpl(`STOP ${failure.reason} detail=${failure.detail}; quiet-window-wait-alert-unrecorded`);
+    }
+    try {
+      await notifyImpl({
+        outcome: "failure",
+        reason: QUIET_WINDOW_WAIT_EXCEEDED_REASON,
+        detail,
+        from: revisions.from,
+        to: revisions.to,
+        dedupeScope: `${attempt.transactionId}:${event.elapsedSeconds}`,
+      });
+    } catch (error) {
+      const failure = failureOf(error);
+      logImpl(`STOP ${failure.reason} detail=${failure.detail}; quiet-window-wait-alert-undelivered`);
+      // An undelivered alert must not consume the hour: the wait retries it.
+      return { delivered: false };
+    }
+    return { delivered: true };
+  };
 };
 
 const acquireLock = async () => {
@@ -907,6 +989,11 @@ export const createDeployHost = ({
   createWatchdog = createBarrierWatchdog,
   pollWait = () => sleep(POLL_MS),
   notify: notifyImpl = notify,
+  // The two statements that stop and restore platform-wide dispatch, and the
+  // deadline that bounds a row this process fails to delete.
+  drainWriter = dispatchDrainWriter,
+  drainDeadlineMs = dispatchDrainDeadlineMs(environment),
+  deployHostname = hostname(),
   // The pre-window allowance to reach the first all-green sample is unchanged;
   // the window is added on top of it rather than taken out of it.
   serviceVerificationTimeoutMs = observationWindowMs + 30_000,
@@ -1060,7 +1147,31 @@ export const createDeployHost = ({
       const barrierTimeoutMs = deployBarrierTimeoutMsForRole(deployRole, serviceLabels.length);
       const { barrier, watchdog, quietWindowWait } = await waitForQuiet({
         blockingRuns: scopedBlockingRuns,
-        onWaitBudgetExceeded: createQuietWindowWaitReporter({ attempt, revisions, notify: notifyImpl }),
+        onWaitBudgetExceeded: createQuietWindowWaitReporter({
+          attempt,
+          revisions,
+          notify: notifyImpl,
+          // A wait past its budget is the only thing that stops dispatch. The
+          // row names this host so an operator reading `GET /runners` knows
+          // which deploy the whole platform is waiting for.
+          openDrain: () => trackResource(openDispatchDrain({
+            insert: () => drainWriter.insert({
+              reason: dispatchDrainReason({
+                host: deployHostname,
+                role: deployRole,
+                from: revisions.from,
+                to: revisions.to,
+              }),
+              requestedBy: `auto-deploy:${attempt.transactionId}`,
+              expiresAt: new Date(Date.now() + drainDeadlineMs),
+            }),
+            remove: (id) => drainWriter.remove(id),
+            // A drain that cannot be written leaves the platform admitting
+            // Runs into a stale release, which is the condition this deploy
+            // exists to end. Interrupt rather than wait on silently.
+            onWriteFailure: (failure) => { interruption.interruptWithFailure(failure); },
+          })),
+        }),
         waitBudgetMs,
         acquireBarrier,
         wait: pollWait,

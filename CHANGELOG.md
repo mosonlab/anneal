@@ -9,6 +9,14 @@ written.
 
 ## Unreleased
 
+- An auto-deploy whose quiet-window wait outlives its budget now stops the
+  platform from admitting new Runs until that deploy lands: it opens a
+  platform-wide dispatch drain, every claim is refused with `dispatch-draining`
+  without touching any Task or its run budget, and the deploy deletes the drain
+  on every exit path. Running Runs are never interrupted, the refused runners
+  stay online, and `GET /runners` reports the drain as `dispatchDrain`. A drain
+  left behind by a dead deploy process expires by itself after 120 minutes
+  (`DISPATCH_DRAIN_DEADLINE_MINUTES`). One migration adds the drain table.
 - Retired the `POST /files/mkdir` and `POST /files/move` routes and their
   underlying store operations.
 - Removed `POST /inbox/messages/:messageId/supersede`;

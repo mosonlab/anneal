@@ -25,6 +25,8 @@ import {
   DEFAULT_QUIET_WINDOW_WAIT_BUDGET_MS,
   QUIET_WINDOW_WAIT_ALERT_INTERVAL_MS,
   quietWindowWaitBudgetMs,
+  DEFAULT_DISPATCH_DRAIN_DEADLINE_MS,
+  dispatchDrainDeadlineMs,
 } from "./quiet-window-deadlines.mjs";
 import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
 
@@ -237,6 +239,19 @@ test("the wait budget defaults to 45 minutes and is environment-overridable", ()
   for (const invalid of ["0", "-5", "45.5", "abc", "10000"]) {
     assert.throws(
       () => quietWindowWaitBudgetMs({ QUIET_WINDOW_WAIT_BUDGET_MINUTES: invalid }),
+      (error) => error instanceof DeployFailure && error.reason === "environment-invalid",
+    );
+  }
+});
+
+test("the dispatch drain deadline defaults to 120 minutes and is environment-overridable", () => {
+  assert.equal(DEFAULT_DISPATCH_DRAIN_DEADLINE_MS, 120 * 60 * 1_000);
+  assert.equal(dispatchDrainDeadlineMs({}), DEFAULT_DISPATCH_DRAIN_DEADLINE_MS);
+  assert.equal(dispatchDrainDeadlineMs({ DISPATCH_DRAIN_DEADLINE_MINUTES: "" }), DEFAULT_DISPATCH_DRAIN_DEADLINE_MS);
+  assert.equal(dispatchDrainDeadlineMs({ DISPATCH_DRAIN_DEADLINE_MINUTES: "30" }), 30 * 60 * 1_000);
+  for (const invalid of ["0", "-5", "45.5", "abc", "10000"]) {
+    assert.throws(
+      () => dispatchDrainDeadlineMs({ DISPATCH_DRAIN_DEADLINE_MINUTES: invalid }),
       (error) => error instanceof DeployFailure && error.reason === "environment-invalid",
     );
   }

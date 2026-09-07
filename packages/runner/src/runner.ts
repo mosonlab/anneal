@@ -27,6 +27,7 @@ import {
   type RuntimeHandle,
 } from "./adapters.js";
 import {
+  claimRefusedByDispatchDrain,
   openControlPlane,
   retriableStartupError,
   type ClaimedTask,
@@ -57,6 +58,7 @@ import {
   summarizeEvidence,
 } from "./envelope.js";
 import { transientBackoff } from "./network-retry.js";
+import type { ClaimOutcome } from "./polling-loop.js";
 import {
   decideProviderRelaunch,
   PROVIDER_RESUME_MAX_ATTEMPTS,
@@ -1201,12 +1203,21 @@ export const executeClaim = async (
 export const pollForTask = async (
   config: RunnerConfig,
   controlPlane: ControlPlane = openControlPlane(config),
-): Promise<boolean> => {
-  const claim = await controlPlane.claim();
-  if (!claim) return false;
+): Promise<ClaimOutcome> => {
+  let claim: ClaimedTask | null;
+  try {
+    claim = await controlPlane.claim();
+  } catch (error: unknown) {
+    // A drain is the platform's answer, not this poll's failure: report it so
+    // the loop can say so once and keep polling. Every other refusal is still
+    // an error this runner has to surface.
+    if (!claimRefusedByDispatchDrain(error)) throw error;
+    return "draining";
+  }
+  if (!claim) return "idle";
   console.log(`Claimed run ${claim.run.id} for task ${claim.task.id} via ${claim.runner.toLowerCase()}`);
   await executeClaim(config, claim, { controlPlane });
-  return true;
+  return "executed";
 };
 
 export const STARTUP_REPORT_ATTEMPTS = 5;

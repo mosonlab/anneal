@@ -156,6 +156,7 @@ for (const contractVersion of [undefined, RUN_COMPLETION_CONTRACT_VERSION + 1]) 
         $queryRaw: async () => [{ granted: true }],
         $executeRawUnsafe: async () => 0,
         chainControl: { findMany: async () => [] },
+        dispatchDrain: { findFirst: async () => null },
         mergeLeaseEvent: { findMany: async () => [] },
         run: {
           findMany: async () => [candidate],
@@ -288,6 +289,7 @@ test("a mismatch Inbox failure aborts the claim before a later candidate is cons
       $queryRaw: async () => [{ granted: true }],
       $executeRawUnsafe: async () => 0,
       chainControl: { findMany: async () => [] },
+      dispatchDrain: { findFirst: async () => null },
       mergeLeaseEvent: { findMany: async () => [] },
       run: {
         findMany: async () => [candidate("first"), candidate("second")],
@@ -411,6 +413,7 @@ const matchingMechanicalClaimHarness = () => {
     },
     $executeRawUnsafe: async () => 0,
     chainControl: { findMany: async () => [] },
+    dispatchDrain: { findFirst: async () => null },
     mergeLeaseEvent: { findMany: async () => [] },
     run: {
       findMany: async ({ where }: { where: { id?: { not?: string } } }) => where.id?.not ? [] : [candidate],
@@ -705,6 +708,7 @@ test("claim query filters archived agents before take so active work cannot star
       },
       // The claim loop brackets every candidate in a savepoint.
       $executeRawUnsafe: async () => 0,
+      dispatchDrain: { findFirst: async () => null },
       run: {
         findMany: async ({ where }: { where: Record<string, any> }) => {
           const selectedIds = where.id?.in as string[] | undefined;
@@ -777,6 +781,7 @@ test("claim polling throttles the archived-run audit sweep per API process", asy
           if (sql.includes('FROM "TaskActivity" AS deferred')) return [];
           return [{ granted: true }];
         },
+        dispatchDrain: { findFirst: async () => null },
         run: { findMany: async () => [] },
         taskActivity: { findMany: async () => [] },
         mergeLeaseEvent: { findMany: async () => [] },

@@ -7,6 +7,13 @@ export type PollingLoopConfig = {
   claimMaxLoadAverage: number;
 };
 
+/**
+ * What one admission attempt reached. `draining` is the control plane's answer
+ * while an auto-deploy waits for its quiet window: no work is offered to any
+ * runner, so the poll is neither idle work nor a failure.
+ */
+export type ClaimOutcome = "executed" | "idle" | "draining";
+
 export type PollingLoopDependencies = {
   /** Read the host's one-minute load average. */
   readLoadAverage?: () => number;
@@ -17,7 +24,7 @@ export type PollingLoopDependencies = {
   /** Reclaim the workspaces due for this iteration's sweep. */
   reclaim: () => Promise<void>;
   /** Try one control-plane claim and execute it when present. */
-  claim: () => Promise<boolean>;
+  claim: () => Promise<ClaimOutcome>;
   /** Return whether the process has received a stop request. */
   shouldStop: () => boolean;
   log?: (line: string) => void;
@@ -49,6 +56,7 @@ export const runPollingLoop = async (
   const reportError = dependencies.error ?? ((line, error) => console.error(line, error));
   let nextReclaimAt = 0;
   let overloaded = false;
+  let draining = false;
 
   while (!dependencies.shouldStop()) {
     const now = currentTime();
@@ -78,8 +86,19 @@ export const runPollingLoop = async (
     }
 
     try {
-      const ranTask = await dependencies.claim();
-      if (ranTask) continue;
+      const outcome = await dependencies.claim();
+      // Paired like the overload lines above: the state is logged when it is
+      // entered and when it is left, not once per poll. The runner keeps
+      // polling throughout, so its heartbeat still says it is alive.
+      if (outcome === "draining" && !draining) {
+        draining = true;
+        log("Runner claim draining: the control plane is refusing claims until a pending deploy lands");
+      }
+      if (outcome !== "draining" && draining) {
+        draining = false;
+        log("Runner claim drain cleared");
+      }
+      if (outcome === "executed") continue;
     } catch (error: unknown) {
       reportError("Runner poll failed", error);
     }

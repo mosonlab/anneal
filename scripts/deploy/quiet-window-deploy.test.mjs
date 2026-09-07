@@ -61,6 +61,7 @@ import {
   createDeployHost,
   createDeployStartup,
   createQuietWindowWaitReporter,
+  openDispatchDrain,
   quietWindowHoldLine,
   DEFAULT_SERVICE_OBSERVATION_WINDOW_MS,
   deployRootFromEnvironment,
@@ -3141,4 +3142,135 @@ test("production startup wiring keeps backup failure host-scoped", async (t) => 
   });
   assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
   assert.equal(targetReads, 0);
+});
+
+/** The wait-and-drain half of a production host, wired to recorded writers.
+ * Everything outside the wait — the barrier, the watchdog child, the sleep and
+ * the Inbox — is substituted, so what runs here is the real drain decision and
+ * nothing else. */
+const drainFixture = ({
+  waitBudgetMs = 0,
+  quietAfterPolls = 2,
+  insert = null,
+  remove = null,
+} = {}) => {
+  const writes = { inserted: [], removed: [] };
+  const blocking = [{ id: "run-1", status: "running", runnerId: "mac-runner-1" }];
+  let polls = 0;
+  const drainWriter = {
+    insert: async (record) => {
+      writes.inserted.push(record);
+      if (insert) return insert(record);
+      return { id: `drain-${writes.inserted.length}`, expiresAt: record.expiresAt };
+    },
+    remove: async (id) => {
+      writes.removed.push(id);
+      if (remove) return remove(id);
+      return 1;
+    },
+  };
+  const host = createDeployHost({
+    serviceControl: { platform: "linux", restart: async () => undefined, isRunning: async () => true, describe: async () => "" },
+    environment: controlPlaneEnvironment(),
+    waitBudgetMs,
+    blockingRunsAdapter: async () => {
+      // The interruption reaches the wait exactly where SIGTERM and the
+      // barrier watchdog do: the next blocking-runs read.
+      if (quietAfterPolls === "interrupted" && polls > 1) throw new DeployFailure("deploy-interrupted", "SIGTERM");
+      return quietAfterPolls === "interrupted" || polls < quietAfterPolls ? blocking : [];
+    },
+    acquireBarrier: async () => ({ release: async () => undefined, verify: async () => true }),
+    createWatchdog: async () => ({ release: async () => undefined }),
+    pollWait: async () => { polls += 1; await new Promise((accept) => { setImmediate(accept); }); },
+    notify: async () => undefined,
+    drainWriter,
+    drainDeadlineMs: 90 * 60_000,
+    deployHostname: "test-host",
+  });
+  return { host, writes };
+};
+
+/** The fixture deployment, with the real wait-and-drain phase spliced in. */
+const deployWithDrain = ({ failure = null, ...drainOptions } = {}) => {
+  const run = fixture({ failure });
+  const drain = drainFixture(drainOptions);
+  run.host.waitForQuiet = async (attempt) => {
+    run.calls.push("acquire-quiet-window");
+    run.phaseCalls.push("acquire-quiet-window");
+    return drain.host.waitForQuiet(attempt);
+  };
+  return { ...run, writes: drain.writes };
+};
+
+test("a wait past its budget opens one drain naming this host, and the deploy deletes it", async () => {
+  const run = deployWithDrain();
+  const openedBefore = Date.now();
+  assert.deepEqual(await executeUpgrade(run.host, run.attempt), { ok: true });
+  assert.equal(run.writes.inserted.length, 1, "one wait opens one drain, however often it alerts");
+  const [record] = run.writes.inserted;
+  assert.equal(
+    record.reason,
+    `quiet-window-wait-exceeded host=test-host role=control-plane from=${revisions.from.slice(0, 12)} to=${revisions.to.slice(0, 12)}`,
+  );
+  assert.equal(record.requestedBy, "auto-deploy:fixture-transaction");
+  assert.ok(record.expiresAt.getTime() >= openedBefore + 90 * 60_000);
+  assert.deepEqual(run.writes.removed, ["drain-1"], "the successful deploy deletes the row it opened");
+});
+
+test("a quiet window found inside the budget opens no drain", async () => {
+  const run = deployWithDrain({ waitBudgetMs: 60 * 60_000, quietAfterPolls: 0 });
+  assert.deepEqual(await executeUpgrade(run.host, run.attempt), { ok: true });
+  assert.deepEqual(run.writes, { inserted: [], removed: [] });
+});
+
+test("a deploy that stops after the window still deletes its drain", async () => {
+  const run = deployWithDrain({ failure: "restart-services" });
+  const result = await executeUpgrade(run.host, run.attempt);
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.reason, "restart-services-failed");
+  assert.deepEqual(run.writes.removed, ["drain-1"]);
+});
+
+test("a deploy that escalates deletes its drain before the operator is told to look", async () => {
+  const run = deployWithDrain({ failure: "guarded-migration" });
+  const result = await executeUpgrade(run.host, run.attempt);
+  assert.equal(result.ok, false);
+  assert.equal(run.state.escalated.reason, "guarded-migration-failed");
+  assert.ok(run.calls.indexOf("escalate") >= 0);
+  assert.deepEqual(run.writes.removed, ["drain-1"]);
+});
+
+test("a wait interrupted after it drained deletes the row it never handed back", async () => {
+  const run = deployWithDrain({ quietAfterPolls: "interrupted" });
+  const result = await executeUpgrade(run.host, run.attempt);
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.reason, "deploy-interrupted");
+  assert.equal(run.writes.inserted.length, 1);
+  assert.deepEqual(run.writes.removed, ["drain-1"], "the drain never reached the phase's facts, and is deleted anyway");
+});
+
+test("a drain that cannot be deleted escalates instead of leaving the fleet drained", async () => {
+  const run = deployWithDrain({ remove: () => { throw Object.assign(new Error("connection lost"), { name: "PrismaClientKnownRequestError" }); } });
+  const result = await executeUpgrade(run.host, run.attempt);
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.reason, "dispatch-drain-delete-failed");
+  assert.equal(result.failure.detail, "drain-1-PrismaClientKnownRequestError");
+  assert.equal(run.state.escalated.reason, "dispatch-drain-delete-failed");
+});
+
+test("a drain that cannot be written is logged and handed to the deploy's failure path", async () => {
+  const lines = [];
+  const failures = [];
+  const drain = openDispatchDrain({
+    insert: async () => { throw Object.assign(new Error("connection lost"), { name: "PrismaClientInitializationError" }); },
+    remove: async () => { throw new Error("a row that was never written must not be deleted"); },
+    onWriteFailure: (failure) => failures.push(failure),
+    log: (line) => lines.push(line),
+  });
+  // Releasing is what every exit path does; the failure is already reported.
+  await drain.release();
+  assert.deepEqual(failures.map(({ reason, detail }) => [reason, detail]), [
+    ["dispatch-drain-create-failed", "PrismaClientInitializationError"],
+  ]);
+  assert.deepEqual(lines, ["STOP dispatch-drain-create-failed detail=PrismaClientInitializationError"]);
 });

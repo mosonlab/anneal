@@ -8,6 +8,7 @@ import type {
 } from "@anneal/db/console-contract";
 import { getMimeType } from "hono/utils/mime";
 
+import { activeDispatchDrain, dispatchDrainStatus } from "../dispatch-drain.js";
 import { projectRunnerBackend } from "../runner-backend-health.js";
 import { versionPayload } from "../version.js";
 import { getFileStore } from "../files/config.js";
@@ -65,13 +66,14 @@ export const registerSystemRoutes = (app: RouteApp, deps: RouteDeps): (() => voi
     const now = new Date();
     const daemons = runners.snapshot(now);
     const knownIds = daemons.map((daemon) => daemon.runnerId);
-    const [storedBackends, activeGroups] = await Promise.all([
+    const [storedBackends, activeGroups, drain] = await Promise.all([
       db.runnerBackendState.findMany(),
       knownIds.length === 0 ? [] : db.run.groupBy({
         by: ["runnerId"],
         where: { status: { in: activeRunStatuses }, runnerId: { in: knownIds } },
         _count: { _all: true },
       }),
+      activeDispatchDrain(db, now),
     ]);
     const activeByRunner = new Map(activeGroups.map((group) => [group.runnerId, group._count._all]));
     const backendsByRunner = new Map(storedBackends.map((backend) => [backend.runner, backend]));
@@ -85,6 +87,9 @@ export const registerSystemRoutes = (app: RouteApp, deps: RouteDeps): (() => voi
       }),
       backends: Object.values(RunnerKind).map((runner) =>
         projectRunnerBackend(runner, backendsByRunner.get(runner) ?? null)),
+      // An idle fleet has two very different causes. This field is which one:
+      // a draining runner is online and refused, not lost.
+      dispatchDrain: dispatchDrainStatus(drain),
     } satisfies RunnersResponse);
   });
 

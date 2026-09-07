@@ -53,12 +53,23 @@ const withTokens = async (operation: () => Promise<void>): Promise<void> => {
   }
 };
 
+type DrainRow = { reason: string; startedAt: Date; expiresAt: Date };
+
+/** The stored drain, answered through the same deadline predicate the route
+ * and the claim send: an expired row is absent to both of them. */
+const drainReader = (drain: DrainRow | null) => ({
+  findFirst: async ({ where }: { where: { expiresAt: { gt: Date } } }) =>
+    drain !== null && drain.expiresAt > where.expiresAt.gt ? drain : null,
+});
+
 const makeDatabase = (
   candidates: Record<string, unknown>[] = [],
   barrierGranted = true,
   onCandidateRead: () => void = () => undefined,
+  drain: DrainRow | null = null,
 ): PrismaClient => {
   const tx = {
+    dispatchDrain: drainReader(drain),
     $queryRaw: async (query: unknown) => {
       const sql = Array.isArray(query) ? query.join("") : JSON.stringify(query);
       if (sql.includes("pg_try_advisory_xact_lock_shared")) return [{ granted: barrierGranted }];
@@ -115,6 +126,7 @@ const makeDatabase = (
     taskStepOutput: { findMany: async () => [] },
   };
   return {
+    dispatchDrain: drainReader(drain),
     run: {
       findMany: async () => [],
       groupBy: async ({ where }: { where: { status: { in: RunStatus[] } } }) => {
@@ -227,5 +239,52 @@ test("a stale heartbeat still records that the daemon is alive", async () => {
     const status = await app.request("/runners", { headers: { Authorization: "Bearer runners-test-operator" } });
     const body = await status.json() as { daemons: Array<{ runnerId: string }> };
     assert.equal(body.daemons[0]?.runnerId, "heartbeat-runner");
+  });
+});
+
+test("an unexpired dispatch drain refuses every claim and explains the idle fleet", async () => {
+  await withTokens(async () => {
+    let candidateRead = false;
+    const drain = {
+      reason: "quiet-window-wait-exceeded host=vm-control-plane role=control-plane from=aaaaaaaaaaaa to=bbbbbbbbbbbb",
+      startedAt: new Date("2026-09-07T01:00:00.000Z"),
+      expiresAt: new Date(Date.now() + 60 * 60_000),
+    };
+    const app = createApp(makeDatabase([], true, () => { candidateRead = true; }, drain));
+
+    const refused = await runnerRequest(app, {});
+    assert.equal(refused.status, 409);
+    assert.deepEqual(await refused.json(), {
+      error: `Dispatch is draining for a pending deploy (${drain.reason})`,
+      reason: "dispatch-draining",
+      code: "dispatch-draining",
+      expiresAt: drain.expiresAt.toISOString(),
+    });
+    assert.equal(candidateRead, false, "a drained claim inspects no candidate, so it can park none");
+
+    const status = await app.request("/runners", { headers: { Authorization: "Bearer runners-test-operator" } });
+    const body = await status.json() as { daemons: Array<{ online: boolean }>; dispatchDrain: unknown };
+    // The refused runner is still online: it heartbeats through the drain.
+    assert.deepEqual(body.daemons.map(({ online }) => online), [true]);
+    assert.deepEqual(body.dispatchDrain, {
+      reason: drain.reason,
+      startedAt: drain.startedAt.toISOString(),
+      expiresAt: drain.expiresAt.toISOString(),
+    });
+  });
+});
+
+test("an expired dispatch drain is absent to the claim and to GET /runners", async () => {
+  await withTokens(async () => {
+    const expired = {
+      reason: "quiet-window-wait-exceeded host=mac-runner-1 role=runner from=aaaaaaaaaaaa to=bbbbbbbbbbbb",
+      startedAt: new Date(Date.now() - 3 * 60 * 60_000),
+      expiresAt: new Date(Date.now() - 60_000),
+    };
+    const app = createApp(makeDatabase([], true, () => undefined, expired));
+
+    assert.equal((await runnerRequest(app, {})).status, 204);
+    const status = await app.request("/runners", { headers: { Authorization: "Bearer runners-test-operator" } });
+    assert.equal((await status.json() as { dispatchDrain: unknown }).dispatchDrain, null);
   });
 });
