@@ -550,7 +550,7 @@ type ExecutorOfflineMarker = { id: string; createdAt: Date; metadata: Prisma.Jso
 
 /** The newest skipped authorization on this readiness Step, the outage anchor. */
 const latestExecutorOfflineMarker = async (
-  db: PrismaClient,
+  db: PrismaClient | Prisma.TransactionClient,
   readinessTaskId: string,
 ): Promise<ExecutorOfflineMarker | null> => db.taskActivity.findFirst({
   where: {
@@ -590,7 +590,7 @@ const openEpisodeStart = (marker: ExecutorOfflineMarker | null): Date | null => 
  * read: an older one is already behind a closed episode.
  */
 const closeExecutorOfflineEpisode = async (
-  db: PrismaClient,
+  db: PrismaClient | Prisma.TransactionClient,
   readinessTaskId: string,
 ): Promise<void> => {
   const marker = await latestExecutorOfflineMarker(db, readinessTaskId);
@@ -609,6 +609,35 @@ const closeExecutorOfflineEpisode = async (
  * by the current outage; past the ceiling the tail parks in REVIEW naming the
  * outage, like every other readiness stop.
  */
+const executorOfflineSettlement = async (
+  db: PrismaClient | Prisma.TransactionClient,
+  read: ClaimedReadiness,
+  executorRunnerIds: string[],
+): Promise<ReadinessSettlement> => {
+  const { readiness, regression, recovery } = read;
+  const now = read.input.now;
+  const episodeStartedAt = openEpisodeStart(await latestExecutorOfflineMarker(db, readiness.id)) ?? now;
+  const waitedMs = now.getTime() - episodeStartedAt.getTime();
+  if (waitedMs >= MERGE_EXECUTOR_OFFLINE_WAIT_MS) {
+    await closeExecutorOfflineEpisode(db, readiness.id);
+    return stopReadinessSettlement({
+      readinessTaskId: readiness.id,
+      regressionTaskId: regression.id,
+      reason: `${executorOfflineDetail(executorRunnerIds)} after ${Math.round(waitedMs / 60_000)} minutes`,
+      recovery,
+      refusalCode: null,
+      now,
+    });
+  }
+  return executorOfflineRequeueSettlement({
+    readinessTaskId: readiness.id,
+    regressionTaskId: regression.id,
+    executorRunnerIds,
+    episodeStartedAt,
+    now,
+  });
+};
+
 const settleExecutorOffline = async (
   db: PrismaClient,
   read: ClaimedReadiness,
@@ -616,41 +645,15 @@ const settleExecutorOffline = async (
   result: ReadinessTickResult,
   runner: ReadinessSettlementRunner,
 ): Promise<Extract<ReadinessSettlementApplication, { kind: "settled" }>> => {
-  const { readiness, regression, recovery, claim } = read;
-  const now = read.input.now;
-  const episodeStartedAt = openEpisodeStart(await latestExecutorOfflineMarker(db, readiness.id)) ?? now;
-  const waitedMs = now.getTime() - episodeStartedAt.getTime();
-  if (waitedMs >= MERGE_EXECUTOR_OFFLINE_WAIT_MS) {
-    // This outage is over as far as the wait is concerned: it has been paid in
-    // full and answered with a stop. Closing before the stop is applied means
-    // an interrupted stop costs another wait rather than an operator retry that
-    // stops again on its first tick without waiting at all.
-    await closeExecutorOfflineEpisode(db, readiness.id);
-    const stopped = await runner.apply(stopReadinessSettlement({
-      readinessTaskId: readiness.id,
-      regressionTaskId: regression.id,
-      reason: `${executorOfflineDetail(executorRunnerIds)} after ${Math.round(waitedMs / 60_000)} minutes`,
-      recovery,
-      refusalCode: null,
-      now,
-    }), claim);
-    if (stopped.kind === "acquire-lease") {
-      throw new Error("Readiness stop requested a Merge Lease");
-    }
-    if (stopped.outcome.value.applied) result.stopped += 1;
-    return stopped;
-  }
-  const application = await runner.apply(executorOfflineRequeueSettlement({
-    readinessTaskId: readiness.id,
-    regressionTaskId: regression.id,
-    executorRunnerIds,
-    episodeStartedAt,
-    now,
-  }), claim);
+  const settlement = await executorOfflineSettlement(db, read, executorRunnerIds);
+  const application = await runner.apply(settlement, read.claim);
   if (application.kind === "acquire-lease") {
-    throw new Error("Readiness executor-offline requeue requested a Merge Lease");
+    throw new Error("Readiness executor-offline settlement requested a Merge Lease");
   }
-  if (application.outcome.value.applied) result.requeued += 1;
+  if (application.outcome.value.applied) {
+    if (settlement.kind === "stop") result.stopped += 1;
+    else result.requeued += 1;
+  }
   return application;
 };
 
@@ -1173,7 +1176,9 @@ const runReadinessDecision = async (
   // tick observed nothing about the executor, so the episode it may be inside
   // stays open and keeps its start; otherwise one transport timeout inside the
   // wait would hand the outage a fresh window.
-  if (decision.kind === "authorize" || decision.kind === "requeue-regression" || decision.kind === "stop") {
+  const regressionWillRequeue = decision.kind === "requeue-regression"
+    && !(trainWidth > 0 && decision.condition === "base-advanced");
+  if (decision.kind === "authorize" || regressionWillRequeue || decision.kind === "stop") {
     await closeExecutorOfflineEpisode(db, readiness.id);
   }
 
@@ -1391,6 +1396,16 @@ export const readinessTick = async (
       discover: discoverReadiness,
       read: readReadiness,
       authorize: authorizeReadinessSettlement,
+      executor: {
+        blocking: () => executorsBlockingAuthorization(daemons),
+        closeEpisode: closeExecutorOfflineEpisode,
+        settleOffline: async (tx, read, executorRunnerIds) => {
+          const settlement = await executorOfflineSettlement(tx, read, executorRunnerIds);
+          const applied = await settlement.body(tx, read.claim);
+          if (!applied.value.applied) throw new Error(`Merge train readiness claim lost for ${read.readiness.id}`);
+          return settlement.kind === "stop" ? "stopped" : "ready";
+        },
+      },
       single: (database, read, decision, result, release, lease, pullRequests) =>
         runReadinessDecisionSafely(database, read, decision, result, release, lease, pullRequests, daemons, width),
     }, pendingTrains);

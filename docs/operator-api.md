@@ -1584,6 +1584,13 @@ in order with the `train` object described under `merge-authorization`. The
 per-candidate Approval gate is refused per candidate: an unapproved candidate
 stops on its own gate refusal, only the positions before it are authorized
 against the truncated prefix, and the positions after it return to `ready`.
+Train authorization also checks the runner registry inside the settlement
+transaction. When all configured merge executors are offline, no candidate is
+authorized: every candidate returns to `ready` with the existing
+`requeued-executor-offline` activity and its `mergeTail.train` settlement, and
+the Lease is released. A later tick may form a new train. The same bounded
+per-Step offline episode described below applies across these trains; reaching
+the ceiling stops the candidate with `merge-executor-offline` and an inbox notice.
 A settled train card closes as `DONE`; only an aborted train stays in `REVIEW`
 with its named reason.
 
@@ -2681,8 +2688,9 @@ Merge readiness writes an authorization only while a merge executor can claim
 it. Before the leased `authorize` decision is applied, readiness checks the
 runner ids in `MERGE_EXECUTOR_RUNNER_IDS` against the same daemon liveness
 `GET /runners` reports: at least one of them must be `online`. If none is,
-nothing is authorized and no Merge Lease is taken; readiness settles as a
-requeue of itself, leaving the regression evidence and its Run untouched, and
+nothing is authorized. A single candidate checked before acquisition takes no
+Merge Lease; a check after acquisition, including train settlement, releases
+the held Lease. Readiness settles as a requeue of itself, leaving the regression evidence and its Run untouched, and
 writes a TaskActivity on the readiness task with `metadata.state =
 "requeued-executor-offline"`, `metadata.reason = "merge-executor-offline"` and
 the executor runner ids it checked. The next tick asks again.

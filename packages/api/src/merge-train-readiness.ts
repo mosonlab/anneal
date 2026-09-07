@@ -64,6 +64,11 @@ export const trainRecordBindingFailure = (
 
 type ReadyRead = ClaimedReadiness & { input: Extract<ClaimedReadiness["input"], { stage: "ready" }> };
 type TrainHooks = {
+  executor: {
+    blocking(): string[];
+    settleOffline(tx: Prisma.TransactionClient, read: ClaimedReadiness, executorRunnerIds: string[]): Promise<"ready" | "stopped">;
+    closeEpisode(tx: Prisma.TransactionClient, taskId: string): Promise<void>;
+  };
   candidates(db: PrismaClient, pageSize: number): AsyncGenerator<ReadinessCandidate>;
   discover(db: PrismaClient, task: ReadinessCandidate, now: Date): Promise<ReadinessDiscovery>;
   read(db: PrismaClient, task: ReadinessCandidate, now: Date): Promise<ReadinessRead>;
@@ -493,7 +498,7 @@ const settleTrain = async (
     }
     const counts = await db.$transaction(async (tx) => {
       await lockCandidates(tx, train.candidates);
-      if ((await readLatestMarker(tx, train.taskId, "train"))?.state !== "queued") return { authorized: 0, stopped: 0 };
+      if ((await readLatestMarker(tx, train.taskId, "train"))?.state !== "queued") return { authorized: 0, stopped: 0, requeued: 0 };
       for (const read of reads) {
         if (!await evidenceStillMatches(tx, read)) throw new Error(`Merge train candidate ${read.readiness.id} evidence changed during settlement`);
       }
@@ -505,6 +510,28 @@ const settleTrain = async (
       // refusal cannot roll back a peer's settled authorization.
       const gateRefusal = await firstGateRefusal(tx, reads, decisions, record.contiguousPassCount);
       const authorizedCount = gateRefusal ? gateRefusal.index : record.contiguousPassCount;
+      // This is the last shared authorization check, inside the candidate
+      // transaction and under the train Lease. An outage returns the whole
+      // train to readiness without losing the per-Step offline episode.
+      const blockedExecutors = hooks.executor.blocking();
+      if (blockedExecutors.length > 0) {
+        const summaries: string[] = [];
+        let stopped = 0;
+        for (const [index, read] of reads.entries()) {
+          const settlement = await hooks.executor.settleOffline(tx, read, blockedExecutors);
+          if (settlement === "stopped") stopped += 1;
+          const reason = `merge-executor-offline: no merge executor in ${blockedExecutors.join(", ")} is online`;
+          const prefix = record.prefixes[index];
+          const verdict = prefix?.verdict
+            ?? (record.blocked.some((entry) => entry.taskId === read.readiness.id) ? "blocked" : "skipped");
+          await candidateSettlementMarker(tx, train, index + 1, settlement, reason,
+            { verdict, ...(prefix ? { predecessorOid: prefix.predecessorOid } : {}) });
+          summaries.push(`${index + 1}. ${read.readiness.id}: ${verdict} → ${settlement}; ${reason}`);
+        }
+        await finishTrainMarker(tx, train, "settled", summaries.join("\n"), now);
+        return { authorized: 0, stopped, requeued: reads.length - stopped };
+      }
+      for (const read of reads) await hooks.executor.closeEpisode(tx, read.readiness.id);
       const passing = record.prefixes[authorizedCount - 1];
       const summaries: string[] = [];
       let failed = false;
@@ -584,10 +611,11 @@ const settleTrain = async (
         summaries.push(`${index + 1}. ${read.readiness.id}: ${verdict} → ${settlement}`);
       }
       await finishTrainMarker(tx, train, "settled", summaries.join("\n"), now);
-      return { authorized: authorizedCount, stopped };
+      return { authorized: authorizedCount, stopped, requeued: 0 };
     }, serializable);
     result.authorized += counts.authorized;
     result.stopped += counts.stopped;
+    result.requeued += counts.requeued;
     return "finished";
   } catch (error: unknown) {
     const reason = error instanceof Error ? error.message : String(error);

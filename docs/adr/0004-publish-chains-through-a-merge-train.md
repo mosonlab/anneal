@@ -111,6 +111,17 @@ the existing merge tail. The record's base and candidate heads are checked
 again at authorization time; a train never authorizes evidence for an old live
 head.
 
+A train authorization also requires an online merge executor when
+`MERGE_EXECUTOR_RUNNER_IDS` is configured. The settlement transaction reads the
+runner registry after the second reads and before writing any authorization.
+If every configured executor is offline, it authorizes nothing, returns every
+candidate to `ready`, records each candidate's `requeued-executor-offline`
+activity and train settlement, and releases the Lease. A later tick can form a
+new train. The existing per-Step offline episode survives these train
+settlements: only an observed online executor or a terminal Step settlement
+closes it. At the existing offline wait ceiling, the candidate stops with
+`merge-executor-offline` and the existing inbox notice instead of requeueing.
+
 ## Settlement
 
 The runtime record's first non-passing prefix determines the downstream
