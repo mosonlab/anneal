@@ -1045,15 +1045,20 @@ export const handleRegressionCompletion = async (
     qualifiedVerdict?: RegressionVerdict;
     /** A merge-train gate-fix is bound to the train prefix rather than an
      *  active base-drift aggregate. The train worker has already serialized
-     *  that decision under its Merge Lease, so it may explicitly bypass the
-     *  ordinary recovery lookup for this synthetic gate verdict. */
-    ignoreRecovery?: boolean;
+     *  that decision under its Merge Lease, so it may explicitly route this
+     *  named synthetic verdict through the ordinary repair path. */
+    mergeTrainFailure?: { trainTaskId: string; predecessorOid: string };
     now: Date;
   },
 ): Promise<"advance" | "handled"> => {
-  const recovery = input.ignoreRecovery
+  const recovery = input.mergeTrainFailure
     ? null
     : await baseDriftRecoveryContext(tx, input.task.id, input.run.id);
+  if (input.mergeTrainFailure && (!input.qualifiedVerdict
+    || input.qualifiedVerdict.outcome !== "gate-fail"
+    || input.qualifiedVerdict.baseHeadSha !== input.mergeTrainFailure.predecessorOid)) {
+    throw new Error(`Merge train ${input.mergeTrainFailure.trainTaskId} supplied an invalid gate-fix verdict binding`);
+  }
   const stop = async (reason: string): Promise<"handled"> => {
     await stopMergeTail(tx, {
       phase: "regression",
