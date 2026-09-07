@@ -95,69 +95,87 @@ test("the readiness worker never overlaps ticks in one process", async () => {
   assert.equal(maximumActive, 1);
 });
 
-for (const withRecovery of [false, true]) {
-  test(`a fourth readiness requeue parks regression by name (recovery=${withRecovery})`, async () => {
-    const { requeueRegressionSettlement } = await import("./merge-readiness-worker.js");
-    const { TaskStatus } = await import("@anneal/db");
-    const updates: Array<{ where: { id: string }; data: Record<string, unknown> }> = [];
-    const activities: Array<Record<string, unknown>> = [];
-    const recoveryUpdates: Array<{ data: Record<string, unknown> }> = [];
-    const recovery = {
-      aggregateId: "recovery-1", attempt: 1, sourceStopId: "stop-1", sourceRunId: "source-1",
-      authorizationActivityId: "authorization-1", readinessTaskId: "readiness-1", regressionTaskId: "regression-1",
-      integratorTaskId: "integrator-1", repository: "org/repo", prNumber: 1, targetBranch: "main",
-      authorizedHeadSha: "head", authorizedBaseSha: "old-base", observedBaseSha: "new-base",
-      currentBaseSha: "new-base", recoveryRunId: "run-4",
-    };
-    const aggregate = { ...recovery, id: recovery.aggregateId, boundSourceRunId: recovery.sourceRunId,
-      status: "AWAITING_AUTHORIZATION" };
+for (const condition of ["base-advanced", "train-base-stale", "stale-head", "ancestry-refused"] as const) {
+  for (const withRecovery of [false, true]) {
+    test(`readiness parks with the applicable bound (condition=${condition}, recovery=${withRecovery})`, async () => {
+      const { requeueRegressionSettlement } = await import("./merge-readiness-worker.js");
+      const { TaskStatus } = await import("@anneal/db");
+      const updates: Array<{ where: { id: string }; data: Record<string, unknown> }> = [];
+      const activities: Array<Record<string, unknown>> = [];
+      const recoveryUpdates: Array<{ data: Record<string, unknown> }> = [];
+      const recovery = {
+        aggregateId: "recovery-1", attempt: 1, sourceStopId: "stop-1", sourceRunId: "source-1",
+        authorizationActivityId: "authorization-1", readinessTaskId: "readiness-1", regressionTaskId: "regression-1",
+        integratorTaskId: "integrator-1", repository: "org/repo", prNumber: 1, targetBranch: "main",
+        authorizedHeadSha: "head", authorizedBaseSha: "old-base", observedBaseSha: "new-base",
+        currentBaseSha: "new-base", recoveryRunId: "run-4",
+      };
+      const aggregate = { ...recovery, id: recovery.aggregateId, boundSourceRunId: recovery.sourceRunId,
+        status: "AWAITING_AUTHORIZATION" };
 
-    const agent = { id: "agent-1", name: "regression", archivedAt: null };
-    const tx = {
-      $queryRaw: async () => [{ id: agent.id }],
-      agent: { findUnique: async () => agent },
-      task: {
-        findUnique: async () => ({
-          id: "regression-1", name: "Regression", assigneeType: "AGENT", assigneeAgent: agent,
-          archivedAt: null, repo: { id: "repo-1", defaultBranch: "main" },
-          runs: [{ id: "run-4", runNumber: 4, maxRunsPerTask: 4, budgetGrants: 3, leaseLossRefunds: 3 }],
+      const agent = { id: "agent-1", name: "regression", archivedAt: null };
+      const ceiling = withRecovery ? 2 : 3;
+      const baseDrift = condition === "base-advanced" || condition === "train-base-stale";
+      const tx = {
+        $queryRaw: async () => [{ id: agent.id }],
+        agent: { findUnique: async () => agent },
+        task: {
+          findUnique: async () => ({
+            id: "regression-1", name: "Regression", assigneeType: "AGENT", assigneeAgent: agent,
+            archivedAt: null, repo: { id: "repo-1", defaultBranch: "main" },
+            runs: [{ id: "run-4", runNumber: 4, maxRunsPerTask: 4, budgetGrants: 3, leaseLossRefunds: 3 }],
+          }),
+          update: async (args: typeof updates[number]) => { updates.push(args); return {}; },
+          updateMany: async (args: { where: { id: { in: string[] } }; data: Record<string, unknown> }) => {
+            for (const id of args.where.id.in) updates.push({ where: { id }, data: args.data });
+            return { count: args.where.id.in.length };
+          },
+        },
+        taskActivity: {
+          findMany: async () => Array.from({ length: ceiling }, (_, index) => ({ metadata: {
+            kind: "mergeReadiness.requeue", ordinal: index + 1,
+            ...(withRecovery ? { recoveryAggregateId: "recovery-1" } : {}),
+          } })),
+          create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return data; },
+        },
+        inboxMessage: { upsert: async () => ({}) },
+        run: { create: async () => { assert.fail("cap exhaustion must not create a Run"); } },
+        mergeRecoveryAttempt: {
+          findUnique: async () => aggregate,
+          findUniqueOrThrow: async () => aggregate,
+          update: async (args: typeof recoveryUpdates[number]) => { recoveryUpdates.push(args); return aggregate; },
+        },
+      } as unknown as import("@anneal/db").Prisma.TransactionClient;
+      const claim = {
+        settle: async (client: typeof tx, input: { apply: (client: typeof tx) => Promise<{ value: unknown }> }) => ({
+          settled: true, claim: "released", value: (await input.apply(client)).value,
         }),
-        update: async (args: typeof updates[number]) => { updates.push(args); return {}; },
-      },
-      taskActivity: {
-        findMany: async () => [],
-        create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return data; },
-      },
-      run: { create: async () => { assert.fail("cap exhaustion must not create a Run"); } },
-      mergeRecoveryAttempt: {
-        findUnique: async () => aggregate,
-        findUniqueOrThrow: async () => aggregate,
-        update: async (args: typeof recoveryUpdates[number]) => { recoveryUpdates.push(args); return aggregate; },
-      },
-    } as unknown as import("@anneal/db").Prisma.TransactionClient;
-    const claim = {
-      settle: async (client: typeof tx, input: { apply: (client: typeof tx) => Promise<{ value: unknown }> }) => ({
-        settled: true, claim: "released", value: (await input.apply(client)).value,
-      }),
-    } as unknown as import("./readiness-claim.js").ReadinessClaimHandle;
-    const result = await requeueRegressionSettlement({
-      readinessTaskId: "readiness-1", regressionTaskId: "regression-1",
-      staleBaseSha: "old-base", currentBaseSha: "new-base", reason: "base drift",
-      now: new Date(), recovery: withRecovery ? recovery : null,
-    }).body(tx, claim);
-    assert.equal(result.value.applied, true);
-    for (const id of ["regression-1", "readiness-1"]) {
-      const last = updates.filter((update) => update.where.id === id).at(-1)?.data;
-      assert.equal(last?.status, TaskStatus.REVIEW);
-      assert.match(String(last?.failureReason), /Lease-loss refunds exhausted/);
-      assert.doesNotMatch(String(last?.failureReason), /readiness evaluation failed/);
-    }
-    if (withRecovery) assert.equal(recoveryUpdates.at(-1)?.data.status, "BLOCKED_DOWNSTREAM");
-    assert.equal(activities.length, 1);
-    // The code alone: only a spend-cap park widens the refusal's metadata.
-    assert.deepEqual(activities[0]?.metadata, { refusal: "lease-loss-refunds-exhausted" });
-  });
+      } as unknown as import("./readiness-claim.js").ReadinessClaimHandle;
+      const result = await requeueRegressionSettlement({
+        readinessTaskId: "readiness-1", regressionTaskId: "regression-1",
+        staleBaseSha: "old-base", currentBaseSha: "new-base", condition, reason: "base drift",
+        now: new Date(), recovery: withRecovery ? recovery : null,
+      }).body(tx, claim);
+      assert.equal(result.value.applied, true);
+      for (const id of ["regression-1", "readiness-1"]) {
+        const last = updates.filter((update) => update.where.id === id).at(-1)?.data;
+        assert.equal(last?.status, TaskStatus.REVIEW);
+        if (baseDrift) {
+          assert.equal(last?.failureReason,
+            `${withRecovery ? "base-drift-recovery" : "readiness-base-drift"}-requeue-limit: ${ceiling} requeues reached ceiling ${ceiling}`);
+        } else {
+          assert.match(String(last?.failureReason), /Lease-loss refunds exhausted/);
+        }
+        assert.doesNotMatch(String(last?.failureReason), /readiness evaluation failed/);
+      }
+      if (withRecovery) assert.equal(recoveryUpdates.at(-1)?.data.status, "BLOCKED_DOWNSTREAM");
+      assert.ok(activities.some((activity) => {
+        const metadata = activity.metadata as Record<string, unknown>;
+        return baseDrift ? metadata?.state === "stopped" : metadata?.refusal === "lease-loss-refunds-exhausted";
+      }));
+    });
 
+  }
 }
 
 test("the exception requeue limit defaults to three and refuses an unusable value", async () => {
