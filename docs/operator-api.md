@@ -3184,13 +3184,15 @@ budget alone can never end a pure lease-loss sequence. A task may therefore have
 at most three attempts refunded this way — counted on the Run as
 `leaseLossRefunds`, projected on the board card of the same name, and shared
 with the other platform-caused refunds: a late-salvage claim invalidation and
-ordinary merge-tail replacement births. A readiness base-drift requeue after a
-Regression PASS was valid at its exact base is exempt; its separate bound is
-described below. Provider-transport and Regression target-fetch failures use
-the separate `EXTERNAL_FAILURE_REFUND_CAP` and do not spend `leaseLossRefunds`.
-Each replacement is queued with the completion path's exponential delay derived
-from that count (30s, then 60s, then 120s) rather than immediately, so a runner
-host that is down is given time to come back.
+ordinary merge-tail replacement births, excluding completed-repair grants. A
+readiness base-drift requeue is exempt only for the `base-advanced` and
+`train-base-stale` conditions, when a Regression PASS was valid at its exact
+base; its separate bound is described below. Provider-transport and Regression
+target-fetch failures use the separate `EXTERNAL_FAILURE_REFUND_CAP` and do
+not spend `leaseLossRefunds`. Each replacement created by this lease-loss
+path is queued with the completion path's exponential delay derived from that
+count (30s, then 60s, then 120s) rather than immediately, so a runner host
+that is down is given time to come back.
 
 At the bound nothing is requeued: the Task moves to `REVIEW` with
 `failureReason` beginning `Lease-loss retry refused: Lease-loss refunds
@@ -3208,9 +3210,10 @@ is still revoked, because its clone base is wrong, but nothing replaces it and
 the Task is parked with the same reason.
 
 Readiness base-drift requeues have their own ceilings and stop reasons; they do
-not park by exhausting this shared lease-loss bound. Other merge-tail births
-still spend `leaseLossRefunds`, and the refund reason is preserved even when
-the ordinary run budget is also exhausted.
+not park by exhausting this shared lease-loss bound. Ordinary merge-tail births
+still spend `leaseLossRefunds`, except for completed-repair grants and the two
+readiness base-drift conditions named below. The refund reason is preserved even
+when the ordinary run budget is also exhausted.
 
 ### Readiness base-drift requeues
 
@@ -3219,10 +3222,12 @@ control plane's remote read finds that the default branch moved before
 authorization, readiness returns the candidate to Regression and grants the
 replacement Run. This readiness base-drift requeue does not increment
 `leaseLossRefunds`: the agent did not lose its Run lease, and the requeue is
-bounded independently. A merge-tail Run birth caused by lease loss,
-late-salvage claim invalidation, or another merge-tail recovery still uses the
-shared three-refund cap described above. Provider-transport and Regression
-target-fetch failures remain on `EXTERNAL_FAILURE_REFUND_CAP`.
+bounded independently. This exemption applies only to `base-advanced` and
+`train-base-stale`. Readiness requeues for `stale-head` or `ancestry-refused`
+still spend the shared three-refund cap, as do lease-loss, late-salvage, and
+other ordinary merge-tail replacement births; completed-repair grants remain
+the existing separate exemption. Provider-transport and Regression target-fetch
+failures remain on `EXTERNAL_FAILURE_REFUND_CAP`.
 
 Outside a base-drift recovery, the readiness task has a fixed ceiling of three
 requeues, `READINESS_BASE_DRIFT_REQUEUE_LIMIT`. This is a platform constant,
