@@ -501,18 +501,33 @@ path it has — success, failure, escalation and interruption — and a delete t
 fails is logged as `STOP dispatch-drain-delete-failed` and written to the
 escalation record. `expiresAt` is the fail-safe for a deploy process that dies
 mid-wait: the claim route treats an expired row as absent, so the fleet resumes
-by itself after **120 minutes** even if nothing deleted it. Override that bound
-with `DISPATCH_DRAIN_DEADLINE_MINUTES` in **`shared/.env`** (an integer from 1
-through 1440, validated like the wait budget above). A deploy that finds its
-quiet window inside the budget opens no drain at all.
+by itself **120 minutes** after the deploy last reported itself even if nothing
+deleted it. A wait that is still running pushes that deadline out on each hourly
+alert, so the bound measures silence rather than capping how long one wait may
+drain dispatch. Override it with `DISPATCH_DRAIN_DEADLINE_MINUTES` in
+**`shared/.env`** (an integer from 1 through 1440, validated like the wait budget
+above). A deploy that finds its quiet window inside the budget opens no drain at
+all.
 
-The drain's own two lines name the row, so an operator reading the log can
-match a refused claim to the deploy that caused it and to the moment it ended:
+The drain's own lines name the row, so an operator reading the log can match a
+refused claim to the deploy that caused it, to each renewal, and to the moment
+it ended:
 
 ```
 HOLD dispatch-draining id=cmt0drain0001 expires=2026-09-07T04:00:00.000Z
 PASS dispatch-drain-cleared id=cmt0drain0001 rows=1
 ```
+
+Two things read differently from the outside while a drain is open. The merge
+executor does not recognise the refusal, so it logs `claim loop error` once per
+poll interval for as long as the drain lasts; that noise is expected and stops
+with the drain. And once the deploy holds the deploy barrier the refusal ends —
+the runners log `Runner claim drain refusal ended` and claims answer `204` —
+while `dispatchDrain` stays set in `GET /runners` until the release has landed
+and the deploy deletes its row. If a deploy process was killed before it could
+delete its row and the fleet must claim again before the deadline, delete that
+one row by the id in its `HOLD dispatch-draining` line:
+`DELETE FROM "DispatchDrain" WHERE id = '<id>';`.
 
 No escalation marker is written for the wait itself, so no `--clear-escalation`
 is needed and the next scheduled deploy is not blocked by the alert. A wait

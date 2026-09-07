@@ -191,8 +191,8 @@ test("a dispatch drain logs one line on entry and one on exit while polling cont
   assert.deepEqual(waits, outcomes.map(() => config.pollIntervalMs));
   assert.deepEqual(logs, [
     "Runner claim draining: the control plane is refusing claims until a pending deploy lands",
-    "Runner claim drain cleared",
+    "Runner claim drain refusal ended",
     "Runner claim draining: the control plane is refusing claims until a pending deploy lands",
-    "Runner claim drain cleared",
+    "Runner claim drain refusal ended",
   ]);
 });

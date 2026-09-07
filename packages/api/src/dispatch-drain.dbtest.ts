@@ -22,6 +22,10 @@ const RUNNER_ID = "dispatch-drain-runner";
 const READY_AT = new Date("2026-08-01T00:00:00.000Z");
 
 let db: PrismaClient;
+// One app per test. The runner registry behind `GET /runners` is in-memory
+// state owned by an app instance, so the claim that reports a runner and the
+// read that must see it online have to run against the same instance.
+let app: ReturnType<typeof createApp>;
 const previousEnvironment = {
   runner: process.env.RUNNER_TOKEN,
   operator: process.env.OPERATOR_TOKEN,
@@ -32,7 +36,10 @@ before(() => {
   process.env.OPERATOR_TOKEN = OPERATOR_TOKEN;
   db = setupTestDb();
 });
-beforeEach(async () => { await resetTestDb(db); });
+beforeEach(async () => {
+  await resetTestDb(db);
+  app = createApp(db);
+});
 after(async () => {
   await db.$disconnect();
   for (const [key, value] of [
@@ -92,7 +99,7 @@ const seedQueuedRun = async () => {
 };
 
 const claim = async (): Promise<{ status: number; body: any }> => {
-  const response = await createApp(db).request("/runner/tasks/claim", {
+  const response = await app.request("/runner/tasks/claim", {
     method: "POST",
     headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -108,7 +115,7 @@ const claim = async (): Promise<{ status: number; body: any }> => {
 };
 
 const runners = async (): Promise<{ status: number; body: any }> => {
-  const response = await createApp(db).request("/runners", {
+  const response = await app.request("/runners", {
     headers: { Authorization: `Bearer ${OPERATOR_TOKEN}` },
   });
   return { status: response.status, body: await response.json() as any };

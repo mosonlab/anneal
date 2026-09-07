@@ -3274,3 +3274,72 @@ test("a drain that cannot be written is logged and handed to the deploy's failur
   ]);
   assert.deepEqual(lines, ["STOP dispatch-drain-create-failed detail=PrismaClientInitializationError"]);
 });
+
+test("a drain is renewed while its wait runs, and a renewal that fails is reported", async () => {
+  const lines = [];
+  const failures = [];
+  const extended = [];
+  let extendFails = false;
+  const drain = openDispatchDrain({
+    insert: async () => ({ id: "drain-1", expiresAt: new Date("2026-09-07T04:00:00.000Z") }),
+    extend: async (id) => {
+      if (extendFails) throw Object.assign(new Error("connection lost"), { name: "PrismaClientKnownRequestError" });
+      extended.push(id);
+      return { expiresAt: new Date("2026-09-07T06:00:00.000Z") };
+    },
+    remove: async () => 1,
+    onWriteFailure: (failure) => failures.push(failure),
+    log: (line) => lines.push(line),
+  });
+  await drain.renew();
+  extendFails = true;
+  await drain.renew();
+  await drain.release();
+  assert.deepEqual(extended, ["drain-1"], "the same row is pushed out rather than replaced");
+  assert.deepEqual(failures.map(({ reason, detail }) => [reason, detail]), [
+    ["dispatch-drain-extend-failed", "drain-1-PrismaClientKnownRequestError"],
+  ]);
+  assert.deepEqual(lines, [
+    "HOLD dispatch-draining id=drain-1 expires=2026-09-07T04:00:00.000Z",
+    "HOLD dispatch-draining id=drain-1 expires=2026-09-07T06:00:00.000Z",
+    "STOP dispatch-drain-extend-failed id=drain-1 detail=PrismaClientKnownRequestError",
+    "PASS dispatch-drain-cleared id=drain-1 rows=1",
+  ]);
+});
+
+test("a wait longer than the drain deadline extends its row instead of opening a second one", async () => {
+  const attempt = openDeploymentAttempt({
+    deployRoot: "/fixture",
+    targetCommit: revisions.to,
+    transactionId: "quiet-window-wait-renew",
+  });
+  attempt.establish({ revisions });
+  let opened = 0;
+  let renewals = 0;
+  const report = createQuietWindowWaitReporter({
+    attempt,
+    revisions,
+    notify: async () => undefined,
+    log: () => undefined,
+    openDrain: () => {
+      opened += 1;
+      return { renew: async () => { renewals += 1; }, release: async () => undefined };
+    },
+  });
+  const event = {
+    elapsedSeconds: 2_700,
+    polls: 45,
+    peakBlockingRuns: 7,
+    blockingRuns: 5,
+    budgetMs: 2_700_000,
+    blockingRunsByRunner: {},
+  };
+  await report(event);
+  await report({ ...event, elapsedSeconds: 6_300 });
+  await report({ ...event, elapsedSeconds: 9_900 });
+  // One row for the whole wait, pushed out on every later crossing: a wait
+  // that outlives the deadline must not let the fleet resume claiming into the
+  // release this deploy is still waiting to install.
+  assert.equal(opened, 1);
+  assert.equal(renewals, 2);
+});

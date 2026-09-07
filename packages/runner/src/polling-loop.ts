@@ -96,7 +96,9 @@ export const runPollingLoop = async (
       }
       if (outcome !== "draining" && draining) {
         draining = false;
-        log("Runner claim drain cleared");
+        // Only the refusal is known to have ended: the deploy that opened the
+        // drain may still be installing its release behind the deploy barrier.
+        log("Runner claim drain refusal ended");
       }
       if (outcome === "executed") continue;
     } catch (error: unknown) {

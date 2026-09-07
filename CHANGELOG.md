@@ -15,8 +15,8 @@ written.
   without touching any Task or its run budget, and the deploy deletes the drain
   on every exit path. Running Runs are never interrupted, the refused runners
   stay online, and `GET /runners` reports the drain as `dispatchDrain`. A drain
-  left behind by a dead deploy process expires by itself after 120 minutes
-  (`DISPATCH_DRAIN_DEADLINE_MINUTES`). One migration adds the drain table.
+  left behind by a dead deploy process expires by itself 120 minutes after that
+  deploy last reported itself (`DISPATCH_DRAIN_DEADLINE_MINUTES`). One migration adds the drain table.
 - Retired the `POST /files/mkdir` and `POST /files/move` routes and their
   underlying store operations.
 - Removed `POST /inbox/messages/:messageId/supersede`;
