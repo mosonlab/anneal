@@ -723,5 +723,5 @@ for (const outcome of ["review-fail", "refresh-conflict"]) {
       assert.equal(closed.failureClass, FailureClass.TASK_FAILED);
       assert.equal(harness.activities.some((activity) => activity.metadata?.failureReason === reason), accepted);
     });
-}
+  }
 }

@@ -2071,9 +2071,9 @@ curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/rerun" \
 A Regression verification Run can persist its `regression-verification-v2`
 output and then fail for an external reason: for example, a task-failed Git
 operation during target refresh or WIP salvage, or a provider stream failure.
-Completion checks the persisted semantic result before it classifies that Run
-failure or decides whether salvage, retry, or an ordinary failure settlement
-applies. This ordering preserves the result the Run already authored.
+Completion qualifies the persisted semantic result before deciding whether to
+retry or settle the Task as an ordinary external failure. This ordering
+preserves the result the Run already authored.
 Only a persisted v2 result receives this precedence; a Run with no such output
 keeps the existing external-failure path, including the legacy protocol-error
 handling.
@@ -2087,10 +2087,11 @@ hold:
 - the verdict's `headSha`, the output's `commitSha`, and the Run's exact head
   agree.
 
-When the external completion has no `headSha` because it failed before WIP
-salvage, the output's authored `commitSha` supplies the persisted head for
-this validation. A repair then binds to that head, so the operator does not
-need to carry the branch forward manually. A result from another Run, a
+When completion has no `headSha`, the persisted Run head is used when present.
+Only when neither completion nor the Run supplies a head does this
+external-failure path use the output's authored `commitSha` as the persisted
+head for validation. A repair then binds to that head, so the operator does
+not need to carry the branch forward manually. A result from another Run, a
 malformed body, a missing authored commit, or a mismatched head is refused and
 does not control the Chain. Run text and `TaskActivity` rows never synthesize a
 verdict.
@@ -2099,7 +2100,7 @@ For a validated negative result, the merge tail uses the persisted semantic
 outcome even though the Run itself records an external failure. `review-fail`
 queues the normal `review-fix` repair and `refresh-conflict` queues the
 `refresh-conflict` repair, both against the persisted head and its recorded
-base. The external failure remains visible as a control-plane diagnostic
+base. The external failure remains visible as a diagnostic
 `TaskActivity` on the Regression task; inspect it with
 `GET /tasks/:taskId/activity`. It is diagnostic history, not a replacement for
 the persisted verdict and not another source of semantic authority.
