@@ -1936,6 +1936,50 @@ test("missing artifact records FAILED without quiet-window, build, or activation
   assert.equal(records.at(-1).state, "FAILED");
 });
 
+for (const [name, diagnostic, terminalReason, retryable] of [
+  ["source TLS", "fatal: gnutls_handshake() failed: The TLS connection was non-properly terminated.", "release-artifact-source-unavailable", true],
+  ["recovered TLS then compile", "fatal: gnutls_handshake() failed\ncompile failed", "release-artifact-build-failed", false],
+  ["dependency TLS", "npm error: SSL_ERROR_SYSCALL", "release-artifact-dependencies-failed", false],
+]) {
+  test(`captured builder stderr preserves escalation policy: ${name}`, async (t) => {
+    withDeployBinaries(t);
+    const stderr = `${"earlier build output\n".repeat(150)}${diagnostic}\nfile:///deploy/scripts/deploy/release-artifact.mjs:291\n    const failure = new DeployFailure(\n                    ^\n\nDeployFailure: ${terminalReason}: exit-128\n    at run (release-artifact.mjs:291:21)\n    at buildReleaseArtifact (release-artifact.mjs:358:27)\nNode.js v24.0.0\n`;
+    const host = createDeployHost({
+      environment: controlPlaneEnvironment(),
+      serviceControl: { platform: "linux" },
+      runCommand: async (_program, args, options) => {
+        assert.ok(args[0].endsWith("/build-release-artifact.mjs"));
+        assert.equal(options.capture, true);
+        return { code: 1, stderr, stdout: "" };
+      },
+    });
+    const attempt = openDeploymentAttempt({
+      deployRoot: "/fixture", targetCommit: revisions.to, transactionId: `captured-${name}`,
+    });
+    let failure;
+    await assert.rejects(host.prepareReleaseArtifact(attempt), (error) => {
+      failure = error;
+      return error.reason === "release-artifact-build-failed";
+    });
+    const record = { reason: failure.reason, detail: failure.detail, to: revisions.to };
+    const state = escalationFixture(t, { ...record, attempts: ESCALATION_RETRY_CAP - 1 });
+    const now = new Date("2026-09-07T12:00:00.000Z");
+    const persisted = writeEscalationWithAttempts({ ...state.options, record, now: () => now });
+    assert.equal(Object.hasOwn(persisted, "retryAfter"), retryable);
+    if (retryable) {
+      assert.equal(persisted.attempts, ESCALATION_RETRY_CAP);
+      assert.equal(persisted.retryAfter, "2026-09-07T12:05:00.000Z");
+      assert.equal(failure.detail, `exit-1: ${stderr.trim().slice(-2_000)}`);
+    } else {
+      assert.equal(Object.hasOwn(persisted, "attempts"), false);
+    }
+    const options = { ...state.options, readRemoteMain: async () => revisions.to };
+    assert.equal((await checkExistingEscalation({ ...options, now: () => now })).active, true);
+    assert.equal((await checkExistingEscalation({ ...options,
+      now: () => new Date(now.getTime() + 300_000) })).active, !retryable);
+  });
+}
+
 test("malformed builder receipt records FAILED before the quiet window opens", async () => {
   const { host, attempt, calls, records } = fixture({ builderOutput: "RELEASE-ARTIFACT {not-json}\n" });
   const result = await executeUpgrade(host, attempt);
