@@ -8,6 +8,7 @@ import { GitHubReadError, type PullRequestReader, type PullRequestSnapshot } fro
 
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
+const TRAIN_BASE = "c".repeat(40);
 const NOW = new Date("2026-08-26T12:00:00.000Z");
 
 const snapshot = (overrides: Partial<PullRequestSnapshot> = {}): PullRequestSnapshot => ({
@@ -57,6 +58,11 @@ const ready = (): Extract<ReadinessInput, { stage: "ready" }> => ({
   regression: { headSha: HEAD, baseHeadSha: BASE },
   target: { resolved: true, repository: "mosonlab/agentos", prNumber: 42 },
   defaultBranch: "main",
+});
+
+const trainReady = (): Extract<ReadinessInput, { stage: "ready" }> => ({
+  ...ready(),
+  train: { baseSha: TRAIN_BASE, candidateHeadSha: HEAD },
 });
 
 type Comparison = Awaited<ReturnType<NonNullable<PullRequestReader["compareCommits"]>>>;
@@ -186,4 +192,23 @@ test("an incomplete comparison is a named stop", async () => {
   }), ready());
   assert.equal(decision.kind, "stop");
   assert.equal(decision.kind === "stop" ? decision.condition : null, "comparison-incomplete");
+});
+
+test("validated train evidence allows a diverged candidate comparison", async () => {
+  const decision = await evaluateReadiness(reader({
+    snapshot: snapshot({ baseSha: TRAIN_BASE }),
+    comparison: { ...compared, status: "diverged", behindBy: 1 },
+  }), trainReady());
+  assert.equal(decision.kind, "authorize");
+  if (decision.kind !== "authorize") return;
+  assert.equal(decision.baseSha, TRAIN_BASE);
+  assert.equal(decision.headSha, HEAD);
+  assert.equal(decision.evidence.baseSha, TRAIN_BASE);
+});
+
+test("a diverged comparison still requeues without train evidence", async () => {
+  const decision = await evaluateReadiness(reader({
+    comparison: { ...compared, status: "diverged", behindBy: 1 },
+  }), ready());
+  assert.equal(decision.kind, "requeue-regression");
 });
