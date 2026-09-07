@@ -1099,6 +1099,15 @@ model Run {
   /// SHA-256 of the exact prompt bytes most recently dispatched for this Run.
   /// Null before the first successful runner start write.
   promptHash                    String?
+  /// SHA-256 of the Specification of record this Run was handed to materialize
+  /// into its Chain workspace, over the same normalized bytes the fidelity
+  /// check reads back from the branch. Written in the claim transaction that
+  /// composed the materialization, so a later brief amendment cannot change
+  /// what this Run was asked to write, and a resumed claim of the same Run
+  /// leaves it alone because the runner reuses that workspace instead of
+  /// materializing again. Null on every Run that carried no materialization,
+  /// and on implementation Runs claimed before this column existed.
+  specificationDigest           String?
   maxDurationMin                Int                    @default(240)
   stallTimeoutMin               Int                    @default(10)
   maxRunsPerTask                Int                    @default(5)
