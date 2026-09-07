@@ -190,6 +190,16 @@ test("merge lease acquire is mutually exclusive and release removes the lease", 
     "second@fixture",
   );
   assert.equal(second.status, 75, second.stdout + second.stderr);
+  // Contention names the holder on the way out: an operator or a readiness tick
+  // that cannot take the lease can say whose lease is in the way.
+  const contendedHolder = /^MERGE LEASE HOLDER: (.+)$/mu.exec(second.stderr);
+  assert.ok(contendedHolder, second.stdout + second.stderr);
+  const blocking = JSON.parse(contendedHolder[1]);
+  assert.equal(blocking.holder, "first@fixture");
+  assert.equal(blocking.task, "chain-1");
+  assert.equal(blocking.reason, "First merge");
+  assert.equal(blocking.sha, readLease(fixture).sha);
+  assert.match(blocking.acquiredAt, /^\d{4}-\d{2}-\d{2}T/u);
   assert.equal(readLease(fixture).lease.holder, "first@fixture");
 
   const released = runLease(fixture, ["release", "--force"], "first@fixture");
@@ -354,7 +364,16 @@ test("merge lease status prints every field of the current holder", (t) => {
   execFileSync("git", ["remote", "add", "origin", fixture.origin], { cwd: secondRoot, env: FIXTURE_ENV });
   const status = runLease({ root: secondRoot, origin: fixture.origin }, ["status"]);
   assert.equal(status.status, 0, status.stderr);
+  // stdout is the blob and nothing else, so `status | jq` keeps working; the
+  // machine line the control plane reads travels beside it on stderr.
   const lease = JSON.parse(status.stdout);
+  assert.deepEqual(JSON.parse(/^MERGE LEASE HOLDER: (.+)$/mu.exec(status.stderr)[1]), {
+    holder: "status@fixture",
+    task: "task-42",
+    acquiredAt: lease.acquiredAt,
+    reason: "Inspect status",
+    sha: readLease(fixture).sha,
+  });
   assert.equal(lease.holder, "status@fixture");
   assert.equal(lease.task, "task-42");
   assert.equal(lease.reason, "Inspect status");
@@ -394,6 +413,84 @@ test("machine steal is refused through 45 minutes and allowed only after it", (t
     reason: stale.reason,
   });
   assert.doesNotMatch(text, /[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}/iu);
+});
+
+// A pseudo-terminal on every standard stream, which is what the removed
+// heuristic used to read as "a human is running this". `script(1)` cannot
+// provide one here -- BSD script wants a terminal of its own to copy settings
+// from, and a test runner has none -- so the pty comes from python's own
+// openpty. python3 is present on the gate worker (scripts/gate-worker/
+// provision.sh) and on macOS, and a missing one fails this case rather than
+// quietly turning it into a run without a terminal, which is the one condition
+// it exists to test. pty.spawn copies the child's output through the terminal,
+// so stdout and stderr arrive merged.
+const runOnTerminal = (fixture, command, holder) => {
+  const result = spawnSync("python3", [
+    "-c",
+    [
+      "import os, pty, sys",
+      "status = pty.spawn(sys.argv[1:])",
+      "sys.exit(os.waitstatus_to_exitcode(status))",
+    ].join("\n"),
+    ...command,
+  ], {
+    cwd: fixture.root,
+    encoding: "utf8",
+    timeout: 15_000,
+    input: "",
+    env: { ...FIXTURE_ENV, MERGE_LEASE_HOLDER: holder },
+  });
+  return { ...result, output: `${result.stdout ?? ""}${result.stderr ?? ""}` };
+};
+
+const runLeaseOnTerminal = (fixture, args, holder) =>
+  runOnTerminal(fixture, ["bash", join(fixture.root, "scripts", "merge-lease.sh"), ...args], holder);
+
+test("usage prints the whole header comment, not a fixed range of it", (t) => {
+  const fixture = leaseFixture(t);
+  const printed = runLease(fixture, []);
+  assert.notEqual(printed.status, 0, printed.stdout + printed.stderr);
+  assert.match(printed.stdout, /steal --reason "Recover abandoned merge" \[--human\]/u);
+  // The range used to be hard-coded, so growing the header truncated the text
+  // mid-sentence. The last sentence, whole, is what proves it is all there.
+  assert.match(
+    printed.stdout.trimEnd(),
+    /Use --force to fall back\nto the holder check when the acquiring task id is genuinely unknown\.$/u,
+  );
+  assert.doesNotMatch(printed.stdout, /^#/mu);
+});
+
+test("a terminal does not make a caller human: only --human waives the threshold", (t) => {
+  const fixture = leaseFixture(t);
+  // Prove the terminal before asserting what the script does in front of one.
+  const probe = runOnTerminal(fixture, ["bash", "-c", "[ -t 0 ] && [ -t 1 ] && [ -t 2 ] && echo TERMINAL"]);
+  assert.match(probe.output, /TERMINAL/u, probe.output);
+
+  const fresh = {
+    holder: "active@fixture",
+    acquiredAt: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+    reason: "Active merge",
+    token: "active-token",
+  };
+  installLease(fixture, fresh);
+
+  const refused = runLeaseOnTerminal(fixture, ["steal", "--reason", "Interactive recovery"], "operator@fixture");
+  assert.notEqual(refused.status, 0, refused.output);
+  assert.match(refused.output, /machine steal refused/u);
+  // The refusal says how long is left rather than only that it refused.
+  assert.match(refused.output, /has not exceeded 2700s; 2[0-9]{3}s remain, or pass --human to steal now/u);
+  assert.equal(readLease(fixture).lease.holder, "active@fixture");
+
+  const stolen = runLeaseOnTerminal(
+    fixture,
+    ["steal", "--human", "--reason", "Interactive recovery", "--task", "incident-9"],
+    "operator@fixture",
+  );
+  assert.equal(stolen.status, 0, stolen.output);
+  const current = readLease(fixture).lease;
+  assert.equal(current.holder, "operator@fixture");
+  assert.equal(current.task, "incident-9");
+  assert.equal(current.stolenFrom.holder, "active@fixture");
 });
 
 test("an explicit human steal replaces a fresh lease immediately", (t) => {

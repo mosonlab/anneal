@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   APPROVE_CHOICE_ID,
+  BASE_DRIFT_CLASS_CEILING_CHOICES,
   AUTHORIZATION_BINDING_WINDOW_MS,
   EVIDENCE_PLACEHOLDER_BODY,
   EVIDENCE_UNAVAILABLE_MARKER,
@@ -324,6 +325,19 @@ test("target-unresolvable does not offer re-authorize, which could not change it
 test("ordinary pre-merge base drift cannot enter the manual re-authorization path", () => {
   assert.deepEqual(STOP_CHOICES["base-drift"], ["abandon"]);
   assert.equal(dispositionFor("base-drift", "re-authorize"), null);
+});
+
+test("base drift answers re-validate as its own nonterminal disposition, and no other condition does", () => {
+  assert.deepEqual(BASE_DRIFT_CLASS_CEILING_CHOICES, ["re-validate", "abandon"]);
+  assert.equal(dispositionFor("base-drift", "re-validate"), "revalidation-requested");
+  assert.equal(dispositionFor("base-drift", "abandon"), "terminal-abandoned");
+  assert.ok(!isTerminalDisposition("revalidation-requested"));
+  // The wider card is the recovery's to open; nothing else answers this choice.
+  for (const condition of STOP_CONDITIONS) {
+    if (condition === "base-drift") continue;
+    assert.equal(dispositionFor(condition, "re-validate"), null, condition);
+  }
+  assert.equal(followUpDispositionFor("re-validate"), null);
 });
 
 test("flag-incident is nonterminal and its follow-up offers the terminal exits", () => {

@@ -503,6 +503,7 @@ export type Disposition =
   | "terminal-abandoned"
   | "refresh-requested"
   | "repair-requested"
+  | "revalidation-requested"
   | "nonterminal";
 
 export const TERMINAL_DISPOSITIONS: Disposition[] = ["terminal-done", "terminal-abandoned"];
@@ -516,7 +517,8 @@ export type StopChoice =
   | "revert"
   | "accept-foreign-merge"
   | "flag-incident"
-  | "open-repair";
+  | "open-repair"
+  | "re-validate";
 
 const RESUMABLE: StopChoice[] = ["re-authorize", "abandon"];
 
@@ -551,6 +553,23 @@ export const STOP_CHOICES: Record<StopCondition, StopChoice[]> = {
 /** The choices the `flag-incident` follow-up question offers — the later exits C3 promised. */
 export const FOLLOW_UP_CHOICES: StopChoice[] = ["accept-foreign-merge", "abandon"];
 
+/**
+ * The wider offering a base-drift recovery opens when one retry class crossed
+ * its own ceiling rather than the candidate being ineligible. Only a ceiling
+ * has counters to reset, so `re-validate` is offered there and nowhere else;
+ * an ordinary refusal keeps the abandon-only card above.
+ */
+export const BASE_DRIFT_CLASS_CEILING_CHOICES: StopChoice[] = ["re-validate", "abandon"];
+
+/**
+ * Every choice a condition can be answered with, which for base drift is wider
+ * than the default offering: the recovery decides per settle which card to
+ * open, and the answer transaction must accept whichever it opened.
+ */
+const ANSWERABLE_CHOICES: Partial<Record<StopCondition, StopChoice[]>> = {
+  "base-drift": [...BASE_DRIFT_CLASS_CEILING_CHOICES, ...STOP_CHOICES["base-drift"]],
+};
+
 const DISPOSITION_OF: Record<StopChoice, Disposition> = {
   accept: "terminal-done",
   revert: "terminal-done",
@@ -558,6 +577,7 @@ const DISPOSITION_OF: Record<StopChoice, Disposition> = {
   abandon: "terminal-abandoned",
   "re-authorize": "refresh-requested",
   "open-repair": "repair-requested",
+  "re-validate": "revalidation-requested",
   "flag-incident": "nonterminal",
 };
 
@@ -571,7 +591,7 @@ export const isStopChoice = (value: unknown): value is StopChoice =>
  */
 export const dispositionFor = (condition: StopCondition, choice: string): Disposition | null => {
   if (!isStopChoice(choice)) return null;
-  if (!STOP_CHOICES[condition].includes(choice)) return null;
+  if (!(ANSWERABLE_CHOICES[condition] ?? STOP_CHOICES[condition]).includes(choice)) return null;
   return DISPOSITION_OF[choice];
 };
 
@@ -589,6 +609,7 @@ export const CHOICE_LABELS: Record<StopChoice, string> = {
   "accept-foreign-merge": "接受他人已完成的合并",
   "flag-incident": "标记为事故，暂不结案",
   "open-repair": "开始修复合并目标",
+  "re-validate": "重新校验（重置该类计数，继续自动恢复）",
 };
 
 export const stopChoicePayload = (choices: StopChoice[]): Array<{ id: string; label: string }> =>
@@ -610,7 +631,10 @@ export const parseStopAnswerMetadata = (metadata: unknown): StopAnswerRecord | n
   if (!isStopCondition(value.condition)) return null;
   if (!isStopChoice(value.choice)) return null;
   const disposition = value.disposition;
-  const known: Disposition[] = ["terminal-done", "terminal-abandoned", "refresh-requested", "repair-requested", "nonterminal"];
+  const known: Disposition[] = [
+    "terminal-done", "terminal-abandoned", "refresh-requested", "repair-requested",
+    "revalidation-requested", "nonterminal",
+  ];
   if (typeof disposition !== "string" || !known.includes(disposition as Disposition)) return null;
   return { stopId: value.stopId, condition: value.condition, choice: value.choice, disposition: disposition as Disposition };
 };

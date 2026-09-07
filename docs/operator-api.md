@@ -1753,11 +1753,100 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/resume" \
     unavailable, lacks the repository grant, or the detached repair task cannot
     resolve the Chain repository, position, and shared branch.
 
+  This route also carries `merge_tail_repair_binding_mismatch`, but a request
+  cannot provoke it: the route repairs the recovery's own `recoveryRunId`, so
+  the repair it creates is bound by construction. The code exists so the repair
+  creation both entrypoints share fails loud and classified — rather than
+  creating an unsettleable repair — if this route ever stops deriving its source
+  Run from the aggregate. The automatic tail is the reachable open-time refusal
+  site.
+
 ```sh
 curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/repair" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
   -d '{"requestId":"reenter-recovery-repair-001","reason":"Fix the regression found during base-drift recovery"}'
 ```
+
+### Settling a chain whose repair cannot bind
+
+Two merge-tail mechanisms can overlap on one Chain: a base-drift recovery
+aggregate bound to its own recovery Run, and an ordinary `gate-fix` or
+`review-fix` repair opened against a different Regression Run. A repair whose
+Chain recovery names another Run can never be settled, so the platform refuses
+it rather than handing an agent work it cannot report.
+
+- At open, both repair entrypoints refuse. The automatic tail parks the
+  regression task in `REVIEW` with a `failureReason` beginning
+  `merge-tail-repair-binding-mismatch:` and writes the ordinary
+  `Autonomous merge tail stopped:` Inbox notice; `POST
+  /tasks/:taskId/merge-tail/repair` answers `409 Conflict` with code
+  `merge_tail_repair_binding_mismatch`. No repair task is created either way.
+- At settlement — a repair opened before the overlap appeared, or one whose
+  aggregate moved while it ran — the completion is rejected rather than failing
+  the Run. `POST /runner/runs/:runId/complete` answers `409 Conflict` with the
+  same reason and a `recoveryId`, `boundRecoveryRunId`, `boundSourceRunId` and
+  `repairedRunId`. This
+  is not an internal error and not an external Run failure: the Run stays
+  terminal and carries the reason in its `failureReason`, the repair task parks
+  in `REVIEW` with it, and the repair's own commit stays on the shared branch.
+- Either way the overlap is recorded as a control-plane TaskActivity on the
+  regression task whose `metadata.kind` is `mergeTailRepair.bindingMismatch`,
+  carrying `recoveryId`, `boundRecoveryRunId`, `boundSourceRunId`,
+  `repairedRunId` and `phase` (`open` or `settlement`). `boundRecoveryRunId` is
+  the Run the recovery is bound to — the aggregate's `recoveryRunId`, the value
+  the invariant compares — while `boundSourceRunId` is the aggregate's column of
+  that name, the Run the recovery was opened from. Read it with `GET
+  /tasks/:taskId/activity`; it names both mechanisms without reading the API
+  journal.
+
+The exit is the reentry route, not another Run of the stranded repair.
+`PATCH /tasks/:taskId` can move the parked repair task's status, but that
+settles nothing: it does not rebind the recovery, reopen the tail, or produce a
+Run that can settle it, and re-running the stranded card reproduces the same
+unbindable completion. `POST /tasks/:taskId/merge-tail/repair` instead opens a
+*new* repair card bound to the recovery's own `recoveryRunId`, with its own Run
+budget — so it works even when the stranded repair task's `maxSessionsPerTask`
+is already spent, and nothing needs `PATCH /tasks/:taskId` to raise a budget.
+
+1. Read the binding-mismatch activity and the parked repair task, and confirm
+   which mechanism owns the Chain.
+
+   ```sh
+   curl "$BASE_URL/tasks/$REGRESSION_TASK_ID/activity" \
+     -H "Authorization: Bearer $OPERATOR_TOKEN" | \
+     jq '[.[] | select(.metadata.kind == "mergeTailRepair.bindingMismatch")]'
+   ```
+
+2. A settlement rejection parks the recovery in `BLOCKED_DOWNSTREAM` with the
+   regression, readiness, and integrator tasks in `REVIEW`, which is exactly
+   the state the reentry route reopens. Call it on the regression task; it
+   charges the existing repair budget and opens a correctly bound repair.
+
+   The rejection parks that state only when no tail task still has an active
+   Run. When the recovery that took the Chain over is still running, the
+   rejection records the activity and the notice and leaves that recovery
+   alone — it is the mechanism that owns the Chain, and it settles the tail on
+   its own. Nothing further is needed unless it, too, stops.
+
+   ```sh
+   curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/repair" \
+     -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+     -d '{"requestId":"settle-unbindable-repair-001","reason":"Recovery and gate-fix repair overlapped on this chain"}'
+   ```
+
+3. If that route refuses — `merge_tail_repair_not_blocked` for a terminal or
+   incomplete aggregate, `merge_tail_repair_verdict_missing` when the stored
+   regression output is no longer the recovery Run's, or
+   `merge_tail_repair_budget_exhausted` — the Chain has no automatic exit left.
+   Carry the delivered branch forward with steps (b) to (e) of
+   [Recovering a merge tail stopped after its repair
+   budget](#recovering-a-merge-tail-stopped-after-its-repair-budget); the
+   repair's commit is already published on the shared branch, so its work is
+   preserved by the successor Chain's first Change.
+
+Whether a Chain should be allowed to run base-drift recovery and a gate-fix
+repair at the same time is not decided here. This refusal names the overlap and
+stops before spending a Run on work the platform would not accept.
 
 ### Recovering a merge tail stopped after its repair budget
 
@@ -1787,6 +1876,60 @@ for a semantic regression stop, or
 for a merge gate stop. A `PATCH /tasks/:taskId` request that supplies `status`
 is refused with `Chain task statuses are controlled by chain execution`. Both
 refusals are expected behaviour; do not use them to reopen the old Chain.
+
+#### Base-drift classification retry classes and `re-validate`
+
+Automatic pre-merge base-drift recovery accounts a classification tick that did
+not conclude against one of three classes, and only one of them is budgeted by
+count:
+
+- `waiting` — the Chain's own Run is still active, so the recovery is not
+  classified yet. Bounded by six hours since the first wait, never by count.
+- `transport` — the server-side repository read failed. Bounded by thirty
+  minutes since the first failed read, never by count.
+- `validation` — a classification ran against real facts and could not
+  conclude. Bounded by both `MAX_BASE_DRIFT_VALIDATION_ATTEMPTS` (30) failures
+  and thirty minutes since the first of them, so a burst inside one incident
+  cannot exhaust it.
+
+`waiting` and `transport` hold the next tick on a per-attempt backoff that
+doubles from the worker's two-second tick to a sixty-second cap, stored on the
+attempt as `nextEligibleAt`; `validation` takes no hold and stays eligible at
+the next tick. Each deferral writes a `baseDriftRecovery` activity in state
+`classification-retry` naming the class, its counter, the elapsed time in that
+class, and the next eligible time (`null` for `validation`); a class change is
+recorded there as well.
+
+A read that reached the repository and returned no usable ancestry comparison
+is `transport`, not `validation`: the candidate was never classified, so its
+counted budget does not pay for the upstream's silence.
+
+Crossing a ceiling settles the attempt as `FAILED` with a `refusalCode` naming
+the class, and the `failureReason` states the class and the elapsed time. The
+settle records the failure that crossed the ceiling before it settles, so the
+attempt's counters and the refusal text state the same number of failures, and
+the settle activity carries all three counters:
+
+- `waiting-ceiling` — `waiting-ceiling reached: the chain stayed active for <elapsed> (limit 6h00m); last classification: <reason>`
+- `transport-ceiling` — `transport-ceiling reached: repository reads failed for <elapsed> (limit 30m); last read failure: <reason>`
+- `validation-budget` — `validation-budget exhausted: <n> classification failures over <elapsed> (limit 30 attempts spanning 30m); last classification: <reason>`
+
+A class-ceiling settle opens a stop question offering `re-validate` alongside
+`abandon`, and writes a stop notice keyed
+`merge-base-drift-recovery:<state>:<stopId>` (with an `:r<n>` suffix after the
+n-th `re-validate`). Every base-drift recovery settle — a class ceiling, an
+ordinary ineligibility, or the automatic recovery limit — carries that same
+`:r<n>` generation on its stop question key `merge-stop:<stopId>:r<n>`, so a
+recovery that settles again after a `re-validate` always opens a fresh,
+answerable card instead of deduplicating against the answered one. Answer it
+through
+`POST /inbox/messages/:messageId/decision` with `decision: "re-validate"`. That
+answer resets the counters of the settled class and no other, clears the
+backoff and the refusal, returns the attempt to `VALIDATING`, and records a
+`class-revalidated` activity. The recovery resumes on the same attempt; no
+successor Chain is required. Every other base-drift refusal keeps its
+abandon-only card, because there is no class counter for `re-validate` to
+reset.
 
 #### Re-entering after a base-drift recovery FAIL
 
@@ -2086,6 +2229,65 @@ curl -X PUT "$BASE_URL/tasks/$TASK_ID/output" \
 curl -X POST "$BASE_URL/tasks/$TASK_ID/merge-target" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
   -d '{"prNumber":42}'
+```
+
+## Merge lease
+
+### GET `/merge-lease`
+
+- Required parameters: none.
+
+```sh
+curl "$BASE_URL/merge-lease" -H "Authorization: Bearer $OPERATOR_TOKEN"
+```
+
+Operator-scoped and read-only; runner, merge-executor and session credentials
+are refused with 403 before origin or the ledger is read. It runs
+`scripts/merge-lease.sh status`, which writes nothing to
+origin, and reads the merge Lease ledger. It never acquires, releases or steals:
+breaking a lease is a human decision made at the script with
+`scripts/merge-lease.sh steal --human --reason "..."`, which is also the only
+way to skip the 45-minute machine threshold.
+
+Response fields:
+
+- `checkedAt` — when the API finished reading origin. `ageSeconds` is measured
+  from this same instant, so neither under-reports the time the read took.
+- `holder` — the lease standing on `refs/merge-lease/holder`, or `null` when no
+  lease is held. It carries `holder` (`user@host`), `task`, `reason`,
+  `acquiredAt`, `ageSeconds` (whole seconds from `acquiredAt` to `checkedAt`,
+  `null` when `acquiredAt` is not a time), and `sha` (the lease blob on origin).
+  `task`, `reason` and `sha` may be `null`.
+- `unavailable` — why the holder could not be read, or `null`. `holder` and
+  `unavailable` are never both set; the ledger is still returned when origin
+  could not be reached, because that history is what an operator needs when the
+  remote is the broken part.
+- `events` — the 20 most recent `MergeLeaseEvent` rows, newest first. `state` is
+  one of `HANDOFF_PENDING`, `RELEASE_DEFERRED`, `CONTENDED`, `RELEASED`, or
+  `INVALID`. A `CONTENDED` row is an observation rather than a lifecycle: a
+  chain that could not take the lease for longer than
+  `MERGE_LEASE_CONTENTION_ALERT_MINUTES` (default 30), recorded with the holder
+  that was in the way in `failureDetail`, that holder's `acquiredAt`, and
+  `settledAt` at the moment it was alerted. Each uninterrupted episode of
+  contention is recorded and alerted once; a tick that takes the lease, cannot
+  reach origin, or settles before reaching for the lease ends the episode, and
+  the next contention starts a new window. Contention is never stolen
+  automatically.
+
+```json
+{
+  "checkedAt": "2026-09-06T12:00:00.000Z",
+  "holder": {
+    "holder": "runner@executor",
+    "task": "chain-42",
+    "reason": "chain merge tail chain-42",
+    "acquiredAt": "2026-09-06T11:00:00.000Z",
+    "ageSeconds": 3600,
+    "sha": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+  },
+  "unavailable": null,
+  "events": []
+}
 ```
 
 ## Inbox

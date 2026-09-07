@@ -339,6 +339,21 @@ node scripts/deploy/install-launchd-services.mjs --replace-existing
 node scripts/deploy/install-launchd-services.mjs --replace-existing --apply
 ```
 
+For `AGENTOS_DEPLOY_ROLE=runner`, the plan prints one
+`PLAN runner-path-source=<label>=<.env|rendered|plist-inline>` line per runner
+definition. `.env` means `shared/.env` defines `RUNNER_PATH` and the definition
+leaves it out so that value reaches the runner; `rendered` means the installer
+wrote a value containing the directories of the provider CLIs it resolved
+(`CLAUDE_BINARY` and `CODEX_BINARY`, otherwise `claude` and `codex` on the
+installing user's PATH); `plist-inline` means a migrated definition keeps its
+own `RUNNER_PATH`, which defeats `shared/.env` — remove it from that plist and
+plan again. A provider CLI absent from this host is named by a
+`PLAN runner-provider-cli-missing=<name>` line; that runner cannot serve it.
+When a configured `CLAUDE_BINARY`/`CODEX_BINARY` does not resolve, or neither
+CLI resolves, the installer refuses with
+`STOP runner-provider-cli-unresolved:<names>`; install the CLI, correct the
+configured path, or set `RUNNER_PATH` in `shared/.env` and plan again.
+
 The installer records original definitions and manifests, creates
 `shared/bin/agentos-service-wrapper.mjs`, and writes wrapper-based plists. Its
 apply path may `bootout` retired labels and `kickstart` changed owned labels;
@@ -444,6 +459,81 @@ The `VERIFIED` ledger entry records what the check actually proved:
 `service_verification.units_checked`, `service_verification.runners_registered`,
 `service_verification.observation_window_ms`, and
 `service_verification.observed_for_ms`.
+
+### Quiet-window wait budget and alert
+
+Step 2 of the activation sequence polls for zero blocking Runs every
+`QUIET_WINDOW_POLL_SECONDS` (60 by default) and has no deadline: the deploy
+waits until the platform is quiet. The wait is measured, and crossing a budget
+tells the operator without changing when the deploy proceeds.
+
+The budget is **45 minutes** by default. Override it by setting
+`QUIET_WINDOW_WAIT_BUDGET_MINUTES` in **`shared/.env`** on the deploying host,
+which the deploy loads into its environment before any phase runs. The
+installer-generated launchd plist and systemd unit carry a closed environment
+block and do not name this key, and the scheduled job inherits nothing from an
+operator shell, so `shared/.env` is the only location that reaches the deploy.
+The value is an integer from 1 through 1440; an out-of-range or non-integer
+value refuses the deploy with `environment-invalid` before the release
+artifact is built, leaving nothing to roll back.
+
+On crossing the budget the deploy, still waiting:
+
+- appends a `QUIET_WINDOW_WAIT_EXCEEDED` entry to the ledger, carrying
+  `quiet_window_wait_seconds`, `quiet_window_wait_polls`,
+  `quiet_window_wait_peak_blocking_runs`, the target commit, and
+  `quiet_window_blocking_runs_by_runner` — the blocking Run count keyed by the
+  runner that owns each Run;
+- sends one operator notification through the same Inbox notifier as an
+  escalation, with `reason=quiet-window-wait-exceeded` and
+  `detail=still-waiting-elapsed-<seconds>s-budget-<seconds>s`. The notice is
+  scoped to the deployment attempt, so a later attempt with the same revisions
+  and the same timing raises its own message rather than reusing this one.
+
+No escalation marker is written, so no `--clear-escalation` is needed and the
+next scheduled deploy is not blocked by the alert. A wait that stays blocked
+re-alerts at most once per hour; an alert that fails to reach the Inbox does
+not consume that hour and is retried on the next poll. Delivery runs beside
+the polling loop, so a stalled notifier never delays acquiring the window. A
+wait that crosses the budget and then finds its window on the next poll still
+alerts and still records its event.
+
+The control-plane quiet-window query is **database-wide**: it counts every
+`claimed`, `provisioning`, or `running` Run in the platform database,
+including Runs on runner-only hosts that this deploy does not touch. A
+control-plane deploy therefore waits for the Mac runners' Runs as well as its
+own, which is what `quiet_window_blocking_runs_by_runner` makes visible. Only
+the runner role scopes the query to its own local runner ids.
+
+Every `HOLD quiet-window` line names both facts:
+
+```
+HOLD quiet-window blockers=4 elapsed=2700s statuses=running,claimed
+HOLD quiet-window blockers=0 elapsed=180s deploy-barrier-contended
+HOLD quiet-window-wait-exceeded still-waiting-elapsed-2700s-budget-2700s blockers=4
+```
+
+#### Reading wait durations from the ledger
+
+Every attempt that acquired a quiet window records the completed wait on its
+ledger entries, whatever the attempt's outcome:
+`quiet_window_wait_seconds`, `quiet_window_wait_polls`, and
+`quiet_window_wait_peak_blocking_runs`. Read the distribution across retained
+deployments (14 by default) from the host:
+
+```sh
+jq -r '[.deployment_id, .state, .quiet_window_wait_seconds] | @tsv' \
+  .agentos-deploy/deployments/*/state.json
+```
+
+A `null` wait means the attempt never reached the quiet-window phase. Use the
+per-event file when the crossing itself matters:
+
+```sh
+jq -r 'select(.phase == "QUIET_WINDOW_WAIT_EXCEEDED")
+  | [.timestamp, .quiet_window_wait_seconds, (.quiet_window_blocking_runs_by_runner | tostring)] | @tsv' \
+  .agentos-deploy/deployments/*/events.jsonl
+```
 
 ### Step deadlines and barrier watchdog
 

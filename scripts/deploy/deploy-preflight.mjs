@@ -96,7 +96,7 @@ export const blockingRunsStatement = (statuses = BLOCKING_RUN_STATUSES, runnerId
     ? ""
     : ` AND "runnerId" IN (${runnerIds.map((_, index) => `$${statuses.length + index + 1}`).join(",")})`;
   return {
-    sql: `SELECT "id", "status"::text AS "status" FROM "Run" WHERE "status"::text IN (${placeholders})${runnerPredicate} ORDER BY "id"`,
+    sql: `SELECT "id", "status"::text AS "status", "runnerId" FROM "Run" WHERE "status"::text IN (${placeholders})${runnerPredicate} ORDER BY "id"`,
     parameters: [...statuses, ...(runnerIds ?? [])],
   };
 };
