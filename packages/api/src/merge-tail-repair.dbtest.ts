@@ -612,6 +612,76 @@ test("a refresh conflict creates exactly one resolver and its completion re-runs
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
 });
 
+test("a resolver result whose tradeOffs entries are objects still binds start to target", async () => {
+  // The role prompt asks the resolver to record "the exact trade-off", which a
+  // model renders as an entry per conflicting file. A repair that committed a
+  // real merge is accepted rather than rejected as malformed.
+  const seeded = await exercise("refresh-conflict");
+  const repair = await repairFor(seeded, "refresh-conflict");
+  await completeRepair(seeded, repair.id, JSON.stringify({
+    schemaVersion: 1,
+    outcome: "resolved",
+    startHeadSha: HEAD,
+    targetHeadSha: BASE,
+    resolvedHeadSha: RESOLVED,
+    tradeOffs: [{
+      file: "packages/db/src/merge-tail.ts",
+      decision: "kept main's fail-loud rejection",
+      reason: "the branch's fallback contradicts current main's stated goal",
+      intentPreserved: true,
+    }],
+    changedTestExpectations: [],
+  }));
+
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: repair.id } })).status, TaskStatus.DONE);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.TODO);
+  const result = latestMarker(await readMarkers(db, seeded.regression.id), "repairResult");
+  assert.equal(result?.state, null);
+  assert.equal(result?.startHeadSha, HEAD);
+  assert.equal(result?.raw.targetHeadSha, BASE);
+  assert.equal(result?.resolvedHeadSha, RESOLVED);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
+
+  const claimed = await claimNext();
+  assert.equal(claimed.status, 200);
+  const body = claimed.body as {
+    regressionRepairHandoff: { repair: { kind: string; taskId: string; resolvedHeadSha: string } };
+  };
+  assert.equal(body.regressionRepairHandoff.repair.kind, "refresh-conflict");
+  assert.equal(body.regressionRepairHandoff.repair.taskId, repair.id);
+  assert.equal(body.regressionRepairHandoff.repair.resolvedHeadSha, RESOLVED);
+});
+
+test("a rejected resolver output records its offending key and the retry refusal names the repair task", async () => {
+  const seeded = await exercise("refresh-conflict");
+  const repair = await repairFor(seeded, "refresh-conflict");
+  await completeRepair(seeded, repair.id, JSON.stringify({
+    schemaVersion: 1,
+    outcome: "resolved",
+    startHeadSha: HEAD,
+    targetHeadSha: BASE,
+    resolvedHeadSha: RESOLVED,
+    tradeOffs: [42],
+    changedTestExpectations: [],
+  }));
+
+  // The rejection is on the resolver's own card, with the key that failed.
+  const rejection = latestMarker(await readMarkers(db, repair.id), "repairResult");
+  assert.equal(rejection?.state, "invalid-output");
+  assert.equal(rejection?.raw.rejectedKey, "tradeOffs");
+  assert.match(String(rejection?.raw.reason ?? ""), /tradeOffs/u);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.REVIEW);
+
+  // An operator retry of the parked Regression is refused, and the refusal says
+  // which repair task produced the output that was thrown away.
+  await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.TODO } });
+  const retry = await db.$transaction((tx) => enqueueTaskRun(tx, seeded.regression.id));
+  assert.equal((await claimNext()).status, 204);
+  const stopped = await db.run.findUniqueOrThrow({ where: { id: retry.id } });
+  assert.equal(stopped.status, "FAILED");
+  assert.match(stopped.failureReason ?? "", new RegExp(`repair task ${repair.id} returned invalid output`, "u"));
+});
+
 test("a renamed canonical resolver still receives the refresh-conflict repair", async () => {
   // R9: `canonicalRole` is the Agent's identity and `name` is the operator's
   // label. Addressing the resolver by name meant a legitimate rename turned

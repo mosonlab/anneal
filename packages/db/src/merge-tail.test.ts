@@ -298,6 +298,39 @@ test("merge-resolver-opus-medium results are versioned and head-bound", () => {
   })]) assert.equal(parseResolverResult(body).status, "invalid");
 });
 
+test("structured tradeOffs entries are normalised and a rejection names the key that failed", () => {
+  const resolved = (tradeOffs: unknown[]) => parseResolverResult(JSON.stringify({
+    schemaVersion: 1, outcome: "resolved", startHeadSha: A, targetHeadSha: B,
+    resolvedHeadSha: B, tradeOffs, changedTestExpectations: [],
+  }));
+
+  // The role prompt asks for "the exact trade-off", which a model renders as an
+  // entry per conflicting file. Both readings resolve to the stored string form.
+  const parsed = resolved([
+    "packages/db/src/merge-tail.ts: kept main's parser",
+    { file: "packages/api/src/app.ts", decision: "kept the branch's route", reason: "main never had it", intentPreserved: true },
+  ]);
+  assert.equal(parsed.status, "ok");
+  assert.deepEqual(parsed.status === "ok" && parsed.result.outcome === "resolved" ? parsed.result.tradeOffs : null, [
+    "packages/db/src/merge-tail.ts: kept main's parser",
+    "packages/api/src/app.ts: kept the branch's route",
+  ]);
+
+  for (const entry of [42, null, ["a"], { file: "a.ts" }, { file: 1, decision: "kept" }]) {
+    const rejected = resolved([entry]);
+    assert.equal(rejected.status, "invalid", JSON.stringify(entry));
+    assert.ok(rejected.status === "invalid" && rejected.reason.includes("tradeOffs"), JSON.stringify(entry));
+    assert.equal(rejected.status === "invalid" && rejected.key, "tradeOffs", JSON.stringify(entry));
+  }
+
+  const objectExpectation = parseResolverResult(JSON.stringify({
+    schemaVersion: 1, outcome: "resolved", startHeadSha: A, targetHeadSha: B,
+    resolvedHeadSha: B, tradeOffs: [], changedTestExpectations: [{ file: "a.ts", decision: "kept" }],
+  }));
+  assert.equal(objectExpectation.status, "invalid");
+  assert.equal(objectExpectation.status === "invalid" && objectExpectation.key, "changedTestExpectations");
+});
+
 /** Test sources are not merge-tail machinery, so the inventory below skips them. */
 const isTestSource = (path: string): boolean => (
   /(?:^|\/)(?:tests?|__tests__)(?:\/|$)/u.test(path)
