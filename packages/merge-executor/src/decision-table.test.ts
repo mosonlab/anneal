@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { execute, idempotencyKeyFor, matchingProtectionRule, synchronousExecution } from "./decision-table.js";
+import type { DirectCommitRead, RepositorySnapshot } from "./github.js";
 import {
   AUTHORIZED_BASE,
   AUTHORIZED_HEAD,
@@ -57,7 +58,7 @@ test("post-merge verification accepts our identified merge after a concurrent ba
   assert.deepEqual(await execute(fake.deps), { outcome: "merged", mergeCommitSha: MERGE_COMMIT });
 });
 
-test("post-merge verification stops after a concurrent base advance without positive merge identity", async () => {
+test("post-merge verification stops after a concurrent base advance when the direct read cannot settle it either", async () => {
   const concurrentMergeSha = "d".repeat(40);
   const mismatchedMergeSha = "e".repeat(40);
   const cases = [
@@ -78,6 +79,11 @@ test("post-merge verification stops after a concurrent base advance without posi
           snapshot: { ...mergedSnapshot({ mergeCommit }), baseRefOid: concurrentMergeSha },
         },
       ],
+      // Neither pull-request-side predicate holds, so the stop below is the
+      // direct read's verdict: it is stated here rather than left to the fake's
+      // default, because a successful read of the authorized parents would
+      // instead complete the run as merged.
+      directCommit: { status: "error", reason: "landed commit read failed: network: request timed out" },
     });
 
     const verdict = stopped(await execute(fake.deps));
@@ -96,6 +102,81 @@ test("post-merge verification stops when the base ref cannot be resolved", async
   });
 
   assert.equal(stopped(await execute(fake.deps)).condition, "base-drift-post-merge");
+});
+
+/** The 2026-09-06 shape: our merge landed, a later merge moved the base ref on,
+ *  and GitHub's `mergeCommit` projection never caught up. Neither
+ *  pull-request-side predicate can identify the merge from this. */
+const staleProjection = (laterMerge: string): RepositorySnapshot =>
+  ({ ...mergedSnapshot({ mergeCommit: null }), baseRefOid: laterMerge });
+
+test("a landed merge self-verifies from the commit when the pull-request projection cannot", async () => {
+  const fake = makeFake({
+    reads: [
+      { status: "ok", snapshot: cleanSnapshot() },
+      { status: "ok", snapshot: cleanSnapshot() },
+      { status: "ok", snapshot: staleProjection("d".repeat(40)) },
+    ],
+    directCommit: { status: "ok", parents: [AUTHORIZED_BASE, AUTHORIZED_HEAD], reachableFromMain: true },
+  });
+
+  assert.deepEqual(await execute(fake.deps), { outcome: "merged", mergeCommitSha: MERGE_COMMIT });
+  // One bounded attempt, asked about the commit this run built and the base ref
+  // the human authorized.
+  const direct = fake.trace.filter((entry) => entry.call === "readLandedCommit");
+  assert.equal(direct.length, 1);
+  assert.equal(direct[0]!.detail?.mergeCommitSha, MERGE_COMMIT);
+  assert.equal(direct[0]!.detail?.baseRef, "master");
+  assertNoPublication(fake.calls());
+});
+
+test("the direct commit read accepts nothing short of both parents and reachability", async () => {
+  const foreign = "7".repeat(40);
+  const cases: Array<[string, DirectCommitRead, Record<string, unknown>]> = [
+    [
+      "the first parent is not the authorized base",
+      { status: "ok", parents: [foreign, AUTHORIZED_HEAD], reachableFromMain: true },
+      { parents: [foreign, AUTHORIZED_HEAD], reachableFromMain: true },
+    ],
+    [
+      "the second parent is not the authorized head",
+      { status: "ok", parents: [AUTHORIZED_BASE, foreign], reachableFromMain: true },
+      { parents: [AUTHORIZED_BASE, foreign], reachableFromMain: true },
+    ],
+    [
+      "the authorized parents are not the only parents",
+      { status: "ok", parents: [AUTHORIZED_BASE, AUTHORIZED_HEAD, foreign], reachableFromMain: true },
+      { parents: [AUTHORIZED_BASE, AUTHORIZED_HEAD, foreign], reachableFromMain: true },
+    ],
+    [
+      "the commit is not reachable from the base ref",
+      { status: "ok", parents: [AUTHORIZED_BASE, AUTHORIZED_HEAD], reachableFromMain: false },
+      { parents: [AUTHORIZED_BASE, AUTHORIZED_HEAD], reachableFromMain: false },
+    ],
+    [
+      "the read timed out",
+      { status: "error", reason: "landed commit read failed: network: request timed out" },
+      { error: "landed commit read failed: network: request timed out" },
+    ],
+  ];
+
+  for (const [label, directCommit, expected] of cases) {
+    const fake = makeFake({
+      reads: [
+        { status: "ok", snapshot: cleanSnapshot() },
+        { status: "ok", snapshot: cleanSnapshot() },
+        { status: "ok", snapshot: staleProjection("d".repeat(40)) },
+      ],
+      directCommit,
+    });
+
+    const verdict = stopped(await execute(fake.deps));
+    assert.equal(verdict.condition, "base-drift-post-merge", label);
+    // The Inbox question shows why the mechanical check did not settle it.
+    assert.deepEqual(JSON.parse(verdict.evidence).directParentCheck, expected, label);
+    // A failed or refuted read is never retried into a confirmation.
+    assert.equal(fake.calls().filter((call) => call === "readLandedCommit").length, 1, label);
+  }
 });
 
 test("a successful atomic ref update is not falsely rejected while GitHub still reports the PR open", async () => {

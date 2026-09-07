@@ -91,7 +91,7 @@ export const validated = (context: Context, payload: unknown): Response => {
 };
 
 export const FILE_WRITE_LIMIT = 25 * 1024 * 1024;
-class PayloadTooLargeError extends Error {}
+export class PayloadTooLargeError extends Error {}
 
 export const readBoundedBody = async (request: Request, limit: number): Promise<Buffer> => {
   const length = request.headers.get("Content-Length");
@@ -106,7 +106,7 @@ export const readBoundedBody = async (request: Request, limit: number): Promise<
       if (done) break;
       total += value.byteLength;
       if (total > limit) {
-        await reader.cancel("File upload exceeds limit");
+        await reader.cancel("Request body exceeds limit");
         throw new PayloadTooLargeError();
       }
       chunks.push(value);
@@ -116,6 +116,17 @@ export const readBoundedBody = async (request: Request, limit: number): Promise<
   }
   return Buffer.concat(chunks, total);
 };
+
+/**
+ * `readJson` for a route that must refuse an oversized body rather than buffer
+ * it. The limit is enforced while the body streams, so a client that lies in
+ * `Content-Length` still cannot make this process hold more than `limit` bytes.
+ */
+export const readBoundedJson = async <T>(
+  request: Request,
+  schema: z.ZodType<T>,
+  limit: number,
+): Promise<T> => schema.parse(JSON.parse((await readBoundedBody(request, limit)).toString("utf8")));
 
 export const fileErrorResponse = (context: Context, error: unknown): Response | undefined => {
   if (error instanceof PayloadTooLargeError) return context.json({ error: "File exceeds 25 MB upload limit" }, 413);

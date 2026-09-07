@@ -9,7 +9,7 @@
 import type { AuthorizationPayload } from "@anneal/db/merge-integrator";
 
 import type { ChainEnvelope, Deps, IntentRecord } from "./decision-table.js";
-import type { DisarmResult, MergeResponse, ReadResult, RepositorySnapshot, TrainGitHub } from "./github.js";
+import type { DirectCommitRead, DisarmResult, MergeResponse, ReadResult, RepositorySnapshot, TrainGitHub } from "./github.js";
 
 export const AUTHORIZED_HEAD = "a".repeat(40);
 export const AUTHORIZED_BASE = "b".repeat(40);
@@ -110,6 +110,10 @@ export type FakeOptions = {
   resendEnvelope?: Partial<ChainEnvelope>;
   startedAt?: Date;
   pollAttempts?: number;
+  /** What the post-merge direct commit read answers. Unconfigured is a failed
+   *  read, because a fake that has not been told the commit's parents knows
+   *  nothing about them. */
+  directCommit?: DirectCommitRead;
 };
 
 export const makeFake = (options: FakeOptions = {}) => {
@@ -159,6 +163,10 @@ export const makeFake = (options: FakeOptions = {}) => {
       const result = reads[Math.min(readIndex, reads.length - 1)]!;
       readIndex += 1;
       return result;
+    },
+    readLandedCommit: async (reference, mergeCommitSha) => {
+      trace.push({ call: "readLandedCommit", detail: { ...reference, mergeCommitSha } });
+      return options.directCommit ?? { status: "error", reason: "the direct commit read was not configured" };
     },
     merge: async (reference, expectedHeadSha, expectedBase) => {
       mergeSends += 1;
