@@ -229,12 +229,12 @@ test("a failure outside the agent's own phase does not spend the task's budget",
   const delivery = classifyEnvelope(envelope({ phase: "DELIVER", exitCode: 0, terminalSuccess: true, stderrSummary: "fatal: unable to access remote" }));
   assert.equal(delivery.externalFailure, true, "the agent finished; the push is the runner's plumbing");
   const provisioning = classifyEnvelope(envelope({ phase: "PROVISION", agentExited: false, exitCode: 127 }));
-  assert.equal(provisioning.failureClass, FailureClass.TRANSIENT_PROVIDER);
-  assert.equal(provisioning.retryable, true);
+  assert.equal(provisioning.failureClass, FailureClass.BINARY_NOT_FOUND);
+  assert.equal(provisioning.retryable, false);
   assert.equal(provisioning.externalFailure, true);
 });
 
-test("an unknown provisioning failure stays transient even without an agent exit", () => {
+test("a missing provisioning binary is deterministic even without an agent exit", () => {
   const verdict = classifyEnvelope(envelope({
     phase: "PROVISION",
     agentExited: false,
@@ -242,8 +242,8 @@ test("an unknown provisioning failure stays transient even without an agent exit
     terminationReason: "runner exception",
     stderrSummary: "spawn git: no such file or directory",
   }));
-  assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
-  assert.equal(verdict.retryable, true);
+  assert.equal(verdict.failureClass, FailureClass.BINARY_NOT_FOUND);
+  assert.equal(verdict.retryable, false);
   assert.equal(verdict.externalFailure, true);
 });
 
@@ -514,5 +514,17 @@ test("unrelated capacity verdict text is an ordinary task failure", () => {
       assert.equal(verdict.retryable, false);
       assert.equal(verdict.externalFailure, false);
     }
+  }
+});
+
+test("credential helper warnings do not veto plumbing transport retries", () => {
+  for (const phase of ["PROVISION", "DELIVER", "COMPLETE"] as const) {
+    const verdict = classifyEnvelope(envelope({
+      phase,
+      stderrSummary: "git failed (128): gnutls_handshake() failed; git: 'credential-osxkeychain' is not a git command.",
+    }));
+    assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER, phase);
+    assert.equal(verdict.retryable, true, phase);
+    assert.equal(verdict.externalFailure, true, phase);
   }
 });

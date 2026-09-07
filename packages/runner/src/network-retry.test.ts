@@ -64,6 +64,7 @@ test("git push does not retry a deterministic access refusal", async () => {
 
 test("git push vetoes the common access refusal vocabulary", async () => {
   for (const message of [
+    "Permission denied (publickey).",
     "authentication failed",
     "authorization failed",
     "unauthorized",
@@ -200,4 +201,13 @@ test("sequential operations share one delivery deadline instead of each taking a
   const budget = deliveryDeadline(0, 60, 0);
   assert.ok(clock <= budget + MIN_ATTEMPT_TIMEOUT_MS + KILL_OVERHEAD_MS, `sequential operations overran the phase budget: ${clock}ms`);
   assert.ok(clock < 60_000, `sequential operations outlived the lease: ${clock}ms`);
+});
+
+test("git push retries transport failures accompanied by credential helper warnings", async () => {
+  let calls = 0;
+  await assert.rejects(runWithNetworkRetry("git", ["push"], async () => {
+    calls += 1;
+    throw new Error("gnutls_handshake() failed; git: 'credential-osxkeychain' is not a git command.");
+  }, { wait: async () => undefined }));
+  assert.equal(calls, 6);
 });

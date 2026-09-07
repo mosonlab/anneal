@@ -2040,7 +2040,7 @@ test("a transient provider drop preserves review-fail instead of queueing a retr
   assert.equal((await db.run.findFirstOrThrow({ where: { taskId: repair.id, runNumber: 1 } })).status, "QUEUED");
 });
 
-test("a persisted PASS does not advance after an external git failure", async () => {
+test("a persisted PASS queues another Regression Run after a transient delivery failure", async () => {
   const seeded = await seedRegression();
   const settled = await completeRegressionAfterExternalGitFailure(seeded, "pass", { completionHead: HEAD });
 
@@ -2058,7 +2058,7 @@ test("a persisted PASS does not advance after an external git failure", async ()
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
 });
 
-test("a persisted gate-fail keeps ordinary external git failure settlement", async () => {
+test("a persisted gate-fail queues another Regression Run after a transient delivery failure", async () => {
   const seeded = await seedRegression();
   const settled = await completeRegressionAfterExternalGitFailure(seeded, "gate-fail");
 

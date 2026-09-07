@@ -74,12 +74,6 @@ export const normalizeSessionEventValue = (value: unknown): unknown => {
  *  only — never stdout, which is where the agent's own work appears. */
 const CLI_AUTH_PATTERN = /authentication_failed|\b401\b|Missing authentication|No API key found|not logged in|not-authenticated:\s*the CLI's own login check did not pass/iu;
 
-/** Auth vocabulary of `git push` and `gh`, which is a different one. `\bauth\w*`
- *  would swallow "Author identity unknown" — git's error for a missing
- *  user.email, a config problem and not a credential one — so the terms are
- *  spelled out. */
-const GIT_AUTH_PATTERN = /authentication|authorization|unauthorized|credential|permission denied|\b401\b|\b403\b/iu;
-
 const RATE_LIMIT_PATTERN = /\b429\b|rate.?limit|usage.?limit|quota/iu;
 
 /** The provider's own words for "try again", read off the structured provider
@@ -145,6 +139,12 @@ const DETERMINISTIC_ACCESS_PATTERNS = [
   /bad credentials/i,
 ] as const;
 
+// Plumbing also accepts git's explicit refusals without widening the
+// EXECUTE transient-evidence vocabulary to incidental credential words.
+const plumbingAccessRefusal = (text: string): boolean =>
+  deterministicAccessRefusal(text)
+  || /authorization failed|invalid credentials|\bunauthorized\b|\b(?:401|403)\b/iu.test(text);
+
 const deterministicAccessRefusal = (text: string): boolean =>
   DETERMINISTIC_ACCESS_PATTERNS.some((pattern) => pattern.test(text));
 
@@ -187,9 +187,6 @@ const dependencyProvisioningManifestMissing = (envelope: FailureEnvelope): boole
   && !envelope.agentExited
   && envelope.stderrSummary === DEPENDENCY_PROVISIONING_MANIFEST_MISSING;
 
-const authPatternFor = (phase: FailureEnvelope["phase"]): RegExp =>
-  phase === "DELIVER" ? GIT_AUTH_PATTERN : CLI_AUTH_PATTERN;
-
 const envelopeFailureClass = (envelope: FailureEnvelope): FailureClass => {
   // The one runner verdict still honoured, and only because it is the single
   // class that can neither create a retry nor raise the ceiling: a runner that
@@ -222,16 +219,16 @@ const envelopeFailureClass = (envelope: FailureEnvelope): FailureClass => {
   if (envelope.phase === "EXECUTE" && envelope.agentExited && envelope.terminationReason?.trim()) {
     return FailureClass.CANCELLED_OR_TIMED_OUT;
   }
-  if (envelope.phase === "EXECUTE" && envelope.exitCode === 127) return FailureClass.BINARY_NOT_FOUND;
+  if (envelope.exitCode === 127) return FailureClass.BINARY_NOT_FOUND;
   // The verdict channels. `stdoutSummary` is deliberately absent: it is
   // evidence, kept for the operator and for #114, and never a verdict.
   const verdict = envelopeVerdictText(envelope);
   // Auth outranks transience. A provider error that names an auth failure must
   // not be retried into a lockout just because the same message also mentions a
   // dropped connection.
-  if (authPatternFor(envelope.phase).test(verdict)
+  if (CLI_AUTH_PATTERN.test(verdict)
     || (envelope.phase !== "EXECUTE"
-      && (GIT_AUTH_PATTERN.test(verdict) || deterministicAccessRefusal(verdict)))) {
+      && plumbingAccessRefusal(verdict))) {
     return FailureClass.AUTH_REQUIRED;
   }
   // The runner owns every non-EXECUTE phase, including a failure before an

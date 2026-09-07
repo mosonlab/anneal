@@ -34,10 +34,9 @@ const messageOf = (error: unknown): string => error instanceof Error ? error.mes
  * veto, while leaving isTransientNetworkError's agent-process vocabulary
  * untouched. */
 const GIT_ACCESS_REFUSAL_PATTERNS = [
-  /authentication/iu,
-  /authorization/iu,
+  /authorization failed/iu,
   /\bunauthorized\b/iu,
-  /\bcredentials?\b/iu,
+  /invalid credentials/iu,
   /requested URL returned error:\s*(?:401|403)\b/iu,
 ] as const;
 
