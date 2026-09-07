@@ -1,3 +1,5 @@
+import { isDeterministicRefusal } from "@anneal/github-client";
+
 import { isCommandTimeout, KILL_OVERHEAD_MS } from "./exec.js";
 
 const TRANSIENT_NETWORK_PATTERNS = [
@@ -26,6 +28,22 @@ const DETERMINISTIC_ACCESS_PATTERNS = [
 ] as const;
 
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error);
+
+/** Git reports some access refusals without the HTTP/status prefixes used by
+ * the shared GitHub write classifier. Keep those common forms in the push
+ * veto, while leaving isTransientNetworkError's agent-process vocabulary
+ * untouched. */
+const GIT_ACCESS_REFUSAL_PATTERNS = [
+  /authentication/iu,
+  /authorization/iu,
+  /\bunauthorized\b/iu,
+  /\bcredentials?\b/iu,
+  /requested URL returned error:\s*(?:401|403)\b/iu,
+] as const;
+
+const isDeterministicPushRefusal = (error: unknown): boolean =>
+  isDeterministicRefusal(error)
+  || GIT_ACCESS_REFUSAL_PATTERNS.some((pattern) => pattern.test(messageOf(error)));
 
 export const isTransientNetworkError = (error: unknown): boolean => {
   // Our own per-command timeout is recognised by type, never by its wording.
@@ -216,14 +234,13 @@ export class DeadlineExceededError extends Error {
  *  plus the kill overhead, once. */
 export const MIN_ATTEMPT_TIMEOUT_MS = 5_000;
 
-/** Run an external network operation with a bounded retry budget. Only errors
- * that are explicitly classified as transient are retried; authentication,
- * permission, malformed input, and ordinary command failures return
- * immediately. Each attempt receives the per-command timeout it must not
- * exceed, plus the shared deadline any nested retried call must inherit. */
-export const retryTransientNetwork = async <T>(
+/** Run an external network operation with a bounded retry budget. Each attempt
+ * receives the per-command timeout it must not exceed, plus the shared
+ * deadline any nested retried call must inherit. */
+const retryNetworkOperation = async <T>(
   operation: (budget: AttemptBudget) => Promise<T>,
   options: RetryOptions = {},
+  shouldRetry: (error: unknown) => boolean,
 ): Promise<T> => {
   const attempts = options.attempts ?? NETWORK_ATTEMPTS;
   const wait = options.wait ?? transientBackoff;
@@ -242,7 +259,7 @@ export const retryTransientNetwork = async <T>(
     try {
       return await operation({ timeoutMs, deadline });
     } catch (error: unknown) {
-      if (attempt >= attempts || !isTransientNetworkError(error)) throw error;
+      if (attempt >= attempts || !shouldRetry(error)) throw error;
       // Checked on both sides of the wait: before, so an exhausted budget is
       // not spent sleeping for an attempt that will never run; after, because
       // the wait itself is budget.
@@ -253,6 +270,24 @@ export const retryTransientNetwork = async <T>(
     }
   }
 };
+
+/** Retry only failures classified as transient. This is the policy for clone,
+ * fetch, ls-remote, npm and GitHub read operations; their existing phrase
+ * vocabulary remains unchanged. */
+export const retryTransientNetwork = async <T>(
+  operation: (budget: AttemptBudget) => Promise<T>,
+  options: RetryOptions = {},
+): Promise<T> => retryNetworkOperation(operation, options, isTransientNetworkError);
+
+/** Git ref updates are idempotent: repeating the same push converges on the
+ * same remote ref even when the first response was lost. Their retry policy is
+ * therefore veto based: only a deterministic refusal stops the loop, while an
+ * otherwise unknown transport or command error gets the existing bounded
+ * retry budget. */
+const retryPush = async <T>(
+  operation: (budget: AttemptBudget) => Promise<T>,
+  options: RetryOptions = {},
+): Promise<T> => retryNetworkOperation(operation, options, (error) => !isDeterministicPushRefusal(error));
 
 /** `gh --version` is a liveness probe for a local binary, not a network call,
  *  so it is not retried — but it still runs inside the delivery phase, and an
@@ -328,5 +363,8 @@ export const runWithNetworkRetry = async <T>(
   // commit` or `git checkout` of a huge tree is slow, not hung, and killing it
   // at 20s would turn a working run into a failed one. Only a command that
   // talks to the network can stop making progress without ever returning.
-  return retryableCommand ? retryTransientNetwork(operation, options) : operation({});
+  if (!retryableCommand) return operation({});
+  return executable === "git" && args[0] === "push"
+    ? retryPush(operation, options)
+    : retryTransientNetwork(operation, options);
 };

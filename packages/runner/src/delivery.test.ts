@@ -1007,6 +1007,31 @@ test("transient push failures succeed on the third attempt", async () => {
   assert.equal(result.pushStatus, "SUCCEEDED");
 });
 
+test("an unknown push failure retries the same branch ref before GitHub work", async () => {
+  const pushArgs: string[][] = [];
+  const fake: CommandRunner = async (executable, args) => {
+    if (executable === "git" && args[0] === "push") {
+      pushArgs.push([...args]);
+      if (pushArgs.length < 3) throw new Error("fatal: gnutls_handshake() failed: TLS connection was not properly terminated");
+    }
+    if (executable === "gh" && args[1] === "list") {
+      return JSON.stringify([{ url: "https://github.com/acme/app/pull/13", number: 13 }]);
+    }
+    return "";
+  };
+  const result = await deliverWorkspace(config, claim, workspace, {
+    command: fake,
+    headSha: "new-head",
+    retryOptions: { wait: async () => undefined },
+  });
+  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.deepEqual(pushArgs, [
+    ["push", "--set-upstream", "origin", workspace.branch],
+    ["push", "--set-upstream", "origin", workspace.branch],
+    ["push", "--set-upstream", "origin", workspace.branch],
+  ]);
+});
+
 test("deterministic authentication failures are not retried", async () => {
   let pushes = 0;
   const fake: CommandRunner = async (executable, args) => {
@@ -1252,7 +1277,7 @@ test("a pushed branch remains published when PR retries are exhausted, but deliv
   assert.match(result.deliveryInstructions ?? "", /PR creation failed/);
 });
 
-test("git's Author identity error is a tool failure, not an auth failure", async () => {
+test("git's Author identity error stays a tool failure after push retries", async () => {
   let pushes = 0;
   const fake: CommandRunner = async (executable, args) => {
     if (executable === "git" && args[0] === "push") {
@@ -1262,7 +1287,10 @@ test("git's Author identity error is a tool failure, not an auth failure", async
     return "";
   };
   const result = await deliverWorkspace(config, claim, workspace, { command: fake, retryOptions: { wait: async () => undefined } });
-  assert.equal(pushes, 1);
+  // It is a deterministic local configuration problem, but it is not an
+  // access refusal. Push retries are veto based, so it exhausts the existing
+  // bounded budget while preserving the tool-failure classification.
+  assert.equal(pushes, 6);
   assert.equal(result.pushStatus, "FAILED");
   assert.equal(result.failureClass, "TOOL_FAILED");
 });
