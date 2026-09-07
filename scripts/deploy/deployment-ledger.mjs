@@ -24,6 +24,7 @@ export const DEPLOYMENT_LEDGER_STATES = Object.freeze([
   "STARTED",
   "ARTIFACT_PREPARED",
   "ARTIFACT_VERIFIED",
+  "QUIET_WINDOW_WAIT_EXCEEDED",
   "BACKED_UP",
   "SCHEMA_ADVANCED",
   "ACTIVATED",
@@ -38,6 +39,7 @@ const TERMINAL_STATES = new Set(["SUCCEEDED", "FAILED", "MANUAL_RECOVERY"]);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const MAX_VERIFICATION_ENTRIES = 128;
+const MAX_BLOCKING_RUNNER_ENTRIES = 128;
 const SECRET_TEXT = /(DATABASE_URL|(?:API|AUTH|ACCESS|REFRESH|PRIVATE)[_-]?(?:KEY|TOKEN|SECRET)|PASSWORD|\.env|(?:gh[pousr]_\w+)|(?:xox[bap]-[A-Za-z0-9-]+)|(?:sk-[A-Za-z0-9_-]+)|(?:Bearer\s+\S+)|(?:postgres(?:ql)?:\/\/)|(?:https?:\/\/[^/\s]+:[^@\s]+@))/iu;
 
 const invalid = (detail) => {
@@ -103,7 +105,24 @@ const safeIdentifierList = (value) => {
   return value.map((entry) => safeText(entry)).filter((entry) => entry !== null).slice(0, MAX_VERIFICATION_ENTRIES);
 };
 
-const safeDurationMs = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
+const safeNonNegativeInteger = (value) => Number.isSafeInteger(value) && value >= 0 ? value : null;
+
+/** Blocking Runs by runner id at the moment a quiet-window wait crossed its
+ * budget. The control-plane query is database-wide, so the map names
+ * runner-only hosts as well as the deploying host. Runner ids are arbitrary
+ * strings, so the map is built through a Map and materialized as own data
+ * properties: an id naming an Object prototype member is a key, not a
+ * lookup that would drop or corrupt its count. */
+const safeBlockingRunsByRunner = (value) => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const counts = new Map();
+  for (const [runner, total] of Object.entries(value).slice(0, MAX_BLOCKING_RUNNER_ENTRIES)) {
+    const id = safeText(runner);
+    const count = safeNonNegativeInteger(total);
+    if (id !== null && count !== null) counts.set(id, count);
+  }
+  return counts.size === 0 ? null : Object.fromEntries(counts);
+};
 
 /** What the post-restart verification actually proved: the units it sampled,
  * the local runners it saw re-registered, and how long everything stayed
@@ -112,8 +131,8 @@ const safeServiceVerification = (value) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const unitsChecked = safeIdentifierList(value.unitsChecked);
   const runnersRegistered = safeIdentifierList(value.runnersRegistered);
-  const observationWindowMs = safeDurationMs(value.observationWindowMs);
-  const observedForMs = safeDurationMs(value.observedForMs);
+  const observationWindowMs = safeNonNegativeInteger(value.observationWindowMs);
+  const observedForMs = safeNonNegativeInteger(value.observedForMs);
   if (unitsChecked === null && runnersRegistered === null
       && observationWindowMs === null && observedForMs === null) {
     return null;
@@ -319,6 +338,10 @@ export const createDeploymentLedger = ({
     pointerNewTarget: null,
     rollbackPointerOutcome: null,
     supersededEscalation: null,
+    quietWindowWaitSeconds: null,
+    quietWindowWaitPolls: null,
+    quietWindowWaitPeakBlockingRuns: null,
+    quietWindowBlockingRunsByRunner: null,
     reasonCode: null,
   };
 
@@ -347,6 +370,12 @@ export const createDeploymentLedger = ({
       pointerNewTarget: safePointerTarget(metadata.pointerNewTarget) ?? context.pointerNewTarget,
       rollbackPointerOutcome: safeRollbackPointerOutcome(metadata.rollbackPointerOutcome) ?? context.rollbackPointerOutcome,
       supersededEscalation: safeSupersededEscalation(metadata.supersededEscalation) ?? context.supersededEscalation,
+      quietWindowWaitSeconds: safeNonNegativeInteger(metadata.quietWindowWaitSeconds) ?? context.quietWindowWaitSeconds,
+      quietWindowWaitPolls: safeNonNegativeInteger(metadata.quietWindowWaitPolls) ?? context.quietWindowWaitPolls,
+      quietWindowWaitPeakBlockingRuns: safeNonNegativeInteger(metadata.quietWindowWaitPeakBlockingRuns)
+        ?? context.quietWindowWaitPeakBlockingRuns,
+      quietWindowBlockingRunsByRunner: safeBlockingRunsByRunner(metadata.quietWindowBlockingRunsByRunner)
+        ?? context.quietWindowBlockingRunsByRunner,
       reasonCode: state === "FAILED" || state === "MANUAL_RECOVERY"
         ? safeReasonCode(metadata.reasonCode)
         : null,
@@ -365,6 +394,10 @@ export const createDeploymentLedger = ({
       pointer_new_target: nextContext.pointerNewTarget,
       rollback_pointer_outcome: nextContext.rollbackPointerOutcome,
       superseded_escalation: nextContext.supersededEscalation,
+      quiet_window_wait_seconds: nextContext.quietWindowWaitSeconds,
+      quiet_window_wait_polls: nextContext.quietWindowWaitPolls,
+      quiet_window_wait_peak_blocking_runs: nextContext.quietWindowWaitPeakBlockingRuns,
+      quiet_window_blocking_runs_by_runner: nextContext.quietWindowBlockingRunsByRunner,
       reason_code: nextContext.reasonCode,
     };
     const event = { ...payload, phase: state, timestamp: recordedAt };
