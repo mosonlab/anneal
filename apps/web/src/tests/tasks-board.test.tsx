@@ -11,7 +11,7 @@ import { BOARD, BOARD_GRID, CARD_PAGE_SIZE, BoardArrows, BoardColumn, BoardNavig
 import { MobileTaskList } from "../components/mobile-task-list";
 import { PaginatedBoardEntries } from "../components/paginated-board-entries";
 import { cardModel, cardTime, cardTitle, TaskCard } from "../components/task-card";
-import { COLUMNS, STALLED_AFTER_MS, type BoardEntry, boardEntries, columnStep, countByStatus, heldChains, parkedChains, taskBoardEntry } from "../lib/board";
+import { COLUMNS, STALLED_AFTER_MS, type BoardClaimRefusal, type BoardEntry, boardEntries, columnStep, countByStatus, heldChains, parkedChains, taskBoardEntry } from "../lib/board";
 import { LocaleProvider } from "../lib/i18n";
 import { translate } from "../lib/i18n-core";
 import { ProjectProvider } from "../lib/project";
@@ -39,6 +39,21 @@ const ACTIONS = { onMove: noop, onRetry: noop, onArchive: noop, onDelete: noop, 
 const card = (overrides: Partial<BoardTask> = {}): string => renderToStaticMarkup(
   <TaskCard task={task(overrides)} actions={ACTIONS} />,
 );
+
+const CLAIM_REFUSAL: BoardClaimRefusal = {
+  code: "mechanical_contract_mismatch",
+  executorVersion: 1,
+  apiVersion: 2,
+  since: "2026-08-16T00:00:10.000Z",
+};
+
+/** The shared contract gains this optional field with the API projection. The
+ * cast keeps this predecessor-based Web test runnable before that API slice is
+ * integrated, while preserving the exact serialized fixture shape. */
+const claimRefusalRun = (executorVersion: number | null = CLAIM_REFUSAL.executorVersion): NonNullable<BoardTask["latestRun"]> => ({
+  ...boardRun({ status: "QUEUED" }),
+  claimRefusal: { ...CLAIM_REFUSAL, executorVersion },
+} as NonNullable<BoardTask["latestRun"]>);
 
 const localizedCard = (locale: "en" | "zh", overrides: Partial<BoardTask> = {}): string => renderToStaticMarkup(
   <LocaleProvider initialLocale={locale}><TaskCard task={task(overrides)} actions={ACTIONS} /></LocaleProvider>,
@@ -822,6 +837,30 @@ test("a card with nothing to flag carries no badge row at all", () => {
   // An empty row would still take a meta line's height and gap.
   assert.doesNotMatch(cardAt(), /data-card-badge/u);
   assert.doesNotMatch(cardAt({ latestRun: boardRun({ status: "RUNNING", startedAt: at(-60_000) }) }), /data-card-badge/u);
+});
+
+test("a mechanical claim refusal is a red localized badge on cards and the phone list", () => {
+  const run = claimRefusalRun();
+  const markup = cardAt({ latestRun: run });
+  const refusal = new JSDOM(`<!doctype html><html><body>${markup}</body></html>`).window.document.querySelector("[data-card-badge='claim-refusal']");
+  assert.ok(refusal);
+  assert.equal(refusal.textContent, "executor v1 ≠ API v2");
+  assert.match(refusal.querySelector("[data-slot='badge']")?.getAttribute("class") ?? "", /destructive-bg/u);
+  assert.equal(refusal.getAttribute("title"), en("tasks.badge.claimRefusal.title"));
+
+  const unversioned = cardAt({ latestRun: claimRefusalRun(null) });
+  assert.match(unversioned, />executor unversioned ≠ API v2</u);
+  assert.match(mobile("TODO", boardEntries([task({ latestRun: run })])), /executor v1 ≠ API v2/u);
+
+  // The existing absence rule remains intact: a queued Run without the
+  // projected field is not accused of a contract mismatch.
+  assert.doesNotMatch(cardAt({ latestRun: boardRun({ status: "QUEUED" }) }), /claim-refusal|executor v/u);
+
+  const chinese = localizedCard("zh", { latestRun: run });
+  assert.match(chinese, /执行器 v1 ≠ API v2/u);
+  assert.match(localizedCard("zh", { latestRun: claimRefusalRun(null) }), /执行器未提供版本 ≠ API v2/u);
+  assert.notEqual(en("tasks.badge.claimRefusal"), translate("zh", "tasks.badge.claimRefusal"));
+  assert.notEqual(en("tasks.badge.claimRefusal.unversioned"), translate("zh", "tasks.badge.claimRefusal.unversioned"));
 });
 
 test("a task with no runs still shows the agent's configured model", () => {
