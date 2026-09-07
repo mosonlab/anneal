@@ -92,6 +92,17 @@ curl -X POST "$BASE_URL/onboarding" \
   -d '{"project":{"name":"Demo"},"repo":{"name":"demo","remoteUrl":"https://github.com/acme/demo.git"},"acknowledgedHostExecution":true}'
 ```
 
+### Merge-train readiness configuration
+
+The API reads `MERGE_TRAIN_WIDTH` at startup. It accepts an integer from `0`
+through `3`; when it is unset, the effective value is `0`. `0` leaves Merge
+readiness on its existing single-candidate path. Values `1`, `2`, and `3`
+enable cumulative train readiness and bound each train to that many
+candidates. A non-integer or a value outside `0` through `3` is a startup
+configuration refusal naming `MERGE_TRAIN_WIDTH`; the API does not start, and
+the readiness worker uses the width the startup verdict validated rather than
+re-reading the environment. Restart the API after changing the setting.
+
 ## Files
 
 These routes address the configured Files Root. A missing query parameter means
@@ -1041,6 +1052,13 @@ exactly `refs/anneal/train/<publishHead>`, and `position` is a positive,
 control plane supplies this object; it is consumed by the merge executor when
 it publishes and replays a cumulative prefix.
 
+When `MERGE_TRAIN_WIDTH` is enabled, `publishHead` is the final contiguous
+passing prefix OID at `contiguousPassCount` for every authorized candidate,
+and `predecessorOid` is that candidate's own prefix predecessor. Only the
+longest contiguous passing prefix is authorized. The per-candidate Approval
+gate still applies before each output is written; the executor publishes the
+authorized prefix after readiness releases the Lease.
+
 ### GET `/projects/:projectId/task-templates`
 
 - Required path parameter: `projectId`.
@@ -1535,6 +1553,106 @@ creation), `approvalGate`, `opensPullRequest`,
 `maxDurationMin`, `stallTimeoutMin`, `maxSessionsPerTask`, `workingDirectory`,
 `targetBranch`, and paired `chainId`/`chainIndex` fields.
 
+### Merge-train readiness
+
+The worker first reserves a detached train in `REVIEW` with a `mergeTail.train`
+marker in `acquiring` state and no Run. This has no Approval gate. It enqueues
+the sole Run and changes the markers to `queued` only under the Merge Lease.
+Reservations and queued trains drain even after the width is changed to zero.
+A terminal train settlement records one deferred-release obligation in the same
+transaction as its terminal marker. A confirmed release settles that obligation;
+restart reconciliation consumes it if the process exits before release, without
+replaying authorization or releasing a newer lease generation.
+
+When `MERGE_TRAIN_WIDTH` is greater than zero, Merge readiness collects ready
+Chain candidates per Repo. A candidate must have a valid exact-head
+`regression-verification-v2` PASS bound to its `(headSha, baseHeadSha)`, and
+its recovery aggregate must not be `REPAIRING` or `BLOCKED_DOWNSTREAM`.
+Candidates are ordered FIFO by the time their Regression evidence was
+persisted. The control plane forms a train when at least one candidate's
+evidence base differs from the live default-branch head or at least two
+candidates are ready. A single candidate whose evidence is not drifted keeps
+the ordinary single-candidate authorization path.
+
+The control plane represents a train with one detached platform Task of kind
+`merge-train`. This Task has `assigneeType: AGENT`,
+`maxSessionsPerTask: 1`, and the Agent bound to the first candidate Chain's
+Regression verification Step. Its description instructs the session only to
+run `"${AGENTOS_TOOLS}/merge-train.sh"` and finish. The task claim metadata
+contains the tool's input, including the live `baseSha`, configured `width`,
+and ordered `candidates` with each candidate's `taskId`, `chainId`, `headSha`,
+and `branch`:
+
+```json
+{
+  "baseSha": "<live default-branch head>",
+  "width": 2,
+  "candidates": [
+    { "taskId": "<readiness task>", "chainId": "<chain id>", "headSha": "<candidate head>", "branch": "<chain branch>" },
+    { "taskId": "<readiness task>", "chainId": "<chain id>", "headSha": "<candidate head>", "branch": "<chain branch>" }
+  ]
+}
+```
+
+Each candidate readiness Task carries a `mergeTail.train` marker naming the
+detached train Task and the candidate's one-based `position`. If the train is
+aborted, the marker records `state: "aborted"` and the named `reason` for
+every candidate. The train card lists the candidates and, after settlement,
+the record's verdict for each position. The readiness Task activity log gets
+one entry naming the train Task, position, and settlement.
+
+The train obtains the repository Merge Lease under the first candidate's Chain
+lease target before its Task is enqueued and keeps it through record
+validation, the second-read checks, and authorization settlement. A failed
+acquire defers the tick and is named: a contended or unreachable acquisition
+writes a `mergeTail.leaseContention` marker on the train Task and one activity
+entry per candidate. While a train holds the Lease, single-candidate readiness
+for that Repo is deferred; an unresolved deferred release excludes the Repo
+from forming a *new* train only, and its candidates continue on the
+single-candidate path. A routine `HANDOFF_PENDING` event does not block new
+train formation. The Lease is released after the last
+authorization or on every failure path. Merge executor publication occurs
+after the handoff and is outside this Lease. A train Run that is lost or ends
+without a stored `merge-train-v1` record releases the Lease, marks the train
+aborted, and returns its candidates to `ready`; the detached Task is not
+retried.
+
+Before authorizing, readiness parses `merge-train-v1`, requires its `baseSha`
+to equal the live default-branch head and every `candidateHeadSha` to equal
+the corresponding Chain's evidence head. It then repeats the existing
+second-read discipline once per candidate with the train base, still under
+the Lease. A stale base or mismatched candidate head authorizes nothing and
+releases the Lease. Positions `1` through `contiguousPassCount` are authorized
+in order with the `train` object described under `merge-authorization`. The
+per-candidate Approval gate is refused per candidate: an unapproved candidate
+stops on its own gate refusal, only the positions before it are authorized
+against the truncated prefix, and the positions after it return to `ready`.
+The operator authorization remains bound to the candidate's original Regression
+evidence head and base and current gate request. The train separately verifies
+the live publication base, so drift alone does not invalidate that approval.
+Train authorization also checks the runner registry inside the settlement
+transaction. When all configured merge executors are offline, no candidate is
+authorized: every candidate returns to `ready` with the existing
+`requeued-executor-offline` activity and its `mergeTail.train` settlement, and
+the Lease is released. A later tick may form a new train. The same bounded
+per-Step offline episode described below applies across these trains; reaching
+the ceiling stops the candidate with `merge-executor-offline` and an inbox notice.
+A settled train card closes as `DONE`; only an aborted train stays in `REVIEW`
+with its named reason.
+
+Train settlement does not start a per-Chain base-drift Regression re-run. The
+first failing prefix enters the existing gate-fix repair path with the
+candidate head and its predecessor prefix OID as `baseHeadSha`; the existing
+shared Regression completion and repair-task handler preserves the repair
+budget and task shape. A `no-verdict` prefix and every `skipped` candidate
+return to `ready` unchanged; and a `blocked` candidate enters the existing
+refresh-conflict recovery stop with the recorded reason. A `fail`, `blocked`,
+or aborted train writes one existing Inbox stop notice for each affected
+candidate. Initial Regression semantic verification remains part of the
+candidate evidence, but it is deliberately not repeated after a base move
+while train readiness is enabled; the cumulative Merge gate and readiness
+second read provide the train's fresh checks.
+
 ### GET `/tasks`
 
 - Required parameters: none.
@@ -1843,6 +1961,16 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/hold" \
   resume activation-anchor behavior is unchanged.
 - Resume on a Chain that is not held is a successful idempotent no-op: it
   makes no transition, audit event, or activation.
+- Resume releases a held recovery authorization for replay by the base-drift
+  worker. The aggregate keeps the pending `integrator-authorized` intent until
+  the worker validates its authorization against the current base, acquires the
+  merge Lease, applies the same admission as `POST /tasks/:taskId/start`, and
+  records the new Run's durable handoff. Only that birth moves the aggregate to
+  `succeeded`; `authorization-replayed` TaskActivity records it. A second Resume
+  opens nothing. Contention or an admission refusal keeps the intent pending;
+  after the obstruction is repaired, a later worker tick can consume it even
+  though the Chain control is already released. Admission refusals are recorded
+  in the integrator task's activity.
 - Refusals: `404 Not Found` when the Task does not exist; `409 Conflict`
   when the Task belongs to no Chain.
 
@@ -2193,6 +2321,36 @@ successor Chain is required. Every other base-drift refusal keeps its
 abandon-only card, because there is no class counter for `re-validate` to
 reset.
 
+#### When the merge-integrator Run itself fails after recovery
+
+A canonical integrator step defers its `base-drift` question to the recovery
+worker, so while that stop stands there is no card to answer and both
+`POST /tasks/:taskId/retry` and `POST /tasks/:taskId/start` answer
+`Merge integrator stopped on base-drift; answer the stop question before
+starting another run`. The completion that records a failed integrator Run
+therefore decides the exit, with no operator input:
+
+- An **external failure** — transport, credential-mint transport or API 5xx —
+  records a pending authorization on the recovery aggregate. After the failed
+  Run's Lease release finishes, the recovery worker reads the current base.
+  If the authorized base is current, it acquires a new Lease and replays the
+  bound `integrator-authorized` intent with a durable handoff. Otherwise it
+  queues fresh base-drift recovery without a stale integrator Run. Recovery
+  Runs and external replays share the automatic recovery ceiling (2) across
+  stops for the same integrator, repository, PR and target. A Hold or admission
+  refusal preserves the pending intent without opening an abandon-only card.
+- **Anything else** is a deterministic refusal — the merge API answered
+  forbidden, unprocessable or not-found — and stops. The question the canonical
+  stop deferred is opened on the same `merge-stop:<stopId>` key family the
+  recovery worker uses, so an operator has something to answer; the activity is
+  in state `question-opened`. The same happens once the re-queue ceiling is
+  spent; this execution allowance has no class counter to reset, so its card
+  offers abandon only.
+
+In both cases the merge Lease handed to that Run is released by this same
+completion, because the Run ended without completing its merge. See
+[Merge lease](#merge-lease).
+
 #### Re-entering after a base-drift recovery FAIL
 
 If a semantic (`review-fail`) or merge-gate (`gate-fail`) regression FAIL
@@ -2515,6 +2673,14 @@ curl "$BASE_URL/tasks/$TASK_ID/recurring-fires?take=10" -H "Authorization: Beare
   `POST /tasks/:taskId/activity` is an ordinary note, and neither it nor an
   unnumbered row is counted or consumes an `ordinal`.
 
+For a candidate readiness Task, train settlement adds one control-plane
+activity entry naming the detached `merge-train` Task, the candidate's
+one-based position, and its settlement. The candidate's separate
+`mergeTail.train` marker carries the train Task id and position; an aborted
+train marker also carries `state: "aborted"` and its reason. These entries are
+the per-Chain audit of a train and do not represent a per-Chain base-drift
+Regression re-run while `MERGE_TRAIN_WIDTH` is enabled.
+
 ```sh
 curl "$BASE_URL/tasks/$TASK_ID/activity" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
@@ -2579,6 +2745,16 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/merge-target" \
 curl "$BASE_URL/merge-lease" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
 
+A merge Lease handed to a queued merge-integrator Run is released by that Run's
+own completion whenever it ends without merging and leaves no ordinary retry
+Run. The same path records the failure and settles its `HANDOFF_PENDING`
+`MergeLeaseEvent` as `RELEASED`, with TaskActivity stating that the Run ended
+without merging. An ordinary retry retains the Lease and transfers the durable
+handoff to its successor Run. Recovery replays wait for the old release to
+settle, then acquire a new Lease before their Run becomes claimable. If the
+completion release fails, it records a deferred release for reconciliation; the
+pending recovery waits until that release settles.
+
 Operator-scoped and read-only; runner, merge-executor and session credentials
 are refused with 403 before origin or the ledger is read. It runs
 `scripts/merge-lease.sh status`, which writes nothing to
@@ -2586,6 +2762,15 @@ origin, and reads the merge Lease ledger. It never acquires, releases or steals:
 breaking a lease is a human decision made at the script with
 `scripts/merge-lease.sh steal --human --reason "..."`, which is also the only
 way to skip the 45-minute machine threshold.
+
+When `MERGE_TRAIN_WIDTH` is enabled, a train holder is the detached
+`merge-train` Task. Merge readiness acquires that repository Lease before the
+train Task is enqueued and keeps it through the train's record validation,
+second-read checks, and authorization settlement. The Lease is released after
+the last authorization or on every failure and abort path; merge executor's
+publication is outside this window. A lost train Run or a Run without a stored
+`merge-train-v1` record aborts the train, releases the Lease, and returns its
+candidates to `ready` for a later tick.
 
 Response fields:
 
@@ -2634,8 +2819,9 @@ Merge readiness writes an authorization only while a merge executor can claim
 it. Before the leased `authorize` decision is applied, readiness checks the
 runner ids in `MERGE_EXECUTOR_RUNNER_IDS` against the same daemon liveness
 `GET /runners` reports: at least one of them must be `online`. If none is,
-nothing is authorized and no Merge Lease is taken; readiness settles as a
-requeue of itself, leaving the regression evidence and its Run untouched, and
+nothing is authorized. A single candidate checked before acquisition takes no
+Merge Lease; a check after acquisition, including train settlement, releases
+the held Lease. Readiness settles as a requeue of itself, leaving the regression evidence and its Run untouched, and
 writes a TaskActivity on the readiness task with `metadata.state =
 "requeued-executor-offline"`, `metadata.reason = "merge-executor-offline"` and
 the executor runner ids it checked. The next tick asks again.

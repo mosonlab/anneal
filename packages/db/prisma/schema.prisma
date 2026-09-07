@@ -803,6 +803,15 @@ model MergeRecoveryAttempt {
   revalidations           Int                       @default(0)
   boundSourceRunId        String?
   authorizationActivityId String?
+  /// The readiness authorization awaiting birth after a Hold or failed Run.
+  /// The aggregate owns replay after Resume or recovery: the recovery worker
+  /// opens the Run under a merge Lease, clears this column, and only then may the
+  /// aggregate reach SUCCEEDED.
+  pendingAuthorizationId  String?
+  /// Failure whose retry is awaiting current-base validation and a new Lease.
+  pendingFailureRunId     String?
+  /// Charged at replay birth; summed with recovery Runs across stops.
+  externalReplayCount     Int                       @default(0)
   recoveryRunId           String?
   readinessTaskId         String?
   regressionTaskId        String?
@@ -822,6 +831,7 @@ model MergeRecoveryAttempt {
 
   @@unique([sourceStopId, attempt])
   @@index([integratorTaskId, status])
+  @@index([pendingAuthorizationId])
   @@index([status, refusalCode, updatedAt])
   @@index([recoveryRunId])
   @@index([repository, prNumber, targetBranch])

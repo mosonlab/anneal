@@ -75,15 +75,15 @@ const writeOpenProjection = async (tx: Tx, event: MergeLeaseEvent): Promise<void
   });
 };
 
-const writeTerminalProjection = async (tx: Tx, event: MergeLeaseEvent): Promise<void> => {
+const writeTerminalProjection = async (tx: Tx, event: MergeLeaseEvent, reason?: string): Promise<void> => {
   if (!event.settledAt) throw new Error(`Terminal Merge Lease event ${event.id} has no settlement time`);
   const state = event.state === MergeLeaseEventState.RELEASED ? "released" : "invalid";
   if (event.handedOffRunId) {
     await writeMarker(tx, event.owningTaskId, "leaseHandoff", {
       actorType: "control-plane",
-      body: state === "released"
-        ? `Queued Run ${event.handedOffRunId} did not consume its Chain Lease handoff`
-        : `Invalid Chain Lease handoff for queued Run ${event.handedOffRunId}: ${event.failureDetail ?? "invalid target"}`,
+      body: reason ?? (state === "released"
+        ? event.failureDetail ?? `Queued Run ${event.handedOffRunId} did not consume its Chain Lease handoff`
+        : `Invalid Chain Lease handoff for queued Run ${event.handedOffRunId}: ${event.failureDetail ?? "invalid target"}`),
       metadata: {
         ledgerId: event.id,
         state,
@@ -118,7 +118,7 @@ const writeTerminalProjection = async (tx: Tx, event: MergeLeaseEvent): Promise<
 
 export const recordLeaseHandoff = async (
   tx: Tx,
-  input: { target: MergeLeaseLedgerTarget; toRunId: string; at: Date },
+  input: { target: MergeLeaseLedgerTarget; toRunId: string; at: Date; fromRunId?: string },
 ): Promise<{ event: MergeLeaseEvent; recorded: boolean }> => {
   const run = await tx.run.findUnique({
     where: { id: input.toRunId },
@@ -127,6 +127,24 @@ export const recordLeaseHandoff = async (
   if (!run?.taskId) throw new Error(`Lease handoff target Run ${input.toRunId} has no Task`);
   if (run.projectId !== input.target.projectId) {
     throw new Error(`Lease handoff target Run ${input.toRunId} belongs to another project`);
+  }
+  if (input.fromRunId) {
+    const source = await tx.run.findUnique({ where: { id: input.fromRunId }, select: { status: true, taskId: true } });
+    if (!source || source.taskId !== run.taskId
+      || !new Set<RunStatus>([RunStatus.FAILED, RunStatus.SUCCEEDED, RunStatus.CANCELLED, RunStatus.LOST]).has(source.status)) {
+      throw new Error("Cannot transfer a live or unrelated Run's Merge Lease handoff");
+    }
+    const transferred = await tx.mergeLeaseEvent.updateMany({
+      where: { ...input.target, state: MergeLeaseEventState.HANDOFF_PENDING, handedOffRunId: input.fromRunId },
+      data: { handedOffRunId: input.toRunId, handedOffAt: input.at, owningTaskId: run.taskId },
+    });
+    if (transferred.count === 1) {
+      const event = await tx.mergeLeaseEvent.findUniqueOrThrow({
+        where: { projectId_chainId_handedOffRunId: { ...input.target, handedOffRunId: input.toRunId } },
+      });
+      await writeOpenProjection(tx, event);
+      return { event, recorded: true };
+    }
   }
   const created = await tx.mergeLeaseEvent.createMany({
     data: [{
@@ -287,6 +305,7 @@ export type SettleLeaseEventInput = {
   failureDetail?: string;
   evidence?: LeaseSettlementEvidence;
   projectionTaskId?: string;
+  reason?: string;
 } | {
   target: MergeLeaseLedgerTarget;
   taskId: string;
@@ -343,7 +362,7 @@ const settleById = async (
     throw new Error(`Merge Lease event ${event.id} is already ${event.state}`);
   }
   if (settled.count === 1) {
-    await writeTerminalProjection(tx, event);
+    await writeTerminalProjection(tx, event, input.reason);
     if (input.evidence) {
       await writeHoldProjection(tx, input.projectionTaskId ?? event.owningTaskId, event, input.evidence);
     }

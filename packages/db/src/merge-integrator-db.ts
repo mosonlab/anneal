@@ -25,6 +25,7 @@ import {
   MERGE_INTEGRATOR_KIND,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
   FOLLOW_UP_CHOICES,
+  BASE_DRIFT_CLASS_CEILING_CHOICES,
   STOP_CHOICES,
   type Disposition,
   type IntegratorStepShape,
@@ -619,6 +620,26 @@ const stopQuestionIdentity = async (
     throw new Error(`Merge stop source Run ${stop.sourceRunId} has no Session identity`);
   }
   return { agentId: sourceRun.agentId, sessionId: sourceRun.session.id };
+};
+
+/** The single deferred base-drift question surface, with durable Run identity. */
+export const openDeferredBaseDriftQuestion = async (
+  tx: Tx,
+  integratorTaskId: string,
+  stopId: string,
+  card: { revalidations: number; ceiling: boolean },
+) => {
+  const task = await loadIntegratorTask(tx, integratorTaskId);
+  const stop = await latestRecordedStop(tx, integratorTaskId);
+  if (!task || stop?.stopId !== stopId || stop.condition !== "base-drift") {
+    throw new Error(`Cannot open the settled base-drift question for unresolved stop ${stopId}`);
+  }
+  const identity = await stopQuestionIdentity(tx, task, stop);
+  return openStopQuestion(tx, {
+    integratorTaskId, stopId, condition: "base-drift", evidence: stop.evidence,
+    ...identity, generation: card.revalidations,
+    ...(card.ceiling ? { choices: BASE_DRIFT_CLASS_CEILING_CHOICES } : {}),
+  });
 };
 
 export type IntegratorStopLandingInput = {
