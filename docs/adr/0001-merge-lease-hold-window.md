@@ -17,10 +17,13 @@ Retired:
   path, the three blocking rounds (`MAX_BLOCKING_REVIEW_ROUNDS`), and the
   review-driven follow-up cards. Defense-list detection survives but is
   audit-only: when a diff touches a defense-list path, merge readiness writes
-  one inbox message on the readiness task naming the triggered paths and
-  reasons, and the merge proceeds unblocked. Nothing in the tail blocks on a
-  review any more. (This is unrelated to the in-chain review template steps
-  `code-review-sol` and `code-review-opus-blind`, which are unchanged.)
+  one control-plane TaskActivity on the readiness Step naming the exact range,
+  triggered paths, and reasons. Its metadata has kind `defenseAudit` and
+  carries `headSha`, `baseSha`, and `triggers`; it is idempotent for
+  `(readinessTaskId, headSha)`, creates no Inbox message, and the merge
+  proceeds unblocked. Nothing in the tail blocks on a review any more. (This
+  is unrelated to the in-chain review template steps `code-review-sol` and
+  `code-review-opus-blind`, which are unchanged.)
 - **The release-authority Ed25519 signing layer.** Gone with it: the authority
   key material, the signing and verification module, the `db:authority-check`
   npm script the regression step ran before the gate, the migration preflight's
