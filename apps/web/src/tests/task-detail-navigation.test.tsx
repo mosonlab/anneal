@@ -457,8 +457,16 @@ test("the task-detail Chain card reflects a completed held layer on the next pol
     assert.doesNotMatch(container.textContent ?? "", /Waiting for the operator to resume/);
 
     latestChain = completedChain;
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2_600)); });
-    await page.settle();
+    // The page polls the chain on its own real timer, so wait for the poll to
+    // happen rather than for a sleep sized just past the interval, which a
+    // descheduled timer callback outlasts on a loaded host (CONTRIBUTING.md,
+    // "Test timing on the gate worker"). Bounded at 600 polls so a page that
+    // stops polling still fails at the assertion below instead of hanging the
+    // suite.
+    for (let poll = 0; poll < 600 && chainPolls < 2; poll += 1) {
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+      await page.settle();
+    }
     assert.ok(chainPolls >= 2, `expected a poll after the initial response, got ${chainPolls}`);
     assert.match(container.textContent ?? "", /Waiting for the operator to resume/);
 
