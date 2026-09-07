@@ -36,6 +36,9 @@ test("the pull-request template has current identity and prompt history", () => 
     }, {
       marker: "pre-salvage-resume",
       promptDigest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8",
+    }, {
+      marker: "pre-model-neutral-review-output",
+      promptDigest: undefined,
     }],
   );
 });
@@ -66,7 +69,7 @@ test("a matching no-history pull-request row is current, never a rollover", () =
       agentName: "code-reviewer-sol-high",
       approvalGate: false,
       optional: false,
-      outputKind: "sol-findings",
+      outputKind: "review-findings",
       attachmentsFromPrevious: true,
       priorOutputKinds: ["implementation"],
       opensPullRequest: false,
