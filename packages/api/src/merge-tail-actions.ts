@@ -30,7 +30,13 @@ import {
 import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js";
 import { canonicalOutputRefusal } from "./canonical-task-output.js";
 import type { LeaseOutcome } from "./merge-lease.js";
-import { awaitAuthorization, blockDownstream, exhaust } from "./merge-tail-state.js";
+import type { RetryClass } from "./base-drift-recovery-decision.js";
+import {
+  awaitAuthorization,
+  blockDownstream,
+  exhaust,
+  recoveryClassSettleState,
+} from "./merge-tail-state.js";
 
 /**
  * The autonomous merge tail's own actions: the base-drift recovery aggregate,
@@ -526,6 +532,10 @@ export type StopMergeTailInput =
     reason: string;
     at: Date;
     attempt: number;
+    /** Set when a retry class crossed its own ceiling rather than the
+     *  candidate being ineligible; it names the settle and its refusal. */
+    retryClass?: RetryClass;
+    revalidations?: number;
     recoveryData: RecoveryStopData;
     markerMetadata: Record<string, unknown>;
   }
@@ -656,7 +666,9 @@ export async function stopMergeTail(
     return;
   }
 
-  const state = input.phase === "recovery-validation" ? "ineligible" : "exhausted";
+  const state = input.retryClass
+    ? recoveryClassSettleState(input.retryClass)
+    : input.phase === "recovery-validation" ? "ineligible" : "exhausted";
   await exhaust(tx, {
     aggregateId: input.aggregateId,
     integratorTaskId: input.integratorTaskId,
@@ -665,6 +677,7 @@ export async function stopMergeTail(
     at: input.at,
     attempt: input.attempt,
     state,
+    ...(input.revalidations ? { revalidations: input.revalidations } : {}),
     recoveryData: input.recoveryData,
     markerMetadata: input.markerMetadata,
   });
@@ -747,18 +760,38 @@ export const settleMergeTailCompletion = async (
     const parsedResolver = parseResolverResult(repairOutput?.body);
     const expectedStart = repairMarker.headSha;
     const expectedTarget = repairMarker.baseHeadSha;
-    const bindingError = parsedResolver.status === "invalid"
-      ? parsedResolver.reason
-      : parsedResolver.result.startHeadSha !== expectedStart || parsedResolver.result.targetHeadSha !== expectedTarget
-        ? "merge-resolver-opus-medium output is bound to stale start or target heads"
-        : parsedResolver.result.outcome === "resolved" && parsedResolver.result.resolvedHeadSha !== input.body.headSha
-          ? "merge-resolver-opus-medium output resolved head does not match the delivered run head"
-          : null;
+    const bindingError: { reason: string; key: string } | null = parsedResolver.status === "invalid"
+      ? { reason: parsedResolver.reason, key: parsedResolver.key }
+      : parsedResolver.result.startHeadSha !== expectedStart
+        ? { reason: "merge-resolver-opus-medium output is bound to a stale start head", key: "startHeadSha" }
+        : parsedResolver.result.targetHeadSha !== expectedTarget
+          ? { reason: "merge-resolver-opus-medium output is bound to a stale target head", key: "targetHeadSha" }
+          : parsedResolver.result.outcome === "resolved" && parsedResolver.result.resolvedHeadSha !== input.body.headSha
+            ? { reason: "merge-resolver-opus-medium output resolved head does not match the delivered run head", key: "resolvedHeadSha" }
+            : null;
     if (bindingError) {
       repairUnable = true;
-      const reason = `refresh-conflict repair ${input.task.id} returned invalid output: ${bindingError}`;
+      const reason = `refresh-conflict repair ${input.task.id} returned invalid output: ${bindingError.reason}`;
       await tx.task.update({ where: { id: input.task.id }, data: { status: TaskStatus.DONE, failureReason: reason } });
       await tx.task.update({ where: { id: repairMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+      // The rejection is recorded on the repair task too: the resolver's own
+      // card is where an operator looks, and the key names the field that
+      // failed so nobody has to read the parser to find out.
+      await writeMarker(tx, input.task.id, "repairResult", {
+        actorType: "control-plane",
+        body: `Resolver output rejected on ${bindingError.key}: ${bindingError.reason}`,
+        metadata: {
+          repairKind: "refresh-conflict",
+          repairTaskId: input.task.id,
+          regressionTaskId: repairMarker.regressionTaskId,
+          startHeadSha: expectedStart,
+          targetHeadSha: expectedTarget,
+          resolvedHeadSha: input.body.headSha ?? null,
+          state: "invalid-output",
+          reason: bindingError.reason,
+          rejectedKey: bindingError.key,
+        },
+      });
       await writeMarker(tx, repairMarker.regressionTaskId, "repairResult", {
         actorType: "control-plane",
         body: `Automatic refresh-conflict attempt stopped: ${reason}`,
@@ -769,7 +802,8 @@ export const settleMergeTailCompletion = async (
           targetHeadSha: expectedTarget,
           resolvedHeadSha: input.body.headSha ?? null,
           state: "invalid-output",
-          reason: bindingError,
+          reason: bindingError.reason,
+          rejectedKey: bindingError.key,
         },
       });
       await openMergeTailStopNotice(tx, {

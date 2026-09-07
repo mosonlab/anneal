@@ -9,6 +9,43 @@ written.
 
 ## Unreleased
 
+- Session events are now bounded end to end. A runner holds at most 32 MiB and
+  20 000 undelivered events per Run. When it fills, the oldest liveness events —
+  streaming deltas, raw provider frames, captured stderr, provider status and
+  tool output — are dropped and an `EVENTS_DROPPED` event records how many and
+  which sequence range were lost. Lifecycle, error and terminal events are never
+  dropped; if the queue is still full once nothing droppable is left, such an
+  event keeps its place, type and sequence number but loses its payload to a
+  `truncated` marker; once every event not in flight is such a marker, the two
+  oldest adjacent markers merge into one `EVENTS_COALESCED` event carrying their
+  summed counts and the sequence range they span, so the queue holds its bounds
+  under any traffic mix while every event it saw is still accounted for.
+  A single event payload above 256 KiB is truncated to a `truncated` marker
+  carrying its original size.
+  `POST /runner/runs/:runId/events` enforces the same per-event cap and a
+  request-body cap, answering 413 with the offending event's index so the runner
+  drops that one event and resends the rest. Heartbeats now carry
+  `eventQueueBytes`.
+- The merge executor verifies its own landed merge from the commit when
+  GitHub's pull-request projection cannot. A merge commit whose parents are
+  exactly the authorized base and head and which is reachable from the
+  authorized base ref now completes the run instead of parking the chain tail on
+  a `base-drift-post-merge` question an operator answered by checking the same
+  two parent shas. Any missing fact, and any failed or timed-out read, still
+  stops `base-drift-post-merge`; the Inbox evidence gains a `directParentCheck`
+  field naming what was read.
+- `PATCH /tasks/:taskId` accepts `dispatchAfterTaskId` on the first step of a
+  Chain that has no Run, re-pointing or (with `null`) releasing its Chain
+  binding instead of forcing the Chain to be deleted and instantiated again. A
+  started Chain, a later step, or a standalone task is refused with
+  `chain_binding_immutable_after_start`; an archived, foreign, standalone, or
+  same-chain predecessor with `chain_binding_target_invalid`.
+- An exception thrown while merge readiness evaluates a Chain now requeues the
+  readiness step instead of stopping the merge tail. The retry is bounded by
+  `MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT` (default 3); past the bound the tail
+  stops with `readiness evaluation failed after <n> exception requeues:
+  <message>`. A deliberate refusal, and a missing or mismatched merge-gate
+  operator authorization, still stop the tail on the first occurrence.
 - Retired the `POST /files/mkdir` and `POST /files/move` routes and their
   underlying store operations.
 - Removed `POST /inbox/messages/:messageId/supersede`;

@@ -164,9 +164,18 @@ export const runClaim = async (
       },
     });
     const deps: Deps = {
+      train: {
+        ...github,
+        publishTrain: async (reference, baseRef, publishHead) => {
+          await checkCancellation();
+          return github.publishTrain(reference, baseRef, publishHead);
+        },
+      },
+      logTrainCleanupFailure: (reason) => runLog.warn("Train ref cleanup failed", { reason }),
       readChain: () => agentos.readChain(claimed, chainIndex - 1),
       readOwnIntents: () => agentos.readOwnIntents(claimed, chainIndex),
       readPullRequest: (reference) => github.readPullRequest(reference),
+      readLandedCommit: (reference, mergeCommitSha) => github.readLandedCommit(reference, mergeCommitSha),
       merge: async (reference, expectedHeadSha, expectedBase) => {
         // The current API refuses new mechanical cancellation, so this is an
         // upgrade fence for persisted legacy intent. Keep it immediately in
