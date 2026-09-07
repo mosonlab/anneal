@@ -34,14 +34,19 @@ const createProfileInput = z.object({
   name: profileName,
   entries: entriesInput,
   isDefault: z.boolean().optional(),
+  mergeTailRepairAgentId: id.nullable().optional(),
+  repoId: id.optional(),
 }).strict();
 const replaceProfileInput = z.object({
   name: profileName,
   entries: entriesInput,
+  mergeTailRepairAgentId: id.nullable().optional(),
+  repoId: id.optional(),
 }).strict();
 // Only promotion is expressible: clearing the default would leave a template
 // with profiles and no default, which instantiation has no answer for.
 const defaultProfileInput = z.object({ isDefault: z.literal(true) }).strict();
+const resetProfileInput = z.object({ repoId: id.optional() }).strict();
 
 /**
  * Answer a staffing-profile refusal with the status family its code declares.
@@ -101,6 +106,15 @@ export const registerStaffingProfileRoutes = (app: RouteApp, { db }: RouteDeps):
   ));
   app.post("/staffing-profiles/:profileId/reset", async (context) => answering(
     context,
-    async () => context.json(await resetStaffingProfile(db, id.parse(context.req.param("profileId")))),
+    async () => {
+      const body = context.req.raw.body === null
+        ? {}
+        : await readJson(context.req.raw, resetProfileInput);
+      return context.json(await resetStaffingProfile(
+        db,
+        id.parse(context.req.param("profileId")),
+        body.repoId,
+      ));
+    },
   ));
 };

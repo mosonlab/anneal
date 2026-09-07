@@ -114,6 +114,9 @@ export type StaffingProfile<DateTime = string> = {
   taskTemplateId: string;
   name: string;
   isDefault: boolean;
+  /** Agent used for review-fix and gate-fix merge-tail repair cards. `null`
+   * means those repairs fall back to the chain's fixed-implementation Agent. */
+  mergeTailRepairAgentId: string | null;
   createdAt: DateTime;
   updatedAt: DateTime;
   entries: StaffingProfileEntry[];
@@ -137,6 +140,9 @@ export type StaffingProfileCreateInput = {
   name: string;
   entries: StaffingProfileEntryInput[];
   isDefault?: boolean;
+  mergeTailRepairAgentId?: string | null;
+  /** Optional repository context used to validate a non-null repair slot. */
+  repoId?: string;
 };
 
 /** `PUT /staffing-profiles/:profileId`: a whole-profile replacement. Default
@@ -144,12 +150,23 @@ export type StaffingProfileCreateInput = {
 export type StaffingProfileReplaceInput = {
   name: string;
   entries: StaffingProfileEntryInput[];
+  /** Omission preserves the current slot; `null` explicitly clears it. */
+  mergeTailRepairAgentId?: string | null;
+  /** Optional repository context used to validate a non-null repair slot. */
+  repoId?: string;
 };
 
 /** `PATCH /staffing-profiles/:profileId`. Only promotion is expressible:
  *  clearing the default would leave a template with none. */
 export type StaffingProfileDefaultInput = {
   isDefault: true;
+};
+
+/** `POST /staffing-profiles/:profileId/reset`. Empty bodies keep the
+ * historical reset behavior; `repoId` disambiguates grant validation in a
+ * project with more than one Repo. */
+export type StaffingProfileResetInput = {
+  repoId?: string;
 };
 
 /** Warnings describe the plan being saved and never block the write. Entries
