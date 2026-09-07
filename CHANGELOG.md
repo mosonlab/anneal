@@ -35,7 +35,9 @@ written.
   no recorded profile uses the template default profile; an archived slot
   Agent falls back with a recorded TaskActivity. The active direct, PR, and
   compound canonical profiles default this slot to `senior-dev-luna-max`,
-  while `refresh-conflict` retains `MERGE_RESOLVER_ROLE`.
+  while `refresh-conflict` retains `MERGE_RESOLVER_ROLE`. Profile create, PUT,
+  and reset operations accept optional `repoId` context for validating the
+  slot's Repo grant; PUT omission preserves the slot and `null` clears it.
 - A gate dispatch queued behind other gates no longer gives up while the queue
   is moving. `GATE_DISPATCH_TIMEOUT_MINUTES` now bounds a queue that makes no
   progress: each poll reads which process holds each busy slot, and a slot that
