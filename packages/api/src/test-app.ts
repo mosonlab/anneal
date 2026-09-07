@@ -8,6 +8,7 @@ import { defaultControlPlaneStateDir } from "./control-plane-state.js";
 import type { MergeLeaseHolderReader, ReleaseMergeLease } from "./merge-lease.js";
 import type { preflightOnboardingRepository, RepositoryPreflight } from "./onboarding-preflight.js";
 import type { ProjectBootstrapLoaders } from "./project-bootstrap.js";
+import type { RunnerRegistry } from "./runners.js";
 import type { SpecificationReader } from "./specification-fidelity.js";
 import { defaultWorkspaceRoot } from "./workspace-root.js";
 
@@ -82,6 +83,7 @@ export const createApp = (db: PrismaClient, options: {
   projectBootstrapLoaders?: Partial<ProjectBootstrapLoaders>;
   releaseMergeLease?: ReleaseMergeLease;
   readMergeLeaseHolder?: MergeLeaseHolderReader;
+  runnerRegistry?: RunnerRegistry;
   specificationReader?: SpecificationReader | null;
 } = {}) => {
   const configured = options.workspaceRoot ?? process.env.RUNNER_WORKSPACE_ROOT;
@@ -103,6 +105,7 @@ export const createApp = (db: PrismaClient, options: {
     // A test never shells out to origin unless it says so: the default is the
     // answer a lease-free origin gives.
     readMergeLeaseHolder: options.readMergeLeaseHolder ?? (async () => ({ outcome: "none" })),
+    ...(options.runnerRegistry === undefined ? {} : { runnerRegistry: options.runnerRegistry }),
     specificationReader: options.specificationReader ?? null,
   });
 };

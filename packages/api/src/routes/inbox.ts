@@ -172,7 +172,12 @@ const inboxProjectPredicate = (projectId: string): Prisma.InboxMessageWhereInput
 
 type InboxCard = InboxMessageContract<Date>;
 
-export const registerInboxRoutes = (app: RouteApp, { db }: RouteDeps): void => {
+export const registerInboxRoutes = (app: RouteApp, { db, runners }: RouteDeps): void => {
+  // The production app passes the same registry that receives runner
+  // heartbeats and that readiness observes. Snapshot synchronously at the
+  // approval boundary so the DB transaction never performs network I/O.
+  const mergeExecutorLiveness = () => runners.snapshot(new Date());
+
   app.get("/inbox/messages/summary", async (context) => {
     const projectId = context.req.query("projectId");
     const messages = await db.inboxMessage.findMany({
@@ -255,6 +260,7 @@ export const registerInboxRoutes = (app: RouteApp, { db }: RouteDeps): void => {
         externalEventId: `web:${body.requestId}`,
         decision: body.decision,
         actorOpenId: "web-operator",
+        mergeExecutorLiveness,
         ...(body.note === undefined ? {} : { note: body.note }),
       });
       return context.json(result, result.duplicate ? 200 : 201);
@@ -274,6 +280,7 @@ export const registerInboxRoutes = (app: RouteApp, { db }: RouteDeps): void => {
         decision: body.body,
         actorOpenId: "web-operator",
         allowFreeText: true,
+        mergeExecutorLiveness,
       });
       return context.json(result, result.duplicate ? 200 : 201);
     } catch (error: unknown) {
