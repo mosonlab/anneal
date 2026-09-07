@@ -43,6 +43,7 @@ const BASE = "b".repeat(40);
 const BRANCH = "agentos/repair-test";
 const RESOLVED = "c".repeat(40);
 const REPAIRED = "d".repeat(40);
+const REPAIRED_AGAIN = "e".repeat(40);
 const exec = promisify(execFile);
 
 let seedCounter = 0;
@@ -698,7 +699,7 @@ test("a renamed canonical resolver still receives the refresh-conflict repair", 
   }), 0);
 });
 
-test("a gate FAIL is repaired twice and the third FAIL escalates with both heads in activity", async () => {
+test("a gate FAIL is repaired three times and the fourth FAIL escalates with both heads in activity", async () => {
   const seeded = await exercise("gate-fail");
   const first = await repairFor(seeded, "gate-fix");
   assert.equal((await db.agent.findUniqueOrThrow({ where: { id: first.assigneeAgentId! } })).name, "senior-dev-astra-medium");
@@ -716,9 +717,18 @@ test("a gate FAIL is repaired twice and the third FAIL escalates with both heads
   await completeRepair(seeded, second.id, "Fixed the remaining failure and reran the affected suite.", REPAIRED);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 3);
   assert.equal(await failRegressionAgain(seeded, "gate-fail", 3, REPAIRED), "handled");
-  assert.equal(await repairCount(seeded), 2);
+  assert.equal(await repairCount(seeded), 3);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
+  const third = await db.task.findFirstOrThrow({
+    where: { projectId: seeded.project.id, name: "Autonomous merge tail: gate-fix" },
+    orderBy: { createdAt: "desc" },
+  });
+  await completeRepair(seeded, third.id, "Fixed the last failure and reran the affected suite.", REPAIRED_AGAIN);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 4);
+  assert.equal(await failRegressionAgain(seeded, "gate-fail", 4, REPAIRED_AGAIN), "handled");
+  assert.equal(await repairCount(seeded), 3);
   const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
-  assert.match(notice.body, /after 2 automatic repair attempts/u);
+  assert.match(notice.body, /after 3 automatic repair attempts/u);
   const trail = await db.taskActivity.findMany({ where: { taskId: seeded.regression.id }, select: { body: true } });
   assert.match(trail.map(({ body }) => body).join("\n"), new RegExp(`${HEAD}.*${BASE}`, "s"));
 });
@@ -774,7 +784,7 @@ test("a gate-fix prompt renders its failure excerpt while other repair prompts r
   ].join("\n\n"));
 });
 
-test("a semantic FAIL skips the gate path and is repaired twice before it escalates", async () => {
+test("a semantic FAIL skips the gate path and is repaired three times before it escalates", async () => {
   const seeded = await exercise("review-fail");
   const first = await repairFor(seeded, "review-fix");
   assert.equal((await db.agent.findUniqueOrThrow({ where: { id: first.assigneeAgentId! } })).name, "senior-dev-astra-medium");
@@ -793,9 +803,18 @@ test("a semantic FAIL skips the gate path and is repaired twice before it escala
   await completeRepair(seeded, second.id, "Closed the remaining finding and reran its focused regression.", REPAIRED);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 3);
   assert.equal(await failRegressionAgain(seeded, "review-fail", 3, REPAIRED), "handled");
-  assert.equal(await repairCount(seeded), 2);
+  assert.equal(await repairCount(seeded), 3);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
+  const third = await db.task.findFirstOrThrow({
+    where: { projectId: seeded.project.id, name: "Autonomous merge tail: review-fix" },
+    orderBy: { createdAt: "desc" },
+  });
+  await completeRepair(seeded, third.id, "Closed the last finding and reran its focused regression.", REPAIRED_AGAIN);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 4);
+  assert.equal(await failRegressionAgain(seeded, "review-fail", 4, REPAIRED_AGAIN), "handled");
+  assert.equal(await repairCount(seeded), 3);
   const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
-  assert.match(notice.body, /after 2 automatic repair attempts/u);
+  assert.match(notice.body, /after 3 automatic repair attempts/u);
 });
 
 test("all five merge-tail repairs grant the sixth Regression run without changing the configured budget", async () => {
@@ -815,8 +834,8 @@ test("all five merge-tail repairs grant the sixth Regression run without changin
     await completeRepair(seeded, repair.id, output, headSha);
   };
 
-  // The repair cap is one refresh conflict plus two attempts for each review
-  // and gate failure. Every successful repair queues a fresh Regression Run;
+  // The repair cap is one refresh conflict plus three attempts for each review
+  // and gate failure; five repairs stay inside it. Every successful repair queues a fresh Regression Run;
   // only those platform requeues should accumulate grants.
   await completeLatest("review-fix", repairOutput, heads[1]!);
   assert.equal(await failRegressionAgain(seeded, "gate-fail", 2, heads[1]!), "handled");
