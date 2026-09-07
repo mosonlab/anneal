@@ -139,10 +139,16 @@ const prHandoffFor = async (
     select: {
       id: true,
       chainIndex: true,
+      templateStep: { select: { outputKind: true } },
       stepOutput: { select: { kind: true, body: true, commitSha: true } },
     },
   });
 
+  for (const row of rows) {
+    if (row.stepOutput && row.stepOutput.kind !== row.templateStep?.outputKind) {
+      return { case: "incomplete", reason: `canonical PR output kind does not match the producing Step for Task ${row.id}` };
+    }
+  }
   return decidePrHandoff(
     { taskId: task.id, chainIndex: task.chainIndex!, stage },
     rows.map((row) => ({

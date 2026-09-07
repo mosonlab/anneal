@@ -135,11 +135,13 @@ test("GET /session/runs/:runId/status projects the decided output evidence", asy
   });
 });
 
-for (const [templateName, reviewKind] of [
-  ["pr-engineer-workflow", "review-findings"],
-  ["pr-engineer-workflow-legacy-pre-model-neutral-review-output-row", "sol-findings"],
+for (const [templateName, reviewKind, persistedKind] of [
+  ["pr-engineer-workflow", "review-findings", "review-findings"],
+  ["pr-engineer-workflow-legacy-pre-model-neutral-review-output-row", "sol-findings", "sol-findings"],
+  ["pr-engineer-workflow", "review-findings", "sol-findings"],
+  ["pr-engineer-workflow-legacy-pre-model-neutral-review-output-row", "sol-findings", "review-findings"],
 ] as const) {
-  test(`PR workflow ${templateName} preserves ${reviewKind} handoff through the current step`, async () => {
+  test(`PR workflow ${templateName} checks ${persistedKind} against ${reviewKind} handoff through the current step`, async () => {
     await withTokens(async () => {
       const outputs = [
         {
@@ -152,7 +154,7 @@ for (const [templateName, reviewKind] of [
           id: "task-sol",
           chainIndex: 2,
           templateStep: { outputKind: reviewKind },
-          stepOutput: { kind: reviewKind, body: "sol body", commitSha: "2".repeat(40) },
+          stepOutput: { kind: persistedKind, body: "sol body", commitSha: "2".repeat(40) },
         },
         {
           id: "task-blind",
@@ -213,6 +215,12 @@ for (const [templateName, reviewKind] of [
       const body = await response.json() as {
         task: { outputEvidence: { prHandoff: unknown } };
       };
+      if (persistedKind !== reviewKind) {
+        assert.deepEqual(body.task.outputEvidence.prHandoff, {
+          case: "incomplete", reason: "canonical PR output kind does not match the producing Step for Task task-sol",
+        });
+        return;
+      }
       assert.deepEqual(body.task.outputEvidence.prHandoff, {
         case: "complete",
         outputs: outputs.map(({ id, chainIndex, stepOutput }) => ({
