@@ -13,6 +13,7 @@ import {
   isGatedMergeReadinessTask,
   isMergeReadinessStep,
   latestRecordedStop,
+  MergeGateAuthorizationError,
   MERGE_TAIL_KIND,
   parseRegressionVerdict,
   readMarkerHistory,
@@ -1000,16 +1001,20 @@ export const readinessTick = async (
       if (error instanceof LeaseReleaseDeferralRecordError) throw error;
       const refusalCode = error instanceof MergeRecoveryRefusalError ? error.refusalCode : null;
       const message = error instanceof Error ? error.message : String(error);
-      // A refusal is a decision and stops the tail on its first occurrence. An
-      // unexpected exception is not: the stop it would write carries no
-      // review-fail or gate-fail verdict, so `merge-tail/repair` refuses to
-      // re-enter it and only a manual delivery finishes the branch. A killed
-      // child or a restarted deploy therefore costs one requeue of the
-      // readiness Step, bounded so a permanent fault still reaches an operator.
-      const spent = refusalCode === null
-        ? await spentExceptionRequeues(db, read.regression.id, read.recovery)
-        : 0;
-      const requeuing = refusalCode === null && spent < exceptionRequeueLimit;
+      // A refusal is a decision and stops the tail on its first occurrence. So
+      // is a missing or mismatched operator authorization: the gate is
+      // fail-closed, and retrying it would re-ask the same settled question
+      // three more times. An unexpected exception is neither: the stop it would
+      // write carries no review-fail or gate-fail verdict, so
+      // `merge-tail/repair` refuses to re-enter it and only a manual delivery
+      // finishes the branch. A killed child or a restarted deploy therefore
+      // costs one requeue of the readiness Step, bounded so a permanent fault
+      // still reaches an operator.
+      const decided = refusalCode !== null || error instanceof MergeGateAuthorizationError;
+      const spent = decided
+        ? 0
+        : await spentExceptionRequeues(db, read.regression.id, read.recovery);
+      const requeuing = !decided && spent < exceptionRequeueLimit;
       // Stopping the tail is not another refusal by the holder either, and the
       // settlement below releases the claim this write is fenced by.
       await forgetContention(

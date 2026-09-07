@@ -1912,13 +1912,15 @@ attempt becomes `BLOCKED_DOWNSTREAM`, the integrator task is parked as well, and
 the notice reads `Automatic base-drift recovery <n> stopped at readiness:
 <reason>`.
 
-Two readiness failures are not exception requeues and stop the tail on their
+Three readiness failures are not exception requeues and stop the tail on their
 first occurrence. A deliberate refusal — a recovery head-adoption refusal —
 carries a refusal code and stops with `readiness evaluation failed: <message>`.
-A GitHub read that fails for any reason other than a timeout or a transport
-error (those are deferred to the next tick) is a `readiness-read-failed`
-decision, and stops with that same `readiness evaluation failed: <message>`
-reason and no refusal code.
+A missing, mismatched, or ambiguous operator authorization on a gated readiness
+step is a fail-closed gate decision, not a transient fault, and stops with that
+same reason. A GitHub read that fails for any reason other than a timeout or a
+transport error (those are deferred to the next tick) is a
+`readiness-read-failed` decision, and stops with that same `readiness evaluation
+failed: <message>` reason and no refusal code.
 
 ### Recovering a merge tail stopped after its repair budget
 
