@@ -2026,19 +2026,19 @@ An automatic `refresh-conflict` repair normally supplies a `resolvedHeadSha`
 from the resolver's versioned output. If that output is malformed or a
 resolved output is missing `resolvedHeadSha`, settlement reads the current
 Chain branch head from the repository once before deciding whether to refuse
-the repair. The
-merge tail adopts that head only when Git verifies that it is a descendant of
+the repair. The merge tail adopts that head only when repository ancestry
+checks verify that it is a descendant of
 both the repair marker's `headSha` (the starting head) and `baseHeadSha` (the
 target base). It then continues recovery with that verified head, preserving
 a resolved merge commit that the resolver pushed even when its result payload
 was malformed.
 
-The fallback is recorded as a `TaskActivity` on the Regression task. The
+The fallback is recorded as a `TaskActivity` on the repair task. The
 activity names the fallback, the rejected result key (for example `body` or
 `resolvedHeadSha`), and the adopted head. Inspect it with
-`GET /tasks/:taskId/activity`. The `repairResult` history continues to carry
-the invalid-output reason and `rejectedKey` on the repair and Regression
-tasks.
+`GET /tasks/:taskId/activity`. When the fallback cannot adopt a head, the
+`repairResult` history continues to carry the invalid-output reason and
+`rejectedKey` on the repair and Regression tasks.
 
 If the repository read fails, the read error is recorded and the repair fails
 as the existing invalid-output path does. A branch head that is not descended

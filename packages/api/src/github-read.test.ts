@@ -195,3 +195,20 @@ test("readFileAtCommit names a missing file and surfaces other HTTP errors", asy
       && /returned 422/u.test(error.message),
   );
 });
+
+test("branch head reads encode the Chain branch and reject non-commit or malformed refs", async () => {
+  for (const object of [
+    { type: "commit", sha: "a".repeat(40) },
+    { type: "tag", sha: "a".repeat(40) },
+    { type: "commit", sha: "bad" },
+    null,
+  ]) {
+    const reader = createGitHubReader("test-token", async (url) => {
+      assert.equal(url, "https://api.github.com/repos/acme/widgets/git/ref/heads/fix%2Frepair");
+      return Response.json({ object });
+    });
+    const read = reader.readBranchHead("acme/widgets", "fix/repair", new AbortController().signal);
+    if (object?.type === "commit" && object.sha.length === 40) assert.equal(await read, object.sha);
+    else await assert.rejects(read, /branch response has no exact commit head/u);
+  }
+});

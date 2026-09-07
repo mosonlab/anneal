@@ -2068,3 +2068,54 @@ test("a persisted gate-fail keeps ordinary external git failure settlement", asy
   } }), 0);
   assert.equal(await db.task.count({ where: { templateStepId: seeded.readinessStep.id } }), 0);
 });
+
+for (const scenario of ["adopt", "no-push", "wrong-base"] as const) {
+  test(`refresh-conflict malformed result uses repository ancestry: ${scenario}`, async (t) => {
+    const seeded = await exercise("refresh-conflict");
+    const repair = await repairFor(seeded, "refresh-conflict");
+    const head = scenario === "no-push" ? HEAD : RESOLVED;
+    const priorToken = process.env.GITHUB_READ_TOKEN;
+    process.env.GITHUB_READ_TOKEN = "test-token";
+    t.after(() => {
+      if (priorToken === undefined) delete process.env.GITHUB_READ_TOKEN;
+      else process.env.GITHUB_READ_TOKEN = priorToken;
+    });
+    const reads: string[] = [];
+    t.mock.method(globalThis, "fetch", async (url: string) => {
+      reads.push(url);
+      if (url.endsWith(`/git/ref/heads/${encodeURIComponent(BRANCH)}`)) {
+        return Response.json({ object: { type: "commit", sha: head } });
+      }
+      assert.ok(url.endsWith(`/compare/${HEAD}...${head}`) || url.endsWith(`/compare/${BASE}...${head}`), url);
+      const missingBase = scenario !== "adopt" && url.endsWith(`/compare/${BASE}...${head}`);
+      return Response.json({ status: missingBase ? "diverged" : head === HEAD ? "identical" : "ahead", behind_by: missingBase ? 1 : 0, files: [] });
+    });
+    // Deliberately omit the delivered head too: the repository is the evidence.
+    await completeRepair(seeded, repair.id, "resolved it", null);
+    assert.equal(reads.length, 3);
+    const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+    const result = latestMarker(await readMarkerHistory(db, seeded.regression.id), "repairResult");
+    const activity = await db.taskActivity.findFirstOrThrow({ where: {
+      taskId: repair.id,
+      metadata: { path: ["kind"], equals: "mergeTail.resolverRepositoryFallback" },
+    } });
+    assert.match(activity.body, /fallback/u);
+    assert.equal(asJsonObject(activity.metadata)?.rejectedKey, "body");
+    if (scenario === "adopt") {
+      assert.equal(result?.resolvedHeadSha, head);
+      assert.equal(result?.state, null);
+      assert.match(activity.body, /adopted/u);
+      assert.notEqual(regression.status, TaskStatus.REVIEW);
+      assert.equal(await db.inboxMessage.count({ where: { taskId: regression.id } }), 0);
+      const claimed = await claimNext();
+      assert.equal(claimed.status, 200);
+      const body = claimed.body as { regressionRepairHandoff: { repair: { resolvedHeadSha: string } } };
+      assert.equal(body.regressionRepairHandoff.repair.resolvedHeadSha, head);
+    } else {
+      assert.equal(regression.status, TaskStatus.REVIEW);
+      assert.match(regression.failureReason ?? "", /invalid output/u);
+      assert.equal(result?.state, "invalid-output");
+      assert.equal(await db.inboxMessage.count({ where: { taskId: regression.id } }), 1);
+    }
+  });
+}

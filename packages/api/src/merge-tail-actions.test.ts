@@ -363,8 +363,11 @@ const completionTx = (outputBody = "repair completed") => {
   const tx = {
     taskStepOutput: {
       findUnique: async () => ({ body: outputBody }),
+      upsert: async () => ({}),
     },
+    run: { update: async () => ({}) },
     task: {
+      findUnique: async () => null,
       update: async (args: Record<string, any>) => {
         taskUpdates.push(args);
         return {};
@@ -393,6 +396,7 @@ const completionInput = (
 ) => ({
   task: { id: "repair-1", documentationTaskId: documentationTaskId ?? null },
   run: {
+    id: "run-1",
     agentId: "agent-1",
     sessionId: "session-1",
     completedAt: new Date("2026-08-27T12:00:00.000Z"),
@@ -865,3 +869,70 @@ test("a fixed-implementation task with no agent stops with an accurate notice", 
   assert.equal(observed.notices[0]?.create.body, `Autonomous merge tail stopped: ${reason}`);
   assert.equal(observed.notices[0]?.create.taskId, "regression-1");
 });
+
+for (const scenario of ["adopt", "missing-head", "no-push", "wrong-base", "wrong-start", "read-error"] as const) {
+  test(`malformed refresh-conflict output repository fallback: ${scenario}`, async (t) => {
+    const observed = completionTx(scenario === "missing-head" ? JSON.stringify({
+      schemaVersion: 1, outcome: "resolved", startHeadSha: "a".repeat(40), targetHeadSha: "b".repeat(40),
+      tradeOffs: [], changedTestExpectations: [],
+    }) : "resolved it");
+    const adopts = scenario === "adopt" || scenario === "missing-head";
+    const runUpdates: unknown[] = [];
+    const outputUpdates: unknown[] = [];
+    t.mock.method(observed.tx.task, "findUnique", async () => ({
+      targetBranch: "feature", repo: { remoteUrl: "https://github.com/acme/widgets.git" },
+    }));
+    t.mock.method(observed.tx.run, "update", async (args: unknown) => { runUpdates.push(args); });
+    t.mock.method(observed.tx.taskStepOutput, "upsert", async (args: unknown) => { outputUpdates.push(args); });
+    const priorToken = process.env.GITHUB_READ_TOKEN;
+    process.env.GITHUB_READ_TOKEN = "test-token";
+    t.after(() => {
+      if (priorToken === undefined) delete process.env.GITHUB_READ_TOKEN;
+      else process.env.GITHUB_READ_TOKEN = priorToken;
+    });
+    const head = scenario === "no-push" ? "a".repeat(40) : "d".repeat(40);
+    const urls: string[] = [];
+    t.mock.method(globalThis, "fetch", async (url: string) => {
+      urls.push(url);
+      if (scenario === "read-error") return new Response("refused", { status: 403 });
+      if (url.includes("/git/ref/")) return Response.json({ object: { type: "commit", sha: head } });
+      const wrong = scenario === "wrong-start" && url.includes(`/compare/${"a".repeat(40)}`)
+        || (scenario === "wrong-base" || scenario === "no-push") && url.includes(`/compare/${"b".repeat(40)}`);
+      return Response.json({ status: wrong ? "diverged" : "ahead", behind_by: wrong ? 1 : 0, files: [] });
+    });
+    const result = await settleMergeTailCompletion(observed.tx, completionInput("refresh-conflict", true));
+    assert.deepEqual(result, adopts
+      ? { handled: false, leaseOutcome: "continue" }
+      : { handled: true, leaseOutcome: "stop" });
+    assert.equal(urls.filter((url) => url.includes("/git/ref/")).length, 1);
+    if (adopts) {
+      assert.equal(urls.length, 3);
+      assert.equal(observed.activities.at(-1)?.metadata.resolvedHeadSha, head);
+      assert.ok(observed.activities.some((activity) => /fallback/u.test(activity.body) && activity.metadata.rejectedKey === (scenario === "missing-head" ? "resolvedHeadSha" : "body")));
+      assert.equal(runUpdates.length, 1);
+      assert.equal(outputUpdates.length, 1);
+      assert.equal(observed.notices.length, 0);
+    } else {
+      assert.equal(runUpdates.length, 0);
+      assert.equal(outputUpdates.length, 0);
+      assert.equal(observed.activities.at(-1)?.metadata.state, "invalid-output");
+      assert.equal(observed.notices.length, 1);
+      if (scenario === "read-error") assert.ok(observed.activities.some((activity) => /fallback.*failed/u.test(activity.body)));
+    }
+  });
+}
+
+for (const rejected of ["startHeadSha", "targetHeadSha", "unable"] as const) {
+  test(`malformed resolver fallback preserves ${rejected} refusal without a repository read`, async (t) => {
+    const observed = completionTx(JSON.stringify({
+      schemaVersion: 1, outcome: rejected === "unable" ? "unable" : "resolved",
+      startHeadSha: rejected === "startHeadSha" ? "e".repeat(40) : "a".repeat(40),
+      targetHeadSha: rejected === "targetHeadSha" ? "e".repeat(40) : "b".repeat(40),
+    }));
+    const read = t.mock.method(observed.tx.task, "findUnique", async () => { throw new Error("must not read"); });
+    assert.deepEqual(await settleMergeTailCompletion(observed.tx, completionInput("refresh-conflict", true)), {
+      handled: true, leaseOutcome: "stop",
+    });
+    assert.equal(read.mock.callCount(), 0);
+  });
+}

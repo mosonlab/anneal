@@ -1173,7 +1173,7 @@ export const completeRun = async (
               templateStep: run.task.templateStep,
               documentationTaskId: repairDocumentationTask?.id ?? null,
             },
-            run: { agentId: run.agentId, sessionId: run.session.id, completedAt: now },
+            run: { id: run.id, agentId: run.agentId, sessionId: run.session.id, completedAt: now },
             body: { headSha: body.headSha ?? null },
             markers: tailMarkers,
             succeeded,
