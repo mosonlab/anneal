@@ -204,7 +204,7 @@ test("branch head reads encode the Chain branch and reject non-commit or malform
     null,
   ]) {
     const reader = createGitHubReader("test-token", async (url) => {
-      assert.equal(url, "https://api.github.com/repos/acme/widgets/git/ref/heads/fix%2Frepair");
+      assert.equal(url, "https://api.github.com/repos/acme/widgets/git/ref/heads/fix/repair");
       return Response.json({ object });
     });
     const read = reader.readBranchHead("acme/widgets", "fix/repair", new AbortController().signal);

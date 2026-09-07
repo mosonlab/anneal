@@ -1,3 +1,4 @@
+import type { BranchAncestryReader } from "./github-read.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -878,29 +879,35 @@ for (const scenario of ["adopt", "missing-head", "no-push", "wrong-base", "wrong
     }) : "resolved it");
     const adopts = scenario === "adopt" || scenario === "missing-head";
     const runUpdates: unknown[] = [];
-    const outputUpdates: unknown[] = [];
+    const outputUpdates: Array<{ create: { kind: string } }> = [];
     t.mock.method(observed.tx.task, "findUnique", async () => ({
       targetBranch: "feature", repo: { remoteUrl: "https://github.com/acme/widgets.git" },
     }));
     t.mock.method(observed.tx.run, "update", async (args: unknown) => { runUpdates.push(args); });
-    t.mock.method(observed.tx.taskStepOutput, "upsert", async (args: unknown) => { outputUpdates.push(args); });
-    const priorToken = process.env.GITHUB_READ_TOKEN;
-    process.env.GITHUB_READ_TOKEN = "test-token";
-    t.after(() => {
-      if (priorToken === undefined) delete process.env.GITHUB_READ_TOKEN;
-      else process.env.GITHUB_READ_TOKEN = priorToken;
-    });
+    t.mock.method(observed.tx.taskStepOutput, "upsert", async (args: { create: { kind: string } }) => { outputUpdates.push(args); });
     const head = scenario === "no-push" ? "a".repeat(40) : "d".repeat(40);
     const urls: string[] = [];
-    t.mock.method(globalThis, "fetch", async (url: string) => {
-      urls.push(url);
-      if (scenario === "read-error") return new Response("refused", { status: 403 });
-      if (url.includes("/git/ref/")) return Response.json({ object: { type: "commit", sha: head } });
-      const wrong = scenario === "wrong-start" && url.includes(`/compare/${"a".repeat(40)}`)
-        || (scenario === "wrong-base" || scenario === "no-push") && url.includes(`/compare/${"b".repeat(40)}`);
-      return Response.json({ status: wrong ? "diverged" : "ahead", behind_by: wrong ? 1 : 0, files: [] });
+    const repositoryReader: BranchAncestryReader = {
+      readBranchHead: async (repository, branch) => {
+        assert.equal(repository, "acme/widgets");
+        assert.equal(branch, "feature");
+        urls.push("/git/ref/");
+        if (scenario === "read-error") throw new Error("read refused");
+        return head;
+      },
+      compareCommits: async (_repository, base, comparedHead) => {
+        assert.equal(comparedHead, head);
+        urls.push(`/compare/${base}`);
+        const wrong = scenario === "wrong-start" && base === "a".repeat(40)
+          || (scenario === "wrong-base" || scenario === "no-push") && base === "b".repeat(40);
+        return { status: wrong ? "diverged" : "ahead", behindBy: wrong ? 1 : 0, filesComplete: true, files: [] };
+      },
+    };
+    const result = await settleMergeTailCompletion(observed.tx, {
+      ...completionInput("refresh-conflict", true),
+      task: { id: "repair-1", templateStep: { stepIndex: 1, outputKind: "resolver-result" } },
+      repositoryReader,
     });
-    const result = await settleMergeTailCompletion(observed.tx, completionInput("refresh-conflict", true));
     assert.deepEqual(result, adopts
       ? { handled: false, leaseOutcome: "continue" }
       : { handled: true, leaseOutcome: "stop" });
@@ -911,6 +918,7 @@ for (const scenario of ["adopt", "missing-head", "no-push", "wrong-base", "wrong
       assert.ok(observed.activities.some((activity) => /fallback/u.test(activity.body) && activity.metadata.rejectedKey === (scenario === "missing-head" ? "resolvedHeadSha" : "body")));
       assert.equal(runUpdates.length, 1);
       assert.equal(outputUpdates.length, 1);
+      assert.equal(outputUpdates[0]?.create.kind, "resolver-result");
       assert.equal(observed.notices.length, 0);
     } else {
       assert.equal(runUpdates.length, 0);

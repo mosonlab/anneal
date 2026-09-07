@@ -624,3 +624,15 @@ test("a Task without a Chain runs without either Lease adapter", async () => {
 
   assert.deepEqual(result, { outcome: "ran", value: "unleased" });
 });
+
+test("commitWithLeaseOutcome forwards an explicit transaction timeout", async () => {
+  let observed: unknown;
+  const db = {
+    $transaction: async (fn: (tx: Prisma.TransactionClient) => Promise<unknown>, options: unknown) => {
+      observed = options;
+      return fn({} as Prisma.TransactionClient);
+    },
+  } as unknown as PrismaClient;
+  await commitWithLeaseOutcome(db, async () => null, { timeout: 60_000 });
+  assert.deepEqual(observed, { timeout: 60_000 });
+});

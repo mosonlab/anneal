@@ -1,3 +1,6 @@
+import { setTimeout as delay } from "node:timers/promises";
+import { createGitHubReader, type BranchAncestryReader } from "./github-read.js";
+import { READINESS_READ_BUDGET_MS } from "./readiness-decision.js";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -294,6 +297,7 @@ const completeRepair = async (
   output: string,
   headSha: string | null = RESOLVED,
   runNumber = 1,
+  repositoryReader?: BranchAncestryReader,
 ) => {
   const run = await db.run.findFirstOrThrow({ where: { taskId: repairId, runNumber } });
   const repair = await db.task.findUniqueOrThrow({ where: { id: repairId } });
@@ -317,7 +321,7 @@ const completeRepair = async (
   const prior = process.env.RUNNER_TOKEN;
   process.env.RUNNER_TOKEN = "merge-tail-repair-token";
   try {
-    const response = await createApp(db).request(`/runner/runs/${run.id}/complete`, {
+    const response = await createApp(db, { repositoryReader }).request(`/runner/runs/${run.id}/complete`, {
       method: "POST",
       headers: { Authorization: "Bearer merge-tail-repair-token", "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -2069,30 +2073,31 @@ test("a persisted gate-fail keeps ordinary external git failure settlement", asy
   assert.equal(await db.task.count({ where: { templateStepId: seeded.readinessStep.id } }), 0);
 });
 
-for (const scenario of ["adopt", "no-push", "wrong-base"] as const) {
-  test(`refresh-conflict malformed result uses repository ancestry: ${scenario}`, async (t) => {
+for (const scenario of ["adopt", "no-push", "wrong-base", "slow-adopt", "read-timeout"] as const) {
+  test(`refresh-conflict malformed result uses repository ancestry: ${scenario}`, async () => {
     const seeded = await exercise("refresh-conflict");
     const repair = await repairFor(seeded, "refresh-conflict");
     const head = scenario === "no-push" ? HEAD : RESOLVED;
-    const priorToken = process.env.GITHUB_READ_TOKEN;
-    process.env.GITHUB_READ_TOKEN = "test-token";
-    t.after(() => {
-      if (priorToken === undefined) delete process.env.GITHUB_READ_TOKEN;
-      else process.env.GITHUB_READ_TOKEN = priorToken;
-    });
+    const adopts = scenario === "adopt" || scenario === "slow-adopt";
     const reads: string[] = [];
-    t.mock.method(globalThis, "fetch", async (url: string) => {
+    const repositoryReader = createGitHubReader("test-token", async (input, init) => {
+      const url = String(input);
       reads.push(url);
-      if (url.endsWith(`/git/ref/heads/${encodeURIComponent(BRANCH)}`)) {
+      if (url.endsWith(`/git/ref/heads/${BRANCH}`)) {
+        // Both exceed Prisma's default 5s transaction timeout. The timeout
+        // case honors the real shared repository deadline, not a fake clock.
+        if (scenario === "slow-adopt") await delay(5_500, undefined, { signal: init?.signal ?? undefined });
+        if (scenario === "read-timeout") await delay(READINESS_READ_BUDGET_MS + 5_000, undefined, { signal: init?.signal ?? undefined });
         return Response.json({ object: { type: "commit", sha: head } });
       }
       assert.ok(url.endsWith(`/compare/${HEAD}...${head}`) || url.endsWith(`/compare/${BASE}...${head}`), url);
-      const missingBase = scenario !== "adopt" && url.endsWith(`/compare/${BASE}...${head}`);
+      const missingBase = !adopts && url.endsWith(`/compare/${BASE}...${head}`);
       return Response.json({ status: missingBase ? "diverged" : head === HEAD ? "identical" : "ahead", behind_by: missingBase ? 1 : 0, files: [] });
     });
     // Deliberately omit the delivered head too: the repository is the evidence.
-    await completeRepair(seeded, repair.id, "resolved it", null);
-    assert.equal(reads.length, 3);
+    await completeRepair(seeded, repair.id, "resolved it", null, 1, repositoryReader);
+    assert.equal(reads.length, scenario === "read-timeout" ? 1 : 3);
+    assert.equal((await db.run.findFirstOrThrow({ where: { taskId: repair.id } })).status, "SUCCEEDED");
     const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
     const result = latestMarker(await readMarkerHistory(db, seeded.regression.id), "repairResult");
     const activity = await db.taskActivity.findFirstOrThrow({ where: {
@@ -2101,7 +2106,8 @@ for (const scenario of ["adopt", "no-push", "wrong-base"] as const) {
     } });
     assert.match(activity.body, /fallback/u);
     assert.equal(asJsonObject(activity.metadata)?.rejectedKey, "body");
-    if (scenario === "adopt") {
+    if (scenario === "read-timeout") assert.match(activity.body, /read failed: GitHub read aborted at its deadline/u);
+    if (adopts) {
       assert.equal(result?.resolvedHeadSha, head);
       assert.equal(result?.state, null);
       assert.match(activity.body, /adopted/u);

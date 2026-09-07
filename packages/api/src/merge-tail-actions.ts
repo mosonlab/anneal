@@ -18,6 +18,7 @@ import {
   type Marker,
   openRun,
   parseResolverResult,
+  resolverFallbackEligible,
   parseRegressionVerdict,
   Prisma,
   readMarkerHistory,
@@ -28,7 +29,7 @@ import {
   writeMarker,
 } from "@anneal/db";
 
-import { createGitHubReader } from "./github-read.js";
+import type { BranchAncestryReader } from "./github-read.js";
 import { READINESS_READ_BUDGET_MS } from "./readiness-decision.js";
 import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js";
 import { canonicalOutputRefusal } from "./canonical-task-output.js";
@@ -714,6 +715,7 @@ export const settleMergeTailCompletion = async (
     body: { headSha?: string | null };
     markers: Marker[];
     succeeded: boolean;
+    repositoryReader?: BranchAncestryReader | undefined;
   },
 ): Promise<MergeTailCompletionResult> => {
   const repairMarker = latestMarker(input.markers, "repairAttempt");
@@ -773,14 +775,8 @@ export const settleMergeTailCompletion = async (
             ? { reason: "merge-resolver-opus-medium output resolved head does not match the delivered run head", key: "resolvedHeadSha" }
             : null;
     let adoptedHead = false;
-    // Malformed ancillary fields must not let stale bindings or an explicit
-    // unable outcome bypass their existing refusal.
-    let rawResolver: Record<string, unknown> | null = null;
-    try { rawResolver = asJsonObject(JSON.parse(repairOutput?.body ?? "null")); } catch { /* Non-JSON output is eligible. */ }
     const fallbackEligible = parsedResolver.status === "invalid"
-      && rawResolver?.outcome !== "unable"
-      && (typeof rawResolver?.startHeadSha !== "string" || rawResolver.startHeadSha === expectedStart)
-      && (typeof rawResolver?.targetHeadSha !== "string" || rawResolver.targetHeadSha === expectedTarget);
+      && resolverFallbackEligible(repairOutput?.body, expectedStart, expectedTarget);
     if (bindingError && fallbackEligible) {
       let repositoryHead: string | null = null;
       let fallbackError: string | null = null;
@@ -793,11 +789,12 @@ export const settleMergeTailCompletion = async (
         if (!repository || !repairTask?.targetBranch || !expectedStart || !expectedTarget) {
           throw new Error("repair repository, Chain branch, or expected heads are missing");
         }
-        const reader = createGitHubReader(process.env.GITHUB_READ_TOKEN ?? "");
+        const reader = input.repositoryReader;
+        if (!reader) throw new Error("resolver repository reader is unavailable");
         const signal = AbortSignal.timeout(READINESS_READ_BUDGET_MS);
         const head = await reader.readBranchHead(repository, repairTask.targetBranch, signal);
-        const startComparison = await reader.compareCommits!(repository, expectedStart, head, signal);
-        const baseComparison = await reader.compareCommits!(repository, expectedTarget, head, signal);
+        const startComparison = await reader.compareCommits(repository, expectedStart, head, signal);
+        const baseComparison = await reader.compareCommits(repository, expectedTarget, head, signal);
         const contains = (comparison: typeof startComparison) => comparison.behindBy === 0
           && (comparison.status === "ahead" || comparison.status === "identical");
         if (contains(startComparison) && contains(baseComparison)) repositoryHead = head;
@@ -825,7 +822,7 @@ export const settleMergeTailCompletion = async (
         await tx.run.update({ where: { id: input.run.id }, data: { headSha: repositoryHead } });
         await tx.taskStepOutput.upsert({
           where: { taskId: input.task.id },
-          create: { taskId: input.task.id, runId: input.run.id, kind: "result", body: repairOutput?.body ?? "", commitSha: repositoryHead },
+          create: { taskId: input.task.id, runId: input.run.id, kind: input.task.templateStep?.outputKind ?? "result", body: repairOutput?.body ?? "", commitSha: repositoryHead },
           update: { runId: input.run.id, commitSha: repositoryHead },
         });
       }

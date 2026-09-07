@@ -1,3 +1,5 @@
+import type { BranchAncestryReader } from "./github-read.js";
+import { READINESS_READ_BUDGET_MS } from "./readiness-decision.js";
 import {
   activateChainSuccessor,
   type ClaimantClass,
@@ -478,6 +480,7 @@ export type CompleteRunInput = {
   runId: string;
   body: CompletionInput;
   claimantClass: ClaimantClass;
+  repositoryReader?: BranchAncestryReader | undefined;
 };
 
 type CompletionEvidenceStep = {
@@ -575,7 +578,7 @@ export const completionEvidenceRefusal = (
  */
 export const completeRun = async (
   db: PrismaClient,
-  { runId, body, claimantClass }: CompleteRunInput,
+  { runId, body, claimantClass, repositoryReader }: CompleteRunInput,
   releaseMergeLease?: ReleaseMergeLease,
 ): Promise<RunCompletion | CompleteRunRefusal> => {
   const now = new Date();
@@ -1177,6 +1180,7 @@ export const completeRun = async (
             body: { headSha: body.headSha ?? null },
             markers: tailMarkers,
             succeeded,
+            repositoryReader,
           })
         : { handled: false, leaseOutcome: "continue" as const };
       const regressionVerificationStep = isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind);
@@ -1493,6 +1497,9 @@ export const completeRun = async (
   }, {
     release: releaseMergeLease,
     isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted,
+    // Resolver fallback shares one 20s deadline across all repository reads.
+    // Keep 40s for database work and refusal/activity writes after that deadline.
+    timeout: READINESS_READ_BUDGET_MS + 40_000,
   });
   // Why the transaction refused, answered here rather than by the caller: a
   // caller that had to re-query the run to tell "suspended for Inbox" from

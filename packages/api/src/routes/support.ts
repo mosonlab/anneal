@@ -1,3 +1,4 @@
+import type { BranchAncestryReader } from "../github-read.js";
 import { Prisma, type PrismaClient } from "@anneal/db";
 import type { Hono } from "hono";
 import type { Context } from "hono";
@@ -24,6 +25,7 @@ import type { preflightOnboardingRepository, RepositoryPreflight } from "../onbo
 export type AppEnvironment = { Variables: { principal: Principal } };
 
 export interface LiveAppOptions {
+  repositoryReader?: BranchAncestryReader | undefined;
   ownership: { assertHeld(): void | Promise<void> };
   onboardingRepositoryPreflight?: typeof preflightOnboardingRepository;
   repositoryPreflight?: RepositoryPreflight;

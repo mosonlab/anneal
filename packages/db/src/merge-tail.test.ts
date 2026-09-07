@@ -14,6 +14,7 @@ import {
   mergeRecoveryTransitionAllowed,
   RECOVERY_TRANSITIONS,
   parseResolverResult,
+  resolverFallbackEligible,
   parseMergeTrainRecord,
   parseRegressionVerdict,
 } from "./merge-tail.js";
@@ -394,4 +395,22 @@ test("renames preserve guarded source identities", () => {
     previousFilename: "packages/api/src/merge-readiness-worker.ts",
     patch: null,
   }]), [{ path: "packages/api/src/merge-readiness-worker.ts", reason: "merge-tail-machinery" }]);
+});
+
+test("resolver fallback eligibility preserves explicit refusal and stale bindings in malformed output", () => {
+  const start = "a".repeat(40);
+  const target = "b".repeat(40);
+  for (const body of [undefined, null, "not JSON", "[]", "null", "{}",
+    JSON.stringify({ startHeadSha: start, targetHeadSha: target })]) {
+    assert.equal(resolverFallbackEligible(body, start, target), true);
+  }
+  for (const value of [
+    { outcome: "unable" },
+    { startHeadSha: "c".repeat(40) },
+    { targetHeadSha: "c".repeat(40) },
+    { startHeadSha: "malformed" },
+    { targetHeadSha: "malformed" },
+  ]) {
+    assert.equal(resolverFallbackEligible(JSON.stringify(value), start, target), false);
+  }
 });

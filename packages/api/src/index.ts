@@ -207,7 +207,7 @@ const main = async (): Promise<void> => {
   // One registry for both readers: `GET /runners` reports it, and merge
   // readiness refuses to authorize a merge no daemon in it can execute.
   const runnerRegistry = createRunnerRegistry();
-  const app = createApp(prisma, { ownership, specificationReader, runnerRegistry });
+  const app = createApp(prisma, { ownership, specificationReader, runnerRegistry, repositoryReader: githubReader });
   const { host: hostname, port } = startup;
   const activeServer = serve({ fetch: app.fetch, hostname, port });
   server = activeServer;

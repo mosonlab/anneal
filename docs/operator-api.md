@@ -2033,6 +2033,18 @@ target base). It then continues recovery with that verified head, preserving
 a resolved merge commit that the resolver pushed even when its result payload
 was malformed.
 
+Adoption rebinds the repair Run's `headSha` and the repair task's
+`TaskStepOutput.commitSha` to the repository-verified head. The Regression
+handoff requires both durable bindings to match the resolved head. Existing
+output text is preserved; if no output exists, settlement creates an empty
+body using the repair Step's output kind (or `result` for a detached repair).
+These bindings record control-plane repository evidence, not a new runner
+publication report.
+
+The repository reads share a 20-second deadline within a completion
+transaction budget of 60 seconds, leaving time to persist a timeout refusal
+and its activity. Completion holds the Run row lock while checking ancestry.
+
 The fallback is recorded as a `TaskActivity` on the repair task. The
 activity names the fallback, the rejected result key (for example `body` or
 `resolvedHeadSha`), and the adopted head. Inspect it with
