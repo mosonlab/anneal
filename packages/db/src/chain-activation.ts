@@ -31,6 +31,8 @@ import {
   enqueueTaskRunInternal,
   gateQuestion,
   isCompoundImplementationStep,
+  parksInsteadOfRaising,
+  runBirthRefusalMetadata,
 } from "./run-open.js";
 
 type Tx = Prisma.TransactionClient;
@@ -250,6 +252,20 @@ const dispatchBoundSuccessor = async (
   // an integrity violation rather than a caller-recoverable refusal.
   if (!successor) throw new Error(`Bound successor ${successorId} disappeared while dispatching`);
 
+  // The successor list was read under the predecessor's chain mutex only, and
+  // `PATCH /tasks/:taskId` may re-point or release the binding of a chain that
+  // has no Run while this transaction waits for that chain's mutex. Decide on
+  // the row read under the lock: a binding that no longer names this
+  // predecessor is not this completion's to dispatch.
+  if (successor.dispatchAfterTaskId !== predecessor.id) {
+    await boundDispatchActivities(tx, predecessor, successor, {
+      successorBody: "Bound predecessor completed after the binding moved; successor was not queued",
+      predecessorBody: "Bound chain dispatch skipped: the successor is no longer bound to this task",
+      metadata: { state: "rebound", dispatchAfterTaskId: successor.dispatchAfterTaskId },
+    });
+    return;
+  }
+
   if (!predecessorTerminal) {
     await parkBoundSuccessor(
       tx,
@@ -372,9 +388,8 @@ const dispatchBoundSuccessor = async (
       // exactly as any other fault: the successor is parked for an operator.
       case "stopped":
       case "fault":
-        await parkBoundSuccessor(tx, predecessor, successor, refusal.message, {
-          refusal: refusal.code,
-        });
+        await parkBoundSuccessor(tx, predecessor, successor, refusal.message,
+          runBirthRefusalMetadata(refusal));
         return;
       default: {
         const unhandled: never = refusal.disposition;
@@ -834,7 +849,11 @@ const activateChainSuccessorInternal = async (
           throw errorForOpenRunRefusal(refusal);
         }
         case "fault":
-          if (options.onRefusal === "raise") {
+          // A spend cap parks the successor even where the caller asked to
+          // raise: raising rolls back the activation transaction, so the park
+          // below — the only record of which cap refused the attempt — would
+          // never reach the operator who has to raise it.
+          if (options.onRefusal === "raise" && !parksInsteadOfRaising(refusal)) {
             // A compound implementation step is bound to one Agent by
             // construction, so a refusal carrying no error of its own is that
             // invariant failing. The operator's answer is the compound-assignee
@@ -858,7 +877,7 @@ const activateChainSuccessorInternal = async (
         taskId: successor.id,
         actorType: "control-plane",
         body: `Predecessor layer completed but Run birth was refused: ${refusal.message}`,
-        metadata: { refusal: refusal.code },
+        metadata: runBirthRefusalMetadata(refusal),
       } });
       continue;
     }

@@ -286,6 +286,7 @@ export const applyCanonicalInstallation = async (
           },
         }),
         sourceSteps.map((step) => ({ outputKind: step.outputKind, optional: step.optional })),
+        { "sol-findings": "review-findings" },
       )
       : null;
     const installedTemplateId = await writeCanonicalTemplate(

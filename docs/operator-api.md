@@ -220,7 +220,12 @@ curl -X DELETE "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERA
   spend; failed spend is further partitioned by failure class.
 - `chains` contains terminal chains whose last run ended in the window, with
   lead/busy time, repair counts, longest idle gap, priced spend by step role,
-  and an unpriced-run count. The `unassigned` role is used when persisted step
+  and an unpriced-run count. Each chain row also carries `readinessRequeues`
+  and `readinessGrants`: how many times merge readiness returned that chain's
+  candidate to Regression because its base moved before authorization, and how
+  many extra Run attempts those requeues granted. The grants funded Runs that
+  are already inside `costUsd`; the two counts make that share attributable.
+  The `unassigned` role is used when persisted step
   metadata cannot classify priced spend. Unknown cache splits are counted and
   excluded from cache metrics; unpriced chain runs never receive a fabricated
   cost.
@@ -1011,6 +1016,31 @@ malformed canonical output, absent Chain id or final pull request, failed edit,
 unreadable read-back, body mismatch, failed cleanup, or retained tracked
 `.chain/` content is a delivery failure.
 
+### `merge-authorization` output
+
+The `merge-authorization` step records its authorization object in the task
+activity metadata. Its existing fields retain their current meanings. An
+ordinary single-candidate authorization omits `train` and keeps the existing
+shape and behavior. A train authorization may include this optional object:
+
+```json
+{
+  "train": {
+    "publishHead": "<40-hex prefix SHA>",
+    "predecessorOid": "<40-hex predecessor SHA>",
+    "ref": "refs/anneal/train/<publishHead>",
+    "position": 1,
+    "trainTaskId": "<train task id>"
+  }
+}
+```
+
+`publishHead` and `predecessorOid` are 40-hex commit SHAs, `ref` must be
+exactly `refs/anneal/train/<publishHead>`, and `position` is a positive,
+1-based integer. `trainTaskId` identifies the control-plane train task. The
+control plane supplies this object; it is consumed by the merge executor when
+it publishes and replays a cumulative prefix.
+
 ### GET `/projects/:projectId/task-templates`
 
 - Required path parameter: `projectId`.
@@ -1207,9 +1237,14 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   second chain to a predecessor that already has one is accepted, and the
   predecessor records one `Chain <id> bound to predecessor <name>` activity per
   binding. The binding stays one-way and one hop deep. An `afterTaskId` binding
-  is released only by `DELETE /tasks/:taskId/chain` on that bound chain, which
-  leaves the predecessor's other successors bound; archiving a bound chain does
-  not release it.
+  is released by `DELETE /tasks/:taskId/chain` on that bound chain, which
+  leaves the predecessor's other successors bound, or — while that chain has no
+  Run — by `PATCH /tasks/:taskId` with `dispatchAfterTaskId` on its first step,
+  which re-points the binding at another task or releases it with `null`.
+  Archiving releases no binding by itself: neither archiving a bound chain nor
+  archiving the predecessor it waits for, and an archived predecessor never
+  becomes `DONE`, so re-pointing or releasing the binding is how such a chain
+  is recovered.
 
 ```sh
 curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/instantiate" \
@@ -1475,6 +1510,18 @@ invalidated by a late salvage publication, a merge-tail requeue — as opposed t
 attempts its agent spent. It is bounded at three per task; at the bound the
 platform stops requeueing and parks the task for an operator, so a card showing
 `3` is one loss away from `REVIEW`. See "Lost-Run reconciliation" below.
+It also includes `spendCapUsage`: `null` on a task with no
+`spendCap`, and otherwise `{capUsd, spentUsd, exhausted}` — the cap, what the
+task's Runs have already spent against it, and whether the cap now refuses a
+new attempt. See "Task spend cap" below for what counts as spend.
+
+Every card also carries `baseline`, the same per-template-step cost and
+duration baseline `GET /tasks/:taskId` documents, or `null` for a card with no
+template step or too little history. The whole page is answered by one grouped
+query, so the board's query count does not grow with the number of cards. Rows
+of the `full` view carry the same `baseline` field on the same terms, read by
+the same single grouped query.
+
 For a Chain member, the first emitted member also carries the
 `chainAggregate` projection. Its `activation.state` is one of
 `parked-unactivated`, `waiting-on-predecessor`, `running`, `idle`, `held`, or
@@ -1485,6 +1532,14 @@ ordinal of the highest execution layer admitted when the Chain was held (or
 `0` before the first layer), `heldAt` is an ISO timestamp, and
 `holdReason` is the optional operator reason. It is non-null whenever the
 Chain's persisted `ChainControl.state` is `HELD`.
+
+Every card carries `readinessRequeues` and `readinessGrants`. They are non-zero
+only on a Chain's merge-readiness Step (`outputKind: merge-authorization`), and
+report how many times readiness returned the candidate to Regression because
+its base moved before authorization and how many extra Run attempts those
+requeues granted. Both are derived from the Step's
+`mergeReadiness.requeue` activities, described under `GET
+/tasks/:taskId/activity`.
 
 An active member keeps `activation.state` as `running` even when
 `activation.hold` is non-null: the hold lets the current Run finish and starts
@@ -1540,6 +1595,10 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
   raise `maxSessionsPerTask` through `PATCH /tasks/:taskId` to lift it. It is a
   separate verdict from the board's `leaseLossRefunds`: a task can have budget
   left and still be out of platform refunds.
+- `spendCap` is the task's own spend limit in USD, a `Decimal(12,2)` or
+  `null`, and `taskCost` is the read-time cost of its Runs. Enforcement and the
+  cost basis are described under "Task spend cap".
+
 - `editableBrief` is the prompt text a caller may rewrite through `PATCH
   /tasks/:taskId` with `description`, already extracted: the brief alone for a
   Chain step that authors one, the whole stored description for an ordinary
@@ -1593,6 +1652,26 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
     the duration is an upper bound (≤) and this rate is a lower bound (≥).
   - `metrics.termination` carries the Session's own account of how the run
     ended: `reason`, `exitCode` and `signal`.
+  - `metrics.vsBaseline` measures the run against the task-level `baseline`
+    below: `costRatio` is the session's reported cost over the baseline cost
+    p50, and `durationRatio` is `metrics.phases.executingMs` over the baseline
+    duration p50. Each is `null` whenever the baseline metric or the run's own
+    value is unknown; above `1` means dearer or slower than usual. Both use the
+    raw values published beside them, so a ratio and its figures cannot
+    disagree. `durationRatio` is also `null` while the session has not ended:
+    the executing phase of a live run is measured to now, and the baseline is
+    built from completed runs only.
+- The response carries a task-level `baseline`: what this task's template step
+  usually costs and how long it usually takes, over the **terminally
+  successful** (`SUCCEEDED`) runs of the same `templateStepId` in the same
+  project. It is
+  `{sampleSize, costUsd: {sampleSize, p50, p90} | null, durationMs: {sampleSize, p50, p90} | null}`.
+  `costUsd` is in USD over the runs whose session reported a cost; `durationMs`
+  is in milliseconds over the runs whose session has both `startedAt` and
+  `endedAt`, so the two samples can differ in size and each reports its own.
+  A metric with fewer than five samples is `null`, and `baseline` itself is
+  `null` when neither metric survives — including on a task with no
+  `templateStepId`. `null` always means insufficient history, never `0`.
 
 ```sh
 curl "$BASE_URL/tasks/$TASK_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1774,6 +1853,68 @@ curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/repair" \
   -d '{"requestId":"reenter-recovery-repair-001","reason":"Fix the regression found during base-drift recovery"}'
 ```
 
+### POST `/tasks/:taskId/merge-tail/rerun`
+
+- Required path parameter: `taskId`, naming the Chain's Regression
+  verification task.
+- Required JSON field: `requestId` (a non-empty operator request identifier).
+- Optional JSON field: `reason` (why the gate FAIL is not the branch's).
+- Use this route instead of `POST /tasks/:taskId/merge-tail/repair` when the
+  recovery's merge gate FAIL was caused by the host and not by the branch — a
+  test that timed out under host load, a gate worker that ran out of memory —
+  so there is nothing for a `gate-fix` repair to fix. Use the repair route when
+  the verdict names a real defect, and for every `review-fail` verdict. Confirm
+  the failing test is outside the branch's change set before re-running: this
+  route re-runs the same head against the same base and will reproduce a
+  genuine failure.
+- The request is accepted only for the latest `MergeRecoveryAttempt` bound to
+  this regression task when its aggregate is `BLOCKED_DOWNSTREAM`, its
+  `refusalCode` is `null`, and its `regressionTaskId` equals `taskId`. The
+  stored `TaskStepOutput` must be produced by that attempt's `recoveryRunId`
+  and carry a `gate-fail` verdict. The regression, merge readiness, and
+  integrator tasks must all be in `REVIEW`, with no active Run on any of them.
+- The accepted operation is one serializable transaction under the Chain lock.
+  It creates a new recovery attempt row for the same source stop at
+  `attempt + 1`, bound to the same authorized head, base, PR, and readiness and
+  integrator tasks; queues a fresh Regression Run through the ordinary recovery
+  path; clears the regression and readiness `failureReason`; and records the
+  operator activity, its `reason`, and the new attempt number on the regression
+  task. It creates no repair task, charges no repair budget, and leaves the
+  `repairAttempt` markers the repair budget counts untouched. It spends none of
+  the two automatic base-drift recovery attempts either: those are counted per
+  recovery source stop, and a rerun re-runs a stop that is already counted. The
+  queued Run carries a one-time budget grant, so a rerun does not consume one of
+  the Regression task's `maxSessionsPerTask` attempts.
+- On success, the API returns `200 OK` with `aggregateId` (the new attempt),
+  `attempt`, `recoveryRunId` (the queued Regression Run), and the verdict
+  `headSha` and `baseHeadSha`. The same `requestId` is idempotent: a replay
+  returns the original `200` result and creates no attempt, Run, or activity.
+- Refusals are `409 Conflict` JSON responses with a typed `code` and no side
+  effect:
+
+  - `merge_tail_rerun_not_blocked`: the task has no matching latest recovery
+    attempt in `BLOCKED_DOWNSTREAM` with complete recovery identity and a null
+    `refusalCode`, or its regression, readiness, or integrator task is not in
+    `REVIEW`.
+  - `merge_tail_rerun_verdict_not_gate_fail`: the recovery Run owns no readable
+    verdict, or its verdict is `review-fail`, `refresh-conflict`, or `pass`.
+    Those are the branch's own results: use the repair route for a `review-fail`
+    verdict, and neither route for a refresh conflict, which needs a resolver
+    result.
+  - `merge_tail_rerun_active_run`: the regression, readiness, or integrator
+    task has an active Run.
+  - `merge_tail_rerun_budget_exhausted`: this recovery source stop has already
+    been re-run `MAX_MERGE_TAIL_OPERATOR_RERUNS` times. A gate that fails three
+    times on the same head is not a host failure; carry the branch forward with
+    [Recovering a merge tail stopped after its repair
+    budget](#recovering-a-merge-tail-stopped-after-its-repair-budget).
+
+```sh
+curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/rerun" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"requestId":"rerun-recovery-gate-001","reason":"The failing test is outside this branch and timed out under host load"}'
+```
+
 ### Settling a chain whose repair cannot bind
 
 Two merge-tail mechanisms can overlap on one Chain: a base-drift recovery
@@ -1855,6 +1996,42 @@ Whether a Chain should be allowed to run base-drift recovery and a gate-fix
 repair at the same time is not decided here. This refusal names the overlap and
 stops before spending a Run on work the platform would not accept.
 
+### Readiness evaluation exceptions
+
+An exception thrown while the merge readiness worker evaluates a Chain — a
+killed child process, a killed worker, a service restart mid-tick — is not a
+verdict. The worker returns the readiness task to `TODO` and evaluates it again
+on a later tick, writing one `TaskActivity` on the Regression verification task,
+where the readiness requeue and stop rows already land, whose `metadata.state`
+is `requeued-exception` and whose body reads
+`Merge readiness requeued after evaluation exception <n> of <limit>: readiness
+evaluation exception: <message>`. The Regression evidence and its Run are left
+alone, no stop notice is written, and the merge lease is released exactly as an
+ordinary readiness requeue releases it.
+
+The retry is bounded by `MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT` (default 3),
+read once per worker tick; a value that is not a non-negative integer fails the
+API service at startup. Once that many exception requeues have been spent on the
+same readiness task within the same recovery attempt, the next exception stops
+the tail as before with `failureReason`
+`readiness evaluation failed after <n> exception requeues: <message>`. Outside a
+base-drift recovery that stop parks the regression and readiness tasks in
+`REVIEW` and writes the matching `Autonomous merge readiness stopped:` Inbox
+notice; inside one it takes the recovery stop path instead — the recovery
+attempt becomes `BLOCKED_DOWNSTREAM`, the integrator task is parked as well, and
+the notice reads `Automatic base-drift recovery <n> stopped at readiness:
+<reason>`.
+
+Three readiness failures are not exception requeues and stop the tail on their
+first occurrence. A deliberate refusal — a recovery head-adoption refusal —
+carries a refusal code and stops with `readiness evaluation failed: <message>`.
+A missing, mismatched, or ambiguous operator authorization on a gated readiness
+step is a fail-closed gate decision, not a transient fault, and stops with that
+same reason. A GitHub read that fails for any reason other than a timeout or a
+transport error (those are deferred to the next tick) is a
+`readiness-read-failed` decision, and stops with that same `readiness evaluation
+failed: <message>` reason and no refusal code.
+
 ### Recovering a merge tail stopped after its repair budget
 
 When a regression verdict fails after the automatic repair budget is exhausted,
@@ -1884,6 +2061,60 @@ for a merge gate stop. A `PATCH /tasks/:taskId` request that supplies `status`
 is refused with `Chain task statuses are controlled by chain execution`. Both
 refusals are expected behaviour; do not use them to reopen the old Chain.
 
+#### Base-drift classification retry classes and `re-validate`
+
+Automatic pre-merge base-drift recovery accounts a classification tick that did
+not conclude against one of three classes, and only one of them is budgeted by
+count:
+
+- `waiting` — the Chain's own Run is still active, so the recovery is not
+  classified yet. Bounded by six hours since the first wait, never by count.
+- `transport` — the server-side repository read failed. Bounded by thirty
+  minutes since the first failed read, never by count.
+- `validation` — a classification ran against real facts and could not
+  conclude. Bounded by both `MAX_BASE_DRIFT_VALIDATION_ATTEMPTS` (30) failures
+  and thirty minutes since the first of them, so a burst inside one incident
+  cannot exhaust it.
+
+`waiting` and `transport` hold the next tick on a per-attempt backoff that
+doubles from the worker's two-second tick to a sixty-second cap, stored on the
+attempt as `nextEligibleAt`; `validation` takes no hold and stays eligible at
+the next tick. Each deferral writes a `baseDriftRecovery` activity in state
+`classification-retry` naming the class, its counter, the elapsed time in that
+class, and the next eligible time (`null` for `validation`); a class change is
+recorded there as well.
+
+A read that reached the repository and returned no usable ancestry comparison
+is `transport`, not `validation`: the candidate was never classified, so its
+counted budget does not pay for the upstream's silence.
+
+Crossing a ceiling settles the attempt as `FAILED` with a `refusalCode` naming
+the class, and the `failureReason` states the class and the elapsed time. The
+settle records the failure that crossed the ceiling before it settles, so the
+attempt's counters and the refusal text state the same number of failures, and
+the settle activity carries all three counters:
+
+- `waiting-ceiling` — `waiting-ceiling reached: the chain stayed active for <elapsed> (limit 6h00m); last classification: <reason>`
+- `transport-ceiling` — `transport-ceiling reached: repository reads failed for <elapsed> (limit 30m); last read failure: <reason>`
+- `validation-budget` — `validation-budget exhausted: <n> classification failures over <elapsed> (limit 30 attempts spanning 30m); last classification: <reason>`
+
+A class-ceiling settle opens a stop question offering `re-validate` alongside
+`abandon`, and writes a stop notice keyed
+`merge-base-drift-recovery:<state>:<stopId>` (with an `:r<n>` suffix after the
+n-th `re-validate`). Every base-drift recovery settle — a class ceiling, an
+ordinary ineligibility, or the automatic recovery limit — carries that same
+`:r<n>` generation on its stop question key `merge-stop:<stopId>:r<n>`, so a
+recovery that settles again after a `re-validate` always opens a fresh,
+answerable card instead of deduplicating against the answered one. Answer it
+through
+`POST /inbox/messages/:messageId/decision` with `decision: "re-validate"`. That
+answer resets the counters of the settled class and no other, clears the
+backoff and the refusal, returns the attempt to `VALIDATING`, and records a
+`class-revalidated` activity. The recovery resumes on the same attempt; no
+successor Chain is required. Every other base-drift refusal keeps its
+abandon-only card, because there is no class counter for `re-validate` to
+reset.
+
 #### Re-entering after a base-drift recovery FAIL
 
 If a semantic (`review-fail`) or merge-gate (`gate-fail`) regression FAIL
@@ -1891,14 +2122,19 @@ occurs inside base-drift recovery, the merge tail is parked in
 `BLOCKED_DOWNSTREAM` with the recovery attempt's `recoveryRunId`. After
 confirming the failing output and stop notice, call
 `POST /tasks/:taskId/merge-tail/repair` on the regression task before
-considering a successor Chain. The route re-enters the ordinary `review-fix`
-or `gate-fix` round against the recorded head and base, charges the Chain's
-existing repair budget, and moves the aggregate to `REPAIRING`. Once that
-repair genuinely completes, the regression is rerun with the recovery context:
-a PASS proceeds to `awaitAuthorization`; another FAIL parks the tail in
-`BLOCKED_DOWNSTREAM` again and can be re-entered with this route while budget
-remains. A refresh-conflict verdict keeps its existing recovery stop and is
-not re-entered by this route.
+considering a successor Chain. The repair route re-enters the ordinary
+`review-fix` or `gate-fix` round against the recorded head and base, charges
+the Chain's existing repair budget, and moves the aggregate to `REPAIRING`.
+Once that repair genuinely completes, the regression is rerun with the recovery
+context: a PASS proceeds to `awaitAuthorization`; another FAIL parks the tail in
+`BLOCKED_DOWNSTREAM` again and can be re-entered with the repair route while
+budget remains. A refresh-conflict verdict keeps its existing recovery stop and
+is not re-entered by either route.
+
+For a `gate-fail` verdict whose failure is the host's and not the branch's — a
+test outside the change set that timed out under load — call
+`POST /tasks/:taskId/merge-tail/rerun` instead: it re-runs the recovery without
+opening a repair card for a defect that does not exist.
 
 Carry the delivered branch forward in this order. The brief used in step (c)
 must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-from-a-delivered-branch).
@@ -1989,7 +2225,11 @@ approval and evidence renewal preserve the same refusal evidence.
   `opensPullRequest`, `maxDurationMin`, `stallTimeoutMin`,
   `maxSessionsPerTask`, `scheduleKind`, `runAt`, `cron`, and `timezone`.
   `status` is a task status (`BACKLOG`, `TODO`, `DOING`, `REVIEW`, `DONE`);
-  `failureReason` may be `null`.
+  `failureReason` may be `null`. `spendCap` is patchable but not creatable: a
+  non-negative number sets the task's spend limit in USD and `null` clears it.
+  Raising or clearing it is the way out of a `spend-cap-exhausted` refusal —
+  the next `POST /tasks/:taskId/retry` is measured against the new value.
+  `dispatchAfterTaskId` is the Chain binding and may be a task id or `null`.
 - For a Chain task, `approvalGate` can change only when the task's template
   step is one of the two configurable slots — the specification step or merge
   readiness step — and the stored task status is `TODO`. The accepted value is
@@ -2003,6 +2243,30 @@ approval and evidence renewal preserve the same refusal evidence.
   This relaxes the previous blanket refusal that approval gates on dispatched
   Chain tasks are controlled by the Chain. Standalone tasks retain their
   existing `approvalGate` PATCH behavior.
+- `dispatchAfterTaskId` re-points or releases the Chain binding of a Chain that
+  has not run, so an operator whose predecessor was archived or replaced does
+  not have to delete the Chain and instantiate it again. It is accepted only on
+  the first step of a Chain none of whose steps has a Run; a later step, a
+  standalone task, or a Chain with so much as one terminal Run returns
+  `409 Conflict` with code `chain_binding_immutable_after_start`. A non-null
+  value must name a Chain task of the same project that is not archived and does
+  not belong to the Chain being bound; an archived, foreign, standalone, or
+  same-chain target — including the task itself — returns `400 Bad Request` with
+  code `chain_binding_target_invalid`. A standalone predecessor is refused
+  because only a Chain task's completion dispatches a bound successor, so such a
+  binding would never resolve. Binding onto a task that is already `DONE` is
+  accepted and resolves the binding immediately, which makes the first step
+  startable under the ordinary start guard; `null` releases the binding the
+  same way. Neither starts the Chain: only a predecessor's completion
+  dispatches a bound successor. A successful change writes one operator
+  TaskActivity on the first step naming the previous and new predecessor ids.
+  Restating the binding a Chain already carries is accepted, writes no
+  activity, and returns the current task, even after the Chain has started. A
+  request that changes the binding together with `approvalGate`, a Run budget,
+  or a status commits every field but records the binding activity only, because
+  one PATCH writes one activity row. The named predecessor is read without its
+  own lock, so a concurrent archive of it can win the race; the Chain still has
+  no Run, so re-issuing the PATCH with another predecessor is the remedy.
 - On a Chain step that carries a feature brief, `description` is the brief
   alone. A task with both a `templateId` and a `chainId` whose Step authors a
   brief — every step role except readiness and integrator — keeps its stored
@@ -2017,9 +2281,36 @@ approval and evidence renewal preserve the same refusal evidence.
   template Step metadata is missing, refuses with `400 Bad Request` and
   `Cannot rewrite task brief: <reason>`. Every other task stores `description`
   verbatim.
-- A `maxSessionsPerTask` or `description` change is recorded as an operator
-  TaskActivity naming the budget's previous and new value, or stating that the
-  prompt was edited. The prompt text itself is not copied into the activity.
+- A `maxSessionsPerTask`, `spendCap` or `description` change is recorded as an
+  operator TaskActivity naming the budget's or cap's previous and new value —
+  both read under the write's own lock, so the stated previous value is the one
+  the write replaced — or stating that the prompt was edited. Clearing a cap is
+  such a change and is recorded as `Spend cap: $<previous> → none`. `spendCap`
+  accepts `0` through `9999999999.99`, the range of its `Decimal(12,2)` column,
+  or `null` to clear it; anything else refuses with `400 Bad Request`. The
+  prompt text itself is not copied into the activity.
+- Amending a brief after the implementation Step has materialized the
+  Specification of record into `.chain/<branchName>/spec.md` does not stop the
+  Chain, as long as that Step's Run was claimed by a version that records what
+  it was handed. A review claim checks the file against the brief the
+  implementer was handed — recorded as a digest when its Run was claimed — so a
+  faithful materialization still passes, and every later review Run's prompt
+  carries one line naming the amended task and the time it was amended. The
+  route never rewrites `spec.md` on the branch: the file remains the
+  pre-amendment text, and the amended text stays on the task that was patched.
+  A `spec.md` that differs from what the implementer was handed is still refused
+  with `spec-transcription-mismatch` and parks the review task, whether or not
+  the brief was amended; that refusal also states whether the current brief
+  still matches the materialized specification, which is how tampering on the
+  branch is told apart from an amendment nobody transcribed.
+- A Chain whose implementation Run was claimed before that digest existed, and
+  one whose implementation output was written by hand through
+  `PUT /tasks/:taskId/output`, records no digest: its review claims still
+  compare `spec.md` against the brief as it reads now, so amending that brief
+  still refuses the claim with `spec-transcription-mismatch` and parks the
+  review task, and the refusal carries no clause about the brief's standing.
+  Recovery is unchanged: rewrite `spec.md` on the branch to the amended text,
+  `PUT` the implementation output's `headSha`, and restart each review Step.
 - A change to `assigneeType` or `assigneeAgentId`, including clearing the
   assignee to `null`, is refused with `409 Conflict` while the task has a Run in
   an active status (`QUEUED`, `RUNNING`, or `WAITING_INBOX`); the message names
@@ -2129,6 +2420,22 @@ curl "$BASE_URL/tasks/$TASK_ID/recurring-fires?take=10" -H "Authorization: Beare
 ### GET `/tasks/:taskId/activity`
 
 - Required path parameter: `taskId`.
+- Control-plane rows carry a `metadata.kind`. On a merge-readiness Step,
+  `mergeReadiness.requeue` records one pre-authorization requeue: readiness
+  returned the chain's candidate to Regression because the pull request's base
+  moved under the authorized head. Its metadata carries `ordinal` (one-based,
+  oldest first within the chain), `staleBaseSha` and `currentBaseSha` (the base
+  it moved from and to), `budgetGrant` (extra Run attempts the settlement
+  granted, which fund the replacement Regression Run), `regressionTaskId`, and
+  `reason`. The row is written in the settlement's own transaction, so the
+  counts and the grants cannot disagree. `readinessRequeues` and
+  `readinessGrants` on the board card and on a costs chain row are folds over
+  these rows: over control-plane rows of this kind that carry a numeric
+  `ordinal`, and over those only. The next requeue's `ordinal` is drawn from
+  exactly that row set, so a row the two views cannot count never shifts the
+  numbering: a row of this kind posted by any other actor through
+  `POST /tasks/:taskId/activity` is an ordinary note, and neither it nor an
+  unnumbered row is counted or consumes an `ordinal`.
 
 ```sh
 curl "$BASE_URL/tasks/$TASK_ID/activity" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -2242,6 +2549,35 @@ Response fields:
   "events": []
 }
 ```
+
+### Readiness authorization and merge executor liveness
+
+Merge readiness writes an authorization only while a merge executor can claim
+it. Before the leased `authorize` decision is applied, readiness checks the
+runner ids in `MERGE_EXECUTOR_RUNNER_IDS` against the same daemon liveness
+`GET /runners` reports: at least one of them must be `online`. If none is,
+nothing is authorized and no Merge Lease is taken; readiness settles as a
+requeue of itself, leaving the regression evidence and its Run untouched, and
+writes a TaskActivity on the readiness task with `metadata.state =
+"requeued-executor-offline"`, `metadata.reason = "merge-executor-offline"` and
+the executor runner ids it checked. The next tick asks again.
+
+That wait is bounded by the 15 minutes after which the registry forgets a
+daemon altogether, and it is measured per outage: the wait starts at the first
+skipped authorization of the outage the chain is currently in, not at the first
+one this task ever recorded. An outage ends when readiness observes it ending --
+the next tick that finds an executor online, settles the Step some other way, or
+stops at the ceiling -- and never merely because time passed between two skipped
+authorizations, so `MERGE_READINESS_POLL_INTERVAL_MS` cannot lengthen or reset
+the wait. An executor still offline at the ceiling stops the tail like any
+other readiness stop: the regression and readiness tasks move to `REVIEW` with
+a `failureReason` naming `merge-executor-offline` and the runner ids. Recover by bringing the executor back and calling
+`POST /tasks/:taskId/retry`.
+
+An empty allowlist is unchanged behaviour: with `MERGE_EXECUTOR_RUNNER_IDS`
+unset no executor is named, the check is skipped, and readiness authorizes as
+before. An executor that is offline stops new authorizations by itself; drain
+by holding chains, not by stopping the executor.
 
 ## Inbox
 
@@ -2371,7 +2707,7 @@ publish: `not-a-pr-delivery`, `complete` with the ordered `outputs`, or
 chain index, output kind, body, and commit SHA, and is accepted only when its
 `projectId` and `chainId` match the claimed Run. The implementation delivery
 receives only its current `implementation` entry; the final delivery receives
-exactly `implementation`, `sol-findings`, `blind-findings`, and
+exactly `implementation`, `review-findings`, `blind-findings`, and
 `fixed-implementation`, in chain order. Malformed, foreign-chain, out-of-order
 or missing evidence makes the handoff `incomplete` rather than being silently
 omitted or guessed, and delivery fails instead of publishing. This projection
@@ -2379,6 +2715,75 @@ does not widen prompt `priorOutputs`, expose sibling evidence to a blind
 review, or derive text from provider output, activity prose, or repository
 contents. Its source is persisted task output and its authentication is the
 claimed session/run identity.
+
+Output kinds name Step deliverables, not execution models. Existing Chains keep
+their original `sol-findings` review contract; the handoff accepts that legacy
+kind in the same review position and preserves it on the wire. New Chains use
+`review-findings`. Changing the assigned Agent or its model never renames a
+Step output or rewrites an immutable report.
+
+The machine-only `POST /runner/runs/:runId/events` append is bounded on both
+sides, and the two bounds are designed against each other. The API reads at most
+1 MiB + 64 KiB of request body — the batch cap plus envelope allowance — and
+refuses a larger one with `413` and `code: "EVENTS_REQUEST_TOO_LARGE"` before
+parsing it. It then refuses any single event whose `payload` exceeds 256 KiB of
+JSON with `413`, `code: "EVENT_PAYLOAD_TOO_LARGE"`, and the `eventIndex`, `seq`,
+`payloadBytes` and `limitBytes` of the offending event. The index is the point:
+the runner removes events from its queue only once they are accepted, so a
+batch-wide refusal would leave an unacceptable event at the head of an ordered
+queue forever, while a named one costs exactly that event. On receiving it the
+runner drops that event, records an `EVENT_REJECTED` event in its place, and
+resends the rest of the batch. A `413` that names *no* index cannot be resolved
+by losing one event, so the runner answers it by sending less: it halves its
+batch budget for the rest of the Run and retries, down to a floor of one event,
+and only then drops that single event as impossible. That keeps an intermediary
+with a smaller body limit, or a peer carrying the previous cap, from wedging a
+queue that only advances on success. `providerConversationId` is capped at 512
+characters, refused with `400` above it and never sent above it, because it is
+the one envelope field a provider grows and the body cap is sized as the batch
+cap plus a fixed envelope allowance.
+
+A runner does not normally reach either refusal. It truncates any payload above
+the same 256 KiB cap itself, replacing it with `{ truncated: true,
+originalBytes, limitBytes, preview }`, and forms batches by bytes as well as by
+count (at most 250 events or 1 MiB). Both caps live in
+`@anneal/db/session-event-limits`, so the two processes cannot be sized against
+stale copies of each other; a 413 in practice means a rolling deployment in
+which the two sides disagree.
+
+The runner's undelivered queue for one Run is bounded at 32 MiB and 20 000
+events. When it is full the queue drops the oldest liveness events —
+`MODEL_DELTA`, `PROVIDER_RAW`, `PROVIDER_STATUS`, `STDERR`, `TOOL_PROGRESS` and
+`TOOL_COMPLETED` — and records one `EVENTS_DROPPED` event carrying the count,
+bytes, and sequence range lost. Tool output is droppable because a tool result
+carries a file read or a command's stdout and is the largest event a Run
+produces. Lifecycle, terminal and error events — including `TOOL_STARTED`,
+`TOOL_FAILED`, `ADAPTER_ERROR` and `FINAL_OUTPUT` — survive while anything else
+can be given up, and are never dropped. They are not exempt from the bound
+either, because a provider drives some of them too — one `ADAPTER_ERROR` per
+unparsable line, a `TOOL_STARTED` per call. A queue with nothing droppable left
+reduces the oldest of them to a `{ truncated: true, reason: "queue-bound",
+originalBytes, queueMaxBytes }` marker — distinct from the per-event cap's
+marker above, which names the cap it hit — keeping its sequence number, type and
+time, at about a hundred bytes an event instead of the 256 KiB cap a payload may
+reach. `providerEventId` and `toolCallId` go with the payload: they are detail
+too, and no cap covers what a provider puts in them. Once every entry not in
+flight is such a marker, the two oldest adjacent markers merge into one
+`EVENTS_COALESCED` event carrying their summed counts and the inclusive sequence
+range they span, plus the `droppedEvents` and `rejectedEvents` totals of any
+`EVENTS_DROPPED` or `EVENT_REJECTED` record absorbed, whose losses are in no
+other event. Merging repeats until both bounds hold again, and the record of a
+drop is opened inside that accounting rather than appended past it. So the
+queue holds its bounds under any traffic mix, and what a protected event gives
+up under pressure is its detail, never its account: each one is still counted,
+in aggregate, in a marker the control plane receives. The batch in flight is the
+one exemption — it is never dropped from, never merged, and never released by
+position, so a provider streaming during an append cannot cost an event that the
+request did not carry, and the bound it suspends holds again as soon as the
+request settles. Each heartbeat carries the
+current queue size as `eventQueueBytes`; the field is observability only and the
+API neither acts on it nor persists it.
+
 The machine-only `POST /runner/runs/:runId/complete` completion payload and
 `POST /runner/runs/:runId/cancel/acknowledge` cancellation acknowledgement
 accept the optional `worktreeContainmentViolations` array: absolute worktree
@@ -2396,6 +2801,27 @@ salvaged work of its own prior attempt. Claim evidence follows the prior same-ta
 publication matching the Run's resolved target ref, including when an intervening
 Run was cancelled without publishing. A different target ref does not receive
 that salvage evidence. Runs that did not salvage omit `salvageParentSha`.
+
+Before a review or fix candidate is claimed, the control plane re-reads the
+specification from the repository. A read that fails transiently defers the
+queued Run at 15s, 30s, then 60s instead of failing it, and the deferral window
+depends on what failed. A window whose every failure was a per-attempt deadline
+hit — a read that is slow, not broken — is extended to a ceiling of 1800000ms
+(30 minutes); any other transient failure in the window keeps the ordinary
+budget of 300000ms (5 minutes) and its `spec-transcription-unreadable` parking
+reason, whose message names the window the episode actually ran alongside that
+budget. Only a per-attempt deadline that this read observed counts as a deadline
+hit; an abort raised by the repository reader itself is an ordinary transient.
+The first deferral that outlives the 5-minute budget opens exactly one
+deduplicated Inbox notice per Task, and none of the later ones do. That notice
+is deduplicated for the Task's lifetime and is never reopened, so a Task that
+meets this condition again after an operator retry raises no second notice;
+parking still announces itself once per Run. At the
+30-minute ceiling the Task is parked in Backlog with the distinct reason
+`spec-read-deadline-exceeded`, whose message names the deadline, the number of
+deferred attempts, and the elapsed window rather than reporting the
+specification as unreadable. Both ceilings are source constants, not
+configuration.
 
 The machine-only `POST /runner/tasks/claim` request may include the optional
 `servedKinds` array of exact `RunnerKind` names. Omitting `servedKinds` means
@@ -2529,6 +2955,55 @@ curl -X POST "$BASE_URL/runs/$RUN_ID/cancel" \
 ```sh
 curl "$BASE_URL/runs/$RUN_ID/events?afterSeq=0&limit=500" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
+
+### Task spend cap
+
+`Task.spendCap` is a per-task limit in USD, or `null` for no limit. It is
+enforced at the single place a Run comes into existence, so every intent that
+would queue a new attempt — an operator retry, a chain enqueue, a merge-tail
+requeue or repair, a claim-invalidation replacement, and both automatic
+after-completion and after-lease-loss retries — is measured against it. When
+the cap is set and the task's accumulated spend is at or above it, no Run is
+opened: the Task moves to `REVIEW` with a `failureReason` beginning
+`Spend cap $<cap> reached`, and a TaskActivity carrying
+`metadata.refusal = "spend-cap-exhausted"` alongside the `spendCapUsd` and
+`spentUsd` the refusal measured. That park is the caller's write and
+is made on a path that commits, so it survives on every intent above: the
+callers that raise other Run-birth refusals out of their transaction park this
+one instead, because rolling it back would delete the record naming the cap the
+operator has to raise. Callers surface the refusal as a `409 Conflict`. Recover
+by raising or clearing `spendCap` through `PATCH /tasks/:taskId` and calling
+`POST /tasks/:taskId/retry`; the retry is measured against the new value.
+
+The cap, the total and every rendering of either are money with cents
+(`$1.00`, not `$1`) — the `failureReason`, the activity's `spendCapUsd` and
+`spentUsd` metadata, the board's `spendCapUsage`, and the operator activity a
+cap edit leaves, all from one formatter beside the basis below.
+
+The cost basis is defined once, in `packages/db/src/spend-cap.ts`:
+
+- Every Run of the task counts, priced the same way `taskCost` is: the
+  provider-reported `Session.costUsd` when there is one, otherwise the
+  read-time token estimate at the Run's own model.
+- The currency is USD. Nothing in the platform converts currencies.
+- A Run whose cost was never captured contributes nothing. A missing amount is
+  unknown, not large, and charging a guess would refuse attempts nobody paid
+  for.
+- An in-flight Run counts as soon as its cost is reported. Session usage is
+  written while the Run executes and at its end, so whatever has been reported
+  by the moment the next attempt is decided is included. A cap therefore stops
+  the attempt *after* the one that crossed it, never the one that is running.
+- The comparison is `spent >= cap`: reaching the cap exactly leaves nothing for
+  another attempt. A cap of `0` refuses every attempt.
+- `Task.spendCapApplicable` is not part of the decision: a cap is in force
+  whenever it is set. That column, and `Run.spendCap` and
+  `Run.spendCapApplicable` beside it, are written by nothing an operator can
+  reach and read by nothing; they are dead and can be dropped by a change that
+  owns the migration.
+
+`GET /tasks?view=board` projects `spendCapUsage`, and `GET /tasks/:taskId`
+returns `spendCap` beside `taskCost`, so the limit is never displayed without
+the number it is measured against.
 
 ### Lost-Run reconciliation
 

@@ -7,7 +7,6 @@ import {
   canonicalReviewArtifactSchema as reviewArtifact,
   isRegressionVerificationOutputKind,
   Prisma,
-  platformImplementationBaseSha,
   recordGateAttestation,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
   REGRESSION_VERIFICATION_SCHEMA_VERSION,
@@ -78,8 +77,8 @@ export const isCanonicalFixStep = (step: TemplateStepIdentity | null | undefined
   step !== null && step !== undefined && stepRole(step) === "fixed-implementation"
 );
 
-export const isCanonicalSolFindingsStep = (step: TemplateStepIdentity | null | undefined): boolean => (
-  step !== null && step !== undefined && stepRole(step) === "sol-findings"
+export const isCanonicalReviewFindingsStep = (step: TemplateStepIdentity | null | undefined): boolean => (
+  step !== null && step !== undefined && stepRole(step) === "review-findings"
 );
 
 const metadataPhase = (metadata: Prisma.JsonValue | Prisma.InputJsonValue | undefined): string | null => {
@@ -261,10 +260,10 @@ const fixedImplementationPersistenceRefusal = async (
   }
   const reports: ReviewArtifact[] = [];
   let presence: ChainStepPresenceIndex | null = null;
-  for (const kind of ["sol-findings", "blind-findings"] as const) {
+  for (const kind of ["review-findings", "blind-findings"] as const) {
     const matches = reviewTasks.filter((candidate) => (
-      kind === "sol-findings"
-        ? isCanonicalSolFindingsStep(candidate.templateStep)
+      kind === "review-findings"
+        ? isCanonicalReviewFindingsStep(candidate.templateStep)
         : isCanonicalBlindFindingsStep(candidate.templateStep)
     ));
     if (matches.length === 0) {
@@ -281,7 +280,7 @@ const fixedImplementationPersistenceRefusal = async (
       }
       continue;
     }
-    if (matches.length !== 1 || !matches[0]!.stepOutput || matches[0]!.stepOutput!.kind !== kind) {
+    if (matches.length !== 1 || !matches[0]!.stepOutput || matches[0]!.stepOutput!.kind !== matches[0]!.templateStep?.outputKind) {
       return `fixed-implementation requires exactly one immutable ${kind} sibling output`;
     }
     const output = matches[0]!.stepOutput!;
@@ -428,7 +427,7 @@ export const canonicalImplementationOutputRefusal = (
  * persisted therefore has nothing left to author, whoever wrote it.
  */
 export const outputIsImmutableOncePersisted = (step: TemplateStepIdentity | null | undefined): boolean => (
-  isCanonicalSolFindingsStep(step) || isCanonicalBlindFindingsStep(step)
+  isCanonicalReviewFindingsStep(step) || isCanonicalBlindFindingsStep(step)
 );
 
 /**
@@ -582,12 +581,20 @@ export const persistSessionTaskOutput = async (
   // the disagreement is recorded where an operator reads the task.
   if (step && isCanonicalAgentStep(step) && step.outputKind === "implementation") {
     const bodyBaseSha = implementationBodyBaseSha(input.body);
-    const platformBaseSha = await platformImplementationBaseSha(tx, input.task.id);
-    if (!platformBaseSha) {
+    // This Run's own provisioning base, not the Task's earliest and not the
+    // pinned one. The body was authored in this Run's workspace, so its base is
+    // the only one it can be a typo of: a first Run that died unpublished keeps
+    // its base out of the pin (`platformImplementationBaseSha`), and comparing
+    // against it would report a mismatch on a correct body and miss the typo.
+    const runBaseSha = (await tx.run.findFirst({
+      where: { id: input.fence.runId },
+      select: { baseSha: true },
+    }))?.baseSha ?? null;
+    if (!runBaseSha) {
       await tx.taskActivity.create({ data: {
         taskId: input.task.id,
         actorType: "control-plane",
-        body: `Implementation task ${input.task.id} has no Run with a recorded baseSha; body baseSha ${bodyBaseSha ?? "absent"} is informational and downstream range pinning will refuse`,
+        body: `Implementation run ${input.fence.runId} of task ${input.task.id} recorded no baseSha; body baseSha ${bodyBaseSha ?? "absent"} is informational and the platform has no provisioning base of this Run to check it against`,
         metadata: {
           kind: "canonicalTaskOutput.implementationBaseShaMissing",
           schemaVersion: 1,
@@ -596,18 +603,18 @@ export const persistSessionTaskOutput = async (
           bodyBaseSha,
         },
       } });
-    } else if (bodyBaseSha && bodyBaseSha !== platformBaseSha) {
+    } else if (bodyBaseSha && bodyBaseSha !== runBaseSha) {
       await tx.taskActivity.create({ data: {
         taskId: input.task.id,
         actorType: "control-plane",
-        body: `Implementation output baseSha ${bodyBaseSha} differs from the platform-derived base ${platformBaseSha}; the reviewed range is pinned to ${platformBaseSha}`,
+        body: `Implementation output baseSha ${bodyBaseSha} differs from ${runBaseSha}, the base this Run's workspace was provisioned at; the field is informational and the reviewed range is pinned from the platform's own Run records`,
         metadata: {
           kind: "canonicalTaskOutput.implementationBaseShaMismatch",
           schemaVersion: 1,
           runId: input.fence.runId,
           outputKind: input.kind,
           bodyBaseSha,
-          platformBaseSha,
+          runBaseSha,
         },
       } });
     }

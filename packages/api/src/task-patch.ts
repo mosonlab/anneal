@@ -22,21 +22,25 @@ import {
   stopStateRefusal,
   type Task,
   TaskStatus,
+  usd,
 } from "@anneal/db";
+import { compare } from "@anneal/db/chain-order";
 import { z } from "zod";
 
 import { blockingPredecessor } from "./chain.js";
 import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
 import type { Refusal } from "./refusal.js";
 import { validateSchedule } from "./scheduler.js";
-import { legacyBriefMigration, patchesBriefInPlace, rewriteBrief } from "./task-brief.js";
+import { BRIEF_EDIT_ACTIVITY_NOTE, legacyBriefMigration, patchesBriefInPlace, rewriteBrief } from "./task-brief.js";
 import { taskMoveAuthority } from "./task-move-authority.js";
 import {
   hasActiveRun,
   isLiveStatus,
+  type LockedTask,
   reactivationBlocked,
   type TaskActivityInput,
   writeTask,
+  type TaskWritePlan,
   type TaskWriteRefusal,
 } from "./task-write.js";
 import { withoutUndefined } from "./without-undefined.js";
@@ -97,9 +101,20 @@ export const taskInput = z.object({
 // `failureReason` is patchable but not creatable: a task is never born with a
 // failure, and an operator whose task carries a stale one needs a way to clear
 // it — an explicit null — without inventing a run.
+// `spendCap` is patchable but not creatable, like `failureReason`: a task is
+// born with the cap its project or template gave it, and the operator action
+// this route exists for is raising or clearing a cap that has already refused
+// an attempt. Null clears it.
+// `dispatchAfterTaskId` is patchable but not creatable either: a chain's
+// binding is written by instantiation, and this route only re-points or
+// releases the one an unstarted chain already carries. `null` unbinds.
 export const taskPatch = z.object(taskFields).partial().extend({
+  // Bounded to the `Decimal(12,2)` column, like every other numeric task field:
+  // an out-of-range cap is a refusal, not a Postgres overflow surfacing as 500.
+  spendCap: z.number().nonnegative().max(9_999_999_999.99).nullable().optional(),
   status: z.nativeEnum(TaskStatus).optional(),
   failureReason: failureReasonText(FAILURE_REASON_LIMIT).nullable().optional(),
+  dispatchAfterTaskId: id.nullable().optional(),
 }).refine((value) => Object.keys(value).length > 0);
 
 export type TaskPatchInput = z.infer<typeof taskPatch>;
@@ -116,14 +131,23 @@ export type TaskPatchResult = { task: Task } | TaskPatchRefusal;
  * task.
  */
 export const fieldEditActivity = (
-  locked: { maxSessionsPerTask: number },
+  locked: { maxSessionsPerTask: number; spendCap: Prisma.Decimal | null },
   body: TaskPatchInput,
 ): TaskActivityInput | null => {
+  // Rendered by the cost basis's own formatter so the trail agrees with the
+  // refusal it answers. Required, not optional: see `LockedTask.spendCap`.
+  const cap = (value: Prisma.Decimal | number | null | undefined): string =>
+    value === null || value === undefined ? "none" : `$${usd(value)}`;
   const notes = [
     body.maxSessionsPerTask !== undefined && body.maxSessionsPerTask !== locked.maxSessionsPerTask
       ? `Run budget: ${locked.maxSessionsPerTask} → ${body.maxSessionsPerTask}`
       : null,
-    body.description !== undefined ? "Prompt edited" : null,
+    // A cap edit is the operator answer to `spend-cap-exhausted`, so it leaves
+    // the same trail the Run budget does.
+    body.spendCap !== undefined && cap(body.spendCap) !== cap(locked.spendCap)
+      ? `Spend cap: ${cap(locked.spendCap)} → ${cap(body.spendCap)}`
+      : null,
+    body.description !== undefined ? BRIEF_EDIT_ACTIVITY_NOTE : null,
   ].filter((note): note is string => note !== null);
   return notes.length === 0 ? null : { actorType: "operator", body: notes.join("; ") };
 };
@@ -208,6 +232,113 @@ const gatePatchPlan = (
   return {
     refusal: null,
     activity: { actorType: "operator", body: gateToggleActivity(slot, requested) },
+  };
+};
+
+/**
+ * Re-pointing or releasing the dispatch binding of a chain that has not run.
+ *
+ * The binding is the chain's admission condition, so it may only move while
+ * nothing has been spent on it: the first step of a chain none of whose steps
+ * has a Run. Everything else — a standalone task, a later step, a chain with
+ * so much as one terminal Run — keeps the binding it was instantiated with and
+ * is refused as a conflict, because the request is well formed and it is the
+ * chain's state that says no.
+ *
+ * The predecessor is validated the way instantiation validates `afterTaskId`,
+ * minus the rules that only make sense before the chain exists: it must be a
+ * live task of this project, outside the chain being bound, and itself a chain
+ * task — only `activateChainSuccessor` dispatches a bound successor and it runs
+ * solely for a predecessor with a `chainId`, so binding onto a standalone task
+ * would strand the chain exactly the way this endpoint exists to undo. A
+ * predecessor that is already DONE is accepted and resolves the binding
+ * immediately; it does not start the chain, because only a completion
+ * dispatches a bound successor.
+ *
+ * `locked` comes from `writeTask`, so this chain's rows and the Run count over
+ * them are serialized by the chain mutex. The predecessor is not: it belongs to
+ * another chain, and taking its rows here would invert the predecessor -> successor
+ * lock order `activateChainSuccessor` uses and deadlock against a concurrent
+ * completion. An archive of the predecessor that commits between this read and
+ * the write therefore wins, and the operator re-issues the PATCH — the chain has
+ * no Run, so its binding is still mutable.
+ *
+ * The binding activity takes the single activity slot `TaskWritePlan` allows, so
+ * a request that also toggles the gate or edits a field records the binding
+ * change only; `docs/operator-api.md` states that precedence.
+ */
+const bindingPatchPlan = async (
+  tx: Prisma.TransactionClient,
+  locked: LockedTask,
+  requested: string | null | undefined,
+): Promise<GatePatchPlan> => {
+  // Idempotent: restating the binding a task already has is not a change, and
+  // is accepted even on a chain that has started.
+  if (requested === undefined || requested === locked.dispatchAfterTaskId) {
+    return { refusal: null, activity: null };
+  }
+  const immutable = (message: string): GatePatchPlan => ({
+    refusal: {
+      reason: "chain_binding_immutable_after_start",
+      message,
+      detail: { code: "chain_binding_immutable_after_start" },
+    },
+    activity: null,
+  });
+  if (locked.chainId === null) {
+    return immutable(`Task ${locked.id} is not a Chain task, so it carries no chain binding`);
+  }
+  const chainId = locked.chainId;
+  const chainRows = await tx.task.findMany({
+    where: { projectId: locked.projectId, chainId },
+    select: { id: true, chainLayer: true, chainIndex: true },
+  });
+  // Sorted with the shared execution comparator, not by SQL: a row whose layer
+  // is still null sorts by its chainIndex here, where NULLS LAST would put it
+  // behind every layered row and pick the wrong first step.
+  chainRows.sort((left, right) => compare(
+    { layer: left.chainLayer, index: left.chainIndex, id: left.id },
+    { layer: right.chainLayer, index: right.chainIndex, id: right.id },
+  ));
+  if (chainRows[0]?.id !== locked.id) {
+    return immutable(`Task ${locked.id} is not the first step of Chain ${chainId}, which is where the binding lives`);
+  }
+  if (await tx.run.count({ where: { task: { projectId: locked.projectId, chainId } } }) > 0) {
+    return immutable(`Chain ${chainId} has already started; its binding is immutable`);
+  }
+  if (requested !== null) {
+    const invalid = (message: string): GatePatchPlan => ({
+      refusal: {
+        reason: "chain_binding_target_invalid",
+        message,
+        detail: { code: "chain_binding_target_invalid" },
+      },
+      activity: null,
+    });
+    const target = await tx.task.findFirst({
+      where: { id: requested, projectId: locked.projectId },
+      select: { id: true, name: true, chainId: true, archivedAt: true },
+    });
+    if (!target) return invalid(`Predecessor task ${requested} was not found in this project`);
+    if (target.archivedAt) return invalid(`Predecessor task ${target.name} (${target.id}) is archived`);
+    if (target.id === locked.id || target.chainId === chainId) {
+      return invalid(`Predecessor task ${target.name} (${target.id}) belongs to Chain ${chainId} itself`);
+    }
+    if (target.chainId === null) {
+      return invalid(`Predecessor task ${target.name} (${target.id}) is not a Chain task, so its completion would never dispatch Chain ${chainId}`);
+    }
+  }
+  return {
+    refusal: null,
+    activity: {
+      actorType: "operator",
+      body: `Chain binding changed by operator request: predecessor ${locked.dispatchAfterTaskId ?? "none"} → ${requested ?? "none"}`,
+      metadata: {
+        chainId,
+        previousDispatchAfterTaskId: locked.dispatchAfterTaskId,
+        dispatchAfterTaskId: requested,
+      },
+    },
   };
 };
 
@@ -332,6 +463,22 @@ export const patchTask = async (
     ...withoutUndefined(patch),
     ...(scheduleTouched ? schedule : {}),
   } as Prisma.TaskUncheckedUpdateInput;
+  /** The three non-status write paths plan the same thing: the two guarded
+   *  fields first, then the plain field edit they share. */
+  const fieldWritePlan = async (
+    tx: Prisma.TransactionClient,
+    locked: LockedTask,
+  ): Promise<TaskWritePlan<Refusal | null>> => {
+    const bindingPatch = await bindingPatchPlan(tx, locked, body.dispatchAfterTaskId);
+    if (bindingPatch.refusal) return { update: null, activity: null, value: bindingPatch.refusal };
+    const gatePatch = gatePatchPlan(locked, body.approvalGate);
+    if (gatePatch.refusal) return { update: null, activity: null, value: gatePatch.refusal };
+    return {
+      update: updateData,
+      activity: bindingPatch.activity ?? gatePatch.activity ?? fieldEditActivity(locked, body),
+      value: null,
+    };
+  };
   // A status write joins the Task-row mutex, like start / retry / archive /
   // the scheduler's claims. Two reasons, both proven by regression tests:
   //
@@ -364,6 +511,10 @@ export const patchTask = async (
           activity: null,
           value: { reason: "conflict" as const, message },
         });
+        const bindingPatch = await bindingPatchPlan(tx, locked, body.dispatchAfterTaskId);
+        if (bindingPatch.refusal) {
+          return { update: null, activity: null, value: bindingPatch.refusal };
+        }
         const gatePatch = gatePatchPlan(locked, body.approvalGate);
         if (gatePatch.refusal) {
           return { update: null, activity: null, value: gatePatch.refusal };
@@ -492,7 +643,7 @@ export const patchTask = async (
             ? { actorType: "operator", body: "Approval gate approved" }
             : mergeGateRejection
               ? null
-              : gatePatch.activity ?? (statusChanged
+              : bindingPatch.activity ?? gatePatch.activity ?? (statusChanged
               ? taskStatusChangedActivity(locked.status, nextStatus)
               : null),
           value: {
@@ -606,11 +757,7 @@ export const patchTask = async (
     // requeues; otherwise a request that commits first can still be missed by
     // a creator holding a stale task relation.
     const updated = await db.$transaction(
-      async (tx) => writeTask(tx, taskId, async (locked) => {
-        const gatePatch = gatePatchPlan(locked, body.approvalGate);
-        if (gatePatch.refusal) return { update: null, activity: null, value: gatePatch.refusal };
-        return { update: updateData, activity: gatePatch.activity ?? fieldEditActivity(locked, body), value: null };
-      }),
+      async (tx) => writeTask(tx, taskId, (locked) => fieldWritePlan(tx, locked)),
       { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
     );
     if (!updated.ok) {
@@ -623,11 +770,7 @@ export const patchTask = async (
   // writer, so it joins the same protocol: Task row first, Agent row second.
   if (assignee) {
     const written = await db.$transaction(
-      async (tx) => writeTask(tx, taskId, async (locked) => {
-        const gatePatch = gatePatchPlan(locked, body.approvalGate);
-        if (gatePatch.refusal) return { update: null, activity: null, value: gatePatch.refusal };
-        return { update: updateData, activity: gatePatch.activity ?? fieldEditActivity(locked, body), value: null };
-      }),
+      async (tx) => writeTask(tx, taskId, (locked) => fieldWritePlan(tx, locked)),
       { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
     );
     if (!written.ok) {
@@ -637,11 +780,7 @@ export const patchTask = async (
     return { task: written.written! };
   }
   const written = await db.$transaction(
-    async (tx) => writeTask(tx, taskId, async (locked) => {
-      const gatePatch = gatePatchPlan(locked, body.approvalGate);
-      if (gatePatch.refusal) return { update: null, activity: null, value: gatePatch.refusal };
-      return { update: updateData, activity: gatePatch.activity ?? fieldEditActivity(locked, body), value: null };
-    }),
+    async (tx) => writeTask(tx, taskId, (locked) => fieldWritePlan(tx, locked)),
     { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },
   );
   if (!written.ok) {

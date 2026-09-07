@@ -17,6 +17,70 @@ written.
   stay online, and `GET /runners` reports the drain as `dispatchDrain`. A drain
   left behind by a dead deploy process expires by itself 120 minutes after that
   deploy last reported itself (`DISPATCH_DRAIN_DEADLINE_MINUTES`). One migration adds the drain table.
+- The runner's dispatcher slot count for the primary gate worker follows
+  `RUNNER_GATE_PRIMARY_SLOTS` (1 or 2, default 2) instead of always being two,
+  and sessions receive it as `AGENTOS_GATE_PRIMARY_SLOTS` in the two-host gate
+  topology. Set it to the primary worker's own `~/gate/worker-capacity`, or a
+  dispatch holds a slot while it waits on that worker's execution lock.
+- A base-drift recovery that stopped on a merge gate FAIL the branch did not
+  cause can be re-run from the API:
+  `POST /tasks/:taskId/merge-tail/rerun` on the Regression task opens the next
+  recovery attempt against the same head and queues a fresh Regression Run. It
+  opens no repair task, charges no repair budget, spends none of the two
+  automatic base-drift recovery attempts, and grants the queued Run its own
+  budget, and it is bounded at two re-runs per recovery stop.
+- A gate dispatch queued behind other gates no longer gives up while the queue
+  is moving. `GATE_DISPATCH_TIMEOUT_MINUTES` now bounds a queue that makes no
+  progress: each poll reads which process holds each busy slot, and a slot that
+  changes hands restarts the timeout, up to an absolute ceiling of twice the
+  timeout so a dispatch that keeps losing the race for a slot still gives up.
+  `GATE DISPATCH: NO SLOT` (exit 75) now reports either a queue where nothing
+  finished for the whole timeout or one that moved for the whole ceiling without
+  room for this dispatch, and the stderr line above it says which.
+- Editing a chain step's brief after implementation has started no longer parks
+  the chain. A review claim now checks the materialized `.chain/<branch>/spec.md`
+  against the brief the implementer was actually handed instead of against the
+  brief as it reads now, and tells the reviewer, in one line, that the brief was
+  amended after materialization. A `spec.md` rewritten on the branch is still
+  refused, and the refusal says whether the current brief also differs. Adds one
+  migration.
+- Session events are now bounded end to end. A runner holds at most 32 MiB and
+  20 000 undelivered events per Run. When it fills, the oldest liveness events —
+  streaming deltas, raw provider frames, captured stderr, provider status and
+  tool output — are dropped and an `EVENTS_DROPPED` event records how many and
+  which sequence range were lost. Lifecycle, error and terminal events are never
+  dropped; if the queue is still full once nothing droppable is left, such an
+  event keeps its place, type and sequence number but loses its payload to a
+  `truncated` marker; once every event not in flight is such a marker, the two
+  oldest adjacent markers merge into one `EVENTS_COALESCED` event carrying their
+  summed counts and the sequence range they span, so the queue holds its bounds
+  under any traffic mix while every event it saw is still accounted for.
+  A single event payload above 256 KiB is truncated to a `truncated` marker
+  carrying its original size.
+  `POST /runner/runs/:runId/events` enforces the same per-event cap and a
+  request-body cap, answering 413 with the offending event's index so the runner
+  drops that one event and resends the rest. Heartbeats now carry
+  `eventQueueBytes`.
+- The merge executor verifies its own landed merge from the commit when
+  GitHub's pull-request projection cannot. A merge commit whose parents are
+  exactly the authorized base and head and which is reachable from the
+  authorized base ref now completes the run instead of parking the chain tail on
+  a `base-drift-post-merge` question an operator answered by checking the same
+  two parent shas. Any missing fact, and any failed or timed-out read, still
+  stops `base-drift-post-merge`; the Inbox evidence gains a `directParentCheck`
+  field naming what was read.
+- `PATCH /tasks/:taskId` accepts `dispatchAfterTaskId` on the first step of a
+  Chain that has no Run, re-pointing or (with `null`) releasing its Chain
+  binding instead of forcing the Chain to be deleted and instantiated again. A
+  started Chain, a later step, or a standalone task is refused with
+  `chain_binding_immutable_after_start`; an archived, foreign, standalone, or
+  same-chain predecessor with `chain_binding_target_invalid`.
+- An exception thrown while merge readiness evaluates a Chain now requeues the
+  readiness step instead of stopping the merge tail. The retry is bounded by
+  `MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT` (default 3); past the bound the tail
+  stops with `readiness evaluation failed after <n> exception requeues:
+  <message>`. A deliberate refusal, and a missing or mismatched merge-gate
+  operator authorization, still stop the tail on the first occurrence.
 - Retired the `POST /files/mkdir` and `POST /files/move` routes and their
   underlying store operations.
 - Removed `POST /inbox/messages/:messageId/supersede`;
@@ -25,6 +89,14 @@ written.
   stop notices, and an approval decision still closes the gate's sibling cards.
 - The retired `goal-5a0` authorization-marker harness and root
   `test:dependency-gate` script are removed.
+- Removed the `bench-postgres.sh` and `bench-dbtest-concurrency.sh` gate-worker
+  benchmark scripts; gate throughput tuning is closed and the measured ceiling
+  is recorded in operator records outside this repository.
+- The runner no longer writes or reads the `.agentos/task-output-receipt.json`
+  delivery receipt, and the `POST_DELIVERY_DISCONNECT_ACCEPTED` event no longer
+  carries its `localReceipt` and `localReceiptReadError` diagnostics. The
+  server-returned output identity alone authorizes that recovery, which is
+  unchanged; the receipt was diagnostic evidence only.
 - Removed the completed one-shot database backfill and post-delivery audit
   CLIs and their root aliases; upgrades from pre-backfill versions are not
   supported. The unused root `db:export-goal-lineage` and

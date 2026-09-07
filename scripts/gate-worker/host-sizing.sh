@@ -46,8 +46,9 @@ process.stdout.write(String(Math.max(1, Math.floor(availableParallelism() / Numb
 # That was a memory ceiling, which is exactly why these widths come from a
 # stated share of a measured host instead of from a raw core count.
 #
-# Each is overridable so that scripts/gate-worker/bench-dbtest-concurrency.sh
-# can alternate arms over one fixed commit. A gate never chooses them itself.
+# Each is overridable through AGENTOS_GATE_UNIT_LANES and AGENTOS_GATE_DB_LANES
+# so that a measurement can hold one width fixed across runs that would otherwise
+# differ. A gate never chooses them itself.
 GATE_UNIT_LANES="${AGENTOS_GATE_UNIT_LANES:-${GATE_CPUS}}"
 GATE_DB_LANES="${AGENTOS_GATE_DB_LANES:-$(( GATE_CPUS < 2 ? 2 : GATE_CPUS ))}"
 for lane_setting in GATE_UNIT_LANES GATE_DB_LANES; do

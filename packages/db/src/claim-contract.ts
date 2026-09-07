@@ -243,6 +243,14 @@ export type ClaimContract = {
    * than null, when the claim carries no rejection.
    */
   operatorFeedback?: string | null;
+  /**
+   * One line telling a review claim that this chain's brief was amended after
+   * the implementation Run materialized the Specification of record. The
+   * fidelity check has already passed against the materialized text, so the
+   * reviewer is the one who has to know the brief moved under it. Absent,
+   * rather than null, when there was no amendment.
+   */
+  specificationAmendment?: string | null;
   previousRunHandoff: ClaimPreviousRunHandoff | null;
   /**
    * A control-plane selected, exact-head handoff for a fresh Regression Run.

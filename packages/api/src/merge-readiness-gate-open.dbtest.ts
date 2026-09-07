@@ -17,6 +17,7 @@ import {
   type ReleaseMergeLease,
   type WithMergeLease,
 } from "./merge-lease.js";
+import { executorsOnline } from "./merge-executor-daemon-fixture.js";
 import { readinessTick } from "./merge-readiness-worker.js";
 import { evidenceTick } from "./merge-evidence-worker.js";
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
@@ -183,6 +184,7 @@ test("the evidence worker fills a gated readiness card and the readiness worker 
     5,
     releaseLease,
     claimLease,
+    executorsOnline,
   );
   assert.deepEqual(tick, { claimed: 0, authorized: 0, requeued: 0, stopped: 0 });
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.REVIEW);

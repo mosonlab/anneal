@@ -173,3 +173,18 @@ test("every optional step of the new graph ends with a boolean the profile never
   ]);
   assert.deepEqual(plan.dropped, []);
 });
+
+
+test("canonical review rename carries staffing without mutating the retired profile", () => {
+  const source = profile("Review", [{ outputKind: "sol-findings", assigneeAgentId: "operator-agent", include: null }]);
+  const before = JSON.stringify(source);
+  const plan = planStaffingProfileCarry([source], required("review-findings"), { "sol-findings": "review-findings" });
+  assert.deepEqual(plan.profiles[0]!.entries, [{ outputKind: "review-findings", assigneeAgentId: "operator-agent", include: null }]);
+  assert.deepEqual(plan.dropped, []);
+  assert.equal(JSON.stringify(source), before);
+  const collision = planStaffingProfileCarry([
+    profile("Both", [...source.entries, { outputKind: "review-findings", assigneeAgentId: "exact-agent", include: null }]),
+  ], required("review-findings"), { "sol-findings": "review-findings" });
+  assert.equal(collision.profiles[0]!.entries[0]!.assigneeAgentId, "exact-agent");
+  assert.equal(collision.dropped[0]!.reason, "ambiguous-kind");
+});

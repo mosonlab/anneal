@@ -36,6 +36,7 @@ const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   repoId: null,
   archivedAt: null,
   maxSessionsPerTask: 5,
+  spendCap: null,
   failureReason: null,
   scheduleKind: "NOW" as BoardRow["scheduleKind"],
   runAt: null,
@@ -47,6 +48,7 @@ const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   chainId: null,
   chainIndex: null,
   chainLayer: null,
+  templateStepId: null,
   dispatchAfterTaskId: null,
   createdAt: new Date("2026-08-15T00:00:00.000Z"),
   updatedAt: new Date("2026-08-16T00:00:00.000Z"),
@@ -212,8 +214,8 @@ test("the board projection carries every field the board consumes and nothing el
   // Spelled out rather than derived: a field added to the projection is a
   // deliberate act with a payload cost, so it has to be added here too.
   assert.deepEqual(Object.keys(boardCard(row(), null, moveContext)).sort(), [
-    "approvalGate", "assigneeAgent", "assigneeType", "blockedOn", "budgetRemaining", "chainAggregate", "chainId", "chainIndex", "chainName", "chainProgress", "createdAt", "cron",
-    "displayName", "failureReason", "id", "latestRun", "leaseLossRefunds", "mergeOutcome", "moveTargets", "name", "repairOf", "runAt", "scheduleKind", "source", "status",
+    "approvalGate", "assigneeAgent", "assigneeType", "baseline", "blockedOn", "budgetRemaining", "chainAggregate", "chainId", "chainIndex", "chainName", "chainProgress", "createdAt", "cron",
+    "displayName", "failureReason", "id", "latestRun", "leaseLossRefunds", "mergeOutcome", "moveTargets", "name", "readinessGrants", "readinessRequeues", "repairOf", "runAt", "scheduleKind", "source", "spendCapUsage", "status",
     "strandedSalvageBranches", "taskCost", "templateId", "timezone", "updatedAt",
   ]);
 });
@@ -628,11 +630,15 @@ test("blockedOn is projected from the resolved predecessor without storing its s
     latestRun: null,
     strandedSalvageBranches: [],
     taskCost: null,
+    spendCapUsage: null,
     mergeOutcome: null,
     repairOf: null,
     budgetRemaining: true,
     leaseLossRefunds: 0,
     chainAggregate: null,
+    baseline: null,
+    readinessRequeues: 0,
+    readinessGrants: 0,
   });
 });
 
@@ -729,6 +735,25 @@ test("task cost sums every run including failures and marks an estimated summand
   assert.deepEqual(card.latestRun, { id: "r2", runNumber: 2, status: "SUCCEEDED", model: "gpt-5.6-luna:max", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null });
   assert.equal(card.taskCost?.costUsd, "1.45");
   assert.equal(card.taskCost?.estimated, true);
+});
+
+test("a capped task carries its cap beside what its runs have spent against it", () => {
+  const runs = [
+    { id: "r2", runNumber: 2, status: "SUCCEEDED" as const, model: "claude-opus-5", codexServiceTier: "DEFAULT" as const, budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, session: session({ costUsd: new Prisma.Decimal("1.00") }) },
+    { id: "r1", runNumber: 1, status: "FAILED" as const, model: "claude-opus-5", codexServiceTier: "DEFAULT" as const, budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null, session: session({ costUsd: new Prisma.Decimal("0.50") }) },
+  ];
+
+  const capped = boardCard(row({ spendCap: new Prisma.Decimal("1.00"), runs }), null, moveContext);
+  assert.deepEqual(capped.spendCapUsage, { capUsd: "1.00", spentUsd: "1.50", exhausted: true });
+  // Money with cents on the wire, from the one formatter the refusal message,
+  // its metadata and the cap-edit trail also use.
+  assert.match(JSON.stringify(capped), /"spentUsd":"1\.50"/u);
+
+  const roomLeft = boardCard(row({ spendCap: new Prisma.Decimal("2.00"), runs }), null, moveContext);
+  assert.deepEqual(roomLeft.spendCapUsage, { capUsd: "2.00", spentUsd: "1.50", exhausted: false });
+
+  // No cap, nothing to show: the board never displays a limit that is absent.
+  assert.equal(boardCard(row({ runs }), null, moveContext).spendCapUsage, null);
 });
 
 test("board cost preserves its estimate when cache creation is split from cached input", () => {
@@ -1011,9 +1036,10 @@ test("a board card is an order of magnitude smaller than the row it projects", (
   }), null, moveContext);
   // The card carries both cost surfaces — the latest run's own cost and the
   // cross-run task total, ownership and the creation timestamp used for queue
-  // order — so the clean-card bound remains under half the ~2.2KB acceptance
-  // budget even with executable move targets.
-  assert.ok(Buffer.byteLength(JSON.stringify(card)) < 1_100, "a clean card must stay well inside its budget");
+  // order — plus the three merge-tail counters (lease-loss refunds, readiness
+  // requeues and the grants they funded), so the clean-card bound remains at
+  // roughly half the ~2.2KB acceptance budget even with executable move targets.
+  assert.ok(Buffer.byteLength(JSON.stringify(card)) < 1_150, "a clean card must stay well inside its budget");
 });
 
 /* --------------------------------------------------------------- the ETag */

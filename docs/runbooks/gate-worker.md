@@ -66,11 +66,9 @@ database lanes does not move it — 4, 6 and 8 lanes all landed within 3 seconds
 of each other over one fixed commit — because the waves saturate PostgreSQL and
 the CPU share together rather than running out of lanes. `NODE_COMPILE_CACHE`
 was measured and rejected: 80 seconds cold against 82 warm, for 77 MiB of cache.
-Use `scripts/gate-worker/bench-postgres.sh` and
-`scripts/gate-worker/bench-dbtest-concurrency.sh` when changing the database
-runner itself; each alternates its arms over one fixed commit so a tuning claim
-is not inferred from unrelated gate runs. The lane widths are overridable
-(`AGENTOS_GATE_UNIT_LANES`, `AGENTOS_GATE_DB_LANES`) for exactly that purpose; a
+That tuning direction is closed: the ceiling is work-bound, and the measurements
+behind it are recorded in operator records outside this repository. The lane
+widths stay overridable (`AGENTOS_GATE_UNIT_LANES`, `AGENTOS_GATE_DB_LANES`); a
 gate never chooses them itself.
 
 `packages/db` and `packages/api` hand their database files to one pool rather
@@ -103,10 +101,13 @@ ships.
 A full gate can consume a host. The dispatcher cannot know the
 candidate-selected profile before running it, so it rations fixed, measured
 host capacity rather than trying to resize from live CPU or memory readings.
-An explicitly configured primary worker contributes two slots and an explicitly
-configured fallback contributes one. The explicit `--server` form contributes
-one dispatcher slot. The local machine contributes no automatic capacity; it
-adds `AGENTOS_GATE_LOCAL_SLOTS` slots only for an invocation that passes
+An explicitly configured primary worker contributes
+`AGENTOS_GATE_PRIMARY_SLOTS` slots (1 or 2, two when the variable is unset, and
+always the same number as that worker's own `~/gate/worker-capacity`; any other
+value is a usage error at dispatch start) and an explicitly configured fallback
+contributes one. The explicit `--server` form contributes one dispatcher slot.
+The local machine contributes no automatic capacity; it adds
+`AGENTOS_GATE_LOCAL_SLOTS` slots only for an invocation that passes
 `--allow-local` or sets `AGENTOS_GATE_ALLOW_LOCAL=1`. The count defaults to one
 when `AGENTOS_GATE_LOCAL_SLOTS` is unset and is capped at 1024; configured slots
 are named `local-1` through `local-N` (there is no bare `local` slot). Each
@@ -154,13 +155,27 @@ AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" AGENTOS_GATE_SERVER=pr
   used. A broken or unavailable primary slot does not count as busy. A timeout
   shorter than the grace can return `75` without probing fallback; increase
   the timeout or reduce the grace if fallback must be eligible before timeout.
-- All usable slots busy: the dispatcher blocks and re-polls (default every 30s,
-  for 60 minutes — `GATE_DISPATCH_POLL_SECONDS`,
-  `GATE_DISPATCH_TIMEOUT_MINUTES`).
-  On timeout it exits **75** with `GATE DISPATCH: NO SLOT`: nothing ran, no
-  verdict exists, and re-dispatching is the recovery. A timeout that recurs
-  means the queue is systemically full, which is a capacity question, not a
-  code question.
+- All usable slots busy: the dispatcher blocks and re-polls (default every 30s —
+  `GATE_DISPATCH_POLL_SECONDS`). `GATE_DISPATCH_TIMEOUT_MINUTES` (default 60)
+  bounds a queue that is *not moving*, not the wait itself. Every poll reads the
+  pid each busy slot's lock names; when a slot this dispatch was already
+  watching changes hands, a gate that was holding a slot ended, the queue is
+  moving, and the timeout starts again from that moment
+  (`gate-dispatch: the queue moved (slot <slot> changed hands)`). A queue deeper
+  than the timeout divided by a gate's duration therefore keeps waiting instead
+  of being cut off mid-queue — which is what made 16 runners sharing one slot
+  burn a full wait and re-queue at the back. The wait still has an absolute
+  ceiling of twice the timeout, because acquiring a slot is a race rather than a
+  place in a line: a dispatch that keeps losing that race would otherwise watch
+  the queue move forever.
+  A queue where nothing finishes for the whole timeout, and a moving queue that
+  never lets this dispatch in before the ceiling, both exit **75** with
+  `GATE DISPATCH: NO SLOT`: nothing ran, no verdict exists, and re-dispatching is
+  the recovery. The stderr line above it says which of the two happened — a
+  stalled gate is a hung-gate question, a queue that moves without admitting this
+  dispatch is a capacity question, and neither is a code question. A slot that appears in the
+  observation only because its own rule let it (the fallback at the end of its
+  grace) is not turnover, so the grace never extends the timeout.
 - A slot whose lock cannot be *operated* — a read-only slot root, a lock left by
   the pre-#132 dispatcher, a lock naming no pid — is not busy and is never waited
   on. The dispatcher keeps using whatever slots still work; if none do it exits
@@ -169,16 +184,16 @@ AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" AGENTOS_GATE_SERVER=pr
   exits 76 rather than 75. Waiting for a lock nobody can take is waiting for
   nothing, and reporting it as a full queue hides what to fix.
 
-The dispatcher accounts for `remote-1`, `remote-1-2`, `remote-2`, and, when
-local dispatch is enabled, `local-1` through `local-N` in the slot directory
-described below, outside any repository. A direct `merge-gate.sh` bypasses that
-accounting. A direct `remote-gate.sh` bypasses the local lock too, but it cannot
-exceed worker capacity: every installed `run-gate.sh` contends for the
-worker-wide `~/gate/.full-gate.lock` and, only on a capacity-two host,
-`~/gate/.full-gate-2.lock`. Each is held with `flock` for the real process
-lifetime. If an SSH connection drops while its remote process survives, that
-process keeps its worker slot and a later invocation waits instead of exceeding
-the configured capacity.
+The dispatcher accounts for `remote-1`, `remote-1-2` (only with two primary
+slots), `remote-2`, and, when local dispatch is enabled, `local-1` through
+`local-N` in the slot directory described below, outside any repository. A
+direct `merge-gate.sh` bypasses that accounting. A direct `remote-gate.sh`
+bypasses the local lock too, but it cannot exceed worker capacity: every
+installed `run-gate.sh` contends for the worker-wide `~/gate/.full-gate.lock`
+and, only on a capacity-two host, `~/gate/.full-gate-2.lock`. Each is held
+with `flock` for the real process lifetime. If an SSH connection drops while
+its remote process survives, that process keeps its worker slot and a later
+invocation waits instead of exceeding the configured capacity.
 
 That wait is bounded. `run-gate.sh` gives up after `SLOT_WAIT_MINUTES` (default
 20) with `GATE NOT RUN: worker slot wait exceeded <n> minutes` and exit `76`, so
@@ -189,7 +204,9 @@ whose `worker-capacity` says one produced an ssh session that simply never
 returned. The dispatcher also reads the capacity the worker states in its own
 output and logs `gate-dispatch: warning — the primary worker reports
 worker-capacity N but this dispatcher configures M primary slot(s)` when they
-disagree. That warning changes nothing on its own; it names the drift.
+disagree. That warning changes nothing on its own; it names the drift, which
+the operator resolves by setting `RUNNER_GATE_PRIMARY_SLOTS` (below) to the
+worker's capacity or by changing the worker's `worker-capacity`.
 
 Local slots are accounted per runner account: the account that owns
 `AGENTOS_RUNNER_HOME` owns the shared slot directory at
@@ -234,7 +251,7 @@ always arrive together.
 | `1` | `MERGE GATE: FAIL (<step>)` | yes |
 | `2` | usage error | no gate ran |
 | `3` | `MERGE GATE: NOT AUTHORITATIVE` — the run was asked to leave state behind (`--keep-postgres`), or every step passed and the host then failed to finish tearing the run down (`cleanup: ...`) | yes |
-| `75` | `GATE DISPATCH: NO SLOT` — every slot stayed busy until the timeout | no gate ran |
+| `75` | `GATE DISPATCH: NO SLOT` — every slot stayed busy and either none of them changed hands for the whole timeout or none came free for this dispatch before the ceiling of twice the timeout | no gate ran |
 | `76` | `GATE NOT RUN: <reason>` — no configured worker produced a verdict, or a precondition failed: a mirror push failed, a slot lock could not be operated, origin was unreadable, the baseline is absent, the toolchain is incomplete, **the docker preflight found no `docker` or no reachable daemon**, **the wait for a worker execution slot exceeded `SLOT_WAIT_MINUTES`**, a step was stopped from outside before it could be judged, or `merge-gate.sh` died without printing a verdict | no gate ran |
 | `130` / `143` | interrupted — `merge-gate.sh` prints `GATE NOT RUN: <reason>` and exits under the signal that stopped it | no gate ran |
 | `128+N` | the gate process died on signal N without a verdict; `137` is `SIGKILL`, which is almost always the OOM killer | no gate ran |
@@ -258,8 +275,10 @@ promise its container is gone, so it is `3`: not a FAIL, and not authority for
 a merge either.
 
 `75` and `76` are not interchangeable. `75` means at least one slot existed that
-could have been taken and stayed busy for the whole timeout — a queue, so
-re-dispatching later is the fix. `76` means the slot lock itself could not be
+could have been taken and stayed busy: either nothing changed hands for a whole
+timeout — a queue that stopped moving — or the queue kept moving without this
+dispatch ever winning a slot before the ceiling. Either way re-dispatching later
+is the fix. `76` means the slot lock itself could not be
 operated (a read-only cache directory, a lock left by the pre-#132 dispatcher, a
 lock naming no pid): waiting changes nothing, and the message names what to
 clear. A slot whose lock is broken is never counted as busy, so a run that sees
@@ -367,9 +386,16 @@ single-server mode with one remote slot. When
 `RUNNER_GATE_FALLBACK_SERVER=<ssh-alias>` is also configured, the fallback must
 be a different destination; the runner exposes the pair as
 `AGENTOS_GATE_PRIMARY_SERVER` and `AGENTOS_GATE_FALLBACK_SERVER` and does not
-set `AGENTOS_GATE_SERVER`. This gives the primary two remote slots
-(`remote-1`, `remote-1-2`) and the fallback one (`remote-2`), tried in that
-order before polling. To contribute local capacity, also set
+set `AGENTOS_GATE_SERVER`. It also passes the primary slot count as
+`AGENTOS_GATE_PRIMARY_SLOTS`, taken from `RUNNER_GATE_PRIMARY_SLOTS` (1 or 2,
+default 2; any other value stops the runner at startup naming the variable).
+That number must equal the primary worker's `~/gate/worker-capacity`: a
+dispatcher configuring more slots than the worker will run only produces an
+ssh session holding a dispatcher slot while it waits for the worker's execution
+lock. With the default this gives the primary two remote slots (`remote-1`,
+`remote-1-2`) and the fallback one (`remote-2`), tried in that order before
+polling; with `RUNNER_GATE_PRIMARY_SLOTS=1` the primary has `remote-1` alone.
+To contribute local capacity, also set
 `RUNNER_GATE_LOCAL_SLOTS=<positive integer, at most 1024>` on the runner. The
 runner then enables local dispatch and passes the count as
 `AGENTOS_GATE_LOCAL_SLOTS`; local slots are tried before the configured remote
@@ -607,9 +633,14 @@ docker rm -f <name>
 ```
 
 **`GATE DISPATCH: NO SLOT` keeps recurring** — the configured slots are
-systemically full. That is a capacity signal, not an error to retry harder:
-either stagger the merges, or repeat the same-commit overlap acceptance before
-changing host capacity.
+systemically full. Read the stderr line above it: `no slot freed up or changed
+hands` means no gate finished in a whole timeout, a stalled queue rather than a
+deep one, so check the workers for a gate that is not progressing; `no slot came
+free for this dispatch` means the queue was moving the whole time and never had
+room for this one, which is capacity. If the gates are moving and this
+still recurs, it is a capacity signal, not an error to retry harder: either
+stagger the merges, or repeat the same-commit overlap acceptance before changing
+host capacity.
 
 **`GATE NOT RUN: no configured worker produced a verdict`** with a stderr line
 naming `broken:` slots or `the locks of <slots> are unusable` — the named slots

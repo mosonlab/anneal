@@ -14,7 +14,7 @@ import {
   SymlinkError,
 } from "../files/store.js";
 import type { SpecificationReader } from "../specification-fidelity.js";
-import { createRunnerRegistry } from "../runners.js";
+import type { RunnerRegistry } from "../runners.js";
 import { appendRunActivity, fencedActivityInput } from "../run-lifecycle.js";
 import type { Principal } from "../auth.js";
 import type { ProjectBootstrapLoaders } from "../project-bootstrap.js";
@@ -34,6 +34,12 @@ export interface LiveAppOptions {
   specificationReader?: SpecificationReader | null;
   /** Source loaders used by POST /projects; injectable for route tests. */
   projectBootstrapLoaders?: Partial<ProjectBootstrapLoaders>;
+  /**
+   * The daemon registry `GET /runners` reports from. The entrypoint passes its
+   * own so the readiness worker reads the same liveness this app records; an
+   * app without one keeps a private registry, as every test app does.
+   */
+  runnerRegistry?: RunnerRegistry;
 }
 
 export type RouteDeps = {
@@ -43,7 +49,7 @@ export type RouteDeps = {
   projectBootstrapLoaders: ProjectBootstrapLoaders;
   releaseChainLease: ReleaseMergeLease;
   readLeaseHolder: MergeLeaseHolderReader;
-  runners: ReturnType<typeof createRunnerRegistry>;
+  runners: RunnerRegistry;
   appendFencedActivity: ReturnType<typeof createAppendFencedActivityHandler>;
 };
 
@@ -85,7 +91,7 @@ export const validated = (context: Context, payload: unknown): Response => {
 };
 
 export const FILE_WRITE_LIMIT = 25 * 1024 * 1024;
-class PayloadTooLargeError extends Error {}
+export class PayloadTooLargeError extends Error {}
 
 export const readBoundedBody = async (request: Request, limit: number): Promise<Buffer> => {
   const length = request.headers.get("Content-Length");
@@ -100,7 +106,7 @@ export const readBoundedBody = async (request: Request, limit: number): Promise<
       if (done) break;
       total += value.byteLength;
       if (total > limit) {
-        await reader.cancel("File upload exceeds limit");
+        await reader.cancel("Request body exceeds limit");
         throw new PayloadTooLargeError();
       }
       chunks.push(value);
@@ -110,6 +116,17 @@ export const readBoundedBody = async (request: Request, limit: number): Promise<
   }
   return Buffer.concat(chunks, total);
 };
+
+/**
+ * `readJson` for a route that must refuse an oversized body rather than buffer
+ * it. The limit is enforced while the body streams, so a client that lies in
+ * `Content-Length` still cannot make this process hold more than `limit` bytes.
+ */
+export const readBoundedJson = async <T>(
+  request: Request,
+  schema: z.ZodType<T>,
+  limit: number,
+): Promise<T> => schema.parse(JSON.parse((await readBoundedBody(request, limit)).toString("utf8")));
 
 export const fileErrorResponse = (context: Context, error: unknown): Response | undefined => {
   if (error instanceof PayloadTooLargeError) return context.json({ error: "File exceeds 25 MB upload limit" }, 413);

@@ -39,7 +39,7 @@ export const RUNNER_DEFINITIONS: Readonly<Record<RunnerKind, AdapterDeclaration>
 
 const COMMON_PROTECTED_SECRET_ENVIRONMENT = [
   "GIT_CONFIG_GLOBAL", "AGENTOS_GATE_SERVER", "AGENTOS_GATE_PRIMARY_SERVER", "AGENTOS_GATE_FALLBACK_SERVER",
-  "AGENTOS_GATE_ALLOW_LOCAL", "AGENTOS_GATE_LOCAL_SLOTS",
+  "AGENTOS_GATE_ALLOW_LOCAL", "AGENTOS_GATE_LOCAL_SLOTS", "AGENTOS_GATE_PRIMARY_SLOTS",
   "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
 ] as const;
 
@@ -84,6 +84,11 @@ export const buildPrompt = (claim: ClaimedTask): string => [
   "",
   `Task: ${claim.task.name}`,
   claim.task.description,
+  ...(claim.specificationAmendment ? [
+    "",
+    "Specification of record amended after materialization:",
+    `- ${claim.specificationAmendment}`,
+  ] : []),
   ...(claim.operatorNotes.length > 0 ? [
     "",
     "Operator notes:",
@@ -156,7 +161,7 @@ const gitConfigOverrides = (entries: readonly (readonly [string, string])[]): No
 
 export const buildChildEnvironment = (
   config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix" | "workspaceRoot" | "hostProofSlots">
-    & Partial<Pick<RunnerConfig, "proxyEnvironment" | "gateServer" | "gateFallbackServer" | "gateLocalSlots">>,
+    & Partial<Pick<RunnerConfig, "proxyEnvironment" | "gateServer" | "gateFallbackServer" | "gateLocalSlots" | "gatePrimarySlots">>,
   claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner" | "agent" | "task">,
   scratch: AgentScratch,
   workspacePath: string,
@@ -176,6 +181,11 @@ export const buildChildEnvironment = (
     delete environment.AGENTOS_GATE_SERVER;
     environment.AGENTOS_GATE_PRIMARY_SERVER = config.gateServer;
     environment.AGENTOS_GATE_FALLBACK_SERVER = config.gateFallbackServer;
+    // Only the two-host topology has a primary worker whose slot count can
+    // differ from the dispatcher's default; single-server mode has one slot.
+    if (config.gatePrimarySlots !== undefined) {
+      environment.AGENTOS_GATE_PRIMARY_SLOTS = String(config.gatePrimarySlots);
+    }
   }
   const taskSecrets = Object.fromEntries(Object.entries(claim.secrets).filter(([name]) =>
     !PROTECTED_SECRET_ENVIRONMENT.has(name)

@@ -7,6 +7,8 @@ import {
   type Run,
   RunnerKind,
   RunnerPreference,
+  RunStatus,
+  TaskStatus,
 } from "@prisma/client";
 
 import { catalogRunnerForModel, DIRECT_TEMPLATE_NAME } from "./agent-contract.js";
@@ -26,6 +28,7 @@ import {
   stopStateFor,
 } from "./merge-integrator-db.js";
 import { runnerFor } from "./model-routing.js";
+import { spendCapExhausted, taskSpendUsd, usd } from "./spend-cap.js";
 import { runOwnedHead } from "./run-head.js";
 import { stepRole } from "./step-role.js";
 
@@ -310,7 +313,16 @@ export const isArchivedTaskError = (error: unknown): error is ArchivedTaskError 
   error instanceof Error && error.name === "ArchivedTaskError";
 
 export class PinnedBaseCommitError extends Error {
-  constructor(readonly taskId: string, readonly baseFromStepIndex: number, detail: string) {
+  constructor(
+    readonly taskId: string,
+    readonly baseFromStepIndex: number,
+    detail: string,
+    /** Present only when the refusal is an unpublished base: the implementation
+     *  Task whose Runs were read, and the base commit they recorded without
+     *  ever publishing it (null when no Run recorded one at all). An operator
+     *  reading the park needs both to tell this apart from a transport fault. */
+    readonly unpublishedBase?: { implementationTaskId: string; baseSha: string | null },
+  ) {
     super(`Pinned task ${taskId} cannot activate from step ${baseFromStepIndex}: ${detail}`);
     this.name = "PinnedBaseCommitError";
   }
@@ -357,15 +369,62 @@ const implementationHeadFromOutput = (
   return output.headSha;
 };
 
+/** The marker written beside every `pushedBranch` ACK: a push of this Run's
+ *  branch carries the commit it was provisioned at, so an acknowledged push is
+ *  the moment its `baseSha` became fetchable from the remote. The first ACK
+ *  wins — a second publication write never restamps it — and a Run that never
+ *  recorded a base has nothing to mark. */
+export const basePublishedStamp = (
+  run: { baseSha: string | null; basePublishedAt: Date | null },
+  now: Date,
+): Date | null => run.basePublishedAt ?? (run.baseSha ? now : null);
+
+/**
+ * Which of an implementation Task's Runs may name the pinned base: one that
+ * published the commit. A `baseSha` is recorded when the workspace is
+ * provisioned, before anything is pushed, so a Run that dies first leaves a
+ * base that lives in a discarded workspace and nowhere else — pinning to it
+ * strands every dependent step on the runner with `upload-pack: not our ref`.
+ * Rows written before `basePublishedAt` existed carry no marker, so the
+ * evidence this repository already trusts answers for them: `pushedBranch`,
+ * written from the ref actually handed to `git push` (see `resolveRunBranches`,
+ * which reads it and nothing else). A Run that pushed and then died in `gh` is
+ * recorded FAILED with the ref on the remote, so its outcome alone would strand
+ * the range past its own commits. A succeeded Run also qualifies: a committing
+ * step cannot succeed without publishing, and it is the only reading left for a
+ * pre-marker row whose ACK predates `pushedBranch` being written at all.
+ */
+const publishedBaseFilter = {
+  OR: [
+    { basePublishedAt: { not: null } },
+    { basePublishedAt: null, pushedBranch: { not: null } },
+    { basePublishedAt: null, status: RunStatus.SUCCEEDED },
+  ],
+} satisfies Prisma.RunWhereInput;
+
 /**
  * Where the implementation Task actually started, from the platform's own
  * record rather than a SHA an agent typed: the earliest Run of that Task that
- * recorded a provisioning `baseSha`, which is the chain's specification commit.
- * A later recovery Run starts at the prior head or at a salvaged WIP commit, so
- * only the earliest recorded base names the range every review sibling and
- * every later fix or regression step must see. Null when no Run recorded one.
+ * published a provisioning `baseSha`, which is the chain's specification
+ * commit. A later recovery Run starts at the prior head or at a salvaged WIP
+ * commit, so only the earliest published base names the range every review
+ * sibling and every later fix or regression step must see. Null when no Run
+ * published one.
  */
 export const platformImplementationBaseSha = async (tx: Tx, taskId: string): Promise<string | null> => {
+  const run = await tx.run.findFirst({
+    where: { taskId, baseSha: { not: null }, ...publishedBaseFilter },
+    orderBy: { runNumber: "asc" },
+    select: { baseSha: true },
+  });
+  return run?.baseSha ?? null;
+};
+
+/** The earliest base the implementation Task's Runs recorded, published or
+ *  not. This names the offending commit when nothing is publishable, so a
+ *  refusal can say which commit no Run put on the remote — never what a range
+ *  is pinned to, and never what an authored body is checked against. */
+export const recordedImplementationBaseSha = async (tx: Tx, taskId: string): Promise<string | null> => {
   const run = await tx.run.findFirst({
     where: { taskId, baseSha: { not: null } },
     orderBy: { runNumber: "asc" },
@@ -414,10 +473,17 @@ export const pinnedImplementationRange = async (
   const implementationHeadSha = implementationHeadFromOutput(task.id, baseFromStepIndex, source);
   const implementationBaseSha = await platformImplementationBaseSha(tx, source.taskId);
   if (!implementationBaseSha) {
+    // The commit an unpublished Run recorded is named, not used: it is what
+    // tells an operator that a dead Run's local base poisoned this chain
+    // rather than that the runner lost its remote.
+    const recorded = await recordedImplementationBaseSha(tx, source.taskId);
     throw new PinnedBaseCommitError(
       task.id,
       baseFromStepIndex,
-      `implementation task ${source.taskId} has no Run with a recorded baseSha`,
+      recorded
+        ? `implementation task ${source.taskId} recorded baseSha ${recorded}, but no Run published a base`
+        : `implementation task ${source.taskId} has no Run that published a baseSha`,
+      { implementationTaskId: source.taskId, baseSha: recorded },
     );
   }
   if (!IMPLEMENTATION_SHA.test(implementationBaseSha)) {
@@ -868,6 +934,7 @@ export type OpenRunRefusal =
   | OpenRunRefusalShape<"task-not-integrator", "invalid-request">
   | OpenRunRefusalShape<"run-budget-exhausted", "conflict">
   | OpenRunRefusalShape<"lease-loss-refunds-exhausted", "conflict">
+  | OpenRunRefusalShape<"spend-cap-exhausted", "conflict">
   | OpenRunRefusalShape<"chain-held", "chain-held">;
 
 /**
@@ -891,6 +958,7 @@ const dispositionByCode = {
   "task-not-integrator": "fault",
   "run-budget-exhausted": "fault",
   "lease-loss-refunds-exhausted": "fault",
+  "spend-cap-exhausted": "fault",
   "chain-held": "held",
 } as const satisfies Record<OpenRunRefusal["code"], OpenRunDisposition>;
 
@@ -1143,6 +1211,55 @@ export const openRun = async (
     }
   }
 
+  // Money, not attempts. `maxSessionsPerTask`, `budgetGrants` and the
+  // lease-loss refund bound all count attempts, so a task whose attempts each
+  // cost more than its operator expected could spend past `Task.spendCap`
+  // without a single decision point reading it. It is read here, after the
+  // hold check — a held chain is queueing nothing and must not be parked in
+  // REVIEW — so every replacement intent crosses it exactly once.
+  //
+  // The consequence is the caller's, as it is for every other refusal code: a
+  // birth attempted through `attemptRunBirth` is rolled back to a savepoint, so
+  // a write made here would not survive on those paths and would be written
+  // twice on the ones where it did. `recordRunBirthRefusal` below is the shared
+  // write, and the callers that used to raise this refusal out of their own
+  // transaction now park the task with it instead — a spend limit crossed
+  // silently by arriving through the wrong caller is the defect this closes.
+  const spendCap = task.spendCap ?? null;
+  if (spendCap !== null) {
+    const costedRuns = await tx.run.findMany({
+      where: { taskId: task.id },
+      select: {
+        model: true,
+        session: {
+          select: {
+            costUsd: true,
+            inputTokens: true,
+            cachedInputTokens: true,
+            cacheCreationInputTokens: true,
+            outputTokens: true,
+            nativeChildUsed: true,
+          },
+        },
+      },
+    });
+    const spentUsd = taskSpendUsd(costedRuns);
+    if (spendCapExhausted(spendCap, spentUsd)) {
+      const cap = usd(spendCap);
+      const spent = usd(spentUsd);
+      const message = `Spend cap $${cap} reached:`
+        + ` $${spent} spent across ${costedRuns.length}`
+        + ` run${costedRuns.length === 1 ? "" : "s"}; raise or clear spendCap to continue`;
+      return openRunRefusal(
+        "spend-cap-exhausted",
+        "conflict",
+        message,
+        { spendCapUsd: cap, spentUsd: spent, runs: costedRuns.length },
+        { taskId: task.id, taskName: task.name },
+      );
+    }
+  }
+
   // Every intent asks the same module, so no arm can put a Step on a different
   // branch from the rest of its Chain, and no caller has to fill in a head.
   const branches = await resolveRunBranches(tx, task, {
@@ -1292,6 +1409,63 @@ export const attemptRunBirth = async (
   if (executeRaw) await executeRaw(`RELEASE SAVEPOINT ${RUN_BIRTH_SAVEPOINT}`);
   return { outcome: "opened", run: opened.run };
 };
+
+/**
+ * What a park says about the refusal it records, for every caller that writes
+ * one. The code is what an operator filters a REVIEW by, and it is the whole
+ * of the metadata for every refusal but one: a refusal's `detail` belongs to
+ * the message and to `errorForOpenRunRefusal`, not to a shape callers already
+ * record. The spend cap is the exception, because its park *is* the operator's
+ * only record of which cap refused the attempt: it adds the formatted
+ * `spendCapUsd`, `spentUsd` and `runs` the handbook promises beside the code.
+ * Callers add their own keys around this; those win, because a caller naming a
+ * task or a schedule of its own knows which row it meant.
+ */
+export const runBirthRefusalMetadata = (
+  refusal: OpenRunRefusal,
+): Record<string, string | number | boolean | null> =>
+  (refusal.code === "spend-cap-exhausted"
+    ? { ...refusal.detail, refusal: refusal.code }
+    : { refusal: refusal.code });
+
+/**
+ * The park a Run-birth refusal leaves behind, for the callers that have none of
+ * their own. `reconcile`, `workspace-reclaim`, `scheduler` and the chain
+ * activation paths each write their own REVIEW and named activity, shaped by
+ * what the refusal means to them; the callers that instead *raised* the refusal
+ * wrote nothing, and raising rolls their transaction back, so a refusal that
+ * arrived through one of them left no durable trace at all. This is the write
+ * they were missing. It must be called on a path that goes on to commit —
+ * never before a `throw`, and never inside `attemptRunBirth`'s savepoint.
+ */
+export const recordRunBirthRefusal = async (
+  tx: Tx,
+  taskId: string,
+  refusal: OpenRunRefusal,
+): Promise<void> => {
+  await tx.task.update({
+    where: { id: taskId },
+    data: { status: TaskStatus.REVIEW, failureReason: refusal.message },
+  });
+  await tx.taskActivity.create({
+    data: {
+      taskId,
+      actorType: "control-plane",
+      body: `Run birth refused: ${refusal.message}`,
+      metadata: runBirthRefusalMetadata(refusal),
+    },
+  });
+};
+
+/**
+ * A refusal a caller must park rather than raise. `spend-cap-exhausted` is the
+ * only one: every other code either belongs to a caller that already parks it,
+ * or is an invariant failure whose honest answer is an error. A spend cap is an
+ * operator's own limit, and rolling its refusal back would delete the very
+ * record that tells them which cap to raise.
+ */
+export const parksInsteadOfRaising = (refusal: OpenRunRefusal): boolean =>
+  refusal.code === "spend-cap-exhausted";
 
 export const errorForOpenRunRefusal = (refusal: OpenRunRefusal): Error => {
   if (refusal.reason === "archived-task") {

@@ -10,9 +10,9 @@ import type { RunnerConfig } from "./config.js";
 import { runCommand } from "./exec.js";
 import { workspaceEnvironment, type Workspace } from "./workspace.js";
 
-const HANDOFF_SCHEMA_VERSION = 1;
+export const HANDOFF_SCHEMA_VERSION = 1;
 const MAX_HANDOFF_BYTES = 32 * 1024;
-const SHA = /^[0-9a-f]{40}$/u;
+export const HANDOFF_SHA = /^[0-9a-f]{40}$/u;
 const TARGET_FETCH_FAILURE_REASON = "target-fetch-failed" as const;
 
 type RegressionOutputHandoffSuccess = {
@@ -35,12 +35,14 @@ export type RegressionHandoffClaim = {
   run: Pick<ClaimedTask["run"], "id">;
 };
 
-const handoffPath = (workspace: Workspace): string =>
-  join(workspace.path, ".agentos", "regression-output.json");
-
-const readHandoffFile = async (
+/** Read one script-authored handoff file out of the workspace scratch
+ * directory, refusing anything that is not a bounded plain file. Shared by
+ * every mechanical deliverable that crosses the Runner's control-plane seam. */
+export const readWorkspaceHandoffFile = async (
   config: RunnerConfig,
   workspace: Workspace,
+  fileName: string,
+  label: string,
 ): Promise<string | null> => {
   const output = await runCommand(
     config.runAsPrefix,
@@ -68,15 +70,15 @@ if [ "$size" -gt "${MAX_HANDOFF_BYTES}" ]; then
 fi
 printf 'PRESENT\n'
 cat -- "$path"
-`, "agentos-regression-output", handoffPath(workspace)],
+`, "agentos-workspace-handoff", join(workspace.path, ".agentos", fileName)],
     workspace.path,
     workspaceEnvironment(config),
   );
   if (output === "ABSENT") return null;
   if (output.startsWith("INVALID:")) {
-    throw new Error(`Regression output handoff is invalid: ${output.slice("INVALID:".length)}`);
+    throw new Error(`${label} handoff is invalid: ${output.slice("INVALID:".length)}`);
   }
-  if (!output.startsWith("PRESENT\n")) throw new Error("Regression output handoff reader returned an unknown result");
+  if (!output.startsWith("PRESENT\n")) throw new Error(`${label} handoff reader returned an unknown result`);
   return output.slice("PRESENT\n".length);
 };
 
@@ -91,7 +93,7 @@ export const readRegressionOutputHandoff = async (
   workspace: Workspace,
 ): Promise<RegressionOutputHandoff | null> => {
   if (claim.task.templateStep?.outputKind !== REGRESSION_VERIFICATION_OUTPUT_KIND) return null;
-  const raw = await readHandoffFile(config, workspace);
+  const raw = await readWorkspaceHandoffFile(config, workspace, "regression-output.json", "Regression output");
   if (raw === null) return null;
 
   let value: Record<string, unknown>;
@@ -116,7 +118,7 @@ export const readRegressionOutputHandoff = async (
     };
   }
   if (typeof value.body !== "string") throw new Error("Regression output handoff body is not a string");
-  if (typeof value.commitSha !== "string" || !SHA.test(value.commitSha)) {
+  if (typeof value.commitSha !== "string" || !HANDOFF_SHA.test(value.commitSha)) {
     throw new Error("Regression output handoff commitSha is invalid");
   }
 

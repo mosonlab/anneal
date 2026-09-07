@@ -43,6 +43,7 @@ const BASE = "b".repeat(40);
 const BRANCH = "agentos/repair-test";
 const RESOLVED = "c".repeat(40);
 const REPAIRED = "d".repeat(40);
+const REPAIRED_AGAIN = "e".repeat(40);
 const exec = promisify(execFile);
 
 let seedCounter = 0;
@@ -51,7 +52,7 @@ let seedCounter = 0;
 // both review reports already persisted. The repair task is chain-detached, so
 // these are the bodies it can only see if the repair prompt carries them.
 const IMPLEMENTATION_BODY = "Feature brief: reject unregistered graphs at every entry point. Acceptance: the webhook and manual fire paths refuse them too.";
-const SOL_FINDINGS_BODY = "sol-findings: MF-2 the HTTP layer validates but the webhook path calls the executor directly.";
+const SOL_FINDINGS_BODY = "review-findings: MF-2 the HTTP layer validates but the webhook path calls the executor directly.";
 const BLIND_FINDINGS_BODY = "blind-findings: the manual fire path repeats the same bypass and the board reads the retired field.";
 
 type RegressionSeedOptions = {
@@ -133,12 +134,12 @@ const seedRegression = async (options: RegressionSeedOptions = {}) => {
   for (const prior of options.withLibrarian
     ? [
       { index: 4, name: "Implementation", kind: "implementation", body: IMPLEMENTATION_BODY },
-      { index: 5, name: "Sol review", kind: "sol-findings", body: SOL_FINDINGS_BODY },
+      { index: 5, name: "Sol review", kind: "review-findings", body: SOL_FINDINGS_BODY },
       { index: 6, name: "Blind review", kind: "blind-findings", body: BLIND_FINDINGS_BODY },
     ]
     : [
       { index: 0, name: "Implementation", kind: "implementation", body: IMPLEMENTATION_BODY },
-      { index: 1, name: "Sol review", kind: "sol-findings", body: SOL_FINDINGS_BODY },
+      { index: 1, name: "Sol review", kind: "review-findings", body: SOL_FINDINGS_BODY },
       { index: 2, name: "Blind review", kind: "blind-findings", body: BLIND_FINDINGS_BODY },
     ]) {
     const step = await db.taskTemplateStep.create({ data: {
@@ -612,6 +613,76 @@ test("a refresh conflict creates exactly one resolver and its completion re-runs
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
 });
 
+test("a resolver result whose tradeOffs entries are objects still binds start to target", async () => {
+  // The role prompt asks the resolver to record "the exact trade-off", which a
+  // model renders as an entry per conflicting file. A repair that committed a
+  // real merge is accepted rather than rejected as malformed.
+  const seeded = await exercise("refresh-conflict");
+  const repair = await repairFor(seeded, "refresh-conflict");
+  await completeRepair(seeded, repair.id, JSON.stringify({
+    schemaVersion: 1,
+    outcome: "resolved",
+    startHeadSha: HEAD,
+    targetHeadSha: BASE,
+    resolvedHeadSha: RESOLVED,
+    tradeOffs: [{
+      file: "packages/db/src/merge-tail.ts",
+      decision: "kept main's fail-loud rejection",
+      reason: "the branch's fallback contradicts current main's stated goal",
+      intentPreserved: true,
+    }],
+    changedTestExpectations: [],
+  }));
+
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: repair.id } })).status, TaskStatus.DONE);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.TODO);
+  const result = latestMarker(await readMarkers(db, seeded.regression.id), "repairResult");
+  assert.equal(result?.state, null);
+  assert.equal(result?.startHeadSha, HEAD);
+  assert.equal(result?.raw.targetHeadSha, BASE);
+  assert.equal(result?.resolvedHeadSha, RESOLVED);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
+
+  const claimed = await claimNext();
+  assert.equal(claimed.status, 200);
+  const body = claimed.body as {
+    regressionRepairHandoff: { repair: { kind: string; taskId: string; resolvedHeadSha: string } };
+  };
+  assert.equal(body.regressionRepairHandoff.repair.kind, "refresh-conflict");
+  assert.equal(body.regressionRepairHandoff.repair.taskId, repair.id);
+  assert.equal(body.regressionRepairHandoff.repair.resolvedHeadSha, RESOLVED);
+});
+
+test("a rejected resolver output records its offending key and the retry refusal names the repair task", async () => {
+  const seeded = await exercise("refresh-conflict");
+  const repair = await repairFor(seeded, "refresh-conflict");
+  await completeRepair(seeded, repair.id, JSON.stringify({
+    schemaVersion: 1,
+    outcome: "resolved",
+    startHeadSha: HEAD,
+    targetHeadSha: BASE,
+    resolvedHeadSha: RESOLVED,
+    tradeOffs: [42],
+    changedTestExpectations: [],
+  }));
+
+  // The rejection is on the resolver's own card, with the key that failed.
+  const rejection = latestMarker(await readMarkers(db, repair.id), "repairResult");
+  assert.equal(rejection?.state, "invalid-output");
+  assert.equal(rejection?.raw.rejectedKey, "tradeOffs");
+  assert.match(String(rejection?.raw.reason ?? ""), /tradeOffs/u);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.REVIEW);
+
+  // An operator retry of the parked Regression is refused, and the refusal says
+  // which repair task produced the output that was thrown away.
+  await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.TODO } });
+  const retry = await db.$transaction((tx) => enqueueTaskRun(tx, seeded.regression.id));
+  assert.equal((await claimNext()).status, 204);
+  const stopped = await db.run.findUniqueOrThrow({ where: { id: retry.id } });
+  assert.equal(stopped.status, "FAILED");
+  assert.match(stopped.failureReason ?? "", new RegExp(`repair task ${repair.id} returned invalid output`, "u"));
+});
+
 test("a renamed canonical resolver still receives the refresh-conflict repair", async () => {
   // R9: `canonicalRole` is the Agent's identity and `name` is the operator's
   // label. Addressing the resolver by name meant a legitimate rename turned
@@ -628,7 +699,7 @@ test("a renamed canonical resolver still receives the refresh-conflict repair", 
   }), 0);
 });
 
-test("a gate FAIL is repaired twice and the third FAIL escalates with both heads in activity", async () => {
+test("a gate FAIL is repaired three times and the fourth FAIL escalates with both heads in activity", async () => {
   const seeded = await exercise("gate-fail");
   const first = await repairFor(seeded, "gate-fix");
   assert.equal((await db.agent.findUniqueOrThrow({ where: { id: first.assigneeAgentId! } })).name, "senior-dev-astra-medium");
@@ -646,9 +717,18 @@ test("a gate FAIL is repaired twice and the third FAIL escalates with both heads
   await completeRepair(seeded, second.id, "Fixed the remaining failure and reran the affected suite.", REPAIRED);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 3);
   assert.equal(await failRegressionAgain(seeded, "gate-fail", 3, REPAIRED), "handled");
-  assert.equal(await repairCount(seeded), 2);
+  assert.equal(await repairCount(seeded), 3);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
+  const third = await db.task.findFirstOrThrow({
+    where: { projectId: seeded.project.id, name: "Autonomous merge tail: gate-fix" },
+    orderBy: { createdAt: "desc" },
+  });
+  await completeRepair(seeded, third.id, "Fixed the last failure and reran the affected suite.", REPAIRED_AGAIN);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 4);
+  assert.equal(await failRegressionAgain(seeded, "gate-fail", 4, REPAIRED_AGAIN), "handled");
+  assert.equal(await repairCount(seeded), 3);
   const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
-  assert.match(notice.body, /after 2 automatic repair attempts/u);
+  assert.match(notice.body, /after 3 automatic repair attempts/u);
   const trail = await db.taskActivity.findMany({ where: { taskId: seeded.regression.id }, select: { body: true } });
   assert.match(trail.map(({ body }) => body).join("\n"), new RegExp(`${HEAD}.*${BASE}`, "s"));
 });
@@ -679,7 +759,7 @@ test("a gate-fix prompt renders its failure excerpt while other repair prompts r
   const reviewContext = [
     "Persisted outputs from prior template steps:",
     `## Implementation (implementation)\n${IMPLEMENTATION_BODY}`,
-    `## Sol review (sol-findings)\n${SOL_FINDINGS_BODY}`,
+    `## Sol review (review-findings)\n${SOL_FINDINGS_BODY}`,
     `## Blind review (blind-findings)\n${BLIND_FINDINGS_BODY}`,
   ].join("\n\n");
   assert.equal(reviewRepair.description, [
@@ -704,7 +784,7 @@ test("a gate-fix prompt renders its failure excerpt while other repair prompts r
   ].join("\n\n"));
 });
 
-test("a semantic FAIL skips the gate path and is repaired twice before it escalates", async () => {
+test("a semantic FAIL skips the gate path and is repaired three times before it escalates", async () => {
   const seeded = await exercise("review-fail");
   const first = await repairFor(seeded, "review-fix");
   assert.equal((await db.agent.findUniqueOrThrow({ where: { id: first.assigneeAgentId! } })).name, "senior-dev-astra-medium");
@@ -723,9 +803,18 @@ test("a semantic FAIL skips the gate path and is repaired twice before it escala
   await completeRepair(seeded, second.id, "Closed the remaining finding and reran its focused regression.", REPAIRED);
   assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 3);
   assert.equal(await failRegressionAgain(seeded, "review-fail", 3, REPAIRED), "handled");
-  assert.equal(await repairCount(seeded), 2);
+  assert.equal(await repairCount(seeded), 3);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
+  const third = await db.task.findFirstOrThrow({
+    where: { projectId: seeded.project.id, name: "Autonomous merge tail: review-fix" },
+    orderBy: { createdAt: "desc" },
+  });
+  await completeRepair(seeded, third.id, "Closed the last finding and reran its focused regression.", REPAIRED_AGAIN);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 4);
+  assert.equal(await failRegressionAgain(seeded, "review-fail", 4, REPAIRED_AGAIN), "handled");
+  assert.equal(await repairCount(seeded), 3);
   const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
-  assert.match(notice.body, /after 2 automatic repair attempts/u);
+  assert.match(notice.body, /after 3 automatic repair attempts/u);
 });
 
 test("all five merge-tail repairs grant the sixth Regression run without changing the configured budget", async () => {
@@ -745,8 +834,8 @@ test("all five merge-tail repairs grant the sixth Regression run without changin
     await completeRepair(seeded, repair.id, output, headSha);
   };
 
-  // The repair cap is one refresh conflict plus two attempts for each review
-  // and gate failure. Every successful repair queues a fresh Regression Run;
+  // The repair cap is one refresh conflict plus three attempts for each review
+  // and gate failure; five repairs stay inside it. Every successful repair queues a fresh Regression Run;
   // only those platform requeues should accumulate grants.
   await completeLatest("review-fix", repairOutput, heads[1]!);
   assert.equal(await failRegressionAgain(seeded, "gate-fail", 2, heads[1]!), "handled");

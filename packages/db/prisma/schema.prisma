@@ -165,6 +165,20 @@ enum MergeRecoveryRefusalCode {
   HEAD_ADOPTION_CONFLICT         @map("head-adoption-conflict")
   PRE_INTENT                     @map("pre-intent")
   TARGET_BRANCH_MISMATCH         @map("target-branch-mismatch")
+  WAITING_CEILING                @map("waiting-ceiling")
+  TRANSPORT_CEILING              @map("transport-ceiling")
+  VALIDATION_BUDGET              @map("validation-budget")
+}
+
+/// Why one base-drift classification tick did not conclude. Only VALIDATION —
+/// a classification that ran against real facts and failed — spends the
+/// bounded validation budget; WAITING (the chain's own Run is still active)
+/// and TRANSPORT (the repository read failed) are held on their own backoff
+/// and their own elapsed-time ceilings.
+enum MergeRecoveryRetryClass {
+  WAITING    @map("waiting")
+  TRANSPORT  @map("transport")
+  VALIDATION @map("validation")
 }
 
 enum MergeLeaseEventState {
@@ -763,7 +777,23 @@ model MergeRecoveryAttempt {
   sourceStopId            String
   attempt                 Int
   status                  MergeRecoveryStatus       @default(VALIDATING)
+  /// Per-class classification-failure counters. Only `validationAttempts` is
+  /// budgeted by count; the other two are bounded by elapsed time alone.
   validationAttempts      Int                       @default(0)
+  waitingAttempts         Int                       @default(0)
+  transportAttempts       Int                       @default(0)
+  /// First failure of each class, and the moment the next tick may classify
+  /// this attempt again. A null first-failure time means the class has never
+  /// failed, so its elapsed time is zero.
+  validationFirstAt       DateTime?
+  waitingFirstAt          DateTime?
+  transportFirstAt        DateTime?
+  nextEligibleAt          DateTime?
+  lastRetryClass          MergeRecoveryRetryClass?
+  /// How many times an operator answered a class-ceiling refusal with
+  /// `re-validate`. It generations the stop question and stop notice dedupe
+  /// keys so a second ceiling still reaches the operator.
+  revalidations           Int                       @default(0)
   boundSourceRunId        String?
   authorizationActivityId String?
   recoveryRunId           String?
@@ -1032,6 +1062,15 @@ model Run {
   /// that question: see the comment in workflow.ts.
   pushedBranch                  String?
   baseSha                       String?
+  /// When a push of this Run's branch was acknowledged while it held a
+  /// `baseSha`, which is the only evidence that the base commit itself reached
+  /// the remote. `baseSha` alone proves nothing: it is written when the
+  /// workspace is provisioned, so a Run that dies before its push leaves a
+  /// commit that exists in a discarded workspace and nowhere else. Written
+  /// beside every `pushedBranch` ACK and never restamped or cleared. Null on
+  /// rows written before this column existed, which `platformImplementationBaseSha`
+  /// reads through the Run's own `pushedBranch`, or its outcome, instead.
+  basePublishedAt               DateTime?
   headSha                       String?
   /// The first parent of the WIP salvage commit a failed Run pushed, written
   /// only on the salvage path. With `headSha` — the salvage commit itself — it
@@ -1060,6 +1099,15 @@ model Run {
   /// SHA-256 of the exact prompt bytes most recently dispatched for this Run.
   /// Null before the first successful runner start write.
   promptHash                    String?
+  /// SHA-256 of the Specification of record this Run was handed to materialize
+  /// into its Chain workspace, over the same normalized bytes the fidelity
+  /// check reads back from the branch. Written in the claim transaction that
+  /// composed the materialization, so a later brief amendment cannot change
+  /// what this Run was asked to write, and a resumed claim of the same Run
+  /// leaves it alone because the runner reuses that workspace instead of
+  /// materializing again. Null on every Run that carried no materialization,
+  /// and on implementation Runs claimed before this column existed.
+  specificationDigest           String?
   maxDurationMin                Int                    @default(240)
   stallTimeoutMin               Int                    @default(10)
   maxRunsPerTask                Int                    @default(5)

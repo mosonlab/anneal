@@ -1,6 +1,11 @@
 import { statfs } from "node:fs/promises";
 
 import { parseRunOutputEvidence, type CleanupStatus, type RunOutcome, type RunOutputEvidence } from "@anneal/db";
+import {
+  SESSION_EVENT_CONVERSATION_ID_MAX_CHARS,
+  SESSION_EVENT_PAYLOAD_TOO_LARGE_CODE,
+  SESSION_EVENTS_REQUEST_TOO_LARGE_CODE,
+} from "@anneal/db/session-event-limits";
 import { DISPATCH_DRAINING_CODE, type ClaimContract } from "@anneal/db/claim-contract";
 
 import type { RunnerConfig, RunnerKind } from "./config.js";
@@ -20,14 +25,56 @@ type HeartbeatResult = { ok: boolean; cancellation: CancellationRequest | null }
 export class ControlPlaneError extends Error {
   readonly status: number;
   readonly code: string | undefined;
+  /** The parsed refusal body, when the API answered with one. */
+  readonly detail: Record<string, unknown> | undefined;
 
-  constructor(status: number, responseBody: string, code?: string) {
+  constructor(status: number, responseBody: string, code?: string, detail?: Record<string, unknown>) {
     super(`Anneal API ${status}: ${responseBody}`);
     this.name = "ControlPlaneError";
     this.status = status;
     this.code = code;
+    this.detail = detail;
   }
 }
+
+/** The typed error for a control-plane refusal, parsed once from its body. */
+export const controlPlaneErrorFor = (status: number, responseBody: string): ControlPlaneError => {
+  let detail: Record<string, unknown> | undefined;
+  try {
+    const parsed: unknown = JSON.parse(responseBody);
+    if (parsed !== null && typeof parsed === "object") detail = parsed as Record<string, unknown>;
+  } catch { /* non-JSON error */ }
+  const code = typeof detail?.["code"] === "string" ? detail["code"] : undefined;
+  return new ControlPlaneError(status, responseBody, code, detail);
+};
+
+/**
+ * The batch index of the one event an events append was refused for, or null
+ * when this failure is about something else.
+ *
+ * The API names the event rather than failing the batch precisely so the runner
+ * can lose that one event and keep the rest: an unnamed 413 would sit at the
+ * head of an ordered queue that only advances on success.
+ */
+export const oversizedEventIndex = (error: unknown): number | null => {
+  if (!(error instanceof ControlPlaneError)) return null;
+  if (error.status !== 413 || error.code !== SESSION_EVENT_PAYLOAD_TOO_LARGE_CODE) return null;
+  const index = error.detail?.["eventIndex"];
+  return typeof index === "number" && Number.isInteger(index) && index >= 0 ? index : null;
+};
+
+/**
+ * Whether an events append was refused for the size of the whole request.
+ *
+ * This refusal names no event, so it cannot be resolved by losing one. It is
+ * reachable without a bug on either side — a reverse proxy with a smaller body
+ * limit, or a peer still carrying the previous cap through a rolling deploy —
+ * so the runner answers it by sending less, not by retrying the same body.
+ */
+export const isEventsRequestTooLarge = (error: unknown): boolean =>
+  error instanceof ControlPlaneError
+  && error.status === 413
+  && error.code === SESSION_EVENTS_REQUEST_TOO_LARGE_CODE;
 
 /** The runner's domain verdict for whether its current Run authority remains. */
 export type Authority =
@@ -105,10 +152,7 @@ const request = async (config: RunnerConfig, path: string, init: RequestInit): P
     throw error;
   });
   if (!response.ok && response.status !== 204) {
-    const responseBody = await response.text();
-    let code: string | undefined;
-    try { code = (JSON.parse(responseBody) as { code?: string }).code; } catch { /* non-JSON error */ }
-    throw new ControlPlaneError(response.status, responseBody, code);
+    throw controlPlaneErrorFor(response.status, await response.text());
   }
   return response;
 };
@@ -180,6 +224,7 @@ const heartbeat = async (
       processAlive: state.processAlive,
       lastProgressEventAt: state.lastProgressEventAt?.toISOString() ?? null,
       inFlightTool: state.inFlightTool,
+      eventQueueBytes: state.eventQueueBytes,
       ...await runnerTelemetryBody(config),
     }),
   });
@@ -301,7 +346,13 @@ const appendEvents = async (
     body: JSON.stringify({
       runnerId: config.runnerId,
       fencingToken: claim.fencingToken,
-      providerConversationId: providerConversationId ?? null,
+      // Dropped rather than truncated when it is absurdly long: this is the one
+      // envelope field a provider controls, the body cap is sized against it,
+      // and a mangled identifier is worse than none.
+      providerConversationId: providerConversationId
+        && providerConversationId.length <= SESSION_EVENT_CONVERSATION_ID_MAX_CHARS
+        ? providerConversationId
+        : null,
       events,
     }),
   });
@@ -483,6 +534,8 @@ export type RunProgress = {
   processAlive: boolean;
   lastProgressEventAt: Date | null;
   inFlightTool: Record<string, unknown> | null;
+  /** Undelivered session-event bytes this Run holds in memory, for observability. */
+  eventQueueBytes: number;
 };
 
 /** Cleanup recorded after this runner has lost its live lease. */

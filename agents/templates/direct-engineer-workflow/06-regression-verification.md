@@ -5,7 +5,7 @@ agent: regression-verifier-luna-xhigh
 approvalGate: false
 optional: false
 outputKind: regression-verification-v2
-priorOutputKinds: [implementation, sol-findings, blind-findings, fixed-implementation]
+priorOutputKinds: [implementation, review-findings, blind-findings, fixed-implementation]
 attachmentsFromPrevious: true
 opensPullRequest: false
 requiresCommit: false
@@ -20,7 +20,7 @@ task output. Do not perform or restate those mechanical operations yourself.
 Run `"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh" prepare`. If it reports
 `refresh-conflict`, the final output is already persisted: record the outcome
 in the activity log and finish. Otherwise read the implementation summary,
-every present review report (`sol-findings` and, when instantiated,
+every present review report (`review-findings` and, when instantiated,
 `blind-findings`), and the fixed implementation with its dispositions from
 Anneal. The blind review report may be absent when its optional step was
 omitted. Review the entire refreshed fix diff as one unit, account for every

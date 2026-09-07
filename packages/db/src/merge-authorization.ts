@@ -10,7 +10,7 @@ import {
   parseEvidence,
 } from "./merge-integrator.js";
 import { findEvidenceRequestByNonce, gateFeedsIntegratorStep } from "./merge-integrator-db.js";
-import { errorForOpenRunRefusal, openRun } from "./run-open.js";
+import { errorForOpenRunRefusal, openRun, parksInsteadOfRaising, recordRunBirthRefusal } from "./run-open.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -143,7 +143,16 @@ export const produceMergeAuthorization = async (
     // would produce a run at the original ceiling that runner.ts then refuses
     // at claim. This is the only writer of a ceiling above the task's original.
     const opened = await openRun(tx, integrator.id, { kind: "integrator-authorized", readyAt: now });
-    if (!opened.ok) throw errorForOpenRunRefusal(opened.refusal);
+    if (!opened.ok) {
+      // A spend cap is parked, not raised. Raising rolls this transaction back
+      // and with it the authorization the human just gave, leaving nothing to
+      // say why no merge run appeared; parking keeps the authorization on the
+      // record and puts the integrator in REVIEW naming the cap, which is the
+      // operator's cue to raise it and retry.
+      if (!parksInsteadOfRaising(opened.refusal)) throw errorForOpenRunRefusal(opened.refusal);
+      await recordRunBirthRefusal(tx, integrator.id, opened.refusal);
+      return { activityId: activity.id, purpose, payload };
+    }
     await tx.task.updateMany({
       where: { id: integrator.id, status: { in: [TaskStatus.REVIEW, TaskStatus.TODO, TaskStatus.DOING] } },
       data: { status: TaskStatus.TODO, failureReason: null },

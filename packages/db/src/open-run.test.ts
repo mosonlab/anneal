@@ -5,8 +5,10 @@ import {
   AssigneeType,
   ChainControlState,
   CodexServiceTier,
+  Prisma,
   RunnerKind,
   RunnerPreference,
+  RunStatus,
 } from "@prisma/client";
 
 import {
@@ -21,8 +23,12 @@ import {
   LEASE_LOSS_REFUND_CAP,
   leaseLossRefundAvailable,
   leaseLossRefundDecision,
+  basePublishedStamp,
   openRun,
+  parksInsteadOfRaising,
   pinnedImplementationRange,
+  recordRunBirthRefusal,
+  runBirthRefusalMetadata,
   runBudgetCeiling,
 } from "./run-open.js";
 import { runOwnedHead } from "./run-head.js";
@@ -92,9 +98,24 @@ const taskRow = (overrides: Record<string, unknown> = {}) => ({
   maxDurationMin: 120,
   stallTimeoutMin: 10,
   maxSessionsPerTask: 5,
+  spendCap: null,
   archivedAt: null,
   runs: [],
   ...overrides,
+});
+
+/** A Run as the spend-cap basis reads it: its model and its session's costs. */
+const costedRun = (costUsd: string | null, overrides: Record<string, unknown> = {}) => ({
+  model: "claude-opus-5",
+  session: {
+    costUsd: costUsd === null ? null : new Prisma.Decimal(costUsd),
+    inputTokens: null,
+    cachedInputTokens: null,
+    cacheCreationInputTokens: null,
+    outputTokens: null,
+    nativeChildUsed: false,
+    ...overrides,
+  },
 });
 
 const intents = (): OpenRunIntent[] => [
@@ -129,9 +150,13 @@ const fakeTx = (
     lockedAgent?: ReturnType<typeof agent> | null;
     publishedRuns?: Array<{ taskId: string; repoId: string; pushedBranch: string | null }>;
     stopRows?: Array<Record<string, unknown>>;
+    /** The task's costed Run rows, as the spend-cap basis reads them. */
+    costedRuns?: Array<Record<string, unknown>>;
   } = {},
 ) => {
   const creates: Array<Record<string, unknown>> = [];
+  const activities: Array<Record<string, unknown>> = [];
+  const taskUpdates: Array<Record<string, unknown>> = [];
   let agentLocks = 0;
   const tx = {
     $queryRaw: async () => {
@@ -144,10 +169,17 @@ const fakeTx = (
     task: {
       findUnique: async () => task,
       findFirst: async () => null,
+      update: async ({ data }: { data: Record<string, unknown> }) => {
+        taskUpdates.push(data);
+        return { ...task, ...data };
+      },
     },
     taskActivity: {
       findMany: async () => options.stopRows ?? [],
-      create: async () => ({ id: "activity-1" }),
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        activities.push(data);
+        return { id: "activity-1" };
+      },
     },
     chainControl: {
       findMany: async () => options.chainControlRows ?? [],
@@ -163,13 +195,14 @@ const fakeTx = (
           && (typeof where.task?.id !== "string" || row.taskId === where.task.id)
         )) ?? null;
       },
+      findMany: async () => options.costedRuns ?? [],
       create: async ({ data }: { data: Record<string, unknown> }) => {
         creates.push(data);
         return { id: "opened-run", ...data };
       },
     },
   };
-  return { tx: tx as never, creates, agentLocks: () => agentLocks };
+  return { tx: tx as never, creates, activities, taskUpdates, agentLocks: () => agentLocks };
 };
 
 const integratorStep = {
@@ -531,17 +564,45 @@ test("a Task without a Repo is born with no publish head at all", async () => {
   assert.equal(creates[0]?.branch, null);
 });
 
+type PinnedRunRow = {
+  runNumber: number;
+  baseSha: string | null;
+  basePublishedAt?: Date | null;
+  pushedBranch?: string | null;
+  status?: RunStatus;
+};
+
+/** The publication clause the selector sends, emulated on the seeded rows. */
+const matchesPublishedBase = (
+  where: Record<string, any> | undefined,
+  run: PinnedRunRow,
+): boolean => {
+  const clauses = where?.OR;
+  if (!Array.isArray(clauses)) return true;
+  return clauses.some((clause: Record<string, any>) => {
+    if (clause.basePublishedAt?.not === null) return (run.basePublishedAt ?? null) !== null;
+    if ((run.basePublishedAt ?? null) !== null) return false;
+    return clause.pushedBranch?.not === null
+      ? (run.pushedBranch ?? null) !== null
+      : (run.status ?? RunStatus.FAILED) === clause.status;
+  });
+};
+
 /**
  * The pinning fake answers the two reads the derivation makes: the referenced
  * step's canonical output, and the implementation Task's own Runs. The Run read
  * is emulated from the query it receives — filtered and ordered as Prisma would
  * — so a test that seeds several Runs proves which one the derivation picks.
+ * A seeded Run with no marker and no status is an unpublished failure, which
+ * is the row shape the 2026-09-06 incident left behind.
  */
 const pinningTx = (options: {
   output?: { taskId?: string; kind?: string; commitSha?: string | null; body?: string } | null;
-  runs?: Array<{ runNumber: number; baseSha: string | null }>;
+  runs?: PinnedRunRow[];
 }) => {
-  const seen: { outputWhere?: unknown; runQuery?: Record<string, any> } = {};
+  const seen: { outputWhere?: unknown; runQuery?: Record<string, any>; runQueries: Array<Record<string, any>> } = {
+    runQueries: [],
+  };
   const output = options.output === null ? null : {
     taskId: "implementation-task",
     kind: "implementation",
@@ -559,9 +620,11 @@ const pinningTx = (options: {
     run: {
       findFirst: async (query: Record<string, any>) => {
         seen.runQuery = query;
+        seen.runQueries.push(query);
         const rows = (options.runs ?? [])
           .filter(() => query.where?.taskId === output?.taskId)
           .filter((run) => (query.where?.baseSha?.not === null ? run.baseSha !== null : true))
+          .filter((run) => matchesPublishedBase(query.where, run))
           .sort((left, right) => (query.orderBy?.runNumber === "asc"
             ? left.runNumber - right.runNumber
             : right.runNumber - left.runNumber));
@@ -575,6 +638,7 @@ const pinningTx = (options: {
 const implementationHead = "2".repeat(40);
 const bodyBase = "9".repeat(40);
 const recordedBase = "1".repeat(40);
+const publishedBase = "7".repeat(40);
 
 const reviewTask = {
   id: "review-task",
@@ -585,7 +649,7 @@ const reviewTask = {
 };
 
 test("a pinned base follows the template Step when conditional tasks use dense chain ordinals", async () => {
-  const { tx, seen } = pinningTx({ runs: [{ runNumber: 1, baseSha: recordedBase }] });
+  const { tx, seen } = pinningTx({ runs: [{ runNumber: 1, baseSha: recordedBase, basePublishedAt: now }] });
   const range = await pinnedImplementationRange(tx, reviewTask);
 
   assert.deepEqual(range, {
@@ -601,7 +665,15 @@ test("a pinned base follows the template Step when conditional tasks use dense c
     },
   });
   assert.deepEqual(seen.runQuery, {
-    where: { taskId: "implementation-task", baseSha: { not: null } },
+    where: {
+      taskId: "implementation-task",
+      baseSha: { not: null },
+      OR: [
+        { basePublishedAt: { not: null } },
+        { basePublishedAt: null, pushedBranch: { not: null } },
+        { basePublishedAt: null, status: RunStatus.SUCCEEDED },
+      ],
+    },
     orderBy: { runNumber: "asc" },
     select: { baseSha: true },
   });
@@ -612,7 +684,7 @@ test("the pinned base is the Run the platform recorded, not the SHA the implemen
   // every review sibling failed provisioning fetching it.
   const { tx } = pinningTx({
     output: { body: JSON.stringify({ schemaVersion: 1, baseSha: bodyBase, headSha: implementationHead }) },
-    runs: [{ runNumber: 1, baseSha: recordedBase }],
+    runs: [{ runNumber: 1, baseSha: recordedBase, basePublishedAt: now }],
   });
   const range = await pinnedImplementationRange(tx, reviewTask);
   assert.equal(range?.implementationBaseSha, recordedBase);
@@ -622,9 +694,9 @@ test("the pinned base is the Run the platform recorded, not the SHA the implemen
 test("a recovery Run's own base never moves the pinned range", async () => {
   const { tx } = pinningTx({
     runs: [
-      { runNumber: 2, baseSha: implementationHead },
-      { runNumber: 1, baseSha: recordedBase },
-      { runNumber: 3, baseSha: "8".repeat(40) },
+      { runNumber: 2, baseSha: implementationHead, basePublishedAt: now },
+      { runNumber: 1, baseSha: recordedBase, basePublishedAt: now },
+      { runNumber: 3, baseSha: "8".repeat(40), basePublishedAt: now },
     ],
   });
   const range = await pinnedImplementationRange(tx, reviewTask);
@@ -637,17 +709,81 @@ test("an implementation Task whose Runs recorded no base refuses instead of trus
     () => pinnedImplementationRange(tx, reviewTask),
     (error: Error) => {
       assert.equal(error.name, "PinnedBaseCommitError");
-      assert.match(error.message, /implementation task implementation-task has no Run with a recorded baseSha/u);
+      assert.match(error.message, /implementation task implementation-task has no Run that published a baseSha/u);
       assert.doesNotMatch(error.message, new RegExp(bodyBase, "u"));
       return true;
     },
   );
 });
 
+test("a base only a dead Run recorded never pins the range", async () => {
+  // The 2026-09-06 incident: Run 1 died before its push with the specification
+  // commit only in its own workspace, and Run 2 published a different one.
+  const { tx } = pinningTx({
+    runs: [
+      { runNumber: 1, baseSha: recordedBase, status: RunStatus.FAILED },
+      { runNumber: 2, baseSha: publishedBase, basePublishedAt: now, status: RunStatus.SUCCEEDED },
+    ],
+  });
+  const range = await pinnedImplementationRange(tx, reviewTask);
+  assert.equal(range?.implementationBaseSha, publishedBase);
+});
+
+test("an unpublished base refuses and names the commit and the implementation Task", async () => {
+  const { tx, seen } = pinningTx({ runs: [{ runNumber: 1, baseSha: recordedBase, status: RunStatus.FAILED }] });
+  await assert.rejects(
+    () => pinnedImplementationRange(tx, reviewTask),
+    (error: Error & { unpublishedBase?: { implementationTaskId: string; baseSha: string | null } }) => {
+      assert.equal(error.name, "PinnedBaseCommitError");
+      assert.match(error.message, new RegExp(`implementation task implementation-task recorded baseSha ${recordedBase}`, "u"));
+      assert.deepEqual(error.unpublishedBase, {
+        implementationTaskId: "implementation-task",
+        baseSha: recordedBase,
+      });
+      return true;
+    },
+  );
+  // The refusal costs the second read — the recorded base it names — and the
+  // published selection costs the first. Nothing else asks the Runs anything.
+  assert.equal(seen.runQueries.length, 2);
+  assert.deepEqual(seen.runQueries[0]?.where?.OR?.length, 3);
+  assert.deepEqual(seen.runQueries[1]?.where, { taskId: "implementation-task", baseSha: { not: null } });
+});
+
+test("a pre-marker Run that published its branch pins the range even though it failed", async () => {
+  // `resolveRunBranches`'s standing rule, applied here: a Run that pushed and
+  // then died in `gh` is recorded FAILED with the ref on the remote, so its
+  // base is fetchable and it still owns the specification commit.
+  const { tx } = pinningTx({
+    runs: [
+      { runNumber: 1, baseSha: recordedBase, status: RunStatus.FAILED, pushedBranch: "agentos/chain/c1" },
+      { runNumber: 2, baseSha: publishedBase, basePublishedAt: now, status: RunStatus.SUCCEEDED },
+    ],
+  });
+  assert.equal((await pinnedImplementationRange(tx, reviewTask))?.implementationBaseSha, recordedBase);
+});
+
+test("a Run written before the marker existed is read through its own outcome", async () => {
+  const succeeded = pinningTx({ runs: [{ runNumber: 1, baseSha: recordedBase, status: RunStatus.SUCCEEDED }] });
+  assert.equal(
+    (await pinnedImplementationRange(succeeded.tx, reviewTask))?.implementationBaseSha,
+    recordedBase,
+  );
+  const lost = pinningTx({ runs: [{ runNumber: 1, baseSha: recordedBase, status: RunStatus.LOST }] });
+  await assert.rejects(() => pinnedImplementationRange(lost.tx, reviewTask), /no Run published a base/u);
+});
+
+test("a publication ACK stamps a recorded base once and never restamps it", () => {
+  const later = new Date(now.getTime() + 60_000);
+  assert.equal(basePublishedStamp({ baseSha: recordedBase, basePublishedAt: null }, now), now);
+  assert.equal(basePublishedStamp({ baseSha: recordedBase, basePublishedAt: now }, later), now);
+  assert.equal(basePublishedStamp({ baseSha: null, basePublishedAt: null }, now), null);
+});
+
 test("an implementation output body with no baseSha still pins from the platform record", async () => {
   const { tx } = pinningTx({
     output: { body: JSON.stringify({ schemaVersion: 1, headSha: implementationHead }) },
-    runs: [{ runNumber: 1, baseSha: recordedBase }],
+    runs: [{ runNumber: 1, baseSha: recordedBase, basePublishedAt: now }],
   });
   assert.deepEqual(await pinnedImplementationRange(tx, reviewTask), {
     implementationBaseSha: recordedBase,
@@ -941,6 +1077,21 @@ test("every OpenRunRefusal code comes from a real guard, carries a disposition, 
       disposition: "fault",
       message: "Lease-loss refunds exhausted after 3 platform-refunded attempts; raise maxSessionsPerTask and retry",
       detail: { leaseLossRefunds: 3, cap: 3 },
+      context: { taskId: "task-1", taskName: "Implement seam" },
+    },
+    "spend-cap-exhausted": {
+      task: taskRow({
+        repoId: repo.id,
+        repo,
+        spendCap: new Prisma.Decimal("1.00"),
+        runs: [priorRun({ repoId: repo.id })],
+      }),
+      intent: { kind: "retry", readyAt: now },
+      options: { costedRuns: [costedRun("1.50")] },
+      reason: "conflict",
+      disposition: "fault",
+      message: "Spend cap $1.00 reached: $1.50 spent across 1 run; raise or clear spendCap to continue",
+      detail: { spendCapUsd: "1.00", spentUsd: "1.50", runs: 1 },
       context: { taskId: "task-1", taskName: "Implement seam" },
     },
     "chain-held": {
@@ -1442,4 +1593,230 @@ test("completed merge-tail repairs grant verification attempts without spending 
     assert.equal(creates[0]?.budgetGrants, runNumber);
     assert.equal(creates[0]?.leaseLossRefunds, LEASE_LOSS_REFUND_CAP);
   }
+});
+
+test("a spend cap refuses every replacement intent, loudly, once the task's runs have reached it", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const task = taskRow({
+    repoId: repo.id,
+    repo,
+    spendCap: new Prisma.Decimal("1.00"),
+    runs: [priorRun({ repoId: repo.id })],
+  });
+  // Every intent that replaces an attempt, not just the operator's `retry`:
+  // the previous budget bound was escaped precisely by arriving as a different
+  // intent kind.
+  const replacements: OpenRunIntent[] = [
+    { kind: "enqueue", readyAt: now },
+    { kind: "retry", readyAt: now },
+    { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1 },
+    { kind: "merge-tail-repair", readyAt: now },
+    { kind: "claim-invalidated", sourceRunId: "run-3", readyAt: now },
+    {
+      kind: "retry-after-completion",
+      readyAt: now,
+      sourceRunId: "run-3",
+      sourceMaxRunsPerTask: 5,
+      sourceBudgetGrants: 1,
+      budgetGrant: 1,
+    },
+    {
+      kind: "retry-after-lease-loss",
+      readyAt: now,
+      sourceRunId: "run-3",
+      sourceMaxRunsPerTask: 5,
+      sourceBudgetGrants: 1,
+    },
+  ];
+
+  for (const intent of replacements) {
+    const { tx, creates, activities, taskUpdates } = fakeTx(task, {
+      costedRuns: [costedRun("0.75"), costedRun("0.75")],
+    });
+    const opened = await openRun(tx, task.id, intent);
+
+    assert.equal(opened.ok, false, intent.kind);
+    if (opened.ok) return;
+    assert.equal(opened.refusal.code, "spend-cap-exhausted", intent.kind);
+    assert.equal(creates.length, 0, `${intent.kind} must not open a Run`);
+    assert.equal(
+      opened.refusal.message,
+      "Spend cap $1.00 reached: $1.50 spent across 2 runs;"
+        + " raise or clear spendCap to continue",
+      intent.kind,
+    );
+    // The consequence belongs to the caller, as it does for every other code:
+    // `attemptRunBirth` rolls the birth back to a savepoint, so a park written
+    // here would not survive on the paths that use it and would be written
+    // twice on the ones that write their own.
+    assert.equal(taskUpdates.length, 0, `${intent.kind} must not park the task itself`);
+    assert.equal(activities.length, 0, `${intent.kind} must not write its own activity`);
+  }
+});
+
+test("the park a raising caller owes a spend-cap refusal names the cap and the total", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const task = taskRow({
+    repoId: repo.id,
+    repo,
+    spendCap: new Prisma.Decimal("1.00"),
+    runs: [priorRun({ repoId: repo.id })],
+  });
+  const { tx, activities, taskUpdates } = fakeTx(task, { costedRuns: [costedRun("1.50")] });
+  const opened = await openRun(tx, task.id, { kind: "retry", readyAt: now });
+  assert.equal(opened.ok, false);
+  if (opened.ok) return;
+
+  // Only this code is parked rather than raised. Every other refusal either
+  // belongs to a caller that already parks it or is an invariant failure.
+  assert.equal(parksInsteadOfRaising(opened.refusal), true);
+  await recordRunBirthRefusal(tx, task.id, opened.refusal);
+  assert.equal(taskUpdates.length, 1);
+  assert.equal(taskUpdates[0]?.status, "REVIEW");
+  assert.equal(
+    taskUpdates[0]?.failureReason,
+    "Spend cap $1.00 reached: $1.50 spent across 1 run; raise or clear spendCap to continue",
+  );
+  assert.equal(activities.length, 1);
+  assert.equal(
+    activities[0]?.body,
+    "Run birth refused: Spend cap $1.00 reached: $1.50 spent across 1 run;"
+      + " raise or clear spendCap to continue",
+  );
+  // Named, not merely prose: this is what an operator filters the REVIEW by,
+  // and it carries the refusal's own detail so the cap and the total are
+  // readable as data, in the same money rendering as the message.
+  assert.deepEqual(activities[0]?.metadata, {
+    refusal: "spend-cap-exhausted",
+    spendCapUsd: "1.00",
+    spentUsd: "1.50",
+    runs: 1,
+  });
+  // The callers that write a park of their own — the automatic lease-loss and
+  // after-completion retries, the chain activations, the merge-tail requeue,
+  // the claim-invalidation replacement and the scheduler — name the refusal
+  // through the same builder, so an operator reads the same cap and total
+  // whichever intent was refused.
+  assert.deepEqual(runBirthRefusalMetadata(opened.refusal), activities[0]?.metadata);
+});
+
+/**
+ * The park's shape is decided in one place, and only the spend cap widens it.
+ * Every other refusal keeps the exact `{ refusal }` each caller recorded before
+ * the cap existed, so adding a `detail` to a refusal for its message or its
+ * error never silently reshapes an activity an operator or a test reads.
+ */
+test("only the spend-cap park carries detail; every other refusal is its code alone", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+
+  // A refusal that carries `detail` of its own and is not the spend cap.
+  const lostTask = taskRow({
+    repoId: repo.id,
+    repo,
+    runs: [priorRun({ repoId: repo.id, leaseLossRefunds: 3 })],
+  });
+  const lost = await openRun(fakeTx(lostTask).tx, lostTask.id, {
+    kind: "retry-after-lease-loss",
+    readyAt: now,
+    sourceRunId: "run-3",
+    sourceMaxRunsPerTask: 5,
+    sourceBudgetGrants: 1,
+  });
+  assert.equal(lost.ok, false);
+  if (lost.ok) return;
+  assert.deepEqual(lost.refusal.detail, { leaseLossRefunds: 3, cap: 3 });
+  assert.deepEqual(runBirthRefusalMetadata(lost.refusal), {
+    refusal: "lease-loss-refunds-exhausted",
+  });
+
+  const cappedTask = taskRow({
+    repoId: repo.id,
+    repo,
+    spendCap: new Prisma.Decimal("1.00"),
+    runs: [priorRun({ repoId: repo.id })],
+  });
+  const capped = await openRun(
+    fakeTx(cappedTask, { costedRuns: [costedRun("1.50")] }).tx,
+    cappedTask.id,
+    { kind: "retry", readyAt: now },
+  );
+  assert.equal(capped.ok, false);
+  if (capped.ok) return;
+  assert.deepEqual(runBirthRefusalMetadata(capped.refusal), {
+    refusal: "spend-cap-exhausted",
+    spendCapUsd: "1.00",
+    spentUsd: "1.50",
+    runs: 1,
+  });
+});
+
+test("the spend basis counts reported and estimated run cost, and a raised cap queues again", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const capped = (spendCap: string) => taskRow({
+    repoId: repo.id,
+    repo,
+    spendCap: new Prisma.Decimal(spendCap),
+    runs: [priorRun({ repoId: repo.id })],
+  });
+  // 1M input tokens with 0 cached and 100k output at the claude-opus-5 rates:
+  // $5 + $2.5 = $7.50, priced at read time because no amount was reported.
+  const estimated = costedRun(null, {
+    inputTokens: 1_000_000,
+    cachedInputTokens: 0,
+    cacheCreationInputTokens: 0,
+    outputTokens: 100_000,
+  });
+  // An unpriced Run is unknown, not expensive: it contributes nothing.
+  const unpriced = costedRun(null);
+
+  const belowCap = fakeTx(capped("10.00"), { costedRuns: [estimated, unpriced, costedRun("2.00")] });
+  const opened = await openRun(belowCap.tx, "task-1", { kind: "retry", readyAt: now });
+  assert.equal(opened.ok, true);
+  assert.equal(belowCap.creates.length, 1);
+  assert.equal(belowCap.taskUpdates.length, 0);
+
+  const atCap = fakeTx(capped("9.50"), { costedRuns: [estimated, unpriced, costedRun("2.00")] });
+  const refused = await openRun(atCap.tx, "task-1", { kind: "retry", readyAt: now });
+  assert.equal(refused.ok, false);
+  if (!refused.ok) assert.equal(refused.refusal.code, "spend-cap-exhausted");
+
+  // A task with no cap never asks what it has spent.
+  const uncapped = fakeTx(taskRow({ repoId: repo.id, repo, runs: [priorRun({ repoId: repo.id })] }), {
+    costedRuns: [costedRun("999.00")],
+  });
+  const uncappedOpen = await openRun(uncapped.tx, "task-1", { kind: "retry", readyAt: now });
+  assert.equal(uncappedOpen.ok, true);
+});
+
+test("a held chain outranks the spend cap, so a hold never parks a task in REVIEW", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const task = taskRow({
+    repoId: repo.id,
+    repo,
+    chainId: "chain-1",
+    chainIndex: 2,
+    chainLayer: 2,
+    spendCap: new Prisma.Decimal("1.00"),
+  });
+  const { tx, taskUpdates } = fakeTx(task, {
+    costedRuns: [costedRun("5.00")],
+    chainControlRows: [{
+      projectId: "project-1",
+      chainId: "chain-1",
+      state: ChainControlState.HELD,
+      heldLayer: 1,
+      heldAt: now,
+      holdRequestId: "hold-1",
+      holdReason: "operator hold",
+      releasedAt: null,
+      releaseRequestId: null,
+      holdGeneration: 1,
+    }],
+  });
+
+  const opened = await openRun(tx, task.id, { kind: "enqueue", readyAt: now });
+
+  assert.equal(opened.ok, false);
+  if (!opened.ok) assert.equal(opened.refusal.code, "chain-held");
+  assert.equal(taskUpdates.length, 0);
 });

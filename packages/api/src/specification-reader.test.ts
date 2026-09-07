@@ -13,7 +13,7 @@ import {
   repoMirrorPath,
   type MirrorGitResult,
 } from "./specification-reader.js";
-import { verifyPreparedSpecification } from "./specification-fidelity.js";
+import { specificationDigest, verifyPreparedSpecification } from "./specification-fidelity.js";
 
 const path = ".chain/feat/spec/spec.md";
 const repository = "acme/repo";
@@ -78,7 +78,8 @@ test("serves the pinned file from the exact runner mirror key before GitHub", as
       remoteUrl,
       path,
       implementationHeadSha: commit,
-      authoritativeBytes: bytes,
+      authoritativeDigest: specificationDigest(bytes),
+      currentBrief: { kind: "not-compared" as const },
     };
     const githubVerdict = await verifyPreparedSpecification(
       verification,
@@ -170,7 +171,8 @@ test("replacement refs cannot change the pinned bytes accepted from a real mirro
       remoteUrl,
       path,
       implementationHeadSha: original.trim(),
-      authoritativeBytes: bytes,
+      authoritativeDigest: specificationDigest(bytes),
+      currentBrief: { kind: "not-compared" as const },
     };
 
     assert.equal(
@@ -362,7 +364,12 @@ test("aborting mirror git kills a run-as process group and settles promptly", as
     await assert.rejects(running, (error: unknown) => error instanceof Error && error.name === "AbortError");
     const elapsed = Date.now() - started;
     assert.ok(elapsed >= 900, `SIGKILL escalation settled too early after ${elapsed}ms`);
-    assert.ok(elapsed < 2_000, `SIGKILL escalation took ${elapsed}ms`);
+    // The floor above is the property: the escalation waited its grace instead
+    // of firing early. This ceiling only catches an escalation that never
+    // lands, so it is sized for the loaded gate worker rather than an idle host
+    // (CONTRIBUTING.md, "Test timing on the gate worker"): signalling, SIGKILL
+    // and reaping a real node child all queue behind that host's load.
+    assert.ok(elapsed < 30_000, `SIGKILL escalation took ${elapsed}ms`);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

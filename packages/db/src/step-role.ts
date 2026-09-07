@@ -6,7 +6,7 @@ export type StepRole =
   | "revised-plan"
   | "must-fix"
   | "implementation"
-  | "sol-findings"
+  | "review-findings"
   | "blind-findings"
   | "fixed-implementation"
   | "documentation"
@@ -28,7 +28,9 @@ const OUTPUT_KIND_ROLES: Readonly<Record<string, StepRole>> = {
   "revised-plan": "revised-plan",
   "must-fix": "must-fix",
   implementation: "implementation",
-  "sol-findings": "sol-findings",
+  "review-findings": "review-findings",
+  // Persisted Steps retain their exact legacy output contract.
+  "sol-findings": "review-findings",
   "blind-findings": "blind-findings",
   "fixed-implementation": "fixed-implementation",
   documentation: "documentation",

@@ -20,6 +20,22 @@ import { buildRuntimeTools, RUNTIME_TOOL_FILES, expectedDirectoryEntries } from 
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
+test("runtime-tool inventory includes the merge-train entrypoint and implementation module", () => {
+  assert.deepEqual(
+    RUNTIME_TOOL_FILES.filter(({ destination }) => destination === "merge-train.sh" || destination === "merge-train.mjs"),
+    [
+      {
+        source: "packages/runner/runtime-tools/merge-train.sh",
+        destination: "merge-train.sh",
+      },
+      {
+        source: "packages/runner/runtime-tools/merge-train.mjs",
+        destination: "merge-train.mjs",
+      },
+    ],
+  );
+});
+
 const fixture = (t) => {
   const root = mkdtempSync(join(tmpdir(), "anneal-runner-runtime-tools-"));
   const repositoryRoot = join(root, "checkout");
@@ -88,6 +104,8 @@ test("buildRuntimeTools creates the exact byte-identical tree and purges stale f
     "gate-worker/remote-gate.sh",
     "gate-worker/run-gate.sh",
     "git-credential-runner.sh",
+    "merge-train.mjs",
+    "merge-train.sh",
     "regression-verification.sh",
   ]);
   for (const { source, destination } of RUNTIME_TOOL_FILES) {

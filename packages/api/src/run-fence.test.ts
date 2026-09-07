@@ -155,6 +155,8 @@ const authorityRun: LockedAuthorityRun = {
   repoId: "repo-1",
   runNumber: 4,
   pushedBranch: null,
+  baseSha: null,
+  basePublishedAt: null,
   branch: "feature/task-1",
   targetBranch: "main",
 };

@@ -2,7 +2,9 @@ import { resolve } from "node:path";
 
 import {
   ACTIVE_RUN_STATUSES,
-  CleanupStatus, FailureClass, leaseLossRefundDecision, openRun, resolveRunBranches, runOwnedHead, RunStatus,
+  basePublishedStamp,
+  CleanupStatus, FailureClass, leaseLossRefundDecision, openRun, resolveRunBranches, runBirthRefusalMetadata,
+  runOwnedHead, RunStatus,
   SessionExecutionStatus, type Prisma, type PrismaClient,
 } from "@anneal/db";
 
@@ -418,7 +420,7 @@ export const acknowledgeReclaimSalvage = async (
       select: {
         id: true, runnerId: true, taskId: true, runNumber: true, status: true,
         workspaceReclaimAt: true, workspaceReclaimedAt: true, pushedBranch: true, branch: true,
-        targetBranch: true,
+        targetBranch: true, baseSha: true, basePublishedAt: true,
       },
     });
     const expected = run?.taskId ? runOwnedHead(run.taskId, run.runNumber) : null;
@@ -434,7 +436,9 @@ export const acknowledgeReclaimSalvage = async (
         workspaceReclaimedAt: null,
         OR: [{ pushedBranch: null }, { pushedBranch: input.pushedBranch }],
       },
-      data: { pushedBranch: input.pushedBranch },
+      // A salvage commit descends from the base this Run was provisioned at,
+      // so publishing it publishes that base too.
+      data: { pushedBranch: input.pushedBranch, basePublishedAt: basePublishedStamp(run, new Date()) },
     });
     if (updated.count !== 1 || !run.taskId) return false;
     const repair = await repairReplacement(tx, {
@@ -538,7 +542,7 @@ export const repairReplacementAfterSalvage = async (
             taskId: run.taskId,
             actorType: "control-plane",
             body: `Late-salvage replacement was revoked and not requeued: ${refusal.message}`,
-            metadata: { refusal: refusal.code },
+            metadata: runBirthRefusalMetadata(refusal),
           } });
           return "repaired";
         default: {

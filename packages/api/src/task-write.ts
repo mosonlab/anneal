@@ -24,8 +24,11 @@ export type LockedTask = {
   assigneeType: AssigneeType;
   assigneeAgentId: string | null;
   /** Read under the lock so a budget-change activity states the value the write
-   *  actually replaced, not one a concurrent patch has already moved. */
+   *  actually replaced, not one a concurrent patch has already moved. The spend
+   *  cap is read for the same reason and is not optional: a missing select must
+   *  fail the typecheck rather than degrade a cap edit's trail to "none". */
   maxSessionsPerTask: number;
+  spendCap: Prisma.Decimal | null;
   templateStep: {
     stepIndex: number;
     outputKind: string;
@@ -41,6 +44,7 @@ export const lockedTaskSelect = {
   chainId: true,
   approvalGate: true,
   maxSessionsPerTask: true,
+  spendCap: true,
   dispatchAfterTaskId: true,
   dispatchAfter: { select: { name: true, status: true } },
   assigneeType: true,
