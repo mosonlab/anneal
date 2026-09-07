@@ -16,6 +16,7 @@ import {
   gateQuestion,
   INTEGRATOR_OUTPUT_KIND,
   isIntegratorStep,
+  isCanonicalIntegratorStep,
   isMergeReadinessStep,
   isRegressionVerificationOutputKind,
   latestMarker,
@@ -998,6 +999,7 @@ export const completeRun = async (
     });
     if (terminal === null || "message" in terminal) return null;
     let retryCreated = false;
+    let retryRunId: string | null = null;
     let retryRefusal: Refusal | null = null;
     if (!succeeded && retryable && !durableNegativeRegressionVerdict && run.task && run.runNumber < budgetCeiling) {
       const opened = await openRun(tx, run.task.id, {
@@ -1008,7 +1010,7 @@ export const completeRun = async (
         budgetGrant: refunded,
         readyAt: retryAt ?? now,
       });
-      if (opened.ok) retryCreated = true;
+      if (opened.ok) { retryCreated = true; retryRunId = opened.run.id; }
       else retryRefusal = opened.refusal;
     }
     if (run.taskId) {
@@ -1338,7 +1340,7 @@ export const completeRun = async (
       // leaves a Task that refuses `retry` and `start` with no card to answer
       // unless this completion decides the exit here, beside the failure it
       // just recorded.
-      if (mechanical && !succeeded && !retryCreated) {
+      if (isCanonicalIntegratorStep(run.task?.templateStep) && !succeeded && !retryCreated) {
         integratorFailureExit = await settleFailedIntegratorRun(tx, {
           integratorTaskId: run.taskId,
           runId: run.id,
@@ -1371,7 +1373,7 @@ export const completeRun = async (
       // The refusal an unresolved stop raises is not news once this completion
       // has already re-queued the integrator past it; saying "retry refused"
       // there is the message that sent operators looking for a card to answer.
-      if (retryRefusal && integratorFailureExit.kind !== "requeued") {
+      if (retryRefusal && integratorFailureExit.kind !== "pending") {
         await tx.inboxMessage.create({
           data: {
             from: "AGENT",
@@ -1419,10 +1421,12 @@ export const completeRun = async (
       // the completion itself answers a named 409 rather than 500.
       value: repairBindingRejection
         ?? { taskId: run.taskId, succeeded, retryCreated, failureClass },
-      // A stranded handoff forces the stop: the Lease was handed to this Run and
-      // this Run is over, so the same completion that records the failure both
-      // releases it on origin and settles its `MergeLeaseEvent`.
-      leaseOutcome: leaseOutcome === "stop" || strandedHandoff
+      // An ordinary successor inherits the handoff. Otherwise this completion
+      // releases the ended Run's Lease and settles its event before a recovery
+      // worker can acquire the next Lease and create a replacement.
+      leaseOutcome: mechanical && retryRunId
+        ? { kind: "hand-off", taskId: run.taskId, handoffRunId: retryRunId, at: now, fromRunId: run.id }
+        : leaseOutcome === "stop" || strandedHandoff
         ? {
           kind: "stop",
           taskId: run.taskId,
@@ -1431,6 +1435,7 @@ export const completeRun = async (
               releasedHandoff: {
                 eventId: strandedHandoff.id,
                 toRunId: run.id,
+                reason: `Chain Lease released after Run ${run.id} ended without merging`,
                 target: { projectId: strandedHandoff.projectId, chainId: strandedHandoff.chainId },
                 at: now,
               },

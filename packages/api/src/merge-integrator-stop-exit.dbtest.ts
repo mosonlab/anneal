@@ -25,6 +25,7 @@ import {
   TaskStatus,
   authorizationMetadata,
   recordIntegratorStop,
+  latestRecordedStop,
   resumeChain,
   stopQuestionKey,
 } from "@anneal/db";
@@ -36,11 +37,13 @@ import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 import {
   withMergeLease,
+  commitWithLeaseOutcome,
   type MergeLeaseAcquirer,
   type MergeLeaseReleaser,
   type ReleaseMergeLease,
   type WithMergeLease,
 } from "./merge-lease.js";
+import { settleFailedIntegratorRun } from "./merge-integrator-failure-exit.js";
 import { readinessTick } from "./merge-readiness-worker.js";
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import { createApp } from "./test-app.js";
@@ -55,11 +58,13 @@ const EXECUTOR = "integrator-stop-exit-executor";
 const EXECUTOR_RUNNER_ID = "merge-executor-1";
 
 let db: PrismaClient;
+let releasePause: (() => Promise<void>) | null = null;
 const releasedLeaseTargets: MergeLeaseTarget[] = [];
 
 before(() => { db = setupTestDb(); });
 beforeEach(async () => {
   releasedLeaseTargets.length = 0;
+  releasePause = null;
   await resetTestDb(db);
 });
 after(async () => { await db.$disconnect(); });
@@ -95,6 +100,7 @@ const acquireChainLease: MergeLeaseAcquirer = async () => ({ outcome: "acquired"
 const releaseLeaseAdapter: MergeLeaseReleaser = async () => ({ outcome: "not-held" });
 const releaseChainLease: ReleaseMergeLease = async (target) => {
   if (target) releasedLeaseTargets.push(target);
+  await releasePause?.();
 };
 const leased: WithMergeLease = async (target, fn, leaseDb) => withMergeLease(target, fn, leaseDb, {
   acquire: acquireChainLease,
@@ -342,11 +348,11 @@ test("an authorization that lands on a held Chain is replayed by resume, exactly
   assert.equal(await db.mergeLeaseEvent.count({ where: { chainId: seeded.chainId } }), 0);
 
   const resumed = await resume(seeded, "resume-1");
+  await replayTick();
   assert.equal(resumed.duplicate, false);
-  assert.ok(resumed.replayedIntegratorRunId);
   const runs = await integratorRuns(seeded);
   assert.equal(runs.length, 2, "resume opens exactly one integrator Run");
-  assert.equal(runs[1]!.id, resumed.replayedIntegratorRunId);
+  await assertHandoff(runs[1]!.id);
   assert.equal(runs[1]!.status, RunStatus.QUEUED);
   const replayed = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: seeded.aggregateId } });
   assert.equal(replayed.status, "SUCCEEDED", "the aggregate leaves repair only once the Run is born");
@@ -364,8 +370,8 @@ test("an authorization that lands on a held Chain is replayed by resume, exactly
   // A second resume finds a released control and a spent intent, and opens
   // nothing: the replay is owned by the aggregate, once.
   const again = await resume(seeded, "resume-2");
+  await replayTick();
   assert.equal(again.duplicate, true);
-  assert.equal(again.replayedIntegratorRunId, undefined);
   assert.equal((await integratorRuns(seeded)).length, 2);
 });
 
@@ -407,21 +413,14 @@ const completeIntegratorRun = async (
 test("a transport failure after recovery re-queues the integrator and releases the Lease it was handed", async () => {
   const claimed = await recoveredAndQueued("integrator-transport-failure");
 
-  const completed = await completeIntegratorRun(claimed, {
-    case: "provider-failure",
-    reason: "GitHub App installation-token mint failed: transport",
-    envelope: {
-      version: 1,
-      phase: "EXECUTE",
-      agentExited: false,
-      transient: true,
-      exitCode: null,
-    },
-  });
+  const completed = await completeIntegratorRun(claimed, await executorFailureOutcome(true));
   assert.equal(completed.status, 200, JSON.stringify(completed.body));
   assert.equal(completed.body.succeeded, false);
 
+  assert.equal((await integratorRuns(claimed)).length, 2, "release completes before replacement birth");
+  await replayTick();
   const runs = await integratorRuns(claimed);
+  await assertHandoff(runs[2]!.id);
   assert.equal(runs.length, 3, "the failed Run is followed by one automatic re-queue");
   assert.equal(runs[2]!.status, RunStatus.QUEUED);
   assert.equal(
@@ -432,12 +431,16 @@ test("a transport failure after recovery re-queues the integrator and releases t
   assert.equal(await stopQuestion(claimed), null);
   assert.equal(await db.taskActivity.count({ where: {
     taskId: claimed.integratorTask!.id,
-    metadata: { path: ["state"], equals: "requeued-external-failure" },
+    metadata: { path: ["state"], equals: "external-failure-pending" },
   } }), 1);
 
   const handoff = await db.mergeLeaseEvent.findUniqueOrThrow({ where: { id: claimed.handoffId } });
   assert.equal(handoff.state, MergeLeaseEventState.RELEASED);
   assert.ok(handoff.settledAt);
+  assert.ok(await db.taskActivity.findFirst({ where: {
+    taskId: claimed.integratorTask!.id,
+    body: `Chain Lease released after Run ${claimed.queuedRunId} ended without merging`,
+  } }));
   assert.deepEqual(
     releasedLeaseTargets.at(-1),
     { projectId: claimed.project.id, chainId: claimed.chainId },
@@ -455,10 +458,7 @@ test("a deterministic refusal after recovery opens the question the canonical st
   })).id;
   assert.equal(await stopQuestion(claimed), null, "the base-drift question is deferred, not open");
 
-  const completed = await completeIntegratorRun(claimed, {
-    case: "required-output-unsatisfied",
-    reason: "the merge API refused: forbidden",
-  });
+  const completed = await completeIntegratorRun(claimed, await executorFailureOutcome(false));
   assert.equal(completed.status, 200, JSON.stringify(completed.body));
 
   const runs = await integratorRuns(claimed);
@@ -474,4 +474,191 @@ test("a deterministic refusal after recovery opens the question the canonical st
 
   const handoff = await db.mergeLeaseEvent.findUniqueOrThrow({ where: { id: claimed.handoffId } });
   assert.equal(handoff.state, MergeLeaseEventState.RELEASED);
+});
+
+const replayTick = async (base = BASE_2, lease: WithMergeLease = leased) =>
+  baseDriftRecoveryTick(db, reader(snapshot(base)), new Date(), 5, lease);
+const assertHandoff = async (runId: string) => {
+  const event = await db.mergeLeaseEvent.findFirstOrThrow({ where: { handedOffRunId: runId } });
+  assert.equal(event.state, MergeLeaseEventState.HANDOFF_PENDING);
+};
+const externalOutcome = {
+  case: "provider-failure", reason: "transport failed",
+  envelope: { version: 1, phase: "EXECUTE", agentExited: false, transient: true, exitCode: null },
+};
+
+test("Lease contention preserves pending replay without a claimable Run", async () => {
+  const seeded = await recoveredChain("replay-contention");
+  await holdAtReadinessLayer(seeded);
+  await authorizeThroughReadiness(BASE_2);
+  await resume(seeded, "resume");
+  await replayTick(BASE_2, async () => ({ outcome: "contended" }));
+  assert.equal((await integratorRuns(seeded)).length, 1);
+  assert.equal((await call("POST", "/runner/tasks/claim", { runnerId: EXECUTOR_RUNNER_ID, contractVersion: RUN_COMPLETION_CONTRACT_VERSION }, EXECUTOR)).status, 204);
+  assert.ok((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: seeded.aggregateId } })).pendingAuthorizationId);
+  await replayTick();
+  const runs = await integratorRuns(seeded);
+  assert.equal(runs.length, 2);
+  await assertHandoff(runs[1]!.id);
+});
+
+test("admission repaired after release replays once on a later Resume", async () => {
+  const seeded = await recoveredChain("replay-admission");
+  await holdAtReadinessLayer(seeded);
+  await authorizeThroughReadiness(BASE_2);
+  const grant = await db.agentRepoAccess.findFirstOrThrow({ where: { agentId: seeded.integratorAgent.id, repoId: seeded.repo.id } });
+  await db.agentRepoAccess.delete({ where: { agentId_repoId: { agentId: grant.agentId, repoId: grant.repoId } } });
+  await resume(seeded, "resume-refused");
+  await replayTick();
+  assert.equal((await integratorRuns(seeded)).length, 1);
+  await db.agentRepoAccess.create({ data: grant });
+  await resume(seeded, "resume-repaired");
+  await replayTick();
+  await replayTick();
+  const runs = await integratorRuns(seeded);
+  assert.equal(runs.length, 2);
+  await assertHandoff(runs[1]!.id);
+});
+
+test("external failure under Hold keeps the exit pending until Resume", async () => {
+  const claimed = await recoveredAndQueued("failure-held");
+  await holdAtReadinessLayer(claimed);
+  assert.equal((await completeIntegratorRun(claimed, externalOutcome)).status, 200);
+  await replayTick();
+  assert.equal((await integratorRuns(claimed)).length, 2);
+  assert.equal(await stopQuestion(claimed), null);
+  await resume(claimed, "resume-failure");
+  await replayTick();
+  await replayTick();
+  const runs = await integratorRuns(claimed);
+  assert.equal(runs.length, 3);
+  await assertHandoff(runs[2]!.id);
+  assert.equal(await stopQuestion(claimed), null);
+});
+
+test("a moved base enters fresh recovery without a stale integrator birth", async () => {
+  const claimed = await recoveredAndQueued("failure-base-moved");
+  assert.equal((await completeIntegratorRun(claimed, externalOutcome)).status, 200);
+  await replayTick("d".repeat(40));
+  assert.equal((await integratorRuns(claimed)).length, 2);
+  const next = await db.mergeRecoveryAttempt.findFirstOrThrow({ where: { integratorTaskId: claimed.integratorTask!.id }, orderBy: { attempt: "desc" } });
+  assert.equal(next.status, "REPAIRING");
+  assert.equal(next.currentBaseSha, "d".repeat(40));
+  assert.ok(next.recoveryRunId);
+  assert.notEqual(next.id, claimed.aggregateId);
+});
+
+test("recovery allowance includes prior attempts on other stops", async () => {
+  const claimed = await recoveredAndQueued("failure-ceiling");
+  const aggregate = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: claimed.aggregateId } });
+  await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: aggregate.integratorTaskId, sourceStopId: "another-stop", attempt: 2,
+    repository: aggregate.repository, prNumber: aggregate.prNumber, targetBranch: aggregate.targetBranch,
+    recoveryRunId: "prior-recovery-run", status: "SUCCEEDED",
+  } });
+  assert.equal((await completeIntegratorRun(claimed, externalOutcome)).status, 200);
+  await replayTick();
+  assert.equal((await integratorRuns(claimed)).length, 2);
+  assert.ok(await stopQuestion(claimed));
+});
+
+/** Exercise the installed executor client serializer, not a hand-built envelope. */
+const executorFailureOutcome = async (external: boolean): Promise<unknown> => {
+  const moduleUrl = new URL("../../merge-executor/src/agentos.ts", import.meta.url);
+  const { makeAgentOsClient } = await import(moduleUrl.href);
+  let outcome: unknown;
+  const client = makeAgentOsClient({
+    apiUrl: "http://anneal.test", executorToken: EXECUTOR, runnerId: EXECUTOR_RUNNER_ID, apiTimeoutMs: 1000,
+  }, async (_url: unknown, init: RequestInit) => {
+    outcome = JSON.parse(String(init.body)).outcome;
+    return new Response(null, { status: 204 });
+  });
+  await client.complete({ run: { id: "wire-test" }, fencingToken: "fence", sessionToken: "session" },
+    { succeeded: false, outcome: null, external, failureReason: external ? "installation-token-request-failed" : "installation-token-http-error (HTTP 403)" }, String);
+  return outcome;
+};
+
+test("ordinary mechanical retry transfers its one pending handoff without releasing", async () => {
+  const claimed = await recoveredAndQueued("ordinary-mechanical-retry");
+  await db.taskActivity.deleteMany({ where: {
+    taskId: claimed.integratorTask!.id, metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.result },
+  } });
+  await db.mergeRecoveryAttempt.deleteMany({ where: { integratorTaskId: claimed.integratorTask!.id } });
+  releasedLeaseTargets.length = 0;
+  const completed = await completeIntegratorRun(claimed, await executorFailureOutcome(true));
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  assert.equal(completed.body.retryCreated, true);
+  const runs = await integratorRuns(claimed);
+  assert.equal(runs.length, 3);
+  const events = await db.mergeLeaseEvent.findMany({ where: { chainId: claimed.chainId, state: "HANDOFF_PENDING" } });
+  assert.equal(events.length, 1);
+  assert.equal(events[0]!.handedOffRunId, runs[2]!.id);
+  assert.deepEqual(releasedLeaseTargets, []);
+});
+
+test("a non-canonical integrator's existing question is not opened again", async () => {
+  const seeded = await seedIntegratorChain(db, { label: "noncanonical-failure", shape: "twelve-step-readiness" });
+  const authorization = await authorize(seeded.readinessTask!.id, BASE);
+  const source = await mechanicalBaseDriftStop(seeded, authorization.id);
+  const question = await stopQuestion(seeded);
+  assert.ok(question);
+  const stop = await db.$transaction((tx) => latestRecordedStop(tx, seeded.integratorTask!.id));
+  assert.ok(stop);
+  await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: seeded.integratorTask!.id, sourceStopId: stop.stopId,
+    attempt: 1, revalidations: 1, status: "SUCCEEDED",
+  } });
+  const result = await db.$transaction((tx) => settleFailedIntegratorRun(tx, {
+    integratorTaskId: seeded.integratorTask!.id, runId: source.id, external: false,
+    failureReason: "forbidden", now: new Date(),
+  }));
+  assert.deepEqual(result, { kind: "none" });
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.integratorTask!.id, kind: "MULTIPLE_CHOICE" } }), 1);
+});
+
+test("a pending replay waits for the old completion release to settle", async () => {
+  const claimed = await recoveredAndQueued("release-before-replay");
+  let finishRelease!: () => void;
+  let enteredRelease!: () => void;
+  const entered = new Promise<void>((resolve) => { enteredRelease = resolve; });
+  const finish = new Promise<void>((resolve) => { finishRelease = resolve; });
+  releasePause = async () => { enteredRelease(); await finish; };
+  const completion = completeIntegratorRun(claimed, externalOutcome);
+  try {
+    await entered;
+    await replayTick();
+    assert.equal((await integratorRuns(claimed)).length, 2);
+    assert.equal((await db.mergeLeaseEvent.findUniqueOrThrow({ where: { id: claimed.handoffId } })).state, "HANDOFF_PENDING");
+  } finally {
+    finishRelease();
+    releasePause = null;
+  }
+  assert.equal((await completion).status, 200);
+  await Promise.all([replayTick(), replayTick()]);
+  const runs = await integratorRuns(claimed);
+  assert.equal(runs.length, 3);
+  await assertHandoff(runs[2]!.id);
+});
+
+
+test("a failed completion release remains retryable by the deferred-release reconciler", async () => {
+  const claimed = await recoveredAndQueued("release-transport-outage");
+  releasePause = async () => { throw new Error("origin unavailable"); };
+  try {
+    assert.equal((await completeIntegratorRun(claimed, externalOutcome)).status, 500);
+  } finally {
+    releasePause = null;
+  }
+  const deferred = await db.mergeLeaseEvent.findFirstOrThrow({ where: { chainId: claimed.chainId, state: "RELEASE_DEFERRED" } });
+  await replayTick();
+  assert.equal((await integratorRuns(claimed)).length, 2);
+  await commitWithLeaseOutcome(db, async () => ({ value: null, leaseOutcome: {
+    kind: "stop", taskId: claimed.integratorTask!.id,
+    deferredRelease: { eventId: deferred.id, target: { projectId: claimed.project.id, chainId: claimed.chainId }, at: new Date() },
+  } }), { release: releaseChainLease });
+  assert.equal((await db.mergeLeaseEvent.findUniqueOrThrow({ where: { id: deferred.id } })).state, "RELEASED");
+  await replayTick();
+  const runs = await integratorRuns(claimed);
+  assert.equal(runs.length, 3);
+  await assertHandoff(runs[2]!.id);
 });

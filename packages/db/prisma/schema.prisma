@@ -796,11 +796,15 @@ model MergeRecoveryAttempt {
   revalidations           Int                       @default(0)
   boundSourceRunId        String?
   authorizationActivityId String?
-  /// The fresh readiness authorization whose integrator Run birth a Chain hold
-  /// refused. The aggregate is the single owner of that replay: `chain/resume`
-  /// opens the Run exactly once, clears this column, and only then may the
+  /// The readiness authorization awaiting birth after a Hold or failed Run.
+  /// The aggregate owns replay after Resume or recovery: the recovery worker
+  /// opens the Run under a merge Lease, clears this column, and only then may the
   /// aggregate reach SUCCEEDED.
   pendingAuthorizationId  String?
+  /// Failure whose retry is awaiting current-base validation and a new Lease.
+  pendingFailureRunId     String?
+  /// Charged at replay birth; summed with recovery Runs across stops.
+  externalReplayCount     Int                       @default(0)
   recoveryRunId           String?
   readinessTaskId         String?
   regressionTaskId        String?

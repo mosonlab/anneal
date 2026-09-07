@@ -5,7 +5,6 @@ import {
   BASE_DRIFT_TRANSPORT_CEILING_MS,
   BASE_DRIFT_VALIDATION_MIN_ELAPSED_MS,
   BASE_DRIFT_WAITING_CEILING_MS,
-  BASE_DRIFT_CLASS_CEILING_CHOICES,
   INTEGRATOR_OUTPUT_KIND,
   MAX_BASE_DRIFT_VALIDATION_ATTEMPTS,
   MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
@@ -19,7 +18,11 @@ import {
   isMergeReadinessStep,
   latestRecordedStop,
   lockChainRows,
-  openStopQuestion,
+  openDeferredBaseDriftQuestion,
+  pendingIntegratorAuthorization,
+  replayHeldIntegratorAuthorization,
+  recordLeaseHandoff,
+  writeMarker,
   parseMergeResult,
   REGRESSION_VERIFICATION_OUTPUT_KINDS,
   resolveChainTarget,
@@ -32,6 +35,8 @@ import {
   type MergeRecoveryAttempt,
 } from "@anneal/db";
 
+import { withMergeLease, type WithMergeLease } from "./merge-lease.js";
+
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import {
   classifyCandidate,
@@ -40,6 +45,7 @@ import {
   classifyRetryBudget,
   recoveryDeferred,
   type DurableCandidateFacts,
+  type FreshDecision,
   type Ineligible,
   type RecoveryCandidate,
   type RecoveryIdentity,
@@ -257,40 +263,7 @@ export const readCandidateFacts = async (
  * would otherwise deduplicate the second settle into a task with no open
  * question and no way out.
  */
-type RecoverySettleCard = { revalidations: number; ceiling: boolean };
-
-/**
- * The operator card a settled recovery leaves behind. An ordinary refusal
- * offers abandoning only; a retry class that crossed its own ceiling also
- * offers `re-validate`.
- */
-const openRecoveryQuestion = async (
-  tx: Prisma.TransactionClient,
-  integratorTaskId: string,
-  stopId: string,
-  card: RecoverySettleCard,
-): Promise<void> => {
-  const [task, stop] = await Promise.all([
-    tx.task.findUnique({ where: { id: integratorTaskId }, select: { assigneeAgentId: true } }),
-    latestRecordedStop(tx, integratorTaskId),
-  ]);
-  if (!task?.assigneeAgentId || stop?.stopId !== stopId) {
-    throw new Error(`Cannot open the settled base-drift question for unresolved stop ${stopId}`);
-  }
-  const session = stop.sourceRunId
-    ? await tx.session.findUnique({ where: { runId: stop.sourceRunId }, select: { id: true } })
-    : null;
-  await openStopQuestion(tx, {
-    integratorTaskId,
-    stopId,
-    condition: "base-drift",
-    evidence: stop.evidence,
-    agentId: task.assigneeAgentId,
-    sessionId: session?.id ?? null,
-    generation: card.revalidations,
-    ...(card.ceiling ? { choices: BASE_DRIFT_CLASS_CEILING_CHOICES } : {}),
-  });
-};
+const openRecoveryQuestion = openDeferredBaseDriftQuestion;
 
 /** A settle a retry class owns: the class, and the instant the classification
  *  that ended it was taken at. */
@@ -453,14 +426,7 @@ const queueRecovery = async (
   // Validation refusals remain visible aggregate rows but do not consume the
   // two executor-drift attempts. Historical TaskActivity rows are deliberately
   // ignored: the migration has no backfill, so absence here means zero.
-  const attempts = await tx.mergeRecoveryAttempt.count({ where: {
-    id: { not: aggregate.id },
-    integratorTaskId: expected.integratorTaskId,
-    repository: expected.repository,
-    prNumber: expected.prNumber,
-    targetBranch: expected.targetBranch,
-    recoveryRunId: { not: null },
-  } });
+  const attempts = await recoveryAllowanceSpent(tx, aggregate);
   const decision = classifyDurable({
     expected,
     candidateDecision: classifyCandidate(candidateFacts),
@@ -580,12 +546,177 @@ const addTickDelta = (result: BaseDriftRecoveryTickResult, delta: RecoveryTickDe
   result.ineligible += delta.ineligible;
 };
 
+/** Recovery Runs and external replays spend one shared allowance across stops. */
+export const recoveryAllowanceSpent = async (
+  tx: Prisma.TransactionClient,
+  identity: MergeRecoveryAttempt,
+): Promise<number> => {
+  const rows = await tx.mergeRecoveryAttempt.findMany({ where: {
+    integratorTaskId: identity.integratorTaskId, repository: identity.repository,
+    prNumber: identity.prNumber, targetBranch: identity.targetBranch,
+  }, select: { recoveryRunId: true, externalReplayCount: true } });
+  return rows.reduce((total, row) => total + (row.recoveryRunId ? 1 : 0) + row.externalReplayCount, 0);
+};
+
+/** Resume releases the Hold; this worker consumes the aggregate intent under a
+ * fresh Lease. An unresolved old handoff fences the post-completion release. */
+export const replayRecoveryAuthorizations = async (
+  db: PrismaClient, reader: PullRequestReader, now: Date, limit: number,
+  leased: WithMergeLease = withMergeLease,
+): Promise<void> => {
+  const pendingRows = await db.mergeRecoveryAttempt.findMany({
+    where: { status: MergeRecoveryStatus.AWAITING_AUTHORIZATION, pendingAuthorizationId: { not: null },
+      OR: [{ nextEligibleAt: null }, { nextEligibleAt: { lte: now } }] },
+    include: { integratorTask: { select: { projectId: true, chainId: true } } },
+    orderBy: [{ updatedAt: "asc" }, { id: "asc" }], take: limit,
+  });
+  for (const row of pendingRows) {
+    const chainId = row.integratorTask.chainId;
+    if (!chainId) continue;
+    const target = { projectId: row.integratorTask.projectId, chainId };
+    const unresolved = () => db.mergeLeaseEvent.count({ where: { ...target,
+      state: { in: ["HANDOFF_PENDING", "RELEASE_DEFERRED"] } } });
+    if (await unresolved()) continue;
+    if (await db.chainControl.count({ where: { ...target, state: "HELD" } })) continue;
+    // Reserve this aggregate before external Lease operations. Concurrent ticks
+    // cannot acquire the same Chain Lease and then release one another's work.
+    // The reservation expires after the bounded network calls if a worker dies.
+    const reservedUntil = new Date(Date.now() + 5 * 60_000);
+    const reserved = await db.mergeRecoveryAttempt.updateMany({ where: {
+      id: row.id, pendingAuthorizationId: row.pendingAuthorizationId,
+      status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
+      OR: [{ nextEligibleAt: null }, { nextEligibleAt: { lte: now } }],
+    }, data: { nextEligibleAt: reservedUntil } });
+    if (reserved.count !== 1) continue;
+    try {
+      await leased(target, async () => {
+        // Another worker may have handed off between the scan and acquisition.
+        // Its live successor owns this same Chain Lease; never release it here.
+        if (await unresolved()) return { leaseOutcome: { kind: "continue" }, value: null };
+        const facts = await readCandidateFacts(db, row.integratorTaskId);
+        const auth = facts.authorizationSelection?.authorization;
+        let snapshot: PullRequestSnapshot | null = null;
+        let baseRecovery: FreshDecision | null = null;
+        if (auth && auth.activityId === row.pendingAuthorizationId) {
+          try {
+            const signal = AbortSignal.timeout(8_000);
+            snapshot = await reader.readPullRequest(auth.repository, auth.prNumber, auth.baseRef, signal);
+            if (snapshot.baseSha && snapshot.baseSha !== auth.baseSha
+              && row.boundSourceRunId && row.readinessTaskId && row.regressionTaskId) {
+              const authorizedAdvance = reader.compareCommits
+                ? await reader.compareCommits(auth.repository, auth.baseSha, snapshot.baseSha, signal)
+                : null;
+              baseRecovery = classifyFresh({ kind: "snapshot", snapshot,
+                candidate: {
+                  integratorTaskId: row.integratorTaskId, stopId: row.sourceStopId,
+                  sourceRunId: row.boundSourceRunId, readinessTaskId: row.readinessTaskId,
+                  regressionTaskId: row.regressionTaskId, authorizationActivityId: auth.activityId,
+                  repository: auth.repository, prNumber: auth.prNumber, targetBranch: auth.baseRef,
+                  authorizedHeadSha: auth.headSha, authorizedBaseSha: auth.baseSha,
+                  observedBaseSha: snapshot.baseSha,
+                },
+                comparisonAvailable: reader.compareCommits !== undefined,
+                authorizedAdvance, observedAdvance: null,
+              });
+              if (baseRecovery.kind === "retry") {
+                return { leaseOutcome: { kind: "stop", taskId: row.integratorTaskId }, value: null };
+              }
+            }
+          } catch {
+            // A failed fresh read leaves the same intent pending, without spending
+            // an execution allowance or manufacturing a deterministic refusal.
+            return { leaseOutcome: { kind: "stop", taskId: row.integratorTaskId }, value: null };
+          }
+        }
+        const retain = await db.$transaction(async (tx) => {
+          if (!await lockRecoveryChain(tx, row.integratorTaskId)) return false;
+          const pending = await pendingIntegratorAuthorization(tx, target);
+          if (!pending || pending.id !== row.id || pending.pendingAuthorizationId !== row.pendingAuthorizationId
+            || pending.nextEligibleAt?.getTime() !== reservedUntil.getTime()) {
+            return (await tx.mergeLeaseEvent.count({ where: { ...target, state: "HANDOFF_PENDING" } })) > 0;
+          }
+          if (await tx.run.count({ where: { task: target, status: { in: ACTIVE_RUN_STATUSES } } })) {
+            return (await tx.mergeLeaseEvent.count({ where: { ...target, state: "HANDOFF_PENDING" } })) > 0;
+          }
+          const freshFacts = await readCandidateFacts(tx, row.integratorTaskId);
+          const freshAuth = freshFacts.authorizationSelection?.authorization;
+          const valid = auth && freshAuth?.activityId === auth.activityId
+            && !freshFacts.authorizationSelection?.refusal && snapshot
+            && freshFacts.stop?.stopId === pending.sourceStopId
+            && freshFacts.target?.resolved
+            && freshFacts.target.repository === auth.repository && freshFacts.target.prNumber === auth.prNumber
+            && freshFacts.firstRunTargetRef === auth.baseRef
+            && freshFacts.readiness?.outputCommitSha === auth.headSha
+            && (snapshot.baseSha === auth.baseSha || baseRecovery?.kind === "queue")
+            && snapshot.repository === auth.repository && snapshot.number === auth.prNumber
+            && snapshot.baseRefName === auth.baseRef && snapshot.headRefOid === auth.headSha
+            && snapshot.state === "OPEN" && !snapshot.merged && !snapshot.isDraft && snapshot.baseSha;
+          const spent = await recoveryAllowanceSpent(tx, pending);
+          const moved = valid && snapshot!.baseSha !== auth!.baseSha;
+          const exhausted = (pending.pendingFailureRunId !== null || moved)
+            && spent >= MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES;
+          if (!valid || exhausted) {
+            const reason = exhausted ? "Automatic recovery allowance exhausted" : "Pending authorization is no longer current";
+            await tx.task.update({ where: { id: pending.integratorTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+            await tx.mergeRecoveryAttempt.update({ where: { id: pending.id }, data: {
+              pendingAuthorizationId: null, pendingFailureRunId: null,
+              status: MergeRecoveryStatus.BLOCKED_DOWNSTREAM,
+              failureReason: reason,
+              endedAt: now,
+            } });
+            // The execution allowance cannot be reset by class re-validation.
+            await openRecoveryQuestion(tx, pending.integratorTaskId, pending.sourceStopId, {
+              revalidations: pending.revalidations, ceiling: false,
+            });
+            await writeMarker(tx, pending.integratorTaskId, "baseDriftRecovery", {
+              actorType: "control-plane", body: exhausted ? "Automatic recovery allowance exhausted" : "Pending authorization refused",
+              metadata: { state: "question-opened", aggregateId: pending.id, spent },
+            });
+            return false;
+          }
+          if (moved) {
+            // A fresh aggregate preserves the prior recovery Run and replay counts.
+            // enterRepair is the ordinary regression recovery birth path.
+            const latest = await tx.mergeRecoveryAttempt.aggregate({ where: { integratorTaskId: pending.integratorTaskId }, _max: { attempt: true } });
+            const next = await tx.mergeRecoveryAttempt.create({ data: {
+              integratorTaskId: pending.integratorTaskId, sourceStopId: pending.sourceStopId,
+              attempt: (latest._max.attempt ?? 0) + 1,
+              boundSourceRunId: pending.boundSourceRunId, authorizationActivityId: auth!.activityId,
+              readinessTaskId: pending.readinessTaskId, regressionTaskId: pending.regressionTaskId,
+              repository: auth!.repository, prNumber: auth!.prNumber, targetBranch: auth!.baseRef,
+              authorizedHeadSha: auth!.headSha, authorizedBaseSha: auth!.baseSha,
+              observedBaseSha: snapshot!.baseSha, revalidations: pending.revalidations,
+            } });
+            await enterRepair(tx, { aggregateId: next.id, currentBaseSha: snapshot!.baseSha!, now });
+            await tx.mergeRecoveryAttempt.update({ where: { id: pending.id }, data: {
+              pendingAuthorizationId: null, pendingFailureRunId: null,
+            } });
+            return false;
+          }
+          const replayed = await replayHeldIntegratorAuthorization(tx, {
+            ...target, taskId: pending.integratorTaskId,
+          }, now);
+          if (!replayed) return false;
+          await recordLeaseHandoff(tx, { target, toRunId: replayed.runId, at: now });
+          return true;
+        });
+        return { leaseOutcome: retain ? { kind: "continue" } : { kind: "stop", taskId: row.integratorTaskId }, value: null };
+      }, db);
+    } finally {
+      await db.mergeRecoveryAttempt.updateMany({ where: { id: row.id, nextEligibleAt: reservedUntil },
+        data: { nextEligibleAt: null } });
+    }
+  }
+};
+
 export const baseDriftRecoveryTick = async (
   db: PrismaClient,
   reader: PullRequestReader,
   now = new Date(),
   limit = 5,
+  leased: WithMergeLease = withMergeLease,
 ): Promise<BaseDriftRecoveryTickResult> => {
+  await replayRecoveryAuthorizations(db, reader, now, limit, leased);
   const result: BaseDriftRecoveryTickResult = { examined: 0, recovered: 0, exhausted: 0, ineligible: 0 };
   const where: Prisma.TaskWhereInput = {
     status: TaskStatus.REVIEW,

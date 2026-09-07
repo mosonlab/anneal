@@ -2,7 +2,7 @@ import { type MergeRecoveryAttempt, MergeRecoveryStatus, type Prisma, TaskStatus
 
 import { transitionMergeRecovery } from "./merge-tail.js";
 import { writeMarker } from "./merge-tail-markers.js";
-import { errorForOpenRunRefusal, openRun } from "./run-open.js";
+import { openRun } from "./run-open.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -14,8 +14,8 @@ export type ReplayedIntegratorAuthorization = {
 };
 
 /**
- * The recovery in one Chain whose readiness authorization landed while the
- * Chain was held at the integrator's layer, or null when there is none.
+ * The recovery in one Chain whose authorization is pending after a Hold or an
+ * external integrator failure, or null when there is none.
  *
  * Read separately from the replay so `chain/resume` can put its own Start
  * admission checklist between the two without that checklist moving out of the
@@ -33,22 +33,9 @@ export const pendingIntegratorAuthorization = async (
   orderBy: [{ attempt: "desc" }, { id: "desc" }],
 });
 
-/**
- * The exit a base-drift recovery keeps when its readiness authorization landed
- * while the Chain was held at the integrator's layer.
- *
- * `integrator-authorized` is raised once, at authorization time, and a Hold
- * refuses the Run birth it pays for. Before this, that intent was simply spent:
- * `chain/resume` released the control, ordinary activation was refused by the
- * unresolved stop, and the chain had no exit left because a `base-drift` stop
- * on a canonical Step defers its operator question. The aggregate records the
- * pending authorization and owns replaying it — exactly once, because the
- * replay claims the column with a compare-and-set before opening anything.
- *
- * The aggregate is deliberately left short of SUCCEEDED until this runs: a
- * recovery is finished when the integrator Run it authorized exists, not when
- * the authorization was written.
- */
+/** Called only under the Chain mutex and a freshly acquired merge Lease.
+ * Admission refusal preserves the aggregate intent; successful birth consumes
+ * it and accounts an external replay in the same transaction as the handoff. */
 export const replayPendingIntegratorAuthorization = async (
   tx: Tx,
   pending: MergeRecoveryAttempt,
@@ -56,16 +43,21 @@ export const replayPendingIntegratorAuthorization = async (
 ): Promise<ReplayedIntegratorAuthorization | null> => {
   const authorizationActivityId = pending.pendingAuthorizationId;
   if (!authorizationActivityId) return null;
-  // The claim is the whole of "exactly once": a second Resume that reaches here
-  // concurrently loses the compare-and-set and opens nothing.
-  const claimed = await tx.mergeRecoveryAttempt.updateMany({
-    where: { id: pending.id, pendingAuthorizationId: authorizationActivityId },
-    data: { pendingAuthorizationId: null },
-  });
-  if (claimed.count !== 1) return null;
-
   const opened = await openRun(tx, pending.integratorTaskId, { kind: "integrator-authorized", readyAt: now });
-  if (!opened.ok) throw errorForOpenRunRefusal(opened.refusal);
+  if (!opened.ok) {
+    await writeMarker(tx, pending.integratorTaskId, "baseDriftRecovery", {
+      actorType: "control-plane",
+      body: `Pending recovery authorization was not replayed: ${opened.refusal.message}`,
+      metadata: { state: "authorization-replay-refused", aggregateId: pending.id,
+        authorizationActivityId, reason: opened.refusal.code },
+    });
+    return null;
+  }
+  await tx.mergeRecoveryAttempt.update({ where: { id: pending.id }, data: {
+    pendingAuthorizationId: null,
+    pendingFailureRunId: null,
+    ...(pending.pendingFailureRunId ? { externalReplayCount: { increment: 1 } } : {}),
+  } });
   await tx.task.updateMany({
     where: {
       id: pending.integratorTaskId,
@@ -81,7 +73,7 @@ export const replayPendingIntegratorAuthorization = async (
   });
   await writeMarker(tx, pending.integratorTaskId, "baseDriftRecovery", {
     actorType: "control-plane",
-    body: "Chain resumed; the held recovery authorization was replayed and the mechanical merge run queued",
+    body: "Recovery authorization replayed; mechanical merge Run queued under its Lease",
     metadata: {
       state: "authorization-replayed",
       aggregateId: pending.id,
@@ -89,6 +81,7 @@ export const replayPendingIntegratorAuthorization = async (
       sourceStopId: pending.sourceStopId,
       authorizationActivityId,
       recoveryRunId: pending.recoveryRunId,
+      failedRunId: pending.pendingFailureRunId,
       runId: opened.run.id,
     },
   });

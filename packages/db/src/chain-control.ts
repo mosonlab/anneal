@@ -456,15 +456,10 @@ export const holdChain = async (
   return { control: chainControlMutationProjection(held), duplicate: false };
 };
 
-/**
- * Replay the merge-integrator authorization this Hold refused, if there is one.
- *
- * The admission is the checklist `POST /tasks/:taskId/start` applies, run here
- * because Resume owns the Chain mutex the route cannot enter. A refusal leaves
- * the pending authorization recorded for a later Resume rather than spending it
- * or blocking the release the operator asked for.
- */
-const replayHeldIntegratorAuthorization = async (
+/** Recovery worker admission for a pending authorization. The caller owns the
+ * Chain mutex and merge Lease. REVIEW is the failed integrator's parked state;
+ * the remaining Start checklist still applies before birth changes it to TODO. */
+export const replayHeldIntegratorAuthorization = async (
   tx: Prisma.TransactionClient,
   address: ChainControlAddress,
   now: Date,
@@ -480,7 +475,7 @@ const replayHeldIntegratorAuthorization = async (
   });
   const admissionRefusal = integrator === null
     ? `Merge integrator task ${pending.integratorTaskId} no longer exists`
-    : (await resumeFirstLayerRefusal(tx, integrator))?.message ?? null;
+    : (await resumeFirstLayerRefusal(tx, { ...integrator, status: integrator.status === TaskStatus.REVIEW ? TaskStatus.TODO : integrator.status }))?.message ?? null;
   if (admissionRefusal === null) return replayPendingIntegratorAuthorization(tx, pending, now);
   await tx.taskActivity.create({ data: {
     taskId: pending.integratorTaskId,
@@ -502,9 +497,6 @@ export type ResumeChainResult = {
   duplicate: boolean;
   nextTaskId: string | null;
   gated: boolean;
-  /** The merge-integrator Run this Resume replayed for a held base-drift
-   *  recovery, when there was one waiting. */
-  replayedIntegratorRunId?: string;
 };
 
 export const resumeChain = async (
@@ -691,23 +683,18 @@ export const resumeChain = async (
     };
   }
 
-  // A base-drift recovery whose authorization landed under this Hold left the
-  // integrator Run birth on the aggregate. It is replayed before ordinary
-  // activation, because the integrator's unresolved stop refuses an ordinary
-  // enqueue: the replayed authorization is the only birth intent that may open
-  // this Run, and once it has, activation reads the successor as already active
-  // instead of parking it on the stop it cannot answer.
-  const replayed = await replayHeldIntegratorAuthorization(tx, input, now);
+  // The recovery worker consumes pending authorization under a new merge Lease.
+  // Ordinary activation cannot bypass the unresolved stop while that is pending.
+  const pending = await pendingIntegratorAuthorization(tx, input);
 
-  const activated = anchor
+  const activated = anchor && !pending
     ? await activateChainSuccessor(tx, anchor, { sourceRunId: sourceRun?.id ?? null }, now)
     : { nextTaskId: null, gated: false };
   return {
     control: chainControlMutationProjection(released),
     duplicate: false,
-    nextTaskId: activated.nextTaskId ?? replayed?.integratorTaskId ?? null,
+    nextTaskId: activated.nextTaskId ?? pending?.integratorTaskId ?? null,
     gated: activated.gated,
-    ...(replayed ? { replayedIntegratorRunId: replayed.runId } : {}),
   };
 };
 

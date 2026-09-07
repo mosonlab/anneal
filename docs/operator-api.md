@@ -1760,19 +1760,16 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/hold" \
   resume activation-anchor behavior is unchanged.
 - Resume on a Chain that is not held is a successful idempotent no-op: it
   makes no transition, audit event, or activation.
-- Resume also replays a merge-integrator authorization the Hold refused. When
-  automatic base-drift recovery finished while the Chain was held at the
-  integrator's layer, the readiness authorization is written but its Run cannot
-  be born, so the recovery aggregate records that pending authorization and
-  stays short of `succeeded`. Resume opens that Run exactly once — under the
-  same admission `POST /tasks/:taskId/start` uses, and under the
-  `integrator-authorized` intent, which is the only birth intent the unresolved
-  `base-drift` stop admits — moves the aggregate to `succeeded`, and reports the
-  Run as `replayedIntegratorRunId`. A `baseDriftRecovery` activity in state
-  `authorization-replayed` records it. A second Resume finds the intent spent
-  and opens nothing. If the integrator task cannot be admitted, the release
-  still happens, the pending authorization stays recorded for a later Resume,
-  and the refusal is written to the integrator task's activity.
+- Resume releases a held recovery authorization for replay by the base-drift
+  worker. The aggregate keeps the pending `integrator-authorized` intent until
+  the worker validates its authorization against the current base, acquires the
+  merge Lease, applies the same admission as `POST /tasks/:taskId/start`, and
+  records the new Run's durable handoff. Only that birth moves the aggregate to
+  `succeeded`; `authorization-replayed` TaskActivity records it. A second Resume
+  opens nothing. Contention or an admission refusal keeps the intent pending;
+  after the obstruction is repaired, a later worker tick can consume it even
+  though the Chain control is already released. Admission refusals are recorded
+  in the integrator task's activity.
 - Refusals: `404 Not Found` when the Task does not exist; `409 Conflict`
   when the Task belongs to no Chain.
 
@@ -2058,20 +2055,22 @@ worker, so while that stop stands there is no card to answer and both
 starting another run`. The completion that records a failed integrator Run
 therefore decides the exit, with no operator input:
 
-- An **external failure** — the environment failed rather than the merge, which
-  is the same classification the run's `failureClass` and budget accounting
-  use — re-queues the mechanical merge on a fresh `integrator-authorized`
-  intent bound to the same authorization, and writes a `baseDriftRecovery`
-  activity in state `requeued-external-failure` naming the attempt and its
-  limit. It is bounded by the automatic base-drift recovery ceiling (2) per
-  stop. If the base has moved underneath it, the re-queued Run stops on
-  `base-drift` again and the ordinary recovery worker opens the next recovery.
+- An **external failure** — transport, credential-mint transport or API 5xx —
+  records a pending authorization on the recovery aggregate. After the failed
+  Run's Lease release finishes, the recovery worker reads the current base.
+  If the authorized base is current, it acquires a new Lease and replays the
+  bound `integrator-authorized` intent with a durable handoff. Otherwise it
+  queues fresh base-drift recovery without a stale integrator Run. Recovery
+  Runs and external replays share the automatic recovery ceiling (2) across
+  stops for the same integrator, repository, PR and target. A Hold or admission
+  refusal preserves the pending intent without opening an abandon-only card.
 - **Anything else** is a deterministic refusal — the merge API answered
   forbidden, unprocessable or not-found — and stops. The question the canonical
   stop deferred is opened on the same `merge-stop:<stopId>` key family the
   recovery worker uses, so an operator has something to answer; the activity is
   in state `question-opened`. The same happens once the re-queue ceiling is
-  spent.
+  spent; this execution allowance has no class counter to reset, so its card
+  offers abandon only.
 
 In both cases the merge Lease handed to that Run is released by this same
 completion, because the Run ended without completing its merge. See
@@ -2451,13 +2450,14 @@ curl "$BASE_URL/merge-lease" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
 
 A merge Lease handed to a queued merge-integrator Run is released by that Run's
-own completion whenever the Run ends without completing its merge — a failure, a
-stop, or a merge result that is absent or malformed. The release runs on the
-same path that records the failure, and the `HANDOFF_PENDING` `MergeLeaseEvent`
-for that Run is settled `RELEASED`. Before this, only the reconciler's stranded
--handoff sweep settled such a row, and it only considers a Run still `QUEUED`
-and unclaimed, so a claimed Run that then failed left the Lease standing on
-`main` until a human stole it.
+own completion whenever it ends without merging and leaves no ordinary retry
+Run. The same path records the failure and settles its `HANDOFF_PENDING`
+`MergeLeaseEvent` as `RELEASED`, with TaskActivity stating that the Run ended
+without merging. An ordinary retry retains the Lease and transfers the durable
+handoff to its successor Run. Recovery replays wait for the old release to
+settle, then acquire a new Lease before their Run becomes claimable. If the
+completion release fails, it records a deferred release for reconciliation; the
+pending recovery waits until that release settles.
 
 Operator-scoped and read-only; runner, merge-executor and session credentials
 are refused with 403 before origin or the ledger is read. It runs

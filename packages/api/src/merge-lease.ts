@@ -176,14 +176,14 @@ export type LeaseOutcome =
   | {
     kind: "stop";
     taskId: string | null;
-    releasedHandoff?: { eventId: string; toRunId: string; target: MergeLeaseTarget; at: Date };
+    releasedHandoff?: { eventId: string; toRunId: string; target: MergeLeaseTarget; at: Date; reason?: string };
     deferredRelease?: { eventId: string; target: MergeLeaseTarget; at: Date };
   }
-  | { kind: "hand-off"; taskId: string | null; handoffRunId: string; at: Date };
+  | { kind: "hand-off"; taskId: string | null; handoffRunId: string; at: Date; fromRunId?: string };
 
 type LeaseSettlement = {
   target: MergeLeaseTarget | null;
-  releasedHandoff: { eventId: string; taskId: string; at: Date } | null;
+  releasedHandoff: { eventId: string; taskId: string; at: Date; reason?: string } | null;
   deferredRelease: {
     eventId: string;
     target: MergeLeaseTarget;
@@ -206,6 +206,7 @@ const settleLease = async (
     await recordLeaseHandoff(tx, {
       target: { projectId: holder.projectId, chainId: holder.chainId },
       toRunId: outcome.handoffRunId,
+      ...(outcome.fromRunId ? { fromRunId: outcome.fromRunId } : {}),
       at: outcome.at,
     });
     return { target: null, releasedHandoff: null, deferredRelease: null };
@@ -237,6 +238,10 @@ const settleLease = async (
       return { target: null, releasedHandoff: null, deferredRelease: null };
     }
   }
+  if (outcome.releasedHandoff?.reason) {
+    await tx.mergeLeaseEvent.update({ where: { id: outcome.releasedHandoff.eventId },
+      data: { failureDetail: outcome.releasedHandoff.reason } });
+  }
   return {
     target: holder
       ? { chainId: holder.chainId, projectId: holder.projectId }
@@ -246,6 +251,7 @@ const settleLease = async (
         eventId: outcome.releasedHandoff.eventId,
         taskId: holder.taskId,
         at: outcome.releasedHandoff.at,
+        ...(outcome.releasedHandoff.reason ? { reason: outcome.releasedHandoff.reason } : {}),
       }
       : null,
     deferredRelease: holder && outcome.deferredRelease
@@ -379,6 +385,22 @@ const releaseCommittedLeaseOutcomes = async (
       await release(entry.target, db);
     } catch (error: unknown) {
       failures.push({ target: entry.target, phase: "release", error });
+      // A claimed, ended Run is outside the queued-handoff sweep. Move its
+      // failed release to the existing deferred-release reconciler only after
+      // the origin call has ended, so no replacement races that call.
+      for (const handoff of entry.handoffs.filter((item) => item.reason)) {
+        try {
+          await db.$transaction(async (tx) => {
+            await settleLeaseEvent(tx, { eventId: handoff.eventId, state: "invalid", at: handoff.at,
+              failureDetail: "Completion Lease release deferred after transport failure",
+              reason: "Chain Lease release deferred after the completed Run's release attempt failed" });
+            await recordLeaseDeferral(tx, { target: entry.target, taskId: handoff.taskId,
+              failureDetail: handoff.reason!, at: handoff.at });
+          });
+        } catch (recordError: unknown) {
+          failures.push({ target: entry.target, phase: "record", error: recordError });
+        }
+      }
       continue;
     }
     if (entry.handoffs.length > 0 || entry.deferredReleases.length > 0) {
@@ -389,6 +411,7 @@ const releaseCommittedLeaseOutcomes = async (
               eventId: handoff.eventId,
               state: "released",
               at: handoff.at,
+              ...(handoff.reason ? { reason: handoff.reason } : {}),
             });
           }
           for (const deferred of entry.deferredReleases) {
