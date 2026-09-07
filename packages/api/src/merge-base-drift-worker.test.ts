@@ -4,16 +4,9 @@ import test from "node:test";
 import type { PrismaClient } from "@anneal/db";
 
 import { startBaseDriftRecoveryWorker } from "./merge-base-drift-worker.js";
+import { waitUntil } from "./worker-tick-wait.js";
 
 const wait = (milliseconds: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, milliseconds));
-
-const waitUntil = async (predicate: () => boolean, timeoutMs = 10_000): Promise<void> => {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error(`condition was not met within ${timeoutMs}ms`);
-    await wait(25);
-  }
-};
 
 test("the base-drift recovery worker never overlaps ticks in one process", async () => {
   const previousInterval = process.env.MERGE_BASE_DRIFT_RECOVERY_POLL_INTERVAL_MS;

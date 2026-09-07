@@ -142,6 +142,34 @@ Fresh-worktree typechecks, unit tests, and focused API database tests need
 `npm install` and `npm run db:generate`, but no prior workspace build.
 Workflows executing built artifacts run after the Merge Gate's full build.
 
+### Test timing on the gate worker
+
+The merge gate runs on a worker that also carries the host's Runs. On
+2026-09-06 that worker sat at load1 20-55 all day, and three tests failed on
+correct branches purely because a fixed wall-clock budget expired: a `node`
+child was still short of its first line ten seconds after it was spawned, and a
+one-second timer was descheduled well past the sleep a test had picked to
+outlast it. Each was proved a flake by re-running the identical tree idle.
+
+That incident is the evidence behind every widened budget in the suites. Do not
+restate it at each budget; cite this section and say only what is local — what
+the budget bounds and why that number. The rules it produced:
+
+- Wait on the condition, not on a duration, wherever the condition is
+  observable. Such a wait returns at once on a green run, so its bound costs
+  nothing.
+- Keep a bound where a genuine hang must still fail rather than hang forever,
+  and size it from the loaded-host duration with margin, never from the idle
+  one. Say at the budget why it stays bounded.
+- Assert a floor when the property is that a grace really elapsed. The ceiling
+  beside it catches a hang, not a slow host, so it can be generous.
+- Nested budgets must nest strictly: a parent waiting on a child has to exceed
+  the child's own worst-case cleanup, or the parent reports a timeout the child
+  was about to resolve.
+- Name the request, process or event you mean by its parameters. Reading
+  "whatever landed last" asserts against unrelated background work.
+- No environment variable or configuration surface for test timing.
+
 ### Development database bootstrap
 
 `npm run db:migrate` runs `prisma migrate dev`, bypasses release preflight, and
