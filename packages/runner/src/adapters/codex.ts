@@ -11,10 +11,13 @@ import {
   asRecord,
   capturePreflight,
   classifyRuntimeError,
+  consumeTurnTtft,
   createAdapterState,
   emitAdapterEvent,
   eventErrorMessage,
+  markFirstChunk,
   markInFlightToolProgress,
+  markTurnRequested,
   mcpServerArgs,
   mcpServerPath,
   modelSpec,
@@ -176,6 +179,20 @@ const observedNativeChild = (item: Record<string, unknown> | null): boolean => {
     && receiverThreadIds.some((value) => typeof value === "string" && value.length > 0);
 };
 
+/** Codex tool items complete the input for the next model turn. */
+const CODEX_TOOL_ITEM_TYPES = new Set([
+  "command_execution", "mcp_tool_call", "collab_agent_tool_call", "collabAgentToolCall",
+  "web_search_call", "file_search_call", "function_call", "custom_tool_call", "computer_call",
+]);
+
+const isCodexToolItem = (item: Record<string, unknown> | null): boolean => {
+  const type = stringField(item, "type");
+  return type !== null && CODEX_TOOL_ITEM_TYPES.has(type);
+};
+
+const isCodexAgentMessage = (item: Record<string, unknown> | null): boolean =>
+  stringField(item, "type") === "agent_message";
+
 export const parseCodexEvent = (
   state: AdapterState,
   event: Record<string, unknown>,
@@ -184,6 +201,11 @@ export const parseCodexEvent = (
   const type = stringField(event, "type");
   if (type === "thread.started") {
     state.providerConversationId = stringField(event, "thread_id") ?? state.providerConversationId;
+    // Codex exposes the initial prompt boundary at thread.started. Later
+    // turns are bounded by completed command/tool items below; this is the
+    // narrowest boundary available because the CLI does not expose a separate
+    // user-input event for every resumed model request.
+    if (!state.turnRequestSeen) markTurnRequested(state);
     emitAdapterEvent(state, sink, "MODEL_STARTED", event);
   } else if (type === "item.started") {
     const item = asRecord(event.item);
@@ -192,21 +214,30 @@ export const parseCodexEvent = (
       const now = new Date();
       state.inFlightTool = { id: toolId, name: "command_execution", startedAt: now, lastProgressAt: now };
       emitAdapterEvent(state, sink, "TOOL_STARTED", item ?? {}, toolId);
-    } else emitAdapterEvent(state, sink, "MODEL_DELTA", event);
+    } else {
+      // item.started is the earliest agent-message output Codex currently
+      // exposes; a future delta event follows the same first-chunk rule.
+      if (isCodexAgentMessage(item)) markFirstChunk(state);
+      emitAdapterEvent(state, sink, "MODEL_DELTA", event);
+    }
   } else if (type === "item.completed") {
     const item = asRecord(event.item);
     if (observedNativeChild(item)) emitAdapterEvent(state, sink, "NATIVE_CHILD_STARTED", item ?? {});
     if (stringField(item, "type") === "command_execution") {
+      // Command completion is the provider-visible input boundary for the
+      // next turn; stamp it before the synchronous completion sink runs.
+      markTurnRequested(state);
       state.inFlightTool = null;
       emitAdapterEvent(state, sink, "TOOL_COMPLETED", item ?? {}, stringField(item, "id"));
+    } else if (isCodexAgentMessage(item)) {
+      // Codex may report an agent progress message while a long-running
+      // command_execution remains open. Raw stderr deliberately does not
+      // reach this path, so background warnings cannot renew a stuck tool.
+      markInFlightToolProgress(state);
+      state.finalOutput = stringField(item, "text") ?? state.finalOutput;
+      emitAdapterEvent(state, sink, "MODEL_DELTA", consumeTurnTtft(state, event));
     } else {
-      if (item && stringField(item, "type") === "agent_message") {
-        // Codex may report an agent progress message while a long-running
-        // command_execution remains open. Raw stderr deliberately does not
-        // reach this path, so background warnings cannot renew a stuck tool.
-        markInFlightToolProgress(state);
-        state.finalOutput = stringField(item, "text") ?? state.finalOutput;
-      }
+      if (isCodexToolItem(item)) markTurnRequested(state);
       emitAdapterEvent(state, sink, "MODEL_DELTA", event);
     }
     // A nonzero shell command inside the session is normal agent behavior;
@@ -231,7 +262,15 @@ export const parseCodexEvent = (
     state.terminalEventSeen = true;
     state.terminalSuccess = !state.sawError;
     emitAdapterEvent(state, sink, "FINAL_OUTPUT", event);
-  } else emitAdapterEvent(state, sink, "PROVIDER_STATUS", event);
+  } else {
+    // Some Codex releases expose a text delta instead of item.started. Keep
+    // the existing provider status event shape while using that delta only as
+    // a liveness/TTFT boundary when it carries an agent-message item.
+    const item = asRecord(event.item);
+    if ((type === "response.output_text.delta" || type === "output_text.delta" || type === "item.delta")
+      && isCodexAgentMessage(item)) markFirstChunk(state);
+    emitAdapterEvent(state, sink, "PROVIDER_STATUS", event);
+  }
 };
 
 export const parseCodexTranscript = (
