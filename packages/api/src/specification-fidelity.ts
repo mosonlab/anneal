@@ -20,19 +20,27 @@ import { BRIEF_EDIT_ACTIVITY_NOTE, legacyBriefMigration, readBrief } from "./tas
 export const SPEC_TRANSCRIPTION_REFUSAL_REASON = "spec-transcription-mismatch";
 export const SPEC_TRANSCRIPTION_UNREADABLE_REASON = "spec-transcription-unreadable";
 export const SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON = "spec-transcription-authority-missing";
+/** The specification was reachable; only the read deadline was exceeded, repeatedly. */
+export const SPEC_READ_DEADLINE_EXCEEDED_REASON = "spec-read-deadline-exceeded";
 
 export type SpecificationRefusalReason =
   | typeof SPEC_TRANSCRIPTION_REFUSAL_REASON
   | typeof SPEC_TRANSCRIPTION_UNREADABLE_REASON
-  | typeof SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON;
+  | typeof SPEC_TRANSCRIPTION_AUTHORITY_MISSING_REASON
+  | typeof SPEC_READ_DEADLINE_EXCEEDED_REASON;
 
 export type SpecificationRefusalClassification = "transient" | "non-transient";
+
+/** Which transient failure a refusal saw: a deadline hit, or anything else. */
+export type SpecificationReadTransientCause = "timeout" | "other";
 
 export type SpecificationRefusal = {
   reason: SpecificationRefusalReason;
   classification: SpecificationRefusalClassification;
   detail: string;
   message: string;
+  /** Present on transient refusals only; drives the claim-side deferral ceiling. */
+  transientCause?: SpecificationReadTransientCause;
 };
 
 /** The path the implementation step promises to materialize. */
@@ -154,26 +162,52 @@ const refusal = (
   reason: SpecificationRefusalReason,
   detail: string,
   classification: SpecificationRefusalClassification = "non-transient",
+  transientCause?: SpecificationReadTransientCause,
 ): SpecificationRefusal => ({
   reason,
   classification,
   detail,
   message: `Spec transcription claim refused: ${reason}: ${detail}`,
+  ...(transientCause ? { transientCause } : {}),
 });
 
 export const specificationUnreadableRefusal = (
   detail: string,
   classification: SpecificationRefusalClassification = "non-transient",
+  transientCause?: SpecificationReadTransientCause,
 ): SpecificationRefusal => (
-  refusal(SPEC_TRANSCRIPTION_UNREADABLE_REASON, detail, classification)
+  refusal(SPEC_TRANSCRIPTION_UNREADABLE_REASON, detail, classification, transientCause)
 );
 
-export const specificationReadBudgetExhaustedRefusal = (
-  budgetMs: number,
-  lastUnderlyingError: string,
-): SpecificationRefusal => specificationUnreadableRefusal(
-  `transient read deferral budget exhausted after ${budgetMs}ms; last underlying error: ${lastUnderlyingError}`,
+/**
+ * The all-timeout exhaustion message. The specification was readable; the
+ * deadline was not met, so the refusal names the deadline, how many deferred
+ * attempts hit it, and the window they spanned instead of calling the
+ * specification unreadable.
+ */
+export const specificationReadDeadlineExceededRefusal = (
+  evidence: { attempts: number; elapsedMs: number; ceilingMs: number; lastUnderlyingError: string },
+): SpecificationRefusal => refusal(
+  SPEC_READ_DEADLINE_EXCEEDED_REASON,
+  `specification read exceeded its per-attempt deadline under host load on all ${evidence.attempts} deferred attempts`
+  + ` over ${evidence.elapsedMs}ms (deferral ceiling ${evidence.ceilingMs}ms); last underlying error: ${evidence.lastUnderlyingError}`,
   "transient",
+  "timeout",
+);
+
+/**
+ * An episode that saw any non-timeout transient parks on the ordinary budget.
+ * The window it actually ran can exceed that budget - an all-timeout episode
+ * extended past it and then saw one other transient - so the message names the
+ * observed elapsed window alongside the budget it was measured against.
+ */
+export const specificationReadBudgetExhaustedRefusal = (
+  evidence: { budgetMs: number; elapsedMs: number; lastUnderlyingError: string },
+): SpecificationRefusal => specificationUnreadableRefusal(
+  `transient read deferral budget exhausted after ${evidence.elapsedMs}ms`
+  + ` (budget ${evidence.budgetMs}ms); last underlying error: ${evidence.lastUnderlyingError}`,
+  "transient",
+  "other",
 );
 
 const isRecord = (value: unknown): value is Record<string, unknown> => (
@@ -474,15 +508,45 @@ export const classifySpecificationReadFailure = (error: unknown): SpecificationR
   return code && TRANSIENT_SYSTEM_ERROR_CODES.has(code) ? "transient" : "non-transient";
 };
 
+/**
+ * A deadline hit is retried on a longer clock; every other transient is not.
+ * Only an observed deadline expiry counts: this function's own per-attempt
+ * timer converts one into `GitHubReadError(..., "timeout")` before classifying,
+ * so a raw `AbortError` reaching here was aborted by something else and is an
+ * ordinary transient, not evidence that the host is merely slow.
+ */
+export const specificationReadTransientCause = (error: unknown): SpecificationReadTransientCause => (
+  error instanceof GitHubReadError && error.kind === "timeout" ? "timeout" : "other"
+);
+
 type SpecificationReadRetryOptions = {
   retryDelaysMs?: readonly number[];
   attemptTimeoutsMs?: readonly number[];
   wait?: (delayMs: number, signal: AbortSignal) => Promise<void>;
 };
 
-// Three reads and both backoffs preserve the claim-side read's existing 4s total bound.
-const SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS = [1_200, 1_200, 1_200] as const;
-const SPECIFICATION_READ_RETRY_DELAYS_MS = [100, 300] as const;
+/**
+ * The runner aborts its claim request at `RUNNER_API_TIMEOUT_MS`, whose shipped
+ * default is 10000ms (`packages/runner/src/config.ts`). The whole read - every
+ * attempt deadline plus every backoff between them - runs inside that request,
+ * so a ladder that reaches the ceiling would abort the claim before the control
+ * plane could defer, park, or notice anything. Half of the shipped default
+ * leaves room for the route work that precedes the read.
+ */
+export const SPECIFICATION_READ_REQUEST_BUDGET_MS = 10_000 / 2;
+
+/**
+ * An escalating per-attempt deadline ladder, not three identical deadlines. A
+ * host under load makes every read slower by the same factor, so repeating one
+ * 1200ms deadline fails all three attempts deterministically rather than
+ * probabilistically. The first attempt keeps the fast deadline for the healthy
+ * case; the later two give a merely slow read room to finish inside the same
+ * claim. How much room is capped by `SPECIFICATION_READ_REQUEST_BUDGET_MS`, so
+ * the escalation that matters for a sustained overload is the claim-side
+ * deferral ceiling, not this ladder.
+ */
+export const SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS = [1_200, 1_500, 1_800] as const;
+export const SPECIFICATION_READ_RETRY_DELAYS_MS = [100, 300] as const;
 
 const failureDetail = (error: unknown): string => (
   error instanceof Error ? error.message : "repository content read failed"
@@ -515,6 +579,7 @@ export const verifyPreparedSpecification = async (
   const attemptTimeoutsMs = options.attemptTimeoutsMs ?? SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS;
   const wait = options.wait ?? abortableDelay;
   let materialized: Uint8Array | undefined;
+  let sawNonTimeoutFailure = false;
   for (let attempt = 0; materialized === undefined; attempt += 1) {
     signal.throwIfAborted();
     const attemptDeadline = new AbortController();
@@ -548,6 +613,7 @@ export const verifyPreparedSpecification = async (
 
     const detail = failureDetail(failure);
     const failureKind = classifySpecificationReadFailure(failure);
+    if (specificationReadTransientCause(failure) !== "timeout") sawNonTimeoutFailure = true;
     const delayMs = retryDelaysMs[attempt];
     if (failureKind === "non-transient" || delayMs === undefined) {
       return specificationUnreadableRefusal(
@@ -555,6 +621,7 @@ export const verifyPreparedSpecification = async (
           ? `after ${attempt} retries (${attempt + 1} total attempts); last failure: ${detail}`
           : detail,
         failureKind,
+        failureKind === "transient" ? (sawNonTimeoutFailure ? "other" : "timeout") : undefined,
       );
     }
     await wait(delayMs, signal);

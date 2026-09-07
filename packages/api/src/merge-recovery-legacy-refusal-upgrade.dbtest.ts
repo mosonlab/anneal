@@ -26,6 +26,7 @@ interface LegacyRefusalMigrationFixture {
   url: string;
   execute(sql: string): Promise<void>;
   applyMigrations(): void;
+  applyRemainingMigrations(): void;
   cleanup(): Promise<void>;
 }
 
@@ -73,6 +74,19 @@ const stageBeforeLegacyRefusalMigrations = async (): Promise<LegacyRefusalMigrat
           { recursive: true },
         );
       }
+      deploy();
+    },
+    // The staged schema stops at the backfill, so it is only readable through
+    // raw SQL that names its own columns. The generated Prisma client selects
+    // every column the current schema declares, including the ones later
+    // migrations add to "MergeRecoveryAttempt", so a typed read needs the whole
+    // committed history. Restore it once the boundary assertions are done.
+    applyRemainingMigrations: () => {
+      cpSync(
+        join(dbDirectory, "prisma", "migrations"),
+        join(staging, "prisma", "migrations"),
+        { recursive: true },
+      );
       deploy();
     },
     cleanup: async (): Promise<void> => {
@@ -150,6 +164,8 @@ test("legacy refusal upgrade backfills only the two exact historical refusal sha
         },
       ],
     );
+
+    fixture.applyRemainingMigrations();
 
     const client = new PrismaClient({ datasources: { db: { url: fixture.url } } });
     try {

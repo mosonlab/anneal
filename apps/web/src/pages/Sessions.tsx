@@ -5,7 +5,7 @@ import {
   type SessionStatusFilter,
 } from "@anneal/db/session-filter-contract";
 
-import { api } from "../lib/api";
+import { type ApiError, api } from "../lib/api";
 import { compact, compactTokens, durationWithInboxWait, formatDate, formatDateTime, formatT, money, repoWebUrl, timeAgo } from "../lib/format";
 import { POLL_MS, usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
@@ -50,6 +50,12 @@ import { cn } from "../lib/utils";
  *  now the product's only raw event table. */
 const EVENT_LOG = "max-h-[420px] overflow-auto rounded-lg border border-[color:var(--border-soft)] bg-[color:var(--code-background)]";
 const EVENT_ROW = "grid grid-cols-[46px_92px_1fr] gap-[10px] border-b border-[color:var(--event-line)] px-[12px] py-[7px] text-[11.5px] last:border-b-0";
+
+/** The session-list error line. The list route names its refusals with a
+ *  `code` (`session-filter-status-invalid`), which is worth showing; most
+ *  other failures carry none, and an absent code must not leave a gap. */
+const errorNotice = (error: ApiError): string =>
+  [String(error.status), error.code, error.message].filter((part) => part !== null && part !== "").join(" ");
 
 const PAGE_SIZE = 50;
 const BLOCK_MAX = 8_000;
@@ -580,7 +586,7 @@ export const SessionsPage = (): ReactNode => {
           onClear={() => replace(SESSIONS_ROUTE)}
         />
         {fatal(head.error, head.data)
-          ? <ErrorNotice message={`${head.error!.status} ${head.error!.code ?? ""} ${head.error!.message}`} onRetry={head.reload} />
+          ? <ErrorNotice message={errorNotice(head.error!)} onRetry={head.reload} />
           : null}
         <Card flush>
           <div data-session-list>

@@ -7,9 +7,12 @@ import {
   DependencyProvisioning,
   INTEGRATOR_SENTINEL_MODEL,
   MergeLeaseEventState,
+  MergeRecoveryStatus,
+  MERGE_READINESS_REQUEUE_KIND,
   MERGE_TAIL_KIND,
   Prisma,
   PrismaClient,
+  readinessRequeueFromMetadata,
   RunStatus,
   TaskStatus,
 } from "@anneal/db";
@@ -26,7 +29,13 @@ import {
   type WithMergeLease,
 } from "./merge-lease.js";
 import type { MergeLeaseTarget } from "./merge-lease-hold.js";
-import { READINESS_CLAIM_LEASE_MS, readinessTick } from "./merge-readiness-worker.js";
+import { readBoard } from "./board.js";
+import {
+  READINESS_CLAIM_LEASE_MS,
+  READINESS_EXCEPTION_REQUEUE_LIMIT,
+  READINESS_EXCEPTION_REQUEUE_STATE,
+  readinessTick,
+} from "./merge-readiness-worker.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -510,6 +519,165 @@ test("ordinary base requeue authorizes the refreshed exact head", async () => {
     claimed: 1, authorized: 1, requeued: 0, stopped: 0,
   });
   assert.equal(await db.task.count({ where: { name: "Autonomous merge tail: independent review" } }), 0);
+});
+
+test("consecutive pre-authorization requeues are counted on the readiness card", async () => {
+  const seeded = await seedReadiness();
+  const firstDrift = "d".repeat(40);
+  const secondDrift = "e".repeat(40);
+  // The public activity route preserves caller-supplied metadata, so an
+  // operator or an agent can post a row carrying this kind, and a control-plane
+  // row of this kind can lack an ordinal the counters could place. Seeded
+  // before the first settlement, a counted one would both inflate the card and
+  // push the first real ordinal past 1.
+  await db.taskActivity.createMany({ data: [
+    {
+      taskId: seeded.readiness.id,
+      actorType: "operator",
+      body: "operator note shaped like a requeue",
+      metadata: { kind: MERGE_READINESS_REQUEUE_KIND, ordinal: 1, budgetGrant: 9 },
+    },
+    {
+      taskId: seeded.readiness.id,
+      actorType: "agent",
+      body: "agent note shaped like a requeue",
+      metadata: { kind: MERGE_READINESS_REQUEUE_KIND, ordinal: 2, budgetGrant: 9 },
+    },
+    {
+      taskId: seeded.readiness.id,
+      actorType: "control-plane",
+      body: "unnumbered row shaped like a requeue",
+      metadata: { kind: MERGE_READINESS_REQUEUE_KIND, budgetGrant: 9 },
+    },
+  ] });
+  assert.equal(
+    (await readinessTick(db, reader([], snapshot({ baseSha: firstDrift })), new Date(), 5, releaseChainLease, runWithMergeLease)).requeued,
+    1,
+  );
+  // The requeued Regression run passes against the base that moved, which is
+  // what puts readiness back in front of a base that has moved again.
+  const rerun = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+  });
+  await db.run.update({ where: { id: rerun.id }, data: { status: "SUCCEEDED", headSha: HEAD } });
+  await db.taskStepOutput.update({ where: { taskId: seeded.regression.id }, data: {
+    runId: rerun.id,
+    body: JSON.stringify({
+      schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: firstDrift, gateVerdict: "PASS",
+    }),
+    commitSha: HEAD,
+  } });
+  await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.DONE } });
+  assert.equal(
+    (await readinessTick(db, reader([], snapshot({ baseSha: secondDrift })), new Date(), 5, releaseChainLease, runWithMergeLease)).requeued,
+    1,
+  );
+
+  const requeues = await db.taskActivity.findMany({
+    where: {
+      taskId: seeded.readiness.id,
+      actorType: "control-plane",
+      metadata: { path: ["kind"], equals: MERGE_READINESS_REQUEUE_KIND },
+    },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  });
+  // The unnumbered seed is still on the Task; it is simply not a requeue.
+  assert.equal(requeues.length, 3);
+  assert.deepEqual(
+    requeues.flatMap((row) => readinessRequeueFromMetadata(row.metadata) ?? []),
+    [
+      { ordinal: 1, staleBaseSha: BASE, currentBaseSha: firstDrift, budgetGrant: 1 },
+      { ordinal: 2, staleBaseSha: firstDrift, currentBaseSha: secondDrift, budgetGrant: 1 },
+    ],
+  );
+  // Each grant funded one extra Regression attempt, so the counted grants and
+  // the runs the chain actually paid for agree.
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 3);
+
+  const cards = await readBoard(db, { projectId: seeded.project.id, archived: "false" });
+  const readinessCard = cards.find((card) => card.id === seeded.readiness.id);
+  assert.ok(readinessCard);
+  assert.equal(readinessCard.readinessRequeues, 2);
+  assert.equal(readinessCard.readinessGrants, 2);
+  // The counters belong to the readiness Step; no other card in the chain
+  // claims its chain's requeues.
+  const regressionCard = cards.find((card) => card.id === seeded.regression.id);
+  assert.ok(regressionCard);
+  assert.equal(regressionCard.readinessRequeues, 0);
+  assert.equal(regressionCard.readinessGrants, 0);
+});
+
+test("a requeue that carries a recovery aggregate is counted the same way", async () => {
+  const seeded = await seedReadiness();
+  const driftedBase = "d".repeat(40);
+  const sourceRun = await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
+  const stop = await db.taskActivity.create({ data: {
+    taskId: seeded.integrator.id,
+    actorType: "control-plane",
+    body: "merge stopped on base drift",
+    metadata: { kind: MERGE_TAIL_KIND.readiness, state: "stopped" },
+  } });
+  const authorization = await db.taskActivity.create({ data: {
+    taskId: seeded.readiness.id,
+    actorType: "control-plane",
+    body: "merge authorized",
+    metadata: { kind: MERGE_TAIL_KIND.readiness, state: "authorized" },
+  } });
+  // A recovery already awaiting authorization: readiness settles this requeue
+  // through enterRepair rather than through its own branch, and the counter has
+  // to come out the same on either path.
+  const aggregate = await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: seeded.integrator.id,
+    sourceStopId: stop.id,
+    attempt: 1,
+    status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
+    boundSourceRunId: sourceRun.id,
+    authorizationActivityId: authorization.id,
+    recoveryRunId: sourceRun.id,
+    readinessTaskId: seeded.readiness.id,
+    regressionTaskId: seeded.regression.id,
+    repository: "acme/widgets",
+    prNumber: 41,
+    targetBranch: "main",
+    authorizedHeadSha: HEAD,
+    authorizedBaseSha: BASE,
+    observedBaseSha: BASE,
+    currentBaseSha: BASE,
+  } });
+
+  assert.equal(
+    (await readinessTick(db, reader([], snapshot({ baseSha: driftedBase })), new Date(), 5, releaseChainLease, runWithMergeLease)).requeued,
+    1,
+  );
+
+  assert.equal(
+    (await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } })).status,
+    MergeRecoveryStatus.REPAIRING,
+  );
+  const requeues = await db.taskActivity.findMany({
+    where: {
+      taskId: seeded.readiness.id,
+      actorType: "control-plane",
+      metadata: { path: ["kind"], equals: MERGE_READINESS_REQUEUE_KIND },
+    },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  });
+  assert.equal(requeues.length, 1);
+  assert.deepEqual(readinessRequeueFromMetadata(requeues[0]!.metadata), {
+    ordinal: 1, staleBaseSha: BASE, currentBaseSha: driftedBase, budgetGrant: 1,
+  });
+  // One grant, one extra Regression attempt, exactly as on the ordinary path.
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
+
+  const cards = await readBoard(db, { projectId: seeded.project.id, archived: "false" });
+  const readinessCard = cards.find((card) => card.id === seeded.readiness.id);
+  assert.ok(readinessCard);
+  assert.equal(readinessCard.readinessRequeues, 1);
+  assert.equal(readinessCard.readinessGrants, 1);
+  const regressionCard = cards.find((card) => card.id === seeded.regression.id);
+  assert.ok(regressionCard);
+  assert.equal(regressionCard.readinessRequeues, 0);
+  assert.equal(regressionCard.readinessGrants, 0);
 });
 
 test("future readiness waits but the readiness role is claimed regardless of ordinal", async () => {
@@ -1163,4 +1331,89 @@ test("eligible readiness is not hidden behind the first hundred ineligible candi
     { claimed: 1, authorized: 1, requeued: 0, stopped: 0 },
   );
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
+});
+
+// The 2026-09-06 incident shape: a merge lease stall plus a deploy restart
+// killed readiness mid-evaluation. The exception carries no review-fail or
+// gate-fail verdict, so the stop it used to write could not be re-entered
+// through `merge-tail/repair` and the branch had to be delivered by hand.
+const terminatingLease: WithMergeLease = async (target) => {
+  if (target) leasedTargets.push(target);
+  throw new Error("terminated");
+};
+
+const exceptionRequeueMarkers = (regressionTaskId: string) => db.taskActivity.findMany({
+  where: {
+    taskId: regressionTaskId,
+    AND: [
+      { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.readiness } },
+      { metadata: { path: ["state"], equals: READINESS_EXCEPTION_REQUEUE_STATE } },
+    ],
+  },
+  orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+});
+
+test("a readiness evaluation exception requeues the step instead of stopping the tail", async () => {
+  const seeded = await seedReadiness();
+
+  assert.deepEqual(
+    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, terminatingLease),
+    { claimed: 1, authorized: 0, requeued: 1, stopped: 0 },
+  );
+
+  const [readiness, regression] = await Promise.all([
+    db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } }),
+    db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } }),
+  ]);
+  assert.equal(readiness.status, TaskStatus.TODO);
+  assert.equal(readiness.failureReason, null);
+  assert.equal(readiness.readinessClaimToken, null);
+  assert.equal(regression.status, TaskStatus.DONE, "the regression evidence is untouched");
+  assert.equal(regression.failureReason, null);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1);
+  assert.equal(await db.inboxMessage.count(), 0, "a requeue writes no stop notice");
+  assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId]);
+
+  const markers = await exceptionRequeueMarkers(seeded.regression.id);
+  assert.equal(markers.length, 1);
+  const metadata = markers[0]!.metadata as Record<string, unknown>;
+  assert.equal(metadata.reason, "readiness evaluation exception: terminated");
+  assert.equal(metadata.requeue, 1);
+  assert.equal(metadata.limit, READINESS_EXCEPTION_REQUEUE_LIMIT);
+  assert.equal(metadata.recoveryAggregateId, null);
+  assert.match(markers[0]!.body, /Merge readiness requeued after evaluation exception 1 of 3/u);
+
+  // The requeued step is evaluated again on the next tick.
+  assert.deepEqual(
+    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, runWithMergeLease),
+    { claimed: 1, authorized: 1, requeued: 0, stopped: 0 },
+  );
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
+});
+
+test("exception requeues are bounded and the stop past the limit counts them", async () => {
+  const seeded = await seedReadiness();
+  for (let requeue = 1; requeue <= READINESS_EXCEPTION_REQUEUE_LIMIT; requeue += 1) {
+    assert.deepEqual(
+      await readinessTick(db, reader(), new Date(), 5, releaseChainLease, terminatingLease),
+      { claimed: 1, authorized: 0, requeued: 1, stopped: 0 },
+    );
+  }
+  assert.deepEqual(
+    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, terminatingLease),
+    { claimed: 1, authorized: 0, requeued: 0, stopped: 1 },
+  );
+
+  const reason = "readiness evaluation failed after 3 exception requeues: terminated";
+  const [readiness, regression] = await Promise.all([
+    db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } }),
+    db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } }),
+  ]);
+  assert.equal(readiness.status, TaskStatus.REVIEW);
+  assert.equal(readiness.failureReason, reason);
+  assert.equal(regression.status, TaskStatus.REVIEW);
+  assert.equal(regression.failureReason, reason);
+  assert.equal((await exceptionRequeueMarkers(seeded.regression.id)).length, READINESS_EXCEPTION_REQUEUE_LIMIT);
+  const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
+  assert.equal(notice.body, `Autonomous merge readiness stopped: ${reason}`);
 });
