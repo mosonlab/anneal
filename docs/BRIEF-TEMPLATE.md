@@ -74,34 +74,46 @@ it can.
 
 ## Routing
 
-Implementation has seven routes:
+The implementation Revalidate specification Step judges one of four tiers from
+the brief and the repository. The default is the answer unless the judge can
+name the specific criterion that applies; it records the tier and reason in
+the revalidation output, and the selected staffing profile supplies the Agent
+for that tier. The tier criteria and their not-a-reason lists are:
 
-- **senior-dev-luna-max** (template default): a brief with mechanical Acceptance
-  is work that tier finishes under the chain's review and regression tail.
-- **senior-dev-astra-medium**, with the reason on the same line, for an
-  owner-defined hazard. A senior-dev-astra-medium route without a reason is a
-  brief defect.
-- **senior-dev-sol-high**, with the reason on the same line, only when the
-  Astra model is unavailable for that work. It is never a default.
-- **senior-dev-opus-medium**, with the reason on the same line, when the operator
-  chooses to spend Claude capacity on that work instead of Codex capacity.
-  It is the same senior-developer prompt on Claude Opus 5 medium; it is
-  never a default, and the chain keeps its code review and blind code review
-  steps unchanged.
-- **senior-dev-opus-high**, with the reason on the same line, when the operator
-  chooses Claude capacity and names the higher effort. It is the same
-  senior-developer prompt as senior-dev-opus-medium on Claude Opus 5 high; it is
-  never a default.
-- **frontend-dev-opus-medium** for the frontend scope defined in
-  [Implementation assignee routing](governance/task-routing-v1.md#implementation-assignee-routing).
-- **frontend-dev-opus-high** for that same frontend scope when the operator names
-  it because the frontend work is harder. It is the same frontend-developer
-  prompt on Claude Opus 5 high; it is never a default.
+- **default** — everything else. Acceptance that existing tests or grep can
+  check stays here whatever it touches. It is not a reason to leave `default`
+  that the change crosses packages, touches web files, touches many files,
+  lands in a sensitive directory, or was once called out by an audit report as
+  needing a stronger model. Its canonical Agent today is
+  `senior-dev-luna-max`.
+- **frontend** — the deliverable is a new page, a page redesign, or a new
+  interaction or visual scheme. Adding a field, wiring data, or changing copy
+  on an existing component is not a reason to choose it. Its canonical Agent
+  today is `frontend-dev-opus-medium`.
+- **hard** — a behavior that neither the brief nor an existing test pins down
+  has to be defined by the implementer, and getting it wrong would not show in
+  review or regression; for example, keeping an untested semantic intact
+  across several providers' event handling. A large change, a change that
+  spans modules, or a change that needs a lot of reading is not a reason to
+  choose it. Its canonical Agent today is `senior-dev-astra-low`.
+- **hazard** — the failure the acceptance suite cannot witness: concurrency,
+  transaction boundaries, lock or lease windows, or cross-module contract
+  migrations; or the change alters what the merge gate, merge automation, a
+  migration, or authorization does. Merely touching those files without
+  changing their behavior is not a reason to choose it. Its canonical Agent
+  today is `senior-dev-astra-medium`.
+
+These tier criteria and not-a-reason lists are the text of record.
 
 The [Implementation assignee routing](governance/task-routing-v1.md#implementation-assignee-routing)
-section owns the default, hazard escalation, exact `Route:` grammar, refusal
-codes, and `stepOverrides` interaction. Follow that section when selecting a
-route or writing the route line.
+section owns the judged tier, its criteria and not-a-reason lists, the tier
+slot lookup, exact `Route:` grammar, refusal codes, and `stepOverrides`
+interaction. The judged tier is the default path. A `Route:` line or explicit
+implementation `stepOverrides` assignee is the operator override and wins the
+judged tier; use it when the operator has a specific Agent to override the
+judge, with the optional suffix recording the reason. A tier slot that is
+empty or lacks the Repo's `GIT_WRITE` grant is never silently replaced by
+another tier.
 
 Tier answers how hard the diff is; chain shape answers how settled the spec
 is — a brief that cannot reach mechanical Acceptance is compound-shaped

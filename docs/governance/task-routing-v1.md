@@ -1,6 +1,6 @@
 # Task Routing Contract v1
 
-Version: 1.10 (2026-09-02)
+Version: 1.11 (2026-09-07)
 
 Status: Active
 
@@ -85,33 +85,35 @@ belongs in Full Assurance, not in assignee escalation.
 
 ## Implementation assignee routing
 
-The `default route` is `senior-dev-luna-max`. A brief with
-mechanical Acceptance stays on that default regardless of which directory it
-touches. Escalate on **hazard**, never on path. Write
-`Route: implementation=senior-dev-astra-medium - <hazard>` only when the
-acceptance suite cannot witness the failure even when the brief states it:
-concurrency, transaction boundaries, lock or lease windows, or cross-module
-contract migrations; also use it when the change alters what the merge gate,
-merge automation, or a migration does. Deleting dead code is never a hazard.
+A direct chain's Revalidate specification Step judges the implementation brief
+and the repository at `HEAD` against the four tiers below. The default is the
+answer unless the judge can name the specific criterion that applies. The
+judge records the tier and the reason in the revalidation output, and the
+selected staffing profile resolves that tier to an Agent. A tier slot is
+operator configuration; an empty slot never falls through to another tier.
 
-Use `senior-dev-sol-high` for that same hazardous work only when the Astra
-model is unavailable; it is never a default. Use
-`senior-dev-opus-medium`, or `senior-dev-opus-high` for that same work at the
-higher effort, when the operator names it to spend Claude capacity
-on the implementation instead of Codex capacity; neither is ever a default.
-Use `frontend-dev-opus-medium` for work primarily consisting of a new or
-redesigned web page or UI surface, and `frontend-dev-opus-high` for that same
-work when the operator names it because the frontend work is harder; it is
-never a default. The review-fix step keeps its template
-assignee `senior-dev-astra-low` on every route; implementation routing does not
-move it.
+| Tier | Criterion | Not a reason to choose this tier | Canonical Agent today |
+| --- | --- | --- | --- |
+| `default` | Everything else. Acceptance that existing tests or grep can check stays here whatever it touches. | Crossing packages, touching web files, touching many files, landing in a sensitive directory, or an audit report once suggesting a stronger model. | `senior-dev-luna-max` |
+| `frontend` | The deliverable is a new page, a page redesign, or a new interaction or visual scheme. | Adding a field, wiring data, or changing copy on an existing component. | `frontend-dev-opus-medium` |
+| `hard` | A behavior that neither the brief nor an existing test pins down has to be defined by the implementer, and getting it wrong would not show in review or regression; for example, keeping an untested semantic intact across several providers' event handling. | The change is large, spans modules, or needs a lot of reading. | `senior-dev-astra-low` |
+| `hazard` | The failure the acceptance suite cannot witness: concurrency, transaction boundaries, lock or lease windows, or cross-module contract migrations; or the change alters what the merge gate, merge automation, a migration, or authorization does. | Merely touching those files without changing their behavior. | `senior-dev-astra-medium` |
 
-Routing assessments use `default route` or `hazard: <which>`, with the latter
-naming the hazard under the criteria above.
+These tier criteria and not-a-reason lists are the text of record.
 
-A non-default implementation route is selected in a backlog card or direct
-instantiation description with a machine-readable line. Its grammar is exactly
-one of these line forms:
+The tier is judged from the brief and tree, never from the path or file count.
+The implementation step is restaffed from the selected profile's slot only
+when it has no Route line or explicit implementation `stepOverrides` assignee,
+has no Run, and the slot resolves to an Agent with the chain Repo's
+`GIT_WRITE` grant. The revalidation output and that decision are stored in one
+transaction. A Route line or explicit implementation `stepOverrides`
+assignee is the operator override: it wins the judged tier, and the activity
+record says that the tier was overridden. A running implementation keeps its
+current Agent; an empty or ungranted tier slot is recorded as unstaffed or
+refused and never silently replaced.
+
+The Route line remains the operator override for a direct implementation. Its
+grammar is exactly one of these line forms:
 
   `Route: implementation=<agent>`
   `Route: implementation=<agent> - <reason>`
@@ -128,10 +130,9 @@ silently used. Other templates do not interpret malformed Route-looking prose.
 The Route line and an explicit `stepOverrides` `assigneeAgentId` for the
 implementation step are mutually exclusive; supplying both is refused with
 `implementation_route_conflicts_with_step_override`. An include-only override
-does not conflict, and a selected staffing profile does not conflict: the
-Route wins for that implementation step. The existing override checks still
-apply to the routed Agent; if its identity changes before instantiation,
-`implementation_route_agent_renamed` is returned.
+does not conflict, and a selected staffing profile does not conflict. The
+existing override checks still apply to the routed Agent; if its identity
+changes before instantiation, `implementation_route_agent_renamed` is returned.
 
 ## Critical classification
 
