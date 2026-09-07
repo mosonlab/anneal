@@ -29,6 +29,13 @@ written.
   opens no repair task, charges no repair budget, spends none of the two
   automatic base-drift recovery attempts, and grants the queued Run its own
   budget, and it is bounded at two re-runs per recovery stop.
+- Merge-tail `review-fix` and `gate-fix` repair cards now use the nullable
+  `mergeTailRepairAgentId` slot on the Chain's staffing profile, falling back
+  to the fixed-implementation Agent only when that slot is empty. A Chain with
+  no recorded profile uses the template default profile; an archived slot
+  Agent falls back with a recorded TaskActivity. The active direct, PR, and
+  compound canonical profiles default this slot to `senior-dev-luna-max`,
+  while `refresh-conflict` retains `MERGE_RESOLVER_ROLE`.
 - A gate dispatch queued behind other gates no longer gives up while the queue
   is moving. `GATE_DISPATCH_TIMEOUT_MINUTES` now bounds a queue that makes no
   progress: each poll reads which process holds each busy slot, and a slot that
