@@ -409,10 +409,10 @@ export const requeueRegressionSettlement = (
     const baseDrift = input.condition === "base-advanced" || input.condition === "train-base-stale";
     // The readiness claim serializes this count with the Run grant and its
     // durable activity. Never use the bounded marker-history window here.
-    const rows = await tx.taskActivity.findMany({
+    const rows = baseDrift ? await tx.taskActivity.findMany({
       where: readinessRequeueActivityWhere(input.readinessTaskId),
       select: { metadata: true },
-    });
+    }) : [];
     const aggregateId = input.recovery?.aggregateId;
     const spent = readinessRequeueTotals(aggregateId
       ? rows.filter((row) => asJsonObject(row.metadata)?.recoveryAggregateId === aggregateId)

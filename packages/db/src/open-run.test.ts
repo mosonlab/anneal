@@ -1625,6 +1625,7 @@ test("a spend cap refuses every replacement intent, loudly, once the task's runs
     { kind: "enqueue", readyAt: now },
     { kind: "retry", readyAt: now },
     { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1 },
+    { kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1, readinessBaseDrift: true },
     { kind: "merge-tail-repair", readyAt: now },
     { kind: "claim-invalidated", sourceRunId: "run-3", readyAt: now },
     {
