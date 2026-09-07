@@ -2781,12 +2781,15 @@ An online observation closes an open per-Step executor-offline episode even
 when that tick's decision is `skip` or another non-`authorize` result. The
 worker records a TaskActivity naming the observation, and the close is fenced
 by the readiness claim, so a tick that loses its claim cannot close the
-episode. The exception stop path closes the episode under the same claim. If
-every configured executor is offline, readiness settles as a requeue of
-itself, leaving the Regression evidence and its Run untouched, and writes a
-TaskActivity on the readiness task with `metadata.state =
+episode. The exception stop path closes the episode under the same claim. When
+an `authorize` decision is blocked because every configured executor is
+offline, readiness settles as a requeue of itself, leaving the Regression
+evidence and its Run untouched, and writes a TaskActivity on the readiness
+task with `metadata.state =
 "requeued-executor-offline"`, `metadata.reason = "merge-executor-offline"` and
 the executor runner ids it checked. The next tick asks again.
+An offline observation does not change the ordinary outcome of `skip` or
+`defer` decisions.
 
 That wait is bounded by the 15 minutes after which the registry forgets a
 daemon altogether, and it is measured per outage: the wait starts at the first
@@ -2800,9 +2803,10 @@ other readiness stop: the Regression and readiness tasks move to `REVIEW`
 with a `failureReason` naming `merge-executor-offline` and the runner ids. A
 later readiness tick that observes an allowed executor online automatically
 re-arms that ceiling stop: it returns both Steps from `REVIEW` to `TODO`,
-records the exit as a TaskActivity, and closes the `merge-tail-stop:` Inbox
-notice. The worker then follows the ordinary authorization path against the
-current base. The re-arm itself opens no new Regression Run and never bypasses
+records the exit as a TaskActivity, and closes the current `merge-readiness-stop:`
+Inbox notice (and any legacy `merge-tail-stop:` notice). The worker then
+follows the ordinary authorization path against the current base. The re-arm
+itself opens no new Regression Run and never bypasses
 the exact `(headSha, baseHeadSha)` check; existing base-drift requeue handling
 applies if the base has moved.
 
