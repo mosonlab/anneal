@@ -19,7 +19,7 @@
  * so importing it does not widen §D-P1's custody surface.
  */
 
-import { callWithTimeout, classifyHttpStatus, NO_RESPONSE, type Http, type HttpAttempt, type HttpTrace } from "@anneal/github-client";
+import { callWithTimeout, classifyHttpStatus, isLostResponse, NO_RESPONSE, type Http, type HttpAttempt, type HttpMethod, type HttpTrace, type ResponseClass } from "@anneal/github-client";
 
 /** Every mutating request this package can construct. Enumerated so the
  *  no-bypass test can assert the complete list and a new write cannot be added
@@ -28,11 +28,11 @@ export const MUTATING_OPERATIONS = [
   "createSanitizedTree",
   "createMergeCommit",
   "updateBaseRef",
+  "publishTrain",
+  "deleteTrainRef",
   "disablePullRequestAutoMerge",
   "dequeuePullRequest",
 ] as const;
-export type MutatingOperation = (typeof MUTATING_OPERATIONS)[number];
-
 export type CheckEntry =
   | { kind: "CheckRun"; name: string; conclusion: string | null; status: string | null }
   | { kind: "StatusContext"; context: string; state: string | null };
@@ -82,15 +82,84 @@ export type ReadResult =
 
 export type MergeResponse =
   | { status: "merged"; sha: string }
-  | { status: "head-moved" }
-  | { status: "not-mergeable" }
   | { status: "forbidden"; reason: string }
   | { status: "not-found"; reason: string }
   | { status: "unprocessable"; reason: string }
   | { status: "ref-update-refused"; reason: string }
+  /**
+   * The ref update's response never arrived, or arrived unreadable. The update
+   * is a compare-and-swap that may or may not have been applied on the far
+   * side, so the commit we built travels with the outcome: reading the target
+   * ref back and comparing it to `mergeCommitSha` is the only thing that
+   * settles which happened. A lost response recorded as a refusal is how an
+   * already-landed merge gets re-classified as base drift on the next read.
+   */
+  | { status: "ref-update-uncertain"; reason: string; mergeCommitSha: string }
   | { status: "unknown"; reason: string };
 
 export type DisarmResult = { ok: true } | { ok: false; reason: string };
+
+/**
+ * A failed GraphQL call, carrying the one distinction a *mutation*'s caller
+ * cannot do without: `lost` means no answer arrived or the answer could not be
+ * read, so the mutation may still have been applied and only a read-back
+ * settles it. A deterministic GitHub refusal is an answer,
+ * and asking again gets the same one.
+ */
+type GraphQlFailure = { error: string; lost: boolean };
+
+/**
+ * A REST call that produced no usable object, with the class
+ * `classifyHttpStatus` computed for it. The class is carried rather than
+ * recomputed by the caller because a 2xx whose body is unreadable is `lost`
+ * even though its status says `applied`.
+ */
+type RestFailure = { ok: false; responseClass: ResponseClass; status: number; reason: string };
+
+/**
+ * A REST failure, as a merge outcome.
+ *
+ * A deterministic GitHub rejection keeps its class: nothing about repeating a
+ * 403, a 404 or a 422 changes the answer, so degrading it to `unknown` would
+ * buy a read-back and a resend for a request the platform has already refused.
+ * Only a genuinely lost response — no answer, a 5xx, a body we cannot read —
+ * leaves the write's fate open.
+ */
+const restStop = (stage: string, failure: RestFailure, method: "GET" | "POST"): MergeResponse => {
+  const reason = `${stage}: ${failure.reason}`;
+  if (failure.responseClass !== "refused") return { status: "unknown", reason };
+  if (failure.status === 401 || failure.status === 403) return { status: "forbidden", reason };
+  // Refused object reads cannot supply the requested object; they have no
+  // mutation payload to label unprocessable. Preserve the HTTP reason.
+  if (failure.status === 404 || method === "GET") return { status: "not-found", reason };
+  return { status: "unprocessable", reason };
+};
+
+export type RepositoryReference = { owner: string; name: string };
+
+export type TrainGitHub = {
+  readDefaultBranch: (reference: RepositoryReference) => Promise<
+    | { status: "ok"; name: string; oid: string }
+    | { status: "api-error"; reason: string }
+  >;
+  readRef: (reference: RepositoryReference, ref: string) => Promise<
+    | { status: "ok"; oid: string | null }
+    | { status: "api-error"; reason: string }
+  >;
+  isAncestor: (reference: RepositoryReference, ancestor: string, descendant: string) => Promise<
+    | { status: "ok"; ancestor: boolean }
+    | { status: "api-error"; reason: string }
+  >;
+  readCommit: (reference: RepositoryReference, oid: string) => Promise<
+    | { status: "ok"; commit: { oid: string; parents: string[] } }
+    | { status: "api-error"; reason: string }
+  >;
+  publishTrain: (reference: RepositoryReference, baseRef: string, publishHead: string) => Promise<
+    | { status: "published" }
+    | { status: "rejected" | "unknown"; reason: string }
+  >;
+  deleteTrainRef: (reference: RepositoryReference, ref: string) => Promise<DisarmResult>;
+};
 
 export const READ_QUERY = `query($owner:String!,$name:String!,$number:Int!,$base:String!) {
   repository(owner:$owner,name:$name) {
@@ -132,6 +201,10 @@ const asRecord = (value: unknown): Json | null =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as Json : null;
 
 const asString = (value: unknown): string | null => typeof value === "string" ? value : null;
+
+const SHA_PATTERN = /^[0-9a-f]{40}$/u;
+
+const isSha = (value: unknown): value is string => typeof value === "string" && SHA_PATTERN.test(value);
 
 /** Re-exported so this module stays the executor's single platform seam even
  *  though the transport itself is now shared. */
@@ -180,7 +253,7 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
   });
 
   const call = async (
-    request: { url: string; method: "GET" | "POST"; accept: string; body?: string },
+    request: { url: string; method: HttpMethod; accept: string; body?: string },
   ): Promise<HttpAttempt> => callWithTimeout(options.http, {
     url: request.url,
     method: request.method,
@@ -188,28 +261,34 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
     ...(request.body === undefined ? {} : { body: request.body }),
   }, options.timeoutMs, options.trace);
 
-  const graphql = async (query: string, variables: Json): Promise<{ data: Json } | { error: string }> => {
+  const graphql = async (query: string, variables: Json): Promise<{ data: Json } | GraphQlFailure> => {
     const response = await call({
       url: options.graphqlUrl,
       method: "POST",
       accept: "application/json",
       body: JSON.stringify({ query, variables }),
     });
-    if (classifyHttpStatus(response.status) !== "applied") {
-      return { error: response.status === NO_RESPONSE ? `network: ${response.body}` : `HTTP ${response.status}` };
+    const responseClass = classifyHttpStatus(response.status);
+    if (responseClass !== "applied") {
+      return {
+        error: response.status === NO_RESPONSE ? `network: ${response.body}` : `HTTP ${response.status}`,
+        lost: responseClass === "lost",
+      };
     }
+    // A 2xx whose body cannot be read says nothing about what the platform did
+    // with the request, so it is lost, not refused.
     let parsed: unknown;
     try {
       parsed = JSON.parse(response.body);
     } catch {
-      return { error: "response body is not valid JSON" };
+      return { error: "response body is not valid JSON", lost: true };
     }
     const record = asRecord(parsed);
-    if (!record) return { error: "response body is not an object" };
+    if (!record) return { error: "response body is not an object", lost: true };
     const errors = classifyGraphQlErrors(record.errors);
-    if (errors) return { error: errors };
+    if (errors) return { error: errors, lost: isLostResponse(errors) };
     const data = asRecord(record.data);
-    if (!data) return { error: "response carried no data" };
+    if (!data) return { error: "response carried no data", lost: true };
     return { data };
   };
 
@@ -419,20 +498,186 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
 
   const restJson = async (
     request: { url: string; method: "GET" | "POST"; body?: unknown },
-  ): Promise<{ ok: true; value: Json } | { ok: false; response: HttpAttempt }> => {
+  ): Promise<{ ok: true; value: Json } | RestFailure> => {
     const response = await call({
       url: request.url,
       method: request.method,
       accept: "application/vnd.github+json",
       ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
     });
-    if (classifyHttpStatus(response.status) !== "applied") return { ok: false, response };
+    const responseClass = classifyHttpStatus(response.status);
+    const reason = response.status === NO_RESPONSE
+      ? `network: ${response.body}`
+      : `HTTP ${response.status} ${response.body}`;
+    if (responseClass !== "applied") return { ok: false, responseClass, status: response.status, reason };
+    // A 2xx we cannot read is not an answer either way, so it keeps the lost
+    // class however deterministic the status looked.
     try {
       const value = asRecord(JSON.parse(response.body));
-      return value ? { ok: true, value } : { ok: false, response: { ...response, body: "response body is not an object" } };
+      return value
+        ? { ok: true, value }
+        : { ok: false, responseClass: "lost", status: response.status, reason: "response body is not an object" };
     } catch {
-      return { ok: false, response: { ...response, body: "response body is not valid JSON" } };
+      return { ok: false, responseClass: "lost", status: response.status, reason: "response body is not valid JSON" };
     }
+  };
+
+  const repositoryUrl = (reference: RepositoryReference): string =>
+    `${options.restUrl}/repos/${encodeURIComponent(reference.owner)}/${encodeURIComponent(reference.name)}`;
+
+  /** GitHub's git-ref REST endpoints take `heads/main`, not `refs/heads/main`. */
+  const apiRefPath = (ref: string): string => {
+    const withoutPrefix = ref.startsWith("refs/") ? ref.slice("refs/".length) : ref;
+    return withoutPrefix.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+  };
+
+  const responseReason = (response: HttpAttempt): string =>
+    response.status === NO_RESPONSE
+      ? `network: ${response.body}`
+      : `HTTP ${response.status}${response.body ? ` ${response.body}` : ""}`;
+
+  const parseRestRecord = (response: HttpAttempt): { ok: true; value: Json } | { ok: false; reason: string } => {
+    if (classifyHttpStatus(response.status) !== "applied") return { ok: false, reason: responseReason(response) };
+    try {
+      const value = asRecord(JSON.parse(response.body));
+      return value ? { ok: true, value } : { ok: false, reason: "response body is not an object" };
+    } catch {
+      return { ok: false, reason: "response body is not valid JSON" };
+    }
+  };
+
+  const readRef = async (
+    reference: RepositoryReference,
+    ref: string,
+  ): Promise<Awaited<ReturnType<TrainGitHub["readRef"]>>> => {
+    const response = await call({
+      url: `${repositoryUrl(reference)}/git/ref/${apiRefPath(ref)}`,
+      method: "GET",
+      accept: "application/vnd.github+json",
+    });
+    // GitHub uses 404 for a ref that is not present. This is a positive
+    // observation and is distinct from an unreadable repository or malformed
+    // response, both of which remain api errors.
+    if (response.status === 404) return { status: "ok", oid: null };
+    const parsed = parseRestRecord(response);
+    if (!parsed.ok) return { status: "api-error", reason: parsed.reason };
+    const object = asRecord(parsed.value.object);
+    const oid = object?.sha;
+    if (!isSha(oid)) return { status: "api-error", reason: "ref response has no valid object sha" };
+    return { status: "ok", oid };
+  };
+
+  const readDefaultBranch = async (
+    reference: RepositoryReference,
+  ): Promise<Awaited<ReturnType<TrainGitHub["readDefaultBranch"]>>> => {
+    const response = await call({
+      url: repositoryUrl(reference),
+      method: "GET",
+      accept: "application/vnd.github+json",
+    });
+    const parsed = parseRestRecord(response);
+    if (!parsed.ok) return { status: "api-error", reason: `default branch read failed: ${parsed.reason}` };
+    const name = parsed.value.default_branch;
+    if (typeof name !== "string" || name.length === 0) {
+      return { status: "api-error", reason: "repository response has no valid default_branch" };
+    }
+    const branch = await readRef(reference, `refs/heads/${name}`);
+    if (branch.status === "api-error") return branch;
+    if (branch.oid === null) return { status: "api-error", reason: `default branch ref ${name} does not exist` };
+    return { status: "ok", name, oid: branch.oid };
+  };
+
+  const isAncestor = async (
+    reference: RepositoryReference,
+    ancestor: string,
+    descendant: string,
+  ): Promise<Awaited<ReturnType<TrainGitHub["isAncestor"]>>> => {
+    if (!isSha(ancestor) || !isSha(descendant)) {
+      return { status: "api-error", reason: "compare requires two valid 40-hex commit shas" };
+    }
+    const response = await call({
+      url: `${repositoryUrl(reference)}/compare/${ancestor}...${descendant}`,
+      method: "GET",
+      accept: "application/vnd.github+json",
+    });
+    const parsed = parseRestRecord(response);
+    if (!parsed.ok) return { status: "api-error", reason: `ancestry read failed: ${parsed.reason}` };
+    const status = parsed.value.status;
+    if (status === "ahead" || status === "identical") return { status: "ok", ancestor: true };
+    if (status === "behind" || status === "diverged") return { status: "ok", ancestor: false };
+    return { status: "api-error", reason: `compare response has unknown status ${String(status)}` };
+  };
+
+  const readCommit = async (
+    reference: RepositoryReference,
+    oid: string,
+  ): Promise<Awaited<ReturnType<TrainGitHub["readCommit"]>>> => {
+    if (!isSha(oid)) return { status: "api-error", reason: "commit read requires a valid 40-hex commit sha" };
+    const response = await call({
+      url: `${repositoryUrl(reference)}/git/commits/${oid}`,
+      method: "GET",
+      accept: "application/vnd.github+json",
+    });
+    const parsed = parseRestRecord(response);
+    if (!parsed.ok) return { status: "api-error", reason: `commit read failed: ${parsed.reason}` };
+    if (parsed.value.sha !== oid) return { status: "api-error", reason: "commit response sha does not match requested oid" };
+    if (!Array.isArray(parsed.value.parents)) return { status: "api-error", reason: "commit response parents is not an array" };
+    const parents: string[] = [];
+    for (const [index, parent] of parsed.value.parents.entries()) {
+      const parentRecord = asRecord(parent);
+      if (!isSha(parentRecord?.sha)) {
+        return { status: "api-error", reason: `commit response parent ${index} has no valid sha` };
+      }
+      parents.push(parentRecord.sha);
+    }
+    return { status: "ok", commit: { oid, parents } };
+  };
+
+  const publishTrain = async (
+    reference: RepositoryReference,
+    baseRef: string,
+    publishHead: string,
+  ): Promise<Awaited<ReturnType<TrainGitHub["publishTrain"]>>> => {
+    if (!isSha(publishHead)) return { status: "unknown", reason: "train publication requires a valid 40-hex publish head" };
+    const branchRef = baseRef.startsWith("refs/heads/") ? baseRef : `refs/heads/${baseRef}`;
+    const response = await call({
+      url: `${repositoryUrl(reference)}/git/refs/${apiRefPath(branchRef)}`,
+      method: "PATCH",
+      accept: "application/vnd.github+json",
+      body: JSON.stringify({ sha: publishHead, force: false }),
+    });
+    // Only GitHub's two ref-update refusals establish that the update itself
+    // was rejected. 401/403/404 and every other deterministic 4xx are access
+    // or addressing failures, and reporting them as a non-fast-forward would
+    // send the operator to re-authorize a condition no authorization changes.
+    if (response.status === 409 || response.status === 422) {
+      return { status: "rejected", reason: responseReason(response) };
+    }
+    if (classifyHttpStatus(response.status) === "applied") {
+      const parsed = parseRestRecord(response);
+      if (!parsed.ok) return { status: "unknown", reason: `publication response could not be confirmed: ${parsed.reason}` };
+      const returnedRef = parsed.value.ref;
+      const returnedSha = asRecord(parsed.value.object)?.sha;
+      if (returnedRef !== branchRef || returnedSha !== publishHead) {
+        return { status: "unknown", reason: "publication response did not confirm the requested ref and sha" };
+      }
+      return { status: "published" };
+    }
+    return { status: "unknown", reason: responseReason(response) };
+  };
+
+  const deleteTrainRef = async (
+    reference: RepositoryReference,
+    ref: string,
+  ): Promise<DisarmResult> => {
+    const response = await call({
+      url: `${repositoryUrl(reference)}/git/refs/${apiRefPath(ref)}`,
+      method: "DELETE",
+      accept: "application/vnd.github+json",
+    });
+    return classifyHttpStatus(response.status) === "applied" || response.status === 404
+      ? { ok: true }
+      : { ok: false, reason: responseReason(response) };
   };
 
   /**
@@ -449,11 +694,11 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
   ): Promise<MergeResponse> => {
     const repo = `${options.restUrl}/repos/${reference.owner}/${reference.name}`;
     const commit = await restJson({ url: `${repo}/git/commits/${expectedHeadSha}`, method: "GET" });
-    if (!commit.ok) return { status: "unknown", reason: `head commit read failed: HTTP ${commit.response.status} ${commit.response.body}` };
+    if (!commit.ok) return restStop("head commit read failed", commit, "GET");
     const headTree = asString(asRecord(commit.value.tree)?.sha);
     if (!headTree) return { status: "unknown", reason: "head commit has no tree sha" };
     const recursive = await restJson({ url: `${repo}/git/trees/${headTree}?recursive=1`, method: "GET" });
-    if (!recursive.ok) return { status: "unknown", reason: `head tree read failed: HTTP ${recursive.response.status} ${recursive.response.body}` };
+    if (!recursive.ok) return restStop("head tree read failed", recursive, "GET");
     if (!Array.isArray(recursive.value.tree) || recursive.value.truncated !== false) {
       return { status: "unknown", reason: "head tree response is malformed or truncated; .chain absence is unproven" };
     }
@@ -465,7 +710,7 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
         method: "POST",
         body: { base_tree: headTree, tree: [{ path: ".chain", mode: "040000", type: "tree", sha: null }] },
       });
-      if (!tree.ok) return { status: "unknown", reason: `sanitized tree creation failed: HTTP ${tree.response.status} ${tree.response.body}` };
+      if (!tree.ok) return restStop("sanitized tree creation failed", tree, "POST");
       const sanitized = asString(tree.value.sha);
       if (!sanitized) return { status: "unknown", reason: "sanitized tree response has no sha" };
       mergeTree = sanitized;
@@ -479,7 +724,7 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
         parents: [expectedBase.sha, expectedHeadSha],
       },
     });
-    if (!created.ok) return { status: "unknown", reason: `merge commit creation failed: HTTP ${created.response.status} ${created.response.body}` };
+    if (!created.ok) return restStop("merge commit creation failed", created, "POST");
     const mergeSha = asString(created.value.sha);
     if (!mergeSha) return { status: "unknown", reason: "merge commit response has no sha" };
     const updated = await graphql(UPDATE_REFS_MUTATION, {
@@ -491,9 +736,18 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
         force: false,
       }],
     });
-    if ("error" in updated) return { status: "ref-update-refused", reason: updated.error };
+    // The ref update IS the merge, so the difference between "GitHub said no"
+    // and "GitHub never answered" is the difference between a stop and a merge
+    // that is already on the branch. Only the former is a refusal; the latter
+    // travels with the commit we built so the caller can settle it by reading
+    // the ref back.
+    if ("error" in updated) {
+      return updated.lost
+        ? { status: "ref-update-uncertain", reason: updated.error, mergeCommitSha: mergeSha }
+        : { status: "ref-update-refused", reason: updated.error };
+    }
     if (!asRecord(updated.data.updateRefs)) {
-      return { status: "unknown", reason: "updateRefs response did not prove the atomic ref update" };
+      return { status: "ref-update-uncertain", reason: "updateRefs response did not prove the atomic ref update", mergeCommitSha: mergeSha };
     }
     return { status: "merged", sha: mergeSha };
   };
@@ -508,7 +762,17 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
     return "error" in result ? { ok: false, reason: result.error } : { ok: true };
   };
 
-  return { readPullRequest, mergePullRequest, disableAutoMerge, dequeuePullRequest, graphql };
+  return {
+    readPullRequest,
+    mergePullRequest,
+    disableAutoMerge,
+    dequeuePullRequest,
+    readDefaultBranch,
+    readRef,
+    isAncestor,
+    readCommit,
+    publishTrain,
+    deleteTrainRef,
+    graphql,
+  };
 };
-
-export type GitHubClient = ReturnType<typeof makeGitHubClient>;

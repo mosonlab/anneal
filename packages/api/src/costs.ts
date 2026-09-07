@@ -1,4 +1,6 @@
 import {
+  MERGE_READINESS_REQUEUE_ACTOR_TYPE,
+  MERGE_READINESS_REQUEUE_KIND,
   MERGE_TAIL_KIND,
   MODEL_TOKEN_PRICES,
   Prisma,
@@ -87,6 +89,10 @@ export type CostsTaskRow = {
   /** The primary Chain id resolved from the repair marker. Detached repairs
    * intentionally keep `chainId` null in the persisted Task shape. */
   repairChainId?: string;
+  /** Pre-authorization merge-readiness requeues this Task recorded, and the
+   * extra Run attempts they granted. Only the readiness Step records any. */
+  readinessRequeues: number;
+  readinessGrants: number;
 };
 
 export type CostsChainData = {
@@ -263,19 +269,26 @@ const runCost = (run: CostsRunRow): UsageCost | null => {
 const isTerminalRunStatus = (status: RunStatus): status is typeof terminalRunStatuses[number] =>
   terminalRunStatuses.includes(status as typeof terminalRunStatuses[number]);
 
-type CacheSplit = {
+export type CacheSplit = {
   inputTokens: number;
   cachedInputTokens: number;
   cacheCreationInputTokens: number;
   uncachedInputTokens: number;
 };
 
-/** A split is known only when all three pieces of the canonical input total
- * are present and internally consistent. A persisted NULL stays unknown. */
-const cacheSplit = (run: CostsRunRow): CacheSplit | null => {
-  const session = run.session;
-  if (session === null) return null;
-  const { inputTokens, cachedInputTokens, cacheCreationInputTokens } = session;
+/** The canonical input-token split rule, over the three persisted columns
+ * alone. A split is known only when all three pieces of the canonical input
+ * total are present and internally consistent — cached reads and cache writes
+ * are subsets of `inputTokens`. A persisted NULL stays unknown.
+ *
+ * Exported because the per-run diagnostics in `run-metrics.ts` report the same
+ * split to an operator; that reader must not re-derive this rule. */
+export const inputTokenSplit = (tokens: {
+  inputTokens: number | null;
+  cachedInputTokens: number | null;
+  cacheCreationInputTokens: number | null;
+}): CacheSplit | null => {
+  const { inputTokens, cachedInputTokens, cacheCreationInputTokens } = tokens;
   if (inputTokens === null || cachedInputTokens === null || cacheCreationInputTokens === null
     || inputTokens < 0 || cachedInputTokens < 0 || cacheCreationInputTokens < 0
     || cachedInputTokens + cacheCreationInputTokens > inputTokens) return null;
@@ -286,6 +299,9 @@ const cacheSplit = (run: CostsRunRow): CacheSplit | null => {
     uncachedInputTokens: inputTokens - cachedInputTokens - cacheCreationInputTokens,
   };
 };
+
+const cacheSplit = (run: CostsRunRow): CacheSplit | null =>
+  run.session === null ? null : inputTokenSplit(run.session);
 
 /** The efficiency view prices uncached input at the Run's own model, the same
  * model `runSessionUsageCost` charges the whole aggregate at. Codex reports no
@@ -429,6 +445,11 @@ const chainReport = (
       else if (repair.repairKind === "refresh-conflict") repairs.refreshConflict += 1;
       else if (repair.repairKind === "review-fix") repairs.reviewFix += 1;
     }
+    // Requeue spend is already inside `costUsd` — every granted attempt funded a
+    // Run this chain owns. These two say how much of it the readiness Step's
+    // base-drift requeues account for.
+    const readinessRequeues = members.reduce((sum, task) => sum + task.readinessRequeues, 0);
+    const readinessGrants = members.reduce((sum, task) => sum + task.readinessGrants, 0);
     reports.push({
       chainId: orderedPrimary[0]!.chainId!,
       detailTaskId: orderedPrimary[0]!.id,
@@ -438,6 +459,8 @@ const chainReport = (
       busyMinutes: minutes(busyMilliseconds),
       busyPct: lastEnded === firstStarted ? 0 : (busyMilliseconds / (lastEnded - firstStarted)) * 100,
       repairs,
+      readinessRequeues,
+      readinessGrants,
       costUsd: pricedRuns === 0 ? null : amount(total),
       costByRole: Object.fromEntries(Object.entries(costByRole).map(([role, value]) => [role, amount(value)])),
       costUnavailableRuns: unavailableRuns,
@@ -740,7 +763,29 @@ export const readProjectCosts = async (
           WHERE activity."taskId" = task."id"
             AND activity."actorType" = 'control-plane'
             AND activity."metadata"->>'kind' = ${MERGE_TAIL_KIND.repairAttempt}
-        ), '[]'::jsonb) AS "repairMarkers"
+        ), '[]'::jsonb) AS "repairMarkers",
+        -- The same rows the board folds: control-plane only, and numbered,
+        -- because an unnumbered row is not a requeue the counters can place.
+        (
+          SELECT COUNT(*)::int
+          FROM "TaskActivity" AS requeue
+          WHERE requeue."taskId" = task."id"
+            AND requeue."actorType" = ${MERGE_READINESS_REQUEUE_ACTOR_TYPE}
+            AND requeue."metadata"->>'kind' = ${MERGE_READINESS_REQUEUE_KIND}
+            AND jsonb_typeof(requeue."metadata"->'ordinal') = 'number'
+        ) AS "readinessRequeues",
+        COALESCE((
+          SELECT SUM(CASE
+              WHEN jsonb_typeof(requeue."metadata"->'budgetGrant') = 'number'
+                THEN (requeue."metadata"->>'budgetGrant')::numeric
+              ELSE 0
+            END)::int
+          FROM "TaskActivity" AS requeue
+          WHERE requeue."taskId" = task."id"
+            AND requeue."actorType" = ${MERGE_READINESS_REQUEUE_ACTOR_TYPE}
+            AND requeue."metadata"->>'kind' = ${MERGE_READINESS_REQUEUE_KIND}
+            AND jsonb_typeof(requeue."metadata"->'ordinal') = 'number'
+        ), 0) AS "readinessGrants"
       FROM "Task" AS task
       JOIN candidate_tasks ON candidate_tasks."id" = task."id"
       LEFT JOIN "TaskTemplateStep" AS step ON step."id" = task."templateStepId"
@@ -758,6 +803,8 @@ export const readProjectCosts = async (
       templateStep: task.templateStepName === null || task.templateStepOutputKind === null
         ? null
         : { name: task.templateStepName, outputKind: task.templateStepOutputKind },
+      readinessRequeues: task.readinessRequeues,
+      readinessGrants: task.readinessGrants,
     }));
     const activityRows: RepairMarkerRow[] = rawTaskRows.flatMap((task) => (
       Array.isArray(task.repairMarkers)

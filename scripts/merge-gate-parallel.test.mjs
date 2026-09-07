@@ -21,11 +21,12 @@
 // file the gate sources needs neither.
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import nodeTest from "node:test";
 import { fileURLToPath } from "node:url";
+import { stripVTControlCharacters } from "node:util";
 
 // Sourced by the harnesses below rather than restated in them. The verdict's
 // exit codes and the four lines that carry them live in one file, and a fixture
@@ -45,39 +46,226 @@ const verdictPath = fileURLToPath(new URL("./gate-worker/verdict.sh", import.met
 
 const test = (name, body) => nodeTest(name, { concurrency: true }, body);
 
+// Read declarations only: a path in a comment or an unused npm alias does not
+// mean the gate executes it. Line continuations make each group one declaration.
+const gateSource = readFileSync(new URL("./merge-gate.sh", import.meta.url), "utf8");
+const gateDeclarations = gateSource.replace(/\\\n/g, " ").split("\n")
+  .filter((line) => /^(?:step|parallel_steps) /.test(line));
+const rootScripts = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).scripts;
+// Only the gate's current direct node --test commands and npm aliases count.
+// Keep selectors attached to their command rather than treating paths as proof.
+const testCommands = (declarations) => declarations.flatMap((declaration) =>
+  declaration.split(" :: ").flatMap((member) => {
+    const alias = /\bnpm run ([\w:-]+)/.exec(member);
+    const command = alias ? rootScripts[alias[1]] ?? "" : member;
+    const invocation = /\bnode (?:--import \S+ )?--test\s+(.+)/.exec(command);
+    if (!invocation) return [];
+    const args = invocation[1].match(/'[^']*'|"[^"]*"|[^\s]+/g) ?? [];
+    const selectors = [...invocation[1].matchAll(/--test-(skip|name)-pattern(?:=|\s+)(?:'([^']*)'|"([^"]*)"|([^\s]+))/g)]
+      .map((match) => ({ kind: match[1], pattern: match[2] ?? match[3] ?? match[4] }));
+    assert.equal((invocation[1].match(/--test-(?:skip|name)-pattern/g) ?? []).length,
+      selectors.length, "unparsed test selector");
+    return [{ suites: args.filter((arg) => /^scripts\/[\w/.-]+\.test\.mjs$/.test(arg)), selectors }];
+  }),
+);
+const namedSuites = (declarations) => new Set(testCommands(declarations).flatMap((command) => command.suites));
+const assertSelectorCoverage = (declarations) => {
+  const commands = testCommands(declarations);
+  for (const command of commands) {
+    if (command.selectors.length === 0) continue;
+    // Fail closed for new combinations until their coverage is explicitly proved.
+    assert.equal(command.selectors.length, 1, "combined test selectors need a coverage proof");
+    const selector = command.selectors[0];
+    const complements = commands.filter((other) => other !== command &&
+      other.selectors.length === 1 &&
+      other.selectors[0].kind !== selector.kind &&
+      other.selectors[0].pattern === selector.pattern);
+    assert.ok(complements.some((other) => other.suites.some((suite) => command.suites.includes(suite))),
+      `uncompensated test selector: ${selector.kind} ${selector.pattern}`);
+    // A skip command may also name suites with no matching test. For these,
+    // accept only an anchored literal whose test title is absent from the file.
+    for (const suite of command.suites) {
+      if (complements.some((other) => other.suites.includes(suite))) continue;
+      const literal = /^\^([\w ]+)\$$/.exec(selector.pattern)?.[1];
+      assert.ok(selector.kind === "skip" && literal &&
+        !readFileSync(new URL(`../${suite}`, import.meta.url), "utf8").includes(literal),
+      `uncompensated test selector for ${suite}`);
+    }
+  }
+};
+const assertInstallFreeOrder = (declarations) => {
+  const install = declarations.findIndex((line) => line.startsWith('parallel_steps "dependencies and the install-free suites" '));
+  const postgres = declarations.findIndex((line) => line.startsWith('step "throwaway PostgreSQL is accepting connections" '));
+  assert.ok(install >= 0 && postgres > install, "install-free group must precede PostgreSQL");
+};
+
+test("COVERAGE every scripts test is named by an executed gate step", () => {
+  const suites = readdirSync(new URL("./", import.meta.url), { recursive: true })
+    .filter((path) => path.endsWith(".test.mjs"))
+    .map((path) => `scripts/${path}`);
+  assert.ok(suites.length > 0);
+  assertSelectorCoverage(gateDeclarations);
+  const covered = namedSuites(gateDeclarations);
+  assert.deepEqual(suites.filter((path) => !covered.has(path)).sort(), [], "scripts suites missing from gate steps");
+});
+
+test("COVERAGE unused aliases do not count as executed suites", () => {
+  assert.deepEqual([...namedSuites(['step "unrelated" true'])], []);
+});
+
+test("COVERAGE removing the complementary hygiene step leaves an execution gap", () => {
+  const incomplete = gateDeclarations.map((line) => line.replace(
+    /"secret hygiene built-checkout integration" node --test .*? :: /, "",
+  ));
+  assert.throws(() => assertSelectorCoverage(incomplete), /uncompensated test selector/);
+});
+
+test("COVERAGE a suite mention outside node --test does not count", () => {
+  assert.deepEqual([...namedSuites(['step "mention" echo scripts/example.test.mjs'])], []);
+});
+
+test("GROUP-SHAPE rejects PostgreSQL before the install-free group", () => {
+  const reversed = [...gateDeclarations];
+  const install = reversed.findIndex((line) => line.startsWith('parallel_steps "dependencies and the install-free suites" '));
+  const postgres = reversed.findIndex((line) => line.startsWith('step "throwaway PostgreSQL is accepting connections" '));
+  [reversed[install], reversed[postgres]] = [reversed[postgres], reversed[install]];
+  assert.throws(() => assertInstallFreeOrder(reversed), /install-free group must precede PostgreSQL/);
+});
+
+test("GROUP-SHAPE added operational suites share the install-free group", () => {
+  const groups = gateDeclarations.filter((line) => line.startsWith("parallel_steps "));
+  const installFree = groups.find((line) => line.startsWith('parallel_steps "dependencies and the install-free suites" '));
+  assert.ok(installFree, "install-free group must exist");
+  assert.match(installFree, /"npm ci" install_dependencies ::/);
+  const expected = ["setup-local", "verify-secret-hygiene", "compose-binding", "repo-contract-merge-gate", "merge-lease-adapter"];
+  for (const name of expected) {
+    const path = `scripts/${name}.test.mjs`;
+    assert.ok(namedSuites([installFree]).has(path), `${path} must run alongside dependency installation`);
+    assert.equal(groups.filter((group) => namedSuites([group]).has(path)).length, name === "verify-secret-hygiene" ? 2 : 1);
+  }
+  assert.match(installFree, /"operational script fixtures" node --test --test-skip-pattern='\^the command runs over this checkout and reports classes only\$' scripts\/setup-local\.test\.mjs scripts\/verify-secret-hygiene\.test\.mjs scripts\/compose-binding\.test\.mjs scripts\/repo-contract-merge-gate\.test\.mjs scripts\/merge-lease-adapter\.test\.mjs ::/);
+  const proof = groups.find((line) => line.startsWith('parallel_steps "the proof waves" '));
+  assert.ok(proof);
+  assert.match(proof, /"secret hygiene built-checkout integration" node --test --test-name-pattern='\^the command runs over this checkout and reports classes only\$' scripts\/verify-secret-hygiene\.test\.mjs ::/);
+  const hygieneTests = readFileSync(new URL("./verify-secret-hygiene.test.mjs", import.meta.url), "utf8");
+  assert.ok(hygieneTests.includes('test("the command runs over this checkout and reports classes only",'), "split integration selector must match an existing test");
+  for (const [, alias] of installFree.matchAll(/\bnpm run ([\w:-]+)/g)) {
+    assert.ok(Object.hasOwn(rootScripts, alias), `install-free npm alias must exist: ${alias}`);
+  }
+  assert.doesNotMatch(installFree, /await_postgres|prisma|dbtest|test:db/);
+  assertInstallFreeOrder(gateDeclarations);
+});
+
 // The two helpers host-sizing.sh is owed. `note` is the gate's log format, not
 // the sizing's, so the fixture supplies a silent one and reads the derived
 // values back itself.
-const runHostSizing = (hostShare) => {
+//
+// `cores` fixes what the sizing observes. host-sizing.sh asks node for the
+// host's core count, so a case that wants a stated host puts a node on PATH
+// that answers with that number and delegates everything else to the real one.
+// Asserting against `availableParallelism()` instead would restate the
+// implementation's own input and prove nothing about a machine nobody ran on:
+// the 16-vCPU worker the brief sizes for is not the machine this suite runs on.
+const fixedCoreNode = (t, cores) => {
+  const dir = mkdtempSync(join(tmpdir(), "gate-host-cores-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const patch = join(dir, "cores.cjs");
+  writeFileSync(patch, `require("node:os").availableParallelism = () => ${cores};\n`);
+  writeFileSync(
+    join(dir, "node"),
+    `#!/usr/bin/env bash\nexec ${JSON.stringify(process.execPath)} --require ${JSON.stringify(patch)} "$@"\n`,
+  );
+  chmodSync(join(dir, "node"), 0o755);
+  return dir;
+};
+
+const runHostSizing = (hostShare, coreBin) => {
   const env = { ...process.env };
+  if (coreBin) env.PATH = `${coreBin}:${env.PATH ?? ""}`;
   if (hostShare === undefined) delete env.AGENTOS_GATE_HOST_SHARE;
   else env.AGENTOS_GATE_HOST_SHARE = hostShare;
   const harness = `
 die() { printf '%s\\n' "$*" >&2; exit 1; }
 note() { :; }
 . ${JSON.stringify(hostSizingPath)}
-printf 'GATE_HOST_SHARE=%s\\nGATE_CPUS=%s\\n' "$GATE_HOST_SHARE" "$GATE_CPUS"
+printf 'GATE_HOST_SHARE=%s\\nGATE_CPUS=%s\\nGATE_UNIT_LANES=%s\\nGATE_DB_LANES=%s\\n' \
+  "$GATE_HOST_SHARE" "$GATE_CPUS" "$GATE_UNIT_LANES" "$GATE_DB_LANES"
 `;
   return spawnSync("bash", ["-c", harness], { encoding: "utf8", env });
 };
+
+const sizing = (result) =>
+  Object.fromEntries(
+    result.stdout
+      .trim()
+      .split("\n")
+      .map((line) => {
+        const [name, value] = line.split("=");
+        return [name, Number(value)];
+      }),
+  );
 
 test("HOST-SHARE defaults to half the host while explicit and invalid values keep their precedence", () => {
   const cores = availableParallelism();
 
   const defaultShare = runHostSizing(undefined);
   assert.equal(defaultShare.status, 0, defaultShare.stderr);
-  assert.equal(
-    defaultShare.stdout,
-    `GATE_HOST_SHARE=2\nGATE_CPUS=${Math.max(1, Math.floor(cores / 2))}\n`,
-  );
+  assert.equal(sizing(defaultShare).GATE_HOST_SHARE, 2);
+  assert.equal(sizing(defaultShare).GATE_CPUS, Math.max(1, Math.floor(cores / 2)));
 
   const wholeHost = runHostSizing("1");
   assert.equal(wholeHost.status, 0, wholeHost.stderr);
-  assert.equal(wholeHost.stdout, `GATE_HOST_SHARE=1\nGATE_CPUS=${cores}\n`);
+  assert.equal(sizing(wholeHost).GATE_HOST_SHARE, 1);
+  assert.equal(sizing(wholeHost).GATE_CPUS, cores);
 
-  const invalid = runHostSizing("3");
-  assert.notEqual(invalid.status, 0);
-  assert.match(invalid.stderr, /AGENTOS_GATE_HOST_SHARE must be 1 or 2, got 3/);
+  // The share is the worker's own `host-share` setting now, not a restatement
+  // of its slot count, so a gate worker sharing its host with runners can hand
+  // the gate a quarter of it. Stated against this host's own core count rather
+  // than a fixed 16, so the arithmetic is the thing under test on any machine:
+  // on the 16-vCPU worker the brief describes, a share of two is 8 lanes of the
+  // 16 a share of one would take.
+  const half = runHostSizing("2");
+  const quarter = runHostSizing("4");
+  assert.equal(quarter.status, 0, quarter.stderr);
+  assert.equal(sizing(half).GATE_UNIT_LANES, Math.max(1, Math.floor(cores / 2)));
+  assert.equal(sizing(quarter).GATE_UNIT_LANES, Math.max(1, Math.floor(cores / 4)));
+  assert.equal(sizing(half).GATE_DB_LANES, Math.max(2, Math.floor(cores / 2)));
+
+  // A share of zero would divide the host by nothing, and a fraction or a word
+  // is not a number of shares at all. `00` is the same zero written with
+  // padding: it used to slip past the bare `0` pattern here and reach the
+  // division as `Number("00")`, whose Infinity lanes killed the gate with the
+  // FAIL code over a worker's own setting file.
+  for (const refused of ["0", "00", "1.5", "two"]) {
+    const invalid = runHostSizing(refused);
+    assert.notEqual(invalid.status, 0, `AGENTOS_GATE_HOST_SHARE=${refused} was accepted`);
+    assert.match(
+      invalid.stderr,
+      new RegExp(`AGENTOS_GATE_HOST_SHARE must be a whole number of shares, at least 1, got ${refused}`),
+    );
+  }
+});
+
+test("on the 16-vCPU worker a host share of two gives each gate half the machine", (t) => {
+  // The stated case, on a stated host: two concurrent gates on a 16-vCPU worker
+  // each size for 8 of its processors, so the two of them add up to the one
+  // machine they are running on rather than to two.
+  const bin = fixedCoreNode(t, 16);
+
+  const half = runHostSizing("2", bin);
+  assert.equal(half.status, 0, half.stderr);
+  assert.deepEqual(sizing(half), {
+    GATE_HOST_SHARE: 2,
+    GATE_CPUS: 8,
+    GATE_UNIT_LANES: 8,
+    GATE_DB_LANES: 8,
+  });
+
+  // The same host undivided, so the halving above is the share's doing and not
+  // the fixture's.
+  const whole = runHostSizing("1", bin);
+  assert.equal(whole.status, 0, whole.stderr);
+  assert.equal(sizing(whole).GATE_CPUS, 16);
 });
 
 // Enough of the gate for the engine to run: the two output helpers it owes the
@@ -305,6 +493,7 @@ const runVerdict = (scenario) => {
     const script = join(root, "verdict.sh");
     writeFileSync(script, `${VERDICT_HARNESS}\n${scenario}\n`);
     const result = spawnSync("bash", [script], { encoding: "utf8" });
+    assert.match(stripVTControlCharacters(result.stdout ?? "").trim().split("\n").at(-1) ?? "", /^(?:MERGE GATE:|GATE NOT RUN:)/);
     return { status: result.status, stdout: result.stdout ?? "" };
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -342,6 +531,38 @@ test("VERDICT a step that really failed is still a FAIL naming it", () => {
   assert.doesNotMatch(run.stdout, /GATE NOT RUN/);
 });
 
+test("VERDICT a cleanup that failed after every step passed is not a FAIL", () => {
+  // The container would not delete, or the lock would not release. That is the
+  // host failing to finish tearing this run down, and it says nothing about the
+  // commit: reporting FAIL here hands a reviewer a judgement no step formed.
+  // It is not a PASS either — the gate promises the container is gone — so it
+  // is the code that already means "every step passed and this may still not
+  // authorise a merge".
+  const run = runVerdict(`release_lock() { return 1; }\nexit 0`);
+  assert.equal(run.status, 3);
+  assert.match(run.stdout, /MERGE GATE: NOT AUTHORITATIVE \(cleanup: the merge gate lock could not be released\)/);
+  assert.doesNotMatch(run.stdout, /MERGE GATE: FAIL/);
+  assert.doesNotMatch(run.stdout, /MERGE GATE: PASS/);
+});
+
+test("VERDICT container cleanup failure and intentional retention end with their verdict", () => {
+  const failed = runVerdict(`POSTGRES_STARTED=1\ndocker() { return 1; }\nexit 0`);
+  assert.equal(failed.status, 3);
+  assert.match(failed.stdout, /NOT AUTHORITATIVE \(cleanup: postgres container stub could not be removed\)/);
+  const kept = runVerdict(`KEEP_POSTGRES=1\nexit 0`);
+  assert.equal(kept.status, 3);
+  assert.match(kept.stdout, /NOT AUTHORITATIVE \(--keep-postgres\)/);
+});
+
+test("VERDICT a cleanup that failed after a step failed is still that step's FAIL", () => {
+  // The boundary. This run did judge the commit, and nothing about the teardown
+  // afterwards may turn that judgement into an errand.
+  const run = runVerdict(`release_lock() { return 1; }\nFAILED_STEP="a step"\nexit 1`);
+  assert.equal(run.status, 1);
+  assert.match(run.stdout, /MERGE GATE: FAIL \(a step\)/);
+  assert.doesNotMatch(run.stdout, /NOT AUTHORITATIVE/);
+});
+
 test("VERDICT a clean run still passes and still names its commit", () => {
   const run = runVerdict(`exit 0`);
   assert.equal(run.status, 0);
@@ -363,8 +584,8 @@ GATED_HEAD=abc123
 `;
 
 // Runs a group, waits until the member that is meant to block has reported its
-// pid, then signals the harness the way an operator kills a hung gate.
-const interruptGroup = async (members) => {
+// pid and any requested parent-side observation, then signals the harness.
+const interruptGroup = async (members, observed = "") => {
   const root = mkdtempSync(join(tmpdir(), "merge-gate-interrupted-group."));
   try {
     const memberPidFile = join(root, "member.pid");
@@ -382,13 +603,15 @@ const interruptGroup = async (members) => {
     while (Date.now() < deadline) {
       try {
         memberPid = readFileSync(memberPidFile, "utf8").trim();
-        if (memberPid !== "") break;
+        if (memberPid !== "" && stdout.includes(observed)) break;
       } catch {
         // Not written yet.
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
     assert.notEqual(memberPid, "", "the blocking member never reported its pid");
+
+    assert.ok(stdout.includes(observed), "the parent never reported the required observation");
 
     harness.kill("SIGTERM");
     const status = await new Promise((resolve) => harness.on("exit", (code, signal) => resolve(code ?? signal)));
@@ -414,9 +637,16 @@ test("VERDICT a failure seen before the signal survives it", async () => {
   // is reaped rather than in the group's closing accounting: that accounting
   // never runs when a later member is still blocked. Without it the gate would
   // answer "no verdict" about a commit one of its steps had already failed.
+  // A sibling starting does not prove the parent reaped the failure. Wrap the
+  // real recorder to announce that observation before allowing SIGTERM. Delay
+  // the bad member so the old sibling-start handshake reliably signals too soon.
   const run = await interruptGroup(
     (pidFile) =>
-      `parallel_steps "the suites" "bad" sh -c 'exit 1' :: "stuck" sh -c 'printf %s "$$" > "$0"; exec sleep 30' ${pidFile}`,
+      `recorder=$(declare -f record_real_failure)\n` +
+      `eval "\${recorder/record_real_failure/original_record_real_failure}"\n` +
+      `record_real_failure() { original_record_real_failure "$@"; printf 'FAILURE_RECORDED\\n'; }\n` +
+      `parallel_steps "the suites" "bad" sh -c 'sleep 0.2; exit 1' :: "stuck" sh -c 'printf %s "$$" > "$0"; exec sleep 30' ${pidFile}`,
+    "FAILURE_RECORDED\n",
   );
   assert.equal(run.status, 1);
   assert.match(run.stdout, /MERGE GATE: FAIL \(bad\)/);

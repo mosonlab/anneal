@@ -2,17 +2,23 @@
 
 import { execFileSync } from "node:child_process";
 
-const FAST_DOCUMENTS = new Set([
+// Documents no suite reads. That is the whole membership rule: a document a
+// test opens by path is an input to that test, so editing it can break the
+// suite, and a profile that skips the suite lets the breakage surface in the
+// next full gate of an unrelated commit. docs/runbooks/gate-worker.md was on
+// this list and is exactly that case — gate-worker.test.mjs and
+// gate-dispatch.test.mjs both read it — so the rule is held by a fixture in
+// merge-gate-profile.test.mjs rather than by whoever edits this list next.
+export const FAST_DOCUMENTS = new Set([
   "AGENTS.md",
   "SECURITY.md",
   "THIRD_PARTY_NOTICES.md",
   "docs/BRIEF-TEMPLATE.md",
   "docs/governance/task-routing-v1.md",
   "docs/public-snapshot.md",
-  "docs/runbooks/gate-worker.md",
 ]);
 
-const FROZEN_RECORD_DIRECTORIES = [
+export const FROZEN_RECORD_DIRECTORIES = [
   "docs/reviews/",
   "docs/merge-notes/",
   "docs/briefs/",

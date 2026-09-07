@@ -17,7 +17,9 @@ the default count). Linux and macOS use the same generated inventory. The
 macOS control-plane profile is maintainer-unverified; a macOS runner-only host
 uses launchd only for its configured runner labels. The release may contain
 the resident merge-executor runtime, but that service is outside this
-activation set. An Anneal Run workspace is never deployed.
+activation set; on Linux its root-owned runtime follows the release through
+`agentos-merge-executor-follower.timer`. An Anneal Run workspace is never
+deployed.
 
 ## Runner-only host
 
@@ -60,6 +62,12 @@ fails verification; the job points `current` back to `previous`, restarts the
 local runners, and succeeds in recovery only after they all report the
 previous release's commit.
 
+Every host with local runners in its inventory runs that registration check,
+including the control-plane VM, which reads its own loopback API at
+`http://127.0.0.1:${API_PORT}` (default port 3000) with the `OPERATOR_TOKEN`
+from the deployment's `.env`. A control-plane host with local runners and no
+`OPERATOR_TOKEN` fails preflight; the check is never skipped.
+
 ## Runtime layout
 
 ```text
@@ -95,9 +103,15 @@ stage two is the explicit root-only exception described below. Require:
 
 - `current` and `previous` are relative symlinks to direct children of
   `releases/`;
-- `shared/.env` is mode 0600 and contains `DATABASE_URL`,
-  `FEISHU_DEFAULT_CHAT_ID`, and `GITHUB_READ_TOKEN` (the latter must be in the
-  file), plus the five absolute persistent paths beneath `shared/`:
+- `shared/.env` is mode 0600. Both roles require `DATABASE_URL` for
+  quiet-window queries and the deploy barrier, and `FEISHU_DEFAULT_CHAT_ID`
+  for deploy notifications; these two values may also be inherited from the
+  deploy job's environment. Control-plane additionally requires
+  `GITHUB_READ_TOKEN` in the file. Runner additionally requires `OPERATOR_TOKEN`
+  and `RUNNER_TOKEN` in the file, but does not require `GITHUB_READ_TOKEN`.
+  Optional `RUNNER_API_URL` may be set in the file or inherited and is validated
+  by `controlPlaneApiBaseUrl`. The file also contains the five absolute
+  persistent paths beneath `shared/`:
   `FILES_ROOT`, `RUNNER_WORKSPACE_ROOT`, `RUNNER_DEPENDENCY_CACHE_ROOT`,
   `RUNNER_REPO_MIRROR_ROOT`, and `CONTROL_PLANE_STATE_DIR`;
 - every configured service definition, whether a Linux systemd `<label>.service`
@@ -325,6 +339,21 @@ node scripts/deploy/install-launchd-services.mjs --replace-existing
 node scripts/deploy/install-launchd-services.mjs --replace-existing --apply
 ```
 
+For `AGENTOS_DEPLOY_ROLE=runner`, the plan prints one
+`PLAN runner-path-source=<label>=<.env|rendered|plist-inline>` line per runner
+definition. `.env` means `shared/.env` defines `RUNNER_PATH` and the definition
+leaves it out so that value reaches the runner; `rendered` means the installer
+wrote a value containing the directories of the provider CLIs it resolved
+(`CLAUDE_BINARY` and `CODEX_BINARY`, otherwise `claude` and `codex` on the
+installing user's PATH); `plist-inline` means a migrated definition keeps its
+own `RUNNER_PATH`, which defeats `shared/.env` — remove it from that plist and
+plan again. A provider CLI absent from this host is named by a
+`PLAN runner-provider-cli-missing=<name>` line; that runner cannot serve it.
+When a configured `CLAUDE_BINARY`/`CODEX_BINARY` does not resolve, or neither
+CLI resolves, the installer refuses with
+`STOP runner-provider-cli-unresolved:<names>`; install the CLI, correct the
+configured path, or set `RUNNER_PATH` in `shared/.env` and plan again.
+
 The installer records original definitions and manifests, creates
 `shared/bin/agentos-service-wrapper.mjs`, and writes wrapper-based plists. Its
 apply path may `bootout` retired labels and `kickstart` changed owned labels;
@@ -399,15 +428,112 @@ units; macOS launchd services are labels.
    restart every configured Linux systemd `<label>.service` unit or macOS
    launchd label.
 10. Require all configured Linux systemd `<label>.service` units or macOS
-    launchd labels running. On the control plane, require `/health` success and
-    `/version` reporting the exact clean target commit. On a runner host,
-    require every local registration online, newer than its pre-restart
-    observation, and on that commit. Record `VERIFIED` and `SUCCEEDED`, then
-    write the success Inbox record.
+    launchd labels running. On the control plane, require both `/health`
+    success with `/version` reporting the exact clean target commit and every
+    local runner registration; the API probe never substitutes for the runner
+    check. On a runner host, require every local registration online, newer
+    than its pre-restart observation, and on that commit. Require the whole
+    criterion to hold continuously for the observation window (see below)
+    before recording `VERIFIED` and `SUCCEEDED`, then write the success Inbox
+    record.
 
 The sequence has no install, compile, source-checkout mutation, or
 multi-directory publication. The activation unit is the verified release
 directory selected by the pointer.
+
+### Post-restart observation window
+
+A deploy is green only when every part of the readiness criterion stays green.
+After the first all-green sample, verification keeps sampling every unit's
+`is-active`, the control-plane API probe, and the local runner registrations,
+once a second, for a minimum observation window of **20 seconds** by default.
+Set `AGENTOS_DEPLOY_OBSERVATION_WINDOW_MS` in the deployment environment to
+override it with an integer from 0 through 300000 (five minutes). Any sample that regresses inside the window fails the deploy with
+`observation-window-regressed-<reason>`, naming the failing unit or the
+unregistered runner id, and escalates through the normal escalation path; the
+deploy never self-heals. The overall verification timeout is the upper bound
+and equals the window plus thirty seconds (50 seconds at the default window).
+Raising the window raises the phase’s maximum duration by the same amount.
+
+The `VERIFIED` ledger entry records what the check actually proved:
+`service_verification.units_checked`, `service_verification.runners_registered`,
+`service_verification.observation_window_ms`, and
+`service_verification.observed_for_ms`.
+
+### Quiet-window wait budget and alert
+
+Step 2 of the activation sequence polls for zero blocking Runs every
+`QUIET_WINDOW_POLL_SECONDS` (60 by default) and has no deadline: the deploy
+waits until the platform is quiet. The wait is measured, and crossing a budget
+tells the operator without changing when the deploy proceeds.
+
+The budget is **45 minutes** by default. Override it by setting
+`QUIET_WINDOW_WAIT_BUDGET_MINUTES` in **`shared/.env`** on the deploying host,
+which the deploy loads into its environment before any phase runs. The
+installer-generated launchd plist and systemd unit carry a closed environment
+block and do not name this key, and the scheduled job inherits nothing from an
+operator shell, so `shared/.env` is the only location that reaches the deploy.
+The value is an integer from 1 through 1440; an out-of-range or non-integer
+value refuses the deploy with `environment-invalid` before the release
+artifact is built, leaving nothing to roll back.
+
+On crossing the budget the deploy, still waiting:
+
+- appends a `QUIET_WINDOW_WAIT_EXCEEDED` entry to the ledger, carrying
+  `quiet_window_wait_seconds`, `quiet_window_wait_polls`,
+  `quiet_window_wait_peak_blocking_runs`, the target commit, and
+  `quiet_window_blocking_runs_by_runner` — the blocking Run count keyed by the
+  runner that owns each Run;
+- sends one operator notification through the same Inbox notifier as an
+  escalation, with `reason=quiet-window-wait-exceeded` and
+  `detail=still-waiting-elapsed-<seconds>s-budget-<seconds>s`. The notice is
+  scoped to the deployment attempt, so a later attempt with the same revisions
+  and the same timing raises its own message rather than reusing this one.
+
+No escalation marker is written, so no `--clear-escalation` is needed and the
+next scheduled deploy is not blocked by the alert. A wait that stays blocked
+re-alerts at most once per hour; an alert that fails to reach the Inbox does
+not consume that hour and is retried on the next poll. Delivery runs beside
+the polling loop, so a stalled notifier never delays acquiring the window. A
+wait that crosses the budget and then finds its window on the next poll still
+alerts and still records its event.
+
+The control-plane quiet-window query is **database-wide**: it counts every
+`claimed`, `provisioning`, or `running` Run in the platform database,
+including Runs on runner-only hosts that this deploy does not touch. A
+control-plane deploy therefore waits for the Mac runners' Runs as well as its
+own, which is what `quiet_window_blocking_runs_by_runner` makes visible. Only
+the runner role scopes the query to its own local runner ids.
+
+Every `HOLD quiet-window` line names both facts:
+
+```
+HOLD quiet-window blockers=4 elapsed=2700s statuses=running,claimed
+HOLD quiet-window blockers=0 elapsed=180s deploy-barrier-contended
+HOLD quiet-window-wait-exceeded still-waiting-elapsed-2700s-budget-2700s blockers=4
+```
+
+#### Reading wait durations from the ledger
+
+Every attempt that acquired a quiet window records the completed wait on its
+ledger entries, whatever the attempt's outcome:
+`quiet_window_wait_seconds`, `quiet_window_wait_polls`, and
+`quiet_window_wait_peak_blocking_runs`. Read the distribution across retained
+deployments (14 by default) from the host:
+
+```sh
+jq -r '[.deployment_id, .state, .quiet_window_wait_seconds] | @tsv' \
+  .agentos-deploy/deployments/*/state.json
+```
+
+A `null` wait means the attempt never reached the quiet-window phase. Use the
+per-event file when the crossing itself matters:
+
+```sh
+jq -r 'select(.phase == "QUIET_WINDOW_WAIT_EXCEEDED")
+  | [.timestamp, .quiet_window_wait_seconds, (.quiet_window_blocking_runs_by_runner | tostring)] | @tsv' \
+  .agentos-deploy/deployments/*/events.jsonl
+```
 
 ### Step deadlines and barrier watchdog
 
@@ -474,8 +600,12 @@ diagnostic action.
 
 If restart or health verification fails after pointer activation, atomically
 point `current` back to `previous`, record the rollback outcome, and restart
-the prior release. Do not roll back database migrations, check out source, or
-fall back to a partial directory.
+the prior release. The rollback proves the same combined criterion: units
+running, wrapper binding and prior API identity intact, and every local runner
+re-registered on the previous commit, held for the same observation window. A
+runner that does not come back fails the rollback with
+`previous-service-verification-failed` naming that runner id. Do not roll back
+database migrations, check out source, or fall back to a partial directory.
 
 After success or a no-op, retention keeps the newest three immutable releases
 while protecting both pointer targets, the newest 14 database dumps, one dump
@@ -516,7 +646,75 @@ recovery, removes `.agentos-deploy/escalated.json`, and logs
 notification fails, the marker remains. Confirm the SELF-CLEAR entry and
 closed recovery notification before dismissing the original failure.
 
-For any non-allowlisted escalation or an eligible escalation at the cap,
+### Escalation classes
+
+Every marker falls into exactly one of three classes, decided by its recorded
+target commit `to` first and its `reason` second:
+
+- **retryable-transient** — a reason on the allowlist above, on a marker whose
+  `to` is a full commit oid or the literal `unknown` the deploy records when it
+  failed before determining a target. The retry cap and self-clear rules in
+  this section own it end to end; the commit main points at does not change its
+  answer, in either direction. A transient-looking reason on a marker with any
+  other `to` (missing, or a value that is neither) is host-scoped instead: it
+  spends no retry attempt and blocks every deploy.
+- **commit-scoped** — any other reason on a marker whose `to` is a full commit
+  oid: the failure was determined by that commit (its artifact build, its
+  migration, its verification). It blocks that commit and only that commit.
+- **host-scoped** — a reason naming host state rather than the commit, or any
+  marker whose `to` is missing or is neither a commit oid nor `unknown`,
+  whatever its reason. It blocks every deploy.
+  The set is `database-backup-failed`, `database-backup-timeout`,
+  `release-directory-assembly-failed`, `deployment-ledger-write-failed`,
+  `operation-workspace-preparation-failed`, `release-pointer-activation-failed`,
+  `release-pointer-rollback-failed`,
+  `release-pointer-rollback-unavailable`,
+  `previous-service-verification-failed`, `previous-service-restore-failed`,
+  `previous-service-restore-timeout`, `service-wrapper-verification-failed`,
+  `service-control-denied`, `service-control-failed:<verb>:<unit>`,
+  `stale-deploy-owner-recovered`,
+  `deploy-interrupted`, `environment-unreadable`, `environment-invalid`,
+  `workspace-layout-invalid`, `escalation-state-unreadable`,
+  `escalation-state-changed`, and `unexpected-error` — defined next to the
+  retryable allowlist in `scripts/deploy/quiet-window-deploy.mjs`.
+
+A marker carrying `activationOutcomeProven: false` is always host-scoped,
+regardless of reason or retry eligibility: activation or recovery did not prove
+the serving state. This fact also protects runner hosts without a migration.
+
+### Supersession by a newer commit
+
+When a commit-scoped marker is latched and `origin/main` has moved to a
+different commit, the tick reads the new target and proceeds with it, logging
+
+```text
+SUPERSEDE escalation reason=<reason> failed-commit=<oid> target=<oid>
+```
+
+The marker is never deleted by this logic: it stays on disk as history until an
+operator runs `--clear-escalation`. The supersession is an additive ledger
+fact instead — every event of the superseding deployment, and its `state.json`,
+carry it. Later attempts that bypass the same retained latch also record this
+provenance until the marker is replaced or explicitly cleared.
+
+```json
+"superseded_escalation": {
+  "failed_commit": "<the commit that latched>",
+  "reason": "<why it latched>",
+  "escalated_at": "<when it latched>"
+}
+```
+
+The commit that latched is never attempted again on its own: while `origin/main`
+still points at it the tick stops with
+`STOP escalation-active commit-unchanged commit=<oid>` and exit 2. If the new
+commit fails too, it latches against its own oid under the same rules. A target
+read that fails while a commit-scoped marker is latched also stops with
+`STOP escalation-active target-unreadable reason=<reason>`, leaving the marker
+untouched: an unreadable remote cannot prove main moved.
+
+For any host-scoped escalation, an eligible escalation at the cap, or a
+commit-scoped escalation whose commit is still the target,
 inspect the ledger, logs, pointer identities, service states, and Inbox record;
 repair the named cause, build and verify the artifact again, and rerun
 `--dry-run`.

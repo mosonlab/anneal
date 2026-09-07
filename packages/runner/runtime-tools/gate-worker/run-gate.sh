@@ -49,7 +49,18 @@
 # by default, or two when its worker-capacity file contains 2. Each slot is a
 # worker-wide flock held by the real process for its entire run, so repositories
 # share the same fixed capacity and a dropped ssh connection cannot release a
-# slot while its remote gate process survives.
+# slot while its remote gate process survives. Waiting for one of those slots is
+# bounded: after SLOT_WAIT_MINUTES this exits 76 rather than holding the caller's
+# ssh session open for as long as the queue stays full.
+#
+# How much of the host one gate sizes itself for is the worker's own host-share
+# file, next to worker-capacity, and defaults to the capacity. They are different
+# questions: a worker that shares its machine with runners runs one gate at a
+# time and still must not hand that gate the whole box.
+#
+# Every run reclaims what earlier gates abandoned: first their worktrees, then
+# the PostgreSQL containers of gates that died without running their own
+# cleanup, and only those it can prove are dead.
 #
 # Stateless: nothing is remembered between runs except the mirror and the logs.
 # Re-running the same oid after a dropped connection is the supported recovery,
@@ -89,6 +100,28 @@ case "$STALE_WORKTREE_MINUTES" in
                  "$STALE_WORKTREE_MINUTES" >&2; exit 2 ;;
 esac
 
+# How long this run waits for a worker execution slot before giving up. An
+# unbounded wait is what a configuration drift turns into a hang: the dispatcher
+# counts two slots on a worker whose worker-capacity file says one, hands this
+# script the extra dispatch, and the caller's ssh session then sits in the slot
+# loop for as long as the queue stays full — gate-dispatch.sh's own
+# --timeout-minutes cannot interrupt an attempt that has already reached the
+# worker. Twenty minutes is comfortably longer than a full gate on any
+# configured worker, and giving up as "nothing ran" is what lets the dispatcher
+# take the same commit to its fallback worker instead.
+SLOT_WAIT_MINUTES="${SLOT_WAIT_MINUTES:-20}"
+case "$SLOT_WAIT_MINUTES" in
+  ''|*[!0-9]*) printf 'run-gate: SLOT_WAIT_MINUTES must be a whole number of minutes, got: %s\n' \
+                 "$SLOT_WAIT_MINUTES" >&2; exit 2 ;;
+esac
+# Decimal padding is not a different number, and bash arithmetic disagrees: it
+# reads a leading zero as octal, so `08` would abort the deadline expression
+# below with a fatal error — an exit 1 the dispatcher reads as a FAIL about the
+# commit, from worker state alone. Stripping the padding here is what
+# gate-dispatch.sh already does with its own minutes setting.
+SLOT_WAIT_MINUTES="$(printf '%s\n' "$SLOT_WAIT_MINUTES" | sed 's/^0*//')"
+SLOT_WAIT_MINUTES="${SLOT_WAIT_MINUTES:-0}"
+
 VERBOSE=0
 OID=""
 MASTER_OID=""
@@ -106,7 +139,7 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || die_usage "--master needs an object id"
       MASTER_OID="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"; shift ;;
     --master=*) MASTER_OID="$(printf '%s' "${1#--master=}" | tr '[:upper:]' '[:lower:]')" ;;
-    -h|--help) sed -n '2,55p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,67p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0 ;;
     -*) die_usage "unknown argument $1" ;;
     *)
       [ -z "$OID" ] || die_usage "more than one commit given: $OID and $1"
@@ -183,36 +216,163 @@ fi
 mkdir -p "$WORKTREES_DIR" "$LOGS_DIR" || no_verdict "could not create the gate directories under ${GATE_HOME}"
 
 # The repository directory is one level below the worker root installed by
-# mirror-push.sh. Capacity is host state, not repository state: an absent file
-# means one slot, while the only larger supported value is the measured desktop
-# capacity of two. There is no load-sensitive resizing and no third slot.
+# mirror-push.sh.
 WORKER_ROOT="$(dirname "$GATE_HOME")"
+
+# Both worker settings are one file apiece beside the mirror, and both are read
+# the same way: absent means the stated default, a symlink or an unreadable file
+# is worker state this script must not guess at, and what the file says is
+# checked by the caller because the two settings accept different values. Said
+# once, because a second copy of this shape is how the two validations came to
+# disagree. WORKER_SETTING carries the value out: no_verdict inside a command
+# substitution would exit the subshell and leave this run going.
+WORKER_SETTING=""
+read_worker_setting() {
+  local path="$1" label="$2"
+  WORKER_SETTING="$3"
+  if [ -e "$path" ] || [ -L "$path" ]; then
+    [ -f "$path" ] && [ ! -L "$path" ] || no_verdict "${label} at ${path} is not a regular file"
+    WORKER_SETTING="$(cat "$path" 2>/dev/null)" || no_verdict "could not read ${label} at ${path}"
+  fi
+}
+
+# Capacity is host state, not repository state: an absent file means one slot,
+# while the only larger supported value is the measured desktop capacity of two.
+# There is no load-sensitive resizing and no third slot.
 WORKER_CAPACITY_FILE="${WORKER_ROOT}/worker-capacity"
-WORKER_CAPACITY=1
-if [ -e "$WORKER_CAPACITY_FILE" ] || [ -L "$WORKER_CAPACITY_FILE" ]; then
-  [ -f "$WORKER_CAPACITY_FILE" ] && [ ! -L "$WORKER_CAPACITY_FILE" ] \
-    || no_verdict "worker capacity at ${WORKER_CAPACITY_FILE} is not a regular file"
-  WORKER_CAPACITY="$(cat "$WORKER_CAPACITY_FILE" 2>/dev/null)" \
-    || no_verdict "could not read worker capacity at ${WORKER_CAPACITY_FILE}"
-  case "$WORKER_CAPACITY" in
-    1|2) ;;
-    *) no_verdict "worker capacity at ${WORKER_CAPACITY_FILE} must be exactly 1 or 2" ;;
-  esac
-fi
+read_worker_setting "$WORKER_CAPACITY_FILE" "worker capacity" 1
+WORKER_CAPACITY="$WORKER_SETTING"
+case "$WORKER_CAPACITY" in
+  1|2) ;;
+  *) no_verdict "worker capacity at ${WORKER_CAPACITY_FILE} must be exactly 1 or 2" ;;
+esac
+
+# How much of this host one gate may size itself for. It is worker state like
+# the capacity beside it and a different question from it: capacity is how many
+# gates may run at once, share is how much of the machine each of them takes.
+# On a worker that is also this host's runner box the two differ — one gate at a
+# time, and not the whole box — which is exactly the case that made the share a
+# setting instead of a restatement of the capacity. An absent file means the
+# capacity, which is the value this script passed before the file existed, so an
+# installed worker's sizing is unchanged until an operator states otherwise.
+WORKER_HOST_SHARE_FILE="${WORKER_ROOT}/host-share"
+read_worker_setting "$WORKER_HOST_SHARE_FILE" "host share" "$WORKER_CAPACITY"
+WORKER_HOST_SHARE="$WORKER_SETTING"
+case "$WORKER_HOST_SHARE" in
+  ''|*[!0-9]*) no_verdict "host share at ${WORKER_HOST_SHARE_FILE} must be a whole number of shares, at least 1" ;;
+esac
+# `00` is a zero however it is spelled, and `007` is seven. Stripping decimal
+# padding before the comparison is what makes the refusal below mean what its
+# message says: the bare `0` pattern this replaces let every padded zero
+# through, to be divided by inside merge-gate.sh and die there as a FAIL.
+WORKER_HOST_SHARE="$(printf '%s\n' "$WORKER_HOST_SHARE" | sed 's/^0*//')"
+[ -n "$WORKER_HOST_SHARE" ] \
+  || no_verdict "host share at ${WORKER_HOST_SHARE_FILE} must be a whole number of shares, at least 1"
+
+# The invariant the share exists to keep: this worker runs WORKER_CAPACITY gates
+# at once and each of them sizes itself for 1/WORKER_HOST_SHARE of the machine,
+# so a share below the capacity is a configuration under which the concurrent
+# gates add up to more than one host. That combination is not a smaller machine,
+# it is an over-subscribed one — the memory ceiling the sizing exists to respect
+# — so it is refused here rather than sized around.
+[ "$WORKER_HOST_SHARE" -ge "$WORKER_CAPACITY" ] \
+  || no_verdict "host share ${WORKER_HOST_SHARE} at ${WORKER_HOST_SHARE_FILE} is below the worker capacity ${WORKER_CAPACITY}; ${WORKER_CAPACITY} concurrent gates would each size for 1/${WORKER_HOST_SHARE} of this host"
 
 # A gate runs many phases in parallel and every one of them has to fit inside
-# the share of the host this slot represents. State the share once; the gate
+# the share of the host this worker states. State the share once; the gate
 # sizes each phase from it. Naming a single phase's fan-out here instead is what
 # 7886fad did, and merge-gate.sh recomputed that exact variable a moment later,
 # so the bound never took effect: a two-slot worker ran eight database files at
 # once while this script's own line claimed two.
-export AGENTOS_GATE_HOST_SHARE="$WORKER_CAPACITY"
+export AGENTOS_GATE_HOST_SHARE="$WORKER_HOST_SHARE"
+
+# Both numbers, out loud, on the stream remote-gate.sh carries back to the
+# machine that dispatched this run. The dispatcher counts this worker's slots
+# from its own configuration and has no other way to see that the two disagree;
+# the way that disagreement used to show up was an ssh session that never
+# returned.
+printf 'run-gate: worker capacity %s, host share %s\n' "$WORKER_CAPACITY" "$WORKER_HOST_SHARE" >&2
+
+# --- reclaim the databases of gates that died -------------------------------
+
+# merge-gate.sh starts one detached PostgreSQL container per run, with a tmpfs
+# data directory of up to 3 GiB, and deletes it in the EXIT trap the gate's own
+# verdict.sh installs. A trap does not run when the kernel kills the
+# process: an OOM kill, a SIGKILL or a power cut leaves the container running,
+# and `--rm` deletes a container that stops rather than stopping one. Nothing
+# else removed them, so they accumulated — two had been up for a fortnight when
+# they were removed by hand on 2026-09-06.
+#
+# Ownership decides, never age. Every gate labels its container with its own pid
+# and the worktree it ran in, and a container is removed only when that pid is
+# not alive AND that worktree is gone: a live pid is a gate that is merely slow,
+# and a worktree still on disk is a run this box cannot prove has ended. A
+# container this scheme cannot attribute — an older gate's, or one somebody
+# started by hand — is left alone and said out loud, because the one failure
+# this must never have is deleting the database out from under a running gate.
+GATE_CONTAINER_PREFIX="agentos-merge-gate-"
+reap_orphaned_gate_databases() {
+  local names name labels pid worktree
+  # Docker is deliberately not a precondition of this script; merge-gate.sh
+  # owns that check and its ordering. A worker without it simply has no gate
+  # containers to reap.
+  command -v docker >/dev/null 2>&1 || return 0
+  names="$(docker ps -a --filter "name=${GATE_CONTAINER_PREFIX}" --format '{{.Names}}' 2>/dev/null)" || {
+    printf 'run-gate: could not list gate containers; leaving them alone\n' >&2
+    return 0
+  }
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    # The filter is docker's substring match; this is the actual rule. A name
+    # this scheme did not produce is not this script's to remove.
+    case "$name" in
+      "${GATE_CONTAINER_PREFIX}"*) ;;
+      *) continue ;;
+    esac
+    # `with` rather than `index` alone: a container with no labels at all has a
+    # nil map, which `index` renders as the literal text `<no value>` and would
+    # make an unattributable container look like it named a worktree.
+    labels="$(docker inspect --format '{{with index .Config.Labels "agentos.merge-gate.pid"}}{{.}}{{end}}
+{{with index .Config.Labels "agentos.merge-gate.worktree"}}{{.}}{{end}}' "$name" 2>/dev/null)" || labels=""
+    pid="$(printf '%s\n' "$labels" | sed -n '1p')"
+    worktree="$(printf '%s\n' "$labels" | sed -n '2p')"
+    case "$pid" in
+      ''|*[!0-9]*) pid="" ;;
+    esac
+    if [ -z "$pid" ] || [ -z "$worktree" ]; then
+      printf 'run-gate: leaving container %s alone; it names no gate this script can check\n' "$name" >&2
+      continue
+    fi
+    if kill -0 "$pid" 2>/dev/null; then
+      printf 'run-gate: leaving container %s alone, its gate (pid %s) is still running\n' "$name" "$pid" >&2
+      continue
+    fi
+    if [ -d "$worktree" ]; then
+      printf 'run-gate: leaving container %s alone; its gate (pid %s) is gone but its worktree %s is not\n' \
+        "$name" "$pid" "$worktree" >&2
+      continue
+    fi
+    printf 'run-gate: removing orphaned container %s (dead pid %s, worktree %s is gone)\n' \
+      "$name" "$pid" "$worktree" >&2
+    docker rm -f "$name" >/dev/null 2>&1 \
+      || printf 'run-gate: could not remove container %s\n' "$name" >&2
+  done <<EOF
+$names
+EOF
+}
 
 # Slot one retains the original lock path, so a rollout beside an older
 # run-gate.sh still counts the old process. Slot two has one additional lock
 # file. Polling both non-blockingly is what lets whichever slot frees first run
 # the waiter without a queue daemon or mutable scheduler state.
+#
+# The wait is bounded. A worker whose capacity is lower than the number of slots
+# the dispatcher believes it has cannot free one, and an unbounded loop turned
+# that drift into an ssh session that hung until somebody noticed. Giving up as
+# "nothing ran" hands the dispatcher a code it already understands, so it takes
+# the commit to its fallback worker.
 WORKER_SLOT=""
+SLOT_WAIT_DEADLINE=$(( $(date +%s) + SLOT_WAIT_MINUTES * 60 ))
 printf 'run-gate: waiting for one of %s worker slot(s)\n' "$WORKER_CAPACITY" >&2
 while [ -z "$WORKER_SLOT" ]; do
   for slot in $(seq 1 "$WORKER_CAPACITY"); do
@@ -229,7 +389,12 @@ while [ -z "$WORKER_SLOT" ]; do
     fi
     exec 9>&-
   done
-  [ -n "$WORKER_SLOT" ] || sleep 1
+  if [ -z "$WORKER_SLOT" ]; then
+    if [ "$(date +%s)" -ge "$SLOT_WAIT_DEADLINE" ]; then
+      no_verdict "worker slot wait exceeded ${SLOT_WAIT_MINUTES} minutes"
+    fi
+    sleep 1
+  fi
 done
 printf 'run-gate: acquired worker slot %s/%s\n' "$WORKER_SLOT" "$WORKER_CAPACITY" >&2
 
@@ -272,6 +437,13 @@ EOF
 }
 sweep_stale_worktrees
 
+# After the sweep, not before it: the reaper removes a container only when its
+# gate's worktree is gone, and the sweep above is what reclaims the worktree of
+# a gate the kernel killed. Ordered the other way round, the run that finally
+# deleted the tree could not delete the matching container, and a 3 GiB tmpfs
+# waited for a further dispatch that an idle worker may never get.
+reap_orphaned_gate_databases
+
 # --- run --------------------------------------------------------------------
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -313,7 +485,7 @@ printf 'run-gate: %s\n' "$OID" > "$LOG" 2>/dev/null \
   printf 'run-gate: node %s, npm %s\n' "$(node -v 2>/dev/null)" "$(npm -v 2>/dev/null)"
   printf 'run-gate: started %s\n' "$STAMP"
   printf 'run-gate: capacity %s, this gate gets 1/%s of the host\n' \
-    "$WORKER_CAPACITY" "$WORKER_CAPACITY"
+    "$WORKER_CAPACITY" "$WORKER_HOST_SHARE"
   printf 'run-gate: worktree %s\n\n' "$WORKTREE"
 } >> "$LOG"
 

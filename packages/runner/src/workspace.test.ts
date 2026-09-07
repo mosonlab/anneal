@@ -13,7 +13,7 @@ import { bindCommandRunner, runCommand, type CommandRunner } from "./exec.js";
 import { repoMirrorPath, repoMirrorRoot } from "./repo-mirror.js";
 import { runtimeToolPaths } from "./runtime-tools.js";
 import {
-  cleanupAgentScratch, materializeRuntimeTools, provisionAgentScratch, provisionSessionConfig, provisionWorkspace, sessionConfigBaselineRoot,
+  runtimeToolsMaterializationScript, cleanupAgentScratch, materializeRuntimeTools, provisionAgentScratch, provisionSessionConfig, provisionWorkspace, sessionConfigBaselineRoot,
   workspaceEnvironment, writeSessionCredentials,
   type WorkspaceProvisionClaim,
 } from "./workspace.js";
@@ -1338,5 +1338,28 @@ test("Codex auth provisioning fails loudly without touching the host config", as
   } finally {
     await cleanupAgentScratch(config, scratch, { retainConfigRoot: false });
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime-tool materialization derives two-level destination directories", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-nested-runtime-tools-"));
+  const sourceRoot = await createRuntimeToolsFixture();
+  const toolsRoot = join(root, "tools");
+  const nestedPath = "additional/nested/tool.sh";
+  try {
+    await mkdir(join(sourceRoot, "additional/nested"), { recursive: true });
+    await writeFile(join(sourceRoot, nestedPath), "nested tool\n");
+    execFileSync("/bin/sh", ["-c", runtimeToolsMaterializationScript([...runtimeToolPaths, nestedPath]),
+      "agentos-runtime-tools", sourceRoot, toolsRoot]);
+    assert.equal(await readFile(join(toolsRoot, nestedPath), "utf8"), "nested tool\n");
+    for (const directory of ["", "additional", "additional/nested"]) {
+      assert.equal((await stat(join(toolsRoot, directory))).mode & 0o777, 0o700);
+    }
+    assert.equal((await stat(join(toolsRoot, nestedPath))).mode & 0o777, 0o500);
+    assert.deepEqual(await readdir(join(toolsRoot, "additional")), ["nested"]);
+    assert.deepEqual(await readdir(join(toolsRoot, "additional/nested")), ["tool.sh"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(sourceRoot, { recursive: true, force: true });
   }
 });

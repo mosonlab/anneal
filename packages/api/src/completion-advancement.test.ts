@@ -27,6 +27,7 @@ const facts = (overrides: Partial<CompletionAdvancementFacts> = {}): CompletionA
   outputRefusal: null,
   mergeTailAuxiliary: false,
   mergeTailHandled: false,
+  repairBindingRefusal: null,
   auxiliaryTargetTaskId: null,
   mergeTailRequeue: false,
   mergeTailRecoverySourceRunId: null,
@@ -115,6 +116,28 @@ const rows: { name: string; facts: CompletionAdvancementFacts; expected: Complet
     },
   },
   {
+    name: "a repair whose recovery names another Run is rejected, not activated",
+    facts: facts({
+      mergeTailAuxiliary: true,
+      auxiliaryTargetTaskId: "task-regression",
+      repairBindingRefusal: "merge-tail-repair-binding-mismatch: merge recovery aggregate-1 is bound to source Run run-a, not to repaired Run run-b",
+    }),
+    expected: {
+      case: "reject-repair-binding",
+      reason: "merge-tail-repair-binding-mismatch: merge recovery aggregate-1 is bound to source Run run-a, not to repaired Run run-b",
+    },
+  },
+  {
+    name: "a repair the merge tail already settled is not re-decided by its binding",
+    facts: facts({
+      mergeTailAuxiliary: true,
+      mergeTailHandled: true,
+      auxiliaryTargetTaskId: "task-regression",
+      repairBindingRefusal: "merge-tail-repair-binding-mismatch: merge recovery aggregate-1 is bound to source Run run-a, not to repaired Run run-b",
+    }),
+    expected: { case: "merge-tail-settled" },
+  },
+  {
     name: "a standalone success parks the task for review",
     facts: facts(),
     expected: { case: "park-task", status: "REVIEW", failureReason: null },
@@ -174,6 +197,7 @@ test("every advancement case has a row", () => {
     "mechanical-merge-already-recorded",
     "merge-tail-settled",
     "park-task",
+    "reject-repair-binding",
     "repair-after-negative-regression",
     "settle-regression-verdict",
     "stop-with-output-refusal",
@@ -212,6 +236,15 @@ const narrations: { name: string; facts: CompletionAdvancementFacts; expected: s
     name: "a refused canonical output is named even when the merge tail settled the Task",
     facts: facts({ task: templateTask({ templateId: null }), mergeTailHandled: true, outputRefusal: "refused" }),
     expected: "Run 3 succeeded but canonical task output was refused",
+  },
+  {
+    name: "a rejected repair binding is narrated with its reason",
+    facts: facts({
+      mergeTailAuxiliary: true,
+      auxiliaryTargetTaskId: "task-regression",
+      repairBindingRefusal: "merge-tail-repair-binding-mismatch: merge recovery aggregate-1 is bound to source Run run-a, not to repaired Run run-b",
+    }),
+    expected: "Run 3 succeeded but its repair completion was rejected: merge-tail-repair-binding-mismatch: merge recovery aggregate-1 is bound to source Run run-a, not to repaired Run run-b",
   },
   {
     name: "a chain or template success reads as an advance or an awaited approval",

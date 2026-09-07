@@ -2,11 +2,15 @@ import { createHash } from "node:crypto";
 
 import {
   ACTIVE_RUN_STATUSES,
+  EMPTY_READINESS_REQUEUE_TOTALS,
   readChainControls,
   isIntegratorStep,
   markerFromMetadata,
+  MERGE_READINESS_OUTPUT_KIND,
   MERGE_TAIL_KIND,
   projectMergeOutcome,
+  readinessRequeueActivityWhere,
+  readinessRequeueTotals,
   runOwnsMergeOutcome,
   runSessionUsageCost,
   sumUsageCosts,
@@ -16,6 +20,7 @@ import {
   type Marker,
   type Prisma,
   type PrismaClient,
+  type ReadinessRequeueTotals,
   type ScheduleKind,
   type TaskSource,
   type TaskStatus as TaskStatusType,
@@ -116,6 +121,7 @@ export type BoardRow = {
     codexServiceTier: BoardContractLatestRun["codexServiceTier"];
     subagentModel?: string | null;
     budgetGrants: number;
+    leaseLossRefunds: number;
     /** Required, unlike `subagentModel`: this one reaches the board contract,
      *  where `BoardLatestRun.pullRequestUrl` is required. Optional here would
      *  let a select that forgets it type-check and project null, dropping the
@@ -525,6 +531,7 @@ export const boardCard = (
   display: ChainDisplay = { chainName: taskChainName(row), displayName: row.name },
   predecessor: BoardBlockedOnTask | null = null,
   repairOf: RepairBinding | null = null,
+  readiness: ReadinessRequeueTotals = EMPTY_READINESS_REQUEUE_TOTALS,
 ): BoardCard => {
   const taskCost = sumUsageCosts(row.runs.flatMap((item) => item.session === null
     ? []
@@ -532,6 +539,12 @@ export const boardCard = (
   const budgetGrants = row.runs.reduce<number | null>((highest, item) => (
     highest === null ? item.budgetGrants : Math.max(highest, item.budgetGrants)
   ), null);
+  // Read the same way as the grants beside it — carried forward, so the newest
+  // row is the running total and the highest is that total under any ordering.
+  // Shown apart from `budgetRemaining` on purpose: a task can have budget left
+  // and still be out of platform refunds, and the operator who is about to
+  // raise `maxSessionsPerTask` is the one who needs to see which it is.
+  const leaseLossRefunds = row.runs.reduce((highest, item) => Math.max(highest, item.leaseLossRefunds), 0);
   const startability = taskStartability({
     status: row.status,
     assigneeType: row.assigneeType,
@@ -585,7 +598,12 @@ export const boardCard = (
     mergeOutcome: latestRunMergeOutcome(row.runs, row.stepOutput),
     repairOf,
     budgetRemaining: startability.checklist.budgetRemaining,
+    leaseLossRefunds,
     chainAggregate: null,
+    // Only the readiness Step records requeues, so every other card carries the
+    // empty totals rather than a nullable field the web would have to branch on.
+    readinessRequeues: readiness.readinessRequeues,
+    readinessGrants: readiness.readinessGrants,
   } satisfies BoardCard;
 };
 
@@ -866,6 +884,7 @@ const boardChainRows = async (
           codexServiceTier: true,
           subagentModel: true,
           budgetGrants: true,
+          leaseLossRefunds: true,
           pullRequestUrl: true,
           pushedBranch: true,
           baseSha: true,
@@ -886,6 +905,38 @@ const boardChainRows = async (
     },
   });
   return chainRows as unknown as BoardChainMember[];
+};
+
+/**
+ * The pre-authorization requeue totals of every readiness Step on this page.
+ *
+ * Merge readiness records one activity per requeue on its own Task, so the
+ * count and the granted attempts are a fold over those rows. Steps of any other
+ * output kind never record one and are not queried.
+ */
+const readReadinessRequeueTotals = async (
+  db: PrismaClient,
+  rows: readonly Pick<BoardRow, "id" | "templateStep">[],
+): Promise<Map<string, ReadinessRequeueTotals>> => {
+  const readinessTaskIds = rows
+    .filter((row) => row.templateStep?.outputKind === MERGE_READINESS_OUTPUT_KIND)
+    .map((row) => row.id);
+  const totals = new Map<string, ReadinessRequeueTotals>();
+  if (readinessTaskIds.length === 0) return totals;
+  const activities = await db.taskActivity.findMany({
+    where: readinessRequeueActivityWhere({ in: readinessTaskIds }),
+    select: { taskId: true, metadata: true },
+  });
+  const byTask = new Map<string, { metadata: Prisma.JsonValue }[]>();
+  for (const activity of activities) {
+    const group = byTask.get(activity.taskId) ?? [];
+    group.push({ metadata: activity.metadata });
+    byTask.set(activity.taskId, group);
+  }
+  for (const taskId of readinessTaskIds) {
+    totals.set(taskId, readinessRequeueTotals(byTask.get(taskId) ?? []));
+  }
+  return totals;
 };
 
 /** Read the complete board card model, including every lookup needed to project it. */
@@ -912,7 +963,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
         orderBy: { runNumber: "desc" },
         select: {
           id: true, runNumber: true, status: true, model: true, subagentModel: true, budgetGrants: true,
-          codexServiceTier: true, pullRequestUrl: true, pushedBranch: true, baseSha: true,
+          leaseLossRefunds: true, codexServiceTier: true, pullRequestUrl: true, pushedBranch: true, baseSha: true,
           session: {
             select: {
               nativeChildUsed: true, costUsd: true, inputTokens: true, cachedInputTokens: true,
@@ -994,6 +1045,11 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     });
     for (const predecessor of predecessors) predecessorById.set(predecessor.id, predecessor);
   }
+
+  // Requeue counters, read only for the Steps that can record one. Merge
+  // readiness writes its requeue activity on the readiness Task, so the board
+  // needs one query per page rather than a per-card scan.
+  const readinessByTask = await readReadinessRequeueTotals(db, rows);
 
   const grantInputs = rows.flatMap((row) => (
     row.assigneeAgentId === null || row.repoId === null
@@ -1110,6 +1166,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
       displayByTask.get(row.id),
       row.dispatchAfterTaskId === null ? null : predecessorById.get(row.dispatchAfterTaskId) ?? null,
       repairByTask.get(row.id) ?? null,
+      readinessByTask.get(row.id),
     );
     const aggregate = key === undefined || emittedAggregates.has(key)
       ? null

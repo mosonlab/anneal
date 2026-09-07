@@ -108,7 +108,9 @@ const operatorPost = async (path: string, body: unknown): Promise<{ status: numb
 
 /** A chain approved through the real inbox channel, with a live step-12 session. */
 const approvedChain = async (label: string) => {
-  const chain = await seedIntegratorChain(db, { label });
+  const chain = await seedIntegratorChain(db, {
+    label, gateAttestation: { headSha: "a".repeat(40), baseHeadSha: "b".repeat(40) },
+  });
   const card = await db.$transaction(
     (tx) => gateQuestion(tx, chain.gateTask.id, chain.gateRun.id, null),
     { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted },

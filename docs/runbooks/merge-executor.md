@@ -11,6 +11,23 @@ The executor is fail closed. A missing permission, unreadable field, shared
 principal, unsafe key path, failed disarm, or uncertain merge result stops the
 mechanical run; there is no token, identity, or service fallback.
 
+## Not supported: a target branch with a merge queue
+
+The executor merges synchronously and verifies the result it produced. It
+therefore refuses any pull request whose landing GitHub would perform
+asynchronously, and a **repository-level merge queue enabled on the target
+branch** is such a case: the executor's disarm step can dequeue *this* pull
+request and cancel *this* auto-merge, but it cannot turn off the branch's queue.
+
+The chain stops with `deferred-merge-machinery`, and it stops permanently:
+re-authorizing only produces the same stop, because nothing about the branch
+changed. Do not loop on `re-authorize`.
+
+Resolve it in GitHub, not in Anneal — disable the merge queue on the target
+branch's ruleset, or point the chain at a branch that has none. Supporting
+merge-queue landings would mean the executor no longer observes the merge it
+authorized, which the security model does not allow.
+
 ## Security model
 
 Create a private GitHub App owned by the account or organization where Anneal
@@ -79,13 +96,30 @@ following evidence; a process merely staying alive proves none of these writes.
 | --- | --- | --- |
 | `createSanitizedTree` — `POST /git/trees` | Contents write; Workflows write too when the retained tree changes workflow files | The first controlled Anneal chain PR contains `.chain/` on its head. After the App-bot merge, inspect the landed tree and record that `.chain/` is absent. |
 | `createMergeCommit` — `POST /git/commits` | Contents write; Workflows write for a workflow-changing result | The mechanical `merge-result` names the new commit SHA; GitHub shows a two-parent merge commit whose parents are the authorized base and exact reviewed head. |
-| `updateBaseRef` — GraphQL `updateRefs` | Contents write; Workflows write for a workflow-changing result | The selected base ref equals the recorded merge commit and the old base was its first parent. A concurrent base change must instead record `ref-update-refused`. |
+| `updateBaseRef` — GraphQL `updateRefs` | Contents write; Workflows write for a workflow-changing result | The selected base ref equals the recorded merge commit and the old base was its first parent. A concurrent base change must instead record `ref-update-refused`; a lost response records `ref-update-uncertain` and is settled by the read-back below. |
 | `disablePullRequestAutoMerge` — GraphQL mutation | Pull requests write | In a controlled, merge-blocked test PR with auto-merge armed, exercise a stop/disarm path; record the run activity and verify GitHub reports auto-merge disabled. |
 | `dequeuePullRequest` — GraphQL mutation | Merge queues write | On a repository that uses a merge queue, put a controlled, merge-blocked test PR in the queue and exercise a stop/disarm path; record the activity and verify the queue entry is gone. Repositories without a queue do not fabricate this evidence. |
 
 After an App permission change, GitHub may require an organization owner to
 approve the changed installation. Treat the installation as unavailable until
 the selected-repository page shows the intended permission set again.
+
+### How a ref-update outcome is recorded
+
+`updateRefs` is the merge: the compare-and-swap that moves the base ref is what
+lands it. Its three outcomes are recorded separately, because a response that
+never arrived is not the platform saying no.
+
+| Ref-update outcome | What the executor observed | How the run resolves |
+| --- | --- | --- |
+| merged | GitHub acknowledged the atomic update | The mechanical `merge-result` names the merge commit, after the landed parents are verified. |
+| `ref-update-refused` | GitHub answered and refused — a deterministic 4xx, or a deterministic GraphQL `errors` entry such as a `beforeOid` mismatch | No further ref update. If read-back does not confirm a merge and finds synchronous-execution state re-armed, the executor disarms it and stops `deferred-merge-machinery`. The read-back names the stop: ordinarily `base-drift` when the base moved under the run, otherwise `api-error` carrying the platform's own reason. |
+| `ref-update-uncertain` | No response, a timeout (including a lost-class GraphQL error), a reset connection, a 5xx, or a body that could not be read. The update may already be on the branch | No further ref update. If read-back does not confirm a merge and finds synchronous-execution state re-armed, the executor disarms it and stops `deferred-merge-machinery`. The executor reads the target ref back and compares it to the merge commit it built: equal is a merge, and the result is recorded as one even while GitHub still shows the PR open; different is the refused row's handling, named from the ref that is actually there. If the read-back itself cannot be completed, the run stops `api-error` with the merge's fate unresolved, and only an operator may settle it. |
+
+A run that stops `api-error` after an uncertain ref update has sent exactly one
+ref update. Before re-authorizing, read the base ref: if it is a two-parent
+merge commit whose parents are the authorized base and head, the merge landed
+and the stop is a reporting failure, not a merge failure.
 
 ## Run the capture wizard
 
@@ -333,6 +367,110 @@ For later restarts use `sudo systemctl restart
 agentos-merge-executor.service`. A unit failure is a stop; do not remove the
 hardening directives or run the process as root to make it start.
 
+### Linux release follower
+
+On Linux, a separate root-owned systemd timer follows the control plane's
+verified `current` release and adopts it into the executor runtime. The
+follower is outside the quiet-window service inventory and never reads or
+executes the control-plane checkout. Install one trusted copy of the follower
+under the executor root; the copy remains stable while release directories
+change. Complete the initial root-owned adoption first: the follower requires
+an existing `current -> releases/<40-character-commit>` as its rollback target:
+
+```sh
+sudo install -d -o root -g root -m 0755 /opt/agentos/merge-executor/bin
+sudo install -o root -g root -m 0755 \
+  scripts/deploy/merge-executor-follower.mjs \
+  /opt/agentos/merge-executor/bin/merge-executor-follower.mjs
+```
+
+Create its own root-only JSON configuration. Do not point the follower at
+`/etc/agentos/merge-executor.env`; that file belongs to the executor process.
+Substitute the control-plane deployment root and the absolute Node path that
+the executor unit uses:
+
+```json
+{
+  "deployRoot": "<deploy-root>",
+  "executorRoot": "/opt/agentos/merge-executor",
+  "unit": "agentos-merge-executor.service",
+  "nodePath": "<absolute-node>"
+}
+```
+
+The file must be a regular file owned by root with mode 0600. The production
+defaults are `/usr/bin/chown`, `/usr/bin/chmod`, `/usr/bin/systemctl`,
+and `/usr/bin/journalctl`; command substitutions are for
+hermetic tests and are not needed in this file. Configuration and command
+ancestors must be root-owned and not group/world writable (sticky shared
+directories are allowed). The configured `nodePath` must resolve to the same
+executable as the rendered service; divergence fails with
+`config-nodePath-mismatch`. Update both paths together when upgrading Node:
+
+```sh
+sudo install -d -o root -g root -m 0755 /etc/agentos
+sudo install -o root -g root -m 0600 \
+  /path/to/merge-executor-follower.json \
+  /etc/agentos/merge-executor-follower.json
+```
+
+Render the follower unit and timer from the templates in `scripts/deploy/`.
+The renderer writes only the two service definitions; it does not install or
+run the follower:
+
+```sh
+sudo <absolute-node> scripts/deploy/merge-executor-follower-templates.mjs \
+  --node-path <absolute-node> \
+  --follower-path /opt/agentos/merge-executor/bin/merge-executor-follower.mjs \
+  --config-path /etc/agentos/merge-executor-follower.json \
+  --unit-output /etc/systemd/system/agentos-merge-executor-follower.service \
+  --timer-output /etc/systemd/system/agentos-merge-executor-follower.timer
+sudo chown root:root \
+  /etc/systemd/system/agentos-merge-executor-follower.service \
+  /etc/systemd/system/agentos-merge-executor-follower.timer
+sudo chmod 0644 \
+  /etc/systemd/system/agentos-merge-executor-follower.service \
+  /etc/systemd/system/agentos-merge-executor-follower.timer
+```
+
+The timer runs once after boot and every five minutes after activation. Validate
+and enable it as root:
+
+```sh
+sudo systemd-analyze verify \
+  /etc/systemd/system/agentos-merge-executor-follower.service \
+  /etc/systemd/system/agentos-merge-executor-follower.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now agentos-merge-executor-follower.timer
+sudo systemctl status agentos-merge-executor-follower.timer
+sudo systemctl start agentos-merge-executor-follower.service
+sudo systemctl show agentos-merge-executor-follower.service \
+  --property=Result --property=ExecMainStatus
+sudo journalctl --unit agentos-merge-executor-follower.service --no-pager -n 50
+```
+
+Require `Result=success` and `ExecMainStatus=0`, including no
+`config-nodePath-mismatch` in the journal. After the first run, check that
+the executor's `current` points to the
+control-plane commit and that the adopted release is root-owned without group
+or world write permission. A mid-deploy control-plane pointer or a failed
+manifest check leaves the executor untouched; the next timer tick retries.
+The follower checks that the executor stays active with the same main PID for
+30 seconds and that its journal contains no completion-contract mismatch. A
+failed check restores the previous pointer and restarts it; the candidate stays
+for diagnosis. The failed commit is recorded under
+`<executor-root>/failed-adoptions/<commit>`; subsequent ticks refuse that commit
+with `release-adoption-poisoned` without restarting again. After diagnosing and
+correcting the failure, an administrator can remove that commit’s marker to
+permit a retry; a different deployed commit can be adopted immediately.
+The follower uses a Linux abstract socket for mutual exclusion: the kernel
+releases it on process death or reboot, and legacy `.follower-lock` directories
+do not block it. Success retains the current release and two rollback releases,
+always preserving the one just replaced. The follower never modifies the
+executor environment file or its service unit. A pruning error is reported as
+`retention-failed` with a nonzero exit after the adoption success line; the
+healthy adopted pointer is retained.
+
 ### Why no passwordless sudo or generic root helper is installed
 
 Normal executor work needs no privilege: it reads one owner-only key, calls the
@@ -340,12 +478,15 @@ loopback or configured API, and calls GitHub. Administrator authority is needed
 only for account creation, key installation, root-owned runtime/config updates,
 and service-manager changes. These are infrequent, separately reviewed actions.
 
-Neither profile installs passwordless sudo, a setuid binary, nor a generic root
-copy/restart helper. Such a helper would turn a compromise of the repository
-operator or executor into durable root execution and would erase the root-owned
-adoption boundary. The macOS start script is not such a helper: launchd starts
-it after selecting the unprivileged uid, it executes one fixed path, and it has
-no sudo or write operation.
+Neither profile installs passwordless sudo or a setuid binary. The Linux
+follower is a fixed-purpose, root-owned service installed by an administrator;
+its root-only configuration, release-manifest verification, fixed executor
+root, and fixed unit name keep it from becoming a generic root copy/restart
+helper. A generic helper would turn a compromise of the repository operator or
+executor into durable root execution and erase the root-owned adoption boundary.
+The macOS start script is also not a root helper: launchd starts it after
+selecting the unprivileged uid, it executes one fixed path, and it has no sudo
+or write operation.
 
 ## Post-install verification
 
@@ -375,6 +516,15 @@ or stale row or authentication failure is also unhealthy. Check `/runners`
 regularly and alert on staleness; service-manager liveness alone does not prove
 the API recognizes the principal.
 
+A completion-contract mismatch between this executor and the API is not a
+crash. The daemon logs `mechanical completion contract mismatch` once, naming
+both versions, stays alive, and claims nothing further until the versions agree
+again; it re-checks every `MERGE_EXECUTOR_CONTRACT_RECHECK_MS` (default 60000)
+and logs `contract mismatch cleared` when a deploy or rollback on either side
+resolves it. So the healthy signature of an incompatible executor is exactly
+one journal line and a unit that is still active — a repeating mismatch line or
+a restarting unit is the failure, not the mismatch itself.
+
 `/runners` does not expose the executor adapter or CLI identity. After a claim
 has started, inspect that mechanical Run record and require its `adapterVersion`
 and `cliVersion` fields to both equal `merge-executor-v1`. Keep this Run-record
@@ -399,6 +549,84 @@ permissions, sanitized-tree creation, merge-commit creation, and atomic base-ref
 update. It does not prove the two disarm mutations or workflow-file support;
 exercise the controlled cases in the mutation table when those capabilities are
 part of the installation.
+
+### Train-prefix publication
+
+The merge executor may receive a `merge-authorization` with an optional `train`
+object. The control plane produces this object; operators do not construct or
+edit it. It identifies a cumulative prefix commit and the candidate's position
+within that prefix:
+
+```json
+{
+  "train": {
+    "publishHead": "<40-hex prefix SHA>",
+    "predecessorOid": "<40-hex predecessor SHA>",
+    "ref": "refs/anneal/train/<publishHead>",
+    "position": 1,
+    "trainTaskId": "<train task id>"
+  }
+}
+```
+
+An authorization without `train` keeps the ordinary single-candidate behavior
+described above. For a train authorization, the executor completes every live
+state check before making a write. The pull request head must equal the
+authorized `headSha`; `refs/anneal/train/<publishHead>` must exist and resolve
+to `publishHead`; `publishHead` must contain the authorized head as an
+ancestor; and the default branch must equal `baseSha` at position 1, or be an
+ancestor of `publishHead` at later positions. A failed check records the
+`train-precondition-failed` stop with the failing check and makes no GitHub
+write.
+
+These checks are additional to the pre-merge defense list, not a replacement
+for it. Publishing a prefix moves the default branch, so a train candidate
+still has to clear required status checks, the open and non-draft state, clean
+mergeability, and the positive synchronous-execution determination with its
+disarm, and it stops with the same conditions an ordinary candidate would —
+`check-failure-or-absence`, `non-clean-mergeability`, `unresolved-mergeability`
+or `deferred-merge-machinery`. The single relaxation is the base check above:
+at a later position the live base is the prefix commit the predecessor already
+published, and that commit is accepted in place of `baseSha`.
+
+A GitHub read that does not answer is never reported as drift. An unreadable
+pull request, default branch, train ref, ancestry comparison or commit records
+`api-error` with the failing phase; `train-precondition-failed` and
+`changed-underneath-me` are reserved for state the executor positively observed.
+
+Once those checks pass, the executor publishes the prefix by updating
+`refs/heads/<default branch>` to `publishHead` through GitHub's git-refs API
+with the App installation token. The update is never forced and must be a
+fast-forward. The send is bounded by `GUARDED_MERGE_SENDS`, records the intent
+under the same idempotency key, follows the same `confirmedWrite` read-back
+discipline as the ordinary merge path, and rechecks `superseded-authorization`
+at the same points. Replay acceptance differs from the ordinary path in one
+respect: it is governed by the prefix lineage below rather than by finding a
+prior intent of this run, because a peer candidate of the same prefix may have
+performed the publication. If the default branch already equals `publishHead`
+or contains it, the update is skipped. A GitHub non-fast-forward refusal — a
+409 or 422 on the ref update — records `train-publish-rejected`. A 401, 403 or
+404 is an access or addressing failure, not a refused fast-forward, and records
+`api-error`; check the App installation's `contents: write` permission and any
+branch protection that forbids the App from updating the default branch.
+
+After publication, and on replay when the ref update already happened, the
+executor reads the candidate pull request again. It reports `merged` only when
+the pull request is merged and its merge commit is the prefix commit for this
+candidate: the commit reachable from `publishHead` whose second parent is the
+authorized `headSha`, with parents exactly `(predecessor, headSha)`. The
+predecessor is `baseSha` at position 1 and the previous prefix commit at later
+positions, verified by walking exactly `position - 1` first-parent merge steps
+from the predecessor down to `baseSha`, so the check costs `position` commit
+reads and never crawls a chain of unknown length. The GitHub `mergedByLogin` value need not be the executor identity
+for this path; the prefix lineage supplies the authorization check. A merged
+pull request with another shape still records `changed-underneath-me`.
+
+When the candidate at the highest position in a prefix reports `merged`, the
+executor deletes `refs/anneal/train/<publishHead>`. A deletion failure is
+logged for operator follow-up and does not stop the run. Once the default
+branch contains the prefix, replay relies on immutable commit lineage and does
+not require the staging ref to remain present.
 
 ## Rotation and recovery
 
@@ -433,7 +661,9 @@ a personal token as recovery.
 
 ## Code upgrades and rollback
 
-Treat each upgrade as a new root-owned runtime adoption:
+On Linux with the follower installed, adoption is automatic after the control
+plane deploys. Darwin stays manual. The following manual adoption procedure
+remains available for installation and recovery:
 
 1. stop the executor and leave the API running fail closed;
 2. fetch and check out the intended tag or commit in an unprivileged clean
@@ -449,10 +679,14 @@ On a code regression, stop the service, repoint `current` to the previous
 root-owned release, restart, and repeat verification. Do not roll back
 configuration or keys unless the failure is demonstrably in those inputs.
 
-The repository's quiet-window auto-deploy includes
-`packages/merge-executor/dist` in the serving checkout's build publication.
-That may update the serving checkout's executor dist, but it **does not adopt
-that build into `/opt/agentos/merge-executor/current` and does not restart a
-separately root-owned executor service**. Root-owned adoption remains the
-explicit administrator procedure above; treating an auto-deploy build as
-already adopted runs stale code while reporting a misleading upgrade.
+On Linux, the repository's quiet-window auto-deploy publishes
+`packages/merge-executor/dist` in the verified serving release, but the
+auto-deploy stage itself does not adopt that build into the root-owned
+executor's `current` pointer. The follower adopts that release on its next
+timer tick and restarts the executor. It does not modify the executor
+environment file or unit. The manual procedure above remains the rollback
+path: stop the follower timer and wait for any active follower service to
+finish before repointing `current`, then restart and verify the executor. Keep
+the timer stopped while holding a manual rollback; re-enable it only when the
+control-plane release is the one the executor should adopt. The Darwin profile
+stays manual and has no follower timer.

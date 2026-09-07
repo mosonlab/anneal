@@ -55,17 +55,11 @@ type CompletedOutcome = {
   session: Omit<Prisma.SessionUpdateManyMutationInput, "executionStatus" | "endedAt" | "cleanupEndedAt">;
 };
 
-type ClaimInvalidatedOutcome = {
-  kind: "claim-invalidated";
-  reason: string;
-};
-
 export type TerminalOutcome =
   | CancelledOutcome
   | LostOutcome
   | TimedOutOutcome
-  | CompletedOutcome
-  | ClaimInvalidatedOutcome;
+  | CompletedOutcome;
 
 export type TerminalResult = {
   runId: string;
@@ -174,25 +168,6 @@ export const terminalFieldsFor = (outcome: TerminalOutcome, at: Date): TerminalF
           endedAt: at,
           cleanupEndedAt: at,
           ...outcome.session,
-        },
-      };
-    case "claim-invalidated":
-      return {
-        run: {
-          status: RunStatus.CANCELLED,
-          endedAt: at,
-          leaseExpiresAt: null,
-          sessionTokenRevokedAt: at,
-          failureClass: FailureClass.CANCELLED_OR_TIMED_OUT,
-          failureReason: outcome.reason,
-          retryable: true,
-          maxRunsPerTask: { increment: 1 },
-          budgetGrants: { increment: 1 },
-        },
-        session: {
-          executionStatus: SessionExecutionStatus.CANCELLED,
-          endedAt: at,
-          failureReason: outcome.reason,
         },
       };
     default: {

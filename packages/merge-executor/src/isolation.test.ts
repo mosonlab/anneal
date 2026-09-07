@@ -116,11 +116,13 @@ test("the daemon's reachable module graph contains no adapter, workspace, delive
   }
 });
 
-test("the only mutating operations are the sanitized merge construction and the two disarms", async () => {
+test("the only mutating operations are the sanitized merge construction, train publication and disarms", async () => {
   assert.deepEqual([...MUTATING_OPERATIONS], [
     "createSanitizedTree",
     "createMergeCommit",
     "updateBaseRef",
+    "publishTrain",
+    "deleteTrainRef",
     "disablePullRequestAutoMerge",
     "dequeuePullRequest",
   ]);
@@ -137,4 +139,126 @@ test("the only mutating operations are the sanitized merge construction and the 
   assert.equal([...github.matchAll(/method: "PUT"/gu)].length, 0);
   assert.equal([...github.matchAll(/beforeOid/gu)].length >= 1, true);
   assert.equal([...github.matchAll(/^mutation|`mutation\(/gmu)].length, 3);
+});
+
+/** The `= ... ;` body of a top-level type alias, scanned rather than matched.
+ *  A regex that stops at the first line ending in `;` truncates a variant
+ *  written across several lines and silently shrinks the guarded set. */
+const typeAliasBody = (source: string, start: number): { body: string; end: number } => {
+  let index = source.indexOf("=", start) + 1;
+  const bodyStart = index;
+  let depth = 0;
+  while (index < source.length) {
+    const char = source[index]!;
+    if (char === "\"" || char === "'" || char === "`") {
+      const quote = char;
+      index += 1;
+      while (index < source.length && source[index] !== quote) index += source[index] === "\\" ? 2 : 1;
+    } else if ("{([".includes(char)) depth += 1;
+    else if ("})]".includes(char)) depth -= 1;
+    else if (char === ";" && depth === 0) return { body: source.slice(bodyStart, index), end: index + 1 };
+    index += 1;
+  }
+  return assert.fail(`unterminated type alias at offset ${start}`);
+};
+
+/** Type text is not a producer. `ReadResult` declares `status: "api-error"`
+ *  too, so a guard that searched the whole file would accept a variant that
+ *  only a union declaration mentions. Comments are stripped for the same
+ *  reason: prose naming an outcome does not construct it. */
+const withoutTypeAliases = (source: string): string => {
+  const pattern = /(?:^|\n)(?:export )?type [A-Za-z0-9_]+(?:<[^>]*>)? =/gu;
+  let rest = "";
+  let cursor = 0;
+  for (let match = pattern.exec(source); match; match = pattern.exec(source)) {
+    const { end } = typeAliasBody(source, match.index);
+    rest += source.slice(cursor, match.index);
+    cursor = end;
+    pattern.lastIndex = end;
+  }
+  return rest + source.slice(cursor);
+};
+
+/** The variants of a union alias, with the parse asserted total: every
+ *  top-level alternative must yield exactly one status literal, so a shape the
+ *  scanner does not understand fails loudly instead of dropping out of the set. */
+const unionVariants = (source: string, name: string): string[] => {
+  const start = source.indexOf(`export type ${name} =`);
+  assert.notEqual(start, -1, `${name} union not found`);
+  const { body } = typeAliasBody(source, start);
+  const alternatives: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const char of body) {
+    if ("{([".includes(char)) depth += 1;
+    else if ("})]".includes(char)) depth -= 1;
+    else if (char === "|" && depth === 0) {
+      alternatives.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  alternatives.push(current);
+  const variants = alternatives
+    .filter((alternative) => alternative.trim().length > 0)
+    .map((alternative) => {
+      const literal = /status:\s*"([^"]+)"/u.exec(alternative);
+      assert.ok(literal, `${name} alternative carries no status literal: ${alternative.trim()}`);
+      return literal[1]!;
+    });
+  assert.ok(variants.length > 0, `no ${name} variants parsed`);
+  return variants;
+};
+
+/** The `MergeResponse` variants nothing in the rest of the source constructs. */
+const variantsWithoutProducer = (source: string): string[] => {
+  const code = stripComments(source);
+  const producers = withoutTypeAliases(code);
+  return unionVariants(code, "MergeResponse")
+    .filter((variant) => !producers.includes(`status: "${variant}"`));
+};
+
+/**
+ * A closed set: every `MergeResponse` variant is produced somewhere in
+ * `github.ts`.
+ *
+ * The executor no longer merges through the pull-request merge API; it builds
+ * the merge commit and fast-forwards the target ref. That switch silently
+ * orphaned the variants only the old path could return, and the decision table
+ * went on branching on outcomes nothing could produce — branches asserted
+ * against a fake and never against production code. A variant with no producer
+ * is dead weight the decision table cannot be trusted to describe, so it is a
+ * failure here rather than a discovery later.
+ */
+test("every MergeResponse variant has a producer in github.ts", async () => {
+  const source = await readFile(join(sourceRoot, "github.ts"), "utf8");
+  assert.deepEqual(variantsWithoutProducer(source), []);
+});
+
+/** The guard itself, held to the two ways a text search fakes a producer: a
+ *  sibling union that declares the same status name, and a comment that names
+ *  it. The multi-line variant is here because the scanner has to reach past it
+ *  to the alternatives that follow. */
+test("a variant only a declaration or a comment mentions has no producer", () => {
+  const synthetic = [
+    "export type ReadResult =",
+    "  | { status: \"ok\" }",
+    "  | { status: \"invented\"; reason: string };",
+    "",
+    "export type MergeResponse =",
+    "  | { status: \"merged\"; sha: string }",
+    "  /** Prose about status: \"commented\", which constructs nothing. */",
+    "  | { status: \"commented\"; reason: string }",
+    "  | {",
+    "      status: \"invented\";",
+    "      reason: string;",
+    "    }",
+    "  | { status: \"unknown\"; reason: string };",
+    "",
+    "const merged = (sha: string): MergeResponse => ({ status: \"merged\", sha });",
+    "const stop = (reason: string): MergeResponse => ({ status: \"unknown\", reason });",
+    "",
+  ].join("\n");
+  assert.deepEqual(variantsWithoutProducer(synthetic), ["commented", "invented"]);
 });

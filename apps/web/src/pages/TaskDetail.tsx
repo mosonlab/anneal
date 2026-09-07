@@ -1,21 +1,22 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { compactTokens, durationWithInboxWait, formatDateTime, pullRequestLabel, repoWebUrl, sha, timeAgo, titleCase, usageCostLabel } from "../lib/format";
+import { UNKNOWN, measured, compactTokens, durationMs, durationWithInboxWait, formatDateTime, percent, pullRequestLabel, repoWebUrl, sha, timeAgo, titleCase, tokensPerSecond, usageCostLabel } from "../lib/format";
 import { useAction, usePoll, type Poll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { Link } from "../lib/router";
 import { fatal } from "../lib/poll-state";
 import { isRegressionStep } from "../lib/repair-subtimeline";
+import { sessionsFilterHref } from "../lib/session-list";
 import { partitionTaskPrompt } from "../lib/task-prompt";
-import type { Agent, Chain, ChainStep, Run, TaskActivity, TaskDetail, TaskStartability, TaskStepOutput, TaskStatus } from "../lib/types";
+import type { Agent, Chain, ChainStep, Run, RunMetrics, RunPhaseMetrics, TaskActivity, TaskDetail, TaskStartability, TaskStepOutput, TaskStatus } from "../lib/types";
 import { supportsCodexServiceTier } from "../lib/models";
 import { cn } from "../lib/utils";
 import { IconArchive, IconArrowLeft, IconChevron, IconRefresh, IconSend } from "../components/icons";
 import { ChainList, ReassignSelect } from "../components/chain-list";
 import { RunLine } from "../components/run-line";
 import {
-  BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, MSG_CARD, MSG_HEAD, MSG_TIME, ROW, STACK,
+  BACK_LINK, COUNT, DETAIL_HEAD, DETAIL_HEAD_H1, HINT, MSG_CARD, MSG_HEAD, MSG_TIME, ROW, STACK,
   STAT_PILL, STAT_PILLS, TABLE_NAME, TABLE_SUB, TABLE_TIGHT,
   AgentChip, Card, EmptyState, ErrorNotice, KeyValue, Markdown, MarkdownClamp, Page, Pill, RunPill, TaskPill, Toggle,
 } from "../components/ui";
@@ -135,6 +136,147 @@ export const StartabilityChecklist = ({ verdict, hasRuns }: { verdict: TaskStart
   );
 };
 
+/* --------------------------------------------------------- run diagnostics */
+
+/* `dictionary` rather than `label`: the i18n sweep reads a `label` property as
+ * user copy, and these are dictionary keys. */
+const PHASES: ReadonlyArray<{ field: keyof RunPhaseMetrics; dictionary: string; color: string }> = [
+  { field: "queuedMs", dictionary: "taskDetail.diagnostics.phase.queued", color: "var(--series-1)" },
+  { field: "provisioningMs", dictionary: "taskDetail.diagnostics.phase.provisioning", color: "var(--series-2)" },
+  { field: "executingMs", dictionary: "taskDetail.diagnostics.phase.executing", color: "var(--series-3)" },
+  { field: "inboxWaitMs", dictionary: "taskDetail.diagnostics.phase.inboxWait", color: "var(--series-4)" },
+  { field: "cleanupMs", dictionary: "taskDetail.diagnostics.phase.cleanup", color: "var(--series-5)" },
+];
+
+const Stat = ({ k, v }: { k: ReactNode; v: ReactNode }): ReactNode => (
+  <span className="inline-flex items-baseline gap-[5px] whitespace-nowrap">
+    <span className="text-muted-foreground">{k}</span>
+    <span>{v}</span>
+  </span>
+);
+
+const DiagnosticsRow = ({ k, children }: { k: string; children: ReactNode }): ReactNode => (
+  <div className="grid gap-[5px]">
+    <div className="text-[11.5px] text-muted-foreground">{k}</div>
+    <div className="flex flex-wrap gap-x-[16px] gap-y-[5px] text-[12.5px]">{children}</div>
+  </div>
+);
+
+/** Widths are proportional to the phases that were measured; an unmeasured one
+ *  contributes no segment rather than a zero-width sliver, and its duration
+ *  reads as the unknown marker in the legend below. `inboxWaitMs` is a subset
+ *  of `executingMs` on the wire: subtract it from the executing segment,
+ *  preserving the raw executing duration in the legend. */
+const PhaseBar = ({ phases }: { phases: RunPhaseMetrics }): ReactNode => {
+  const t = useT();
+  const segmentMs = (field: keyof RunPhaseMetrics): number | null => {
+    const value = phases[field];
+    const wait = measured(phases.inboxWaitMs) && measured(phases.executingMs)
+      ? Math.min(phases.inboxWaitMs, phases.executingMs) : 0;
+    if (field === "inboxWaitMs") return wait;
+    return field === "executingMs" && measured(value) ? value - wait : value;
+  };
+  const total = PHASES.reduce((sum, phase) => {
+    const value = segmentMs(phase.field);
+    return sum + (measured(value) && value > 0 ? value : 0);
+  }, 0);
+  return (
+    <div className="grid gap-[7px]">
+      <div className="flex h-[8px] overflow-hidden rounded-md bg-accent" data-run-phase-bar="">
+        {total === 0 ? null : PHASES.map((phase) => {
+          const value = segmentMs(phase.field);
+          if (!measured(value) || value <= 0) return null;
+          return (
+            <span
+              key={phase.field}
+              title={t(phase.dictionary)}
+              style={{ width: `${(value / total) * 100}%`, background: phase.color }}
+            />
+          );
+        })}
+      </div>
+      <div className="flex flex-wrap gap-x-[16px] gap-y-[5px] text-[12.5px]">
+        {PHASES.map((phase) => (
+          <span key={phase.field} className="inline-flex items-baseline gap-[5px] whitespace-nowrap">
+            <span className="inline-block h-[8px] w-[8px] shrink-0 rounded-full" style={{ background: phase.color }} />
+            <span className="text-muted-foreground">{t(phase.dictionary)}</span>
+            <span>{durationMs(phases[phase.field])}{phase.field === "inboxWaitMs" && phases.inboxWaitMs === null
+              ? ` · ${t("taskDetail.diagnostics.phase.inboxUnmeasured")}` : ""}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+/** The per-run diagnostics the Task detail attaches at read time. It carries
+ *  session termination with a run-reason fallback for pre-session exits. */
+export const RunDiagnostics = ({ metrics, runTerminationReason }: { metrics: RunMetrics | null | undefined; runTerminationReason?: string | null }): ReactNode => {
+  const t = useT();
+  const title = <div className="text-[12px] font-bold text-muted-foreground">{t("taskDetail.diagnostics.title")}</div>;
+  if (metrics === null || metrics === undefined) {
+    return (
+      <div data-run-diagnostics="" className="grid gap-[10px] border-t border-[color:var(--border-soft)] pt-[14px]">
+        {title}
+        <div className="text-[12.5px] text-muted-foreground">{t("taskDetail.diagnostics.empty")}</div>
+      </div>
+    );
+  }
+  const { phases, tokens, tools, termination } = metrics;
+  // An upper-bound model-active duration gives a lower-bound output rate.
+  const bounded = (text: string, bound: "upperBound" | "lowerBound"): string => metrics.modelActiveIsUpperBound && text !== UNKNOWN
+    ? t(`taskDetail.diagnostics.rate.${bound}`, { value: text })
+    : text;
+  const rate = metrics.outputTokensPerSecond;
+  return (
+    <div data-run-diagnostics="" className="grid gap-[12px] border-t border-[color:var(--border-soft)] pt-[14px]">
+      {title}
+      <div className="grid gap-[5px]">
+        <div className="text-[11.5px] text-muted-foreground">{t("taskDetail.diagnostics.phases")}</div>
+        <PhaseBar phases={phases} />
+      </div>
+      <DiagnosticsRow k={t("taskDetail.diagnostics.tokens.title")}>
+        <Stat k={t("taskDetail.diagnostics.tokens.input")} v={compactTokens(tokens.input)} />
+        <Stat k={t("taskDetail.diagnostics.tokens.cachedRead")} v={compactTokens(tokens.cachedRead)} />
+        <Stat k={t("taskDetail.diagnostics.tokens.cacheWrite")} v={compactTokens(tokens.cacheWrite)} />
+        <Stat k={t("taskDetail.diagnostics.tokens.output")} v={compactTokens(tokens.output)} />
+        <Stat k={t("taskDetail.diagnostics.tokens.cacheHit")} v={percent(tokens.cacheHitRatio) ?? UNKNOWN} />
+      </DiagnosticsRow>
+      <DiagnosticsRow k={t("taskDetail.diagnostics.tools.title")}>
+        <Stat k={t("taskDetail.diagnostics.tools.calls")} v={String(tools.calls)} />
+        <Stat k={t("taskDetail.diagnostics.tools.failed")} v={String(tools.failed)} />
+        <Stat k={t("taskDetail.diagnostics.tools.unclassified")} v={String(tools.unclassified)} />
+        {tools.byName.map((entry) => (
+          <Stat
+            key={entry.name}
+            k={entry.name}
+            v={t("taskDetail.diagnostics.tools.entry", { calls: entry.calls, failed: entry.failed })}
+          />
+        ))}
+      </DiagnosticsRow>
+      <div className="grid gap-[5px]">
+        <DiagnosticsRow k={t("taskDetail.diagnostics.rate.label")}>
+          {/* Unkeyed: the row heading already names it, and a second "Rate"
+              label beside "Effective output rate" reads as two numbers. */}
+          <span className="whitespace-nowrap">
+            {bounded(tokensPerSecond(rate), "lowerBound")}
+          </span>
+          <Stat k={t("taskDetail.diagnostics.modelActive")} v={bounded(durationMs(metrics.modelActiveMs), "upperBound")} />
+        </DiagnosticsRow>
+        <div className={HINT}>{t("taskDetail.diagnostics.rate.note")}</div>
+      </div>
+      <DiagnosticsRow k={t("taskDetail.diagnostics.termination.title")}>
+        <Stat k={t("taskDetail.diagnostics.termination.reason")} v={termination.reason ?? runTerminationReason ?? UNKNOWN} />
+        <Stat
+          k={t("taskDetail.diagnostics.termination.exitCode")}
+          v={measured(termination.exitCode) ? String(termination.exitCode) : UNKNOWN}
+        />
+        <Stat k={t("taskDetail.diagnostics.termination.signal")} v={termination.signal ?? UNKNOWN} />
+      </DiagnosticsRow>
+    </div>
+  );
+};
+
 export const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remoteUrl: string | null | undefined; expanded: boolean; onToggle: () => void }): ReactNode => {
   const t = useT();
   const tierApplies = supportsCodexServiceTier(run.runner, run.model);
@@ -190,8 +332,10 @@ export const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remot
                   : <ExternalLink href={run.pullRequestUrl}>{pullRequestLabel(run.pullRequestUrl)}</ExternalLink> },
                 { k: t("taskDetail.run.sessionStatus"), v: run.session ? t(`status.session.${run.session.executionStatus}`) : "—" },
                 { k: t("taskDetail.run.resumeAttempts"), v: `${run.session?.resumeAttempt ?? 0}` },
-                { k: t("taskDetail.run.termination"), v: run.terminationReason ?? "—" },
+                // Termination moved into the diagnostics block below, which
+                // states it alongside the exit code and signal it belongs with.
               ]} />
+              <RunDiagnostics metrics={run.metrics} runTerminationReason={run.terminationReason} />
               {run.failureReason === null ? null : <ErrorNotice message={run.failureReason} />}
             </div>
           </TableCell>
@@ -534,6 +678,7 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
   const newestIsCancelling = newestIsActive && newest.cancelRequestedAt !== null && newest.cancelAcknowledgedAt === null;
   const newestBranch = newest?.branch ?? newest?.targetBranch ?? null;
   const newestBranchUrl = branchUrl(task.repo?.remoteUrl, newestBranch);
+  const newestCacheHit = percent(newest?.metrics?.tokens.cacheHitRatio);
   const pullRequestUrl = newest?.pullRequestUrl ?? null;
   const strandedSalvageBranches = task.strandedSalvageBranches;
   // `ChainStep.reassignable` is the server's own answer, so a Task inside a
@@ -619,7 +764,13 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
         <div className={STAT_PILLS}>
           <span className={STAT_PILL}>{t("taskDetail.stats.runs", { n: runs.length })}</span>
           <span className={STAT_PILL}>{t("taskDetail.stats.spend", { amount: usageCostLabel(task.taskCost) })}</span>
-          <span className={STAT_PILL}>{t("taskDetail.stats.tokens", { n: compactTokens(totalTokens) })}</span>
+          {/* The cache hit is the newest run's, not the task's: the ratios of
+              runs with different context sizes do not average into a number
+              that means anything. Unknown drops the clause rather than
+              claiming 0%. */}
+          <span className={STAT_PILL}>{newestCacheHit === null
+            ? t("taskDetail.stats.tokens", { n: compactTokens(totalTokens) })
+            : t("taskDetail.stats.tokensWithCacheHit", { n: compactTokens(totalTokens), ratio: newestCacheHit })}</span>
           <span className={STAT_PILL}>{t("taskDetail.stats.wallClock", { n: task.maxDurationMin })}</span>
           <span className={STAT_PILL}>{t("taskDetail.stats.stall", { n: task.stallTimeoutMin })}</span>
           <span className={STAT_PILL}>{t("taskDetail.stats.maxRuns", { n: task.maxSessionsPerTask })}</span>
@@ -703,7 +854,24 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
 
         <StrandedSalvageList branches={strandedSalvageBranches} remoteUrl={task.repo?.remoteUrl} />
 
-        <Card title={t("taskDetail.runs.title")} extra={<span className={COUNT}>{runs.length}</span>} flush>
+        <Card
+          title={t("taskDetail.runs.title")}
+          extra={
+            <span className={ROW}>
+              <span className={COUNT}>{runs.length}</span>
+              {/* The chain, when there is one: a step's runs are rarely the
+                  whole story, and the sibling steps' sessions are what an
+                  operator reading this table goes looking for next. */}
+              <Link
+                to={sessionsFilterHref(task.chainId === null ? { taskId: task.id } : { chainId: task.chainId })}
+                className="text-[12px] text-primary hover:underline"
+              >
+                <span data-task-sessions-link>{t("taskDetail.runs.viewSessions")}</span>
+              </Link>
+            </span>
+          }
+          flush
+        >
           <Table>
             <TableHeader>
               <TableRow>

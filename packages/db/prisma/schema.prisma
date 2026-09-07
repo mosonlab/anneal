@@ -165,11 +165,26 @@ enum MergeRecoveryRefusalCode {
   HEAD_ADOPTION_CONFLICT         @map("head-adoption-conflict")
   PRE_INTENT                     @map("pre-intent")
   TARGET_BRANCH_MISMATCH         @map("target-branch-mismatch")
+  WAITING_CEILING                @map("waiting-ceiling")
+  TRANSPORT_CEILING              @map("transport-ceiling")
+  VALIDATION_BUDGET              @map("validation-budget")
+}
+
+/// Why one base-drift classification tick did not conclude. Only VALIDATION —
+/// a classification that ran against real facts and failed — spends the
+/// bounded validation budget; WAITING (the chain's own Run is still active)
+/// and TRANSPORT (the repository read failed) are held on their own backoff
+/// and their own elapsed-time ceilings.
+enum MergeRecoveryRetryClass {
+  WAITING    @map("waiting")
+  TRANSPORT  @map("transport")
+  VALIDATION @map("validation")
 }
 
 enum MergeLeaseEventState {
   HANDOFF_PENDING  @map("handoff-pending")
   RELEASE_DEFERRED @map("release-deferred")
+  CONTENDED        @map("contended")
   RELEASED         @map("released")
   INVALID          @map("invalid")
 }
@@ -644,7 +659,7 @@ model Task {
   goalDecisionRunId        String?
   goalDecisionAt           DateTime?
   goalPredecessorTaskId    String?                @unique
-  dispatchAfterTaskId      String?                @unique
+  dispatchAfterTaskId      String?
   createdAt                DateTime               @default(now())
   /// Stable completion clock for age-based retention. A database trigger sets
   /// it on every transition into DONE and clears it on every transition out.
@@ -669,7 +684,7 @@ model Task {
   goalPredecessorTask      Task?                  @relation("TaskGoalPredecessor", fields: [goalPredecessorTaskId], references: [id], onDelete: Restrict)
   goalSuccessorTask        Task?                  @relation("TaskGoalPredecessor")
   dispatchAfter            Task?                  @relation("TaskDispatchBinding", fields: [dispatchAfterTaskId, projectId], references: [id, projectId], onDelete: Restrict)
-  dispatchedChainFirstTask Task?                  @relation("TaskDispatchBinding")
+  dispatchedChainFirstTasks Task[]                @relation("TaskDispatchBinding")
   /// Step 2.7 identity backstops. The single-column relations stay as the
   /// delete restrictions the spec names; these composite ones are what stop a
   /// predecessor, Run, or event from crossing a Goal, generation, or iteration.
@@ -689,7 +704,7 @@ model Task {
   @@unique([goalId, goalDecisionKey])
   @@unique([id, goalId, goalGeneration])
   @@unique([id, goalId, goalGeneration, goalIteration])
-  @@unique([dispatchAfterTaskId, projectId])
+  @@index([dispatchAfterTaskId, projectId])
   @@index([projectId, status])
   @@index([assigneeAgentId])
   @@index([templateId])
@@ -762,7 +777,23 @@ model MergeRecoveryAttempt {
   sourceStopId            String
   attempt                 Int
   status                  MergeRecoveryStatus       @default(VALIDATING)
+  /// Per-class classification-failure counters. Only `validationAttempts` is
+  /// budgeted by count; the other two are bounded by elapsed time alone.
   validationAttempts      Int                       @default(0)
+  waitingAttempts         Int                       @default(0)
+  transportAttempts       Int                       @default(0)
+  /// First failure of each class, and the moment the next tick may classify
+  /// this attempt again. A null first-failure time means the class has never
+  /// failed, so its elapsed time is zero.
+  validationFirstAt       DateTime?
+  waitingFirstAt          DateTime?
+  transportFirstAt        DateTime?
+  nextEligibleAt          DateTime?
+  lastRetryClass          MergeRecoveryRetryClass?
+  /// How many times an operator answered a class-ceiling refusal with
+  /// `re-validate`. It generations the stop question and stop notice dedupe
+  /// keys so a second ceiling still reaches the operator.
+  revalidations           Int                       @default(0)
   boundSourceRunId        String?
   authorizationActivityId String?
   recoveryRunId           String?
@@ -1071,6 +1102,15 @@ model Run {
   // Carried forward onto every run a task creates, so the newest row is the
   // running total.
   budgetGrants                  Int                    @default(0)
+  /// How many of this task's attempts were refunded because the platform lost
+  /// the Run rather than because the agent failed: lease loss declared by
+  /// reconciliation, a claim invalidated by a late salvage, a merge-tail
+  /// requeue. Carried forward onto every Run a task creates, so the newest row
+  /// is the running total, and bounded by `LEASE_LOSS_REFUND_CAP` at the one
+  /// place a refund raises a ceiling. Counted apart from `budgetGrants`
+  /// because it must not be raised by the refund it is bounding: the ceiling a
+  /// refund produces is exactly what a bound derived from it would grow with.
+  leaseLossRefunds              Int                    @default(0)
   spendCap                      Decimal?               @db.Decimal(12, 2)
   spendCapApplicable            Boolean                @default(false)
   failureClass                  FailureClass?

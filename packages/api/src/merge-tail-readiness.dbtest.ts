@@ -7,9 +7,12 @@ import {
   DependencyProvisioning,
   INTEGRATOR_SENTINEL_MODEL,
   MergeLeaseEventState,
+  MergeRecoveryStatus,
+  MERGE_READINESS_REQUEUE_KIND,
   MERGE_TAIL_KIND,
   Prisma,
   PrismaClient,
+  readinessRequeueFromMetadata,
   RunStatus,
   TaskStatus,
 } from "@anneal/db";
@@ -26,6 +29,7 @@ import {
   type WithMergeLease,
 } from "./merge-lease.js";
 import type { MergeLeaseTarget } from "./merge-lease-hold.js";
+import { readBoard } from "./board.js";
 import { READINESS_CLAIM_LEASE_MS, readinessTick } from "./merge-readiness-worker.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createApp } from "./test-app.js";
@@ -512,6 +516,165 @@ test("ordinary base requeue authorizes the refreshed exact head", async () => {
   assert.equal(await db.task.count({ where: { name: "Autonomous merge tail: independent review" } }), 0);
 });
 
+test("consecutive pre-authorization requeues are counted on the readiness card", async () => {
+  const seeded = await seedReadiness();
+  const firstDrift = "d".repeat(40);
+  const secondDrift = "e".repeat(40);
+  // The public activity route preserves caller-supplied metadata, so an
+  // operator or an agent can post a row carrying this kind, and a control-plane
+  // row of this kind can lack an ordinal the counters could place. Seeded
+  // before the first settlement, a counted one would both inflate the card and
+  // push the first real ordinal past 1.
+  await db.taskActivity.createMany({ data: [
+    {
+      taskId: seeded.readiness.id,
+      actorType: "operator",
+      body: "operator note shaped like a requeue",
+      metadata: { kind: MERGE_READINESS_REQUEUE_KIND, ordinal: 1, budgetGrant: 9 },
+    },
+    {
+      taskId: seeded.readiness.id,
+      actorType: "agent",
+      body: "agent note shaped like a requeue",
+      metadata: { kind: MERGE_READINESS_REQUEUE_KIND, ordinal: 2, budgetGrant: 9 },
+    },
+    {
+      taskId: seeded.readiness.id,
+      actorType: "control-plane",
+      body: "unnumbered row shaped like a requeue",
+      metadata: { kind: MERGE_READINESS_REQUEUE_KIND, budgetGrant: 9 },
+    },
+  ] });
+  assert.equal(
+    (await readinessTick(db, reader([], snapshot({ baseSha: firstDrift })), new Date(), 5, releaseChainLease, runWithMergeLease)).requeued,
+    1,
+  );
+  // The requeued Regression run passes against the base that moved, which is
+  // what puts readiness back in front of a base that has moved again.
+  const rerun = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
+  });
+  await db.run.update({ where: { id: rerun.id }, data: { status: "SUCCEEDED", headSha: HEAD } });
+  await db.taskStepOutput.update({ where: { taskId: seeded.regression.id }, data: {
+    runId: rerun.id,
+    body: JSON.stringify({
+      schemaVersion: 1, outcome: "pass", headSha: HEAD, baseHeadSha: firstDrift, gateVerdict: "PASS",
+    }),
+    commitSha: HEAD,
+  } });
+  await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.DONE } });
+  assert.equal(
+    (await readinessTick(db, reader([], snapshot({ baseSha: secondDrift })), new Date(), 5, releaseChainLease, runWithMergeLease)).requeued,
+    1,
+  );
+
+  const requeues = await db.taskActivity.findMany({
+    where: {
+      taskId: seeded.readiness.id,
+      actorType: "control-plane",
+      metadata: { path: ["kind"], equals: MERGE_READINESS_REQUEUE_KIND },
+    },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  });
+  // The unnumbered seed is still on the Task; it is simply not a requeue.
+  assert.equal(requeues.length, 3);
+  assert.deepEqual(
+    requeues.flatMap((row) => readinessRequeueFromMetadata(row.metadata) ?? []),
+    [
+      { ordinal: 1, staleBaseSha: BASE, currentBaseSha: firstDrift, budgetGrant: 1 },
+      { ordinal: 2, staleBaseSha: firstDrift, currentBaseSha: secondDrift, budgetGrant: 1 },
+    ],
+  );
+  // Each grant funded one extra Regression attempt, so the counted grants and
+  // the runs the chain actually paid for agree.
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 3);
+
+  const cards = await readBoard(db, { projectId: seeded.project.id, archived: "false" });
+  const readinessCard = cards.find((card) => card.id === seeded.readiness.id);
+  assert.ok(readinessCard);
+  assert.equal(readinessCard.readinessRequeues, 2);
+  assert.equal(readinessCard.readinessGrants, 2);
+  // The counters belong to the readiness Step; no other card in the chain
+  // claims its chain's requeues.
+  const regressionCard = cards.find((card) => card.id === seeded.regression.id);
+  assert.ok(regressionCard);
+  assert.equal(regressionCard.readinessRequeues, 0);
+  assert.equal(regressionCard.readinessGrants, 0);
+});
+
+test("a requeue that carries a recovery aggregate is counted the same way", async () => {
+  const seeded = await seedReadiness();
+  const driftedBase = "d".repeat(40);
+  const sourceRun = await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
+  const stop = await db.taskActivity.create({ data: {
+    taskId: seeded.integrator.id,
+    actorType: "control-plane",
+    body: "merge stopped on base drift",
+    metadata: { kind: MERGE_TAIL_KIND.readiness, state: "stopped" },
+  } });
+  const authorization = await db.taskActivity.create({ data: {
+    taskId: seeded.readiness.id,
+    actorType: "control-plane",
+    body: "merge authorized",
+    metadata: { kind: MERGE_TAIL_KIND.readiness, state: "authorized" },
+  } });
+  // A recovery already awaiting authorization: readiness settles this requeue
+  // through enterRepair rather than through its own branch, and the counter has
+  // to come out the same on either path.
+  const aggregate = await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: seeded.integrator.id,
+    sourceStopId: stop.id,
+    attempt: 1,
+    status: MergeRecoveryStatus.AWAITING_AUTHORIZATION,
+    boundSourceRunId: sourceRun.id,
+    authorizationActivityId: authorization.id,
+    recoveryRunId: sourceRun.id,
+    readinessTaskId: seeded.readiness.id,
+    regressionTaskId: seeded.regression.id,
+    repository: "acme/widgets",
+    prNumber: 41,
+    targetBranch: "main",
+    authorizedHeadSha: HEAD,
+    authorizedBaseSha: BASE,
+    observedBaseSha: BASE,
+    currentBaseSha: BASE,
+  } });
+
+  assert.equal(
+    (await readinessTick(db, reader([], snapshot({ baseSha: driftedBase })), new Date(), 5, releaseChainLease, runWithMergeLease)).requeued,
+    1,
+  );
+
+  assert.equal(
+    (await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } })).status,
+    MergeRecoveryStatus.REPAIRING,
+  );
+  const requeues = await db.taskActivity.findMany({
+    where: {
+      taskId: seeded.readiness.id,
+      actorType: "control-plane",
+      metadata: { path: ["kind"], equals: MERGE_READINESS_REQUEUE_KIND },
+    },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  });
+  assert.equal(requeues.length, 1);
+  assert.deepEqual(readinessRequeueFromMetadata(requeues[0]!.metadata), {
+    ordinal: 1, staleBaseSha: BASE, currentBaseSha: driftedBase, budgetGrant: 1,
+  });
+  // One grant, one extra Regression attempt, exactly as on the ordinary path.
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
+
+  const cards = await readBoard(db, { projectId: seeded.project.id, archived: "false" });
+  const readinessCard = cards.find((card) => card.id === seeded.readiness.id);
+  assert.ok(readinessCard);
+  assert.equal(readinessCard.readinessRequeues, 1);
+  assert.equal(readinessCard.readinessGrants, 1);
+  const regressionCard = cards.find((card) => card.id === seeded.regression.id);
+  assert.ok(regressionCard);
+  assert.equal(regressionCard.readinessRequeues, 0);
+  assert.equal(regressionCard.readinessGrants, 0);
+});
+
 test("future readiness waits but the readiness role is claimed regardless of ordinal", async () => {
   const future = await seedReadiness();
   await db.task.update({ where: { id: future.regression.id }, data: { status: TaskStatus.TODO } });
@@ -621,9 +784,16 @@ test("manual start cannot turn server-owned readiness into a model run", async (
 test("a contended lease leaves readiness for a later tick instead of authorizing", async () => {
   const seeded = await seedReadiness();
   const asked: string[] = [];
+  const holder = {
+    holder: "runner@executor",
+    task: "chain-elsewhere",
+    reason: "chain merge tail chain-elsewhere",
+    acquiredAt: "2026-09-06T10:00:00.000Z",
+    sha: "b".repeat(40),
+  };
   const contended: MergeLeaseAcquirer = async (chainId) => {
     asked.push(chainId);
-    return { outcome: "contended" };
+    return { outcome: "contended", holder };
   };
   const started = new Date();
   assert.deepEqual(
@@ -635,6 +805,17 @@ test("a contended lease leaves readiness for a later tick instead of authorizing
   assert.equal(await db.run.count({ where: { taskId: seeded.integrator.id } }), 0);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DOING);
   assert.deepEqual(releasedChainLeases, []);
+  // The contention is visible from the first tick: an operator reading this
+  // task learns who is in the way without waiting for the alert window.
+  const contention = await db.taskActivity.findMany({
+    where: {
+      taskId: seeded.readiness.id,
+      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseContention },
+    },
+  });
+  assert.equal(contention.length, 1);
+  assert.equal((contention[0]!.metadata as Record<string, unknown>).state, "contended");
+  assert.match(contention[0]!.body, /held by runner@executor \(task chain-elsewhere/u);
 
   // The claim, not a retry counter, is what brings it back: once the claim
   // expires the next tick re-evaluates and takes the lease it could not get.
@@ -652,6 +833,139 @@ test("a contended lease leaves readiness for a later tick instead of authorizing
   );
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
   assert.equal(await db.run.count({ where: { taskId: seeded.integrator.id } }), 1);
+  // Taking the lease closes the episode, so the next contention is measured
+  // from its own beginning rather than from this one. The authorization is the
+  // terminal transition and clears the claim, so the close has to be written
+  // inside the Lease window; a close attempted afterwards would be refused and
+  // leave this episode open forever.
+  const resolved = await db.taskActivity.findFirst({
+    where: {
+      taskId: seeded.readiness.id,
+      metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseContention },
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  assert.equal((resolved!.metadata as Record<string, unknown>).state, "resolved");
+  // It closed this episode rather than opening and closing an unrelated one.
+  assert.equal(
+    (resolved!.metadata as Record<string, unknown>).firstContendedAt,
+    (contention[0]!.metadata as Record<string, unknown>).firstContendedAt,
+  );
+});
+
+const contentionMarkers = async (taskId: string) => await db.taskActivity.findMany({
+  where: { taskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseContention } },
+  orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+});
+
+const contentionState = async (taskId: string): Promise<Array<string | undefined>> => (
+  (await contentionMarkers(taskId)).map((marker) => (
+    (marker.metadata as Record<string, unknown>).state as string | undefined
+  ))
+);
+
+test("a stale worker records no contention after a newer worker owns the claim", async () => {
+  const seeded = await seedReadiness();
+  let startRead!: () => void;
+  let finishRead!: () => void;
+  const readStarted = new Promise<void>((resolve) => { startRead = resolve; });
+  const readMayFinish = new Promise<void>((resolve) => { finishRead = resolve; });
+  let reads = 0;
+  const delayed: PullRequestReader = {
+    readPullRequest: async () => {
+      reads += 1;
+      if (reads === 1) {
+        startRead();
+        await readMayFinish;
+      }
+      return snapshot({});
+    },
+    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+  };
+  const contended: MergeLeaseAcquirer = async () => ({
+    outcome: "contended",
+    holder: {
+      holder: "runner@executor",
+      task: "chain-elsewhere",
+      reason: "chain merge tail chain-elsewhere",
+      acquiredAt: "2026-09-06T10:00:00.000Z",
+      sha: "b".repeat(40),
+    },
+  });
+  const tick = readinessTick(db, delayed, new Date(), 5, releaseChainLease, leaseRunner(contended));
+  await readStarted;
+  await db.task.update({
+    where: { id: seeded.readiness.id },
+    data: {
+      status: TaskStatus.DOING,
+      readinessClaimToken: NEWER_CLAIM_TOKEN,
+      readinessClaimExpiresAt: NEWER_CLAIM_EXPIRY,
+    },
+  });
+  finishRead();
+  await tick;
+
+  // The contention is real, but this worker is no longer the Step's owner, so
+  // it says nothing a successor's own bookkeeping would then have to unpick.
+  assert.deepEqual(await contentionMarkers(seeded.readiness.id), []);
+  assert.equal(await db.mergeLeaseEvent.count({
+    where: { chainId: seeded.readiness.chainId!, state: MergeLeaseEventState.CONTENDED },
+  }), 0);
+  assert.equal(await db.inboxMessage.count({ where: { dedupeKey: { startsWith: "merge-lease-contention:" } } }), 0);
+});
+
+test("an unreachable origin breaks the run of contended results", async () => {
+  const seeded = await seedReadiness();
+  const contended: MergeLeaseAcquirer = async () => ({ outcome: "contended" });
+  const unreachable: MergeLeaseAcquirer = async () => ({ outcome: "unreachable", detail: "spawn bash ENOENT" });
+  const started = new Date();
+  const later = (ticks: number): Date => new Date(started.getTime() + READINESS_CLAIM_LEASE_MS * 2 * ticks);
+
+  await readinessTick(db, reader(), started, 5, releaseChainLease, leaseRunner(contended));
+  assert.deepEqual(await contentionState(seeded.readiness.id), ["contended"]);
+
+  await readinessTick(db, reader(), later(1), 5, releaseChainLease, leaseRunner(unreachable));
+  // The window counts continuous contention. A tick that could not reach origin
+  // learned nothing about the holder, so it is not another refusal.
+  assert.deepEqual(await contentionState(seeded.readiness.id), ["contended", "resolved"]);
+
+  await readinessTick(db, reader(), later(2), 5, releaseChainLease, leaseRunner(contended));
+  const markers = await contentionMarkers(seeded.readiness.id);
+  assert.deepEqual(markers.map((marker) => (marker.metadata as Record<string, unknown>).state), [
+    "contended",
+    "resolved",
+    "contended",
+  ]);
+  // The new episode's 30 minutes start now, not at the first contention.
+  assert.equal(
+    (markers[2]!.metadata as Record<string, unknown>).firstContendedAt,
+    later(2).toISOString(),
+  );
+});
+
+test("a requeue before the lease ends the contention episode", async () => {
+  const seeded = await seedReadiness();
+  const contended: MergeLeaseAcquirer = async () => ({ outcome: "contended" });
+  const started = new Date();
+
+  await readinessTick(db, reader(), started, 5, releaseChainLease, leaseRunner(contended));
+  assert.deepEqual(await contentionState(seeded.readiness.id), ["contended"]);
+
+  const driftedBase = "d".repeat(40);
+  assert.equal(
+    (await readinessTick(
+      db,
+      reader([], snapshot({ baseSha: driftedBase })),
+      new Date(started.getTime() + READINESS_CLAIM_LEASE_MS * 2),
+      5,
+      releaseChainLease,
+      runWithMergeLease,
+    )).requeued,
+    1,
+  );
+  // This tick settled before it ever reached for the lease, so the run of
+  // contended results is broken and the next one starts its own window.
+  assert.deepEqual(await contentionState(seeded.readiness.id), ["contended", "resolved"]);
 });
 
 test("a stale worker cannot stop readiness after a newer worker owns the claim", async () => {

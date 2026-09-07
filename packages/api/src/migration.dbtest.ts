@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, beforeEach, test } from "node:test";
 
-import { backfillTaskSource, backfilledFireId, DependencyProvisioning, PrismaClient } from "@anneal/db";
+import { DependencyProvisioning, PrismaClient } from "@anneal/db";
 
 import {
   dbDirectory,
@@ -19,11 +19,11 @@ import {
   retiredFollowUpColumn,
   retiredFollowUpIndex,
 } from "./chain-layer-migration-fixture.js";
-import { fireCronTask } from "./scheduler.js";
 import { splitSqlStatements } from "./sql-statements.js";
 import { resetTestDb, setupTestDb, testDatabaseSchema, testDatabaseUrl } from "./testdb.js";
 
 const taskDispatchBindingMigration = "20260825120000_task_dispatch_binding";
+const taskDispatchFanOutMigration = "20260906010000_task_dispatch_binding_fan_out";
 
 interface TaskDispatchBindingMigrationFixture {
   schema: string;
@@ -35,11 +35,10 @@ interface TaskDispatchBindingMigrationFixture {
 }
 
 /**
- * Stage the real migration history immediately before the dispatch-binding
- * migration. The fixture deliberately creates a task before the migration so
- * the additive-only proof can compare its row content and count after deploy.
+ * Stage the real migration history immediately before the requested migration
+ * so upgrade tests can compare existing rows before and after deploy.
  */
-const stageBeforeTaskDispatchBinding = async (): Promise<TaskDispatchBindingMigrationFixture> => {
+const stageBeforeTaskDispatchBinding = async (migration = taskDispatchBindingMigration): Promise<TaskDispatchBindingMigrationFixture> => {
   const base = new URL(testDatabaseUrl);
   const sourceSchema = base.searchParams.get("schema");
   if (!sourceSchema || sourceSchema === "public") throw new Error("dispatch-binding migration fixture refuses public schema");
@@ -58,7 +57,7 @@ const stageBeforeTaskDispatchBinding = async (): Promise<TaskDispatchBindingMigr
   const staging = mkdtempSync(join(tmpdir(), "task-dispatch-binding-fixture."));
   cpSync(join(dbDirectory, "prisma"), join(staging, "prisma"), { recursive: true });
   for (const entry of readdirSync(join(staging, "prisma", "migrations"), { withFileTypes: true })) {
-    if (entry.isDirectory() && entry.name >= taskDispatchBindingMigration) {
+    if (entry.isDirectory() && entry.name >= migration) {
       rmSync(join(staging, "prisma", "migrations", entry.name), { recursive: true, force: true });
     }
   }
@@ -79,8 +78,8 @@ const stageBeforeTaskDispatchBinding = async (): Promise<TaskDispatchBindingMigr
     execute,
     applyMigration: () => {
       cpSync(
-        join(dbDirectory, "prisma", "migrations", taskDispatchBindingMigration),
-        join(staging, "prisma", "migrations", taskDispatchBindingMigration),
+        join(dbDirectory, "prisma", "migrations", migration),
+        join(staging, "prisma", "migrations", migration),
         { recursive: true },
       );
       deploy();
@@ -197,157 +196,6 @@ test("webhook foreign keys set a deleted secret null and restrict repo deletion"
   await db.secret.delete({ where: { id: secret.id } });
   assert.equal((await db.taskTemplate.findUniqueOrThrow({ where: { id: template.id } })).webhookSecretId, null);
   await assert.rejects(db.repo.delete({ where: { id: repo.id } }));
-});
-
-// --- batch 2.5: the source / recurring-link / fire-ledger backfill -----------
-// Seeded through the real code paths wherever possible. A hand-written activity
-// fixture is exactly how the first draft's predicate — which would have stamped
-// the recurring *definition* as cron — survived unnoticed.
-
-const seedExecutor = async (label: string) => {
-  const project = await db.project.create({ data: { name: label, slug: `${label}-${Date.now()}` } });
-  const environment = await db.environment.create({ data: { projectId: project.id, name: "local", allowedHosts: [] } });
-  const agent = await db.agent.create({ data: {
-    projectId: project.id, environmentId: environment.id, name: "agent", title: "Agent", model: "claude",
-    foundationalPrompt: "foundation", rolePrompt: "role",
-  } });
-  const repo = await db.repo.create({ data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo", dependencyProvisioning: DependencyProvisioning.NONE } });
-  return { project, agent, repo };
-};
-
-test("the backfill marks fired copies cron and leaves the recurring definition manual", async () => {
-  const { project, agent, repo } = await seedExecutor("backfill");
-  const now = new Date("2026-08-15T12:05:00Z");
-  const definition = await db.task.create({ data: {
-    projectId: project.id, assigneeAgentId: agent.id, repoId: repo.id, name: "Recurring", description: "work",
-    scheduleKind: "CRON", cron: "*/2 * * * *", timezone: "UTC", runAt: new Date("2026-08-15T11:00:00Z"),
-  } });
-  assert.equal(await fireCronTask(db, definition, now), true);
-  const copy = await db.task.findFirstOrThrow({ where: { projectId: project.id, id: { not: definition.id } } });
-  // The live path already stamps the copy; clear both rows so the backfill is
-  // what is under test rather than the writer.
-  await db.task.updateMany({
-    where: { id: { in: [definition.id, copy.id] } },
-    data: { source: "MANUAL", recurringSourceTaskId: null },
-  });
-
-  const result = await backfillTaskSource(db);
-  assert.equal(result.sourceCron, 1);
-  assert.equal(result.recurringLinked, 1);
-
-  const backfilledCopy = await db.task.findUniqueOrThrow({ where: { id: copy.id } });
-  assert.equal(backfilledCopy.source, "CRON");
-  assert.equal(backfilledCopy.recurringSourceTaskId, definition.id);
-
-  const backfilledDefinition = await db.task.findUniqueOrThrow({ where: { id: definition.id } });
-  assert.equal(backfilledDefinition.source, "MANUAL");
-  assert.equal(backfilledDefinition.recurringSourceTaskId, null);
-});
-
-test("the backfill keeps an orphaned copy cron with a null recurring link", async () => {
-  const { project, agent, repo } = await seedExecutor("orphan");
-  const definition = await db.task.create({ data: {
-    projectId: project.id, assigneeAgentId: agent.id, repoId: repo.id, name: "Recurring", description: "work",
-    scheduleKind: "CRON", cron: "*/2 * * * *", runAt: new Date("2026-08-15T11:00:00Z"),
-  } });
-  assert.equal(await fireCronTask(db, definition, new Date("2026-08-15T12:05:00Z")), true);
-  const copy = await db.task.findFirstOrThrow({ where: { projectId: project.id, id: { not: definition.id } } });
-  await db.task.update({ where: { id: copy.id }, data: { source: "MANUAL", recurringSourceTaskId: null } });
-  await db.task.delete({ where: { id: definition.id } });
-
-  const result = await backfillTaskSource(db);
-  assert.equal(result.sourceCron, 1);
-  assert.equal(result.recurringLinked, 0);
-  const backfilled = await db.task.findUniqueOrThrow({ where: { id: copy.id } });
-  assert.equal(backfilled.source, "CRON");
-  assert.equal(backfilled.recurringSourceTaskId, null);
-});
-
-test("the backfill marks webhook tasks and rebuilds one ledger row per fire, idempotently", async () => {
-  const { project } = await seedExecutor("webhook-backfill");
-  const template = await db.taskTemplate.create({
-    data: { projectId: project.id, name: "template", description: "t", variables: [] },
-  });
-  const chainId = "chain-webhook-backfill";
-  const firedAt = "2026-08-15T09:00:00.000Z";
-  const steps = await Promise.all([0, 1, 2].map((index) => db.task.create({ data: {
-    projectId: project.id, name: `Step ${index}`, description: "s", chainId, chainIndex: index, chainLayer: index,
-  } })));
-  await db.taskActivity.createMany({ data: steps.map((task) => ({
-    taskId: task.id,
-    actorType: "webhook",
-    body: "Template instantiated",
-    metadata: { chainId, templateId: template.id, webhookTemplateId: template.id, firedAt },
-  })) });
-  const manual = await db.task.create({ data: { projectId: project.id, name: "Hand made", description: "h" } });
-
-  const first = await backfillTaskSource(db);
-  assert.equal(first.sourceWebhook, 3);
-  assert.equal(first.firesCreated, 1);
-  for (const task of steps) {
-    assert.equal((await db.task.findUniqueOrThrow({ where: { id: task.id } })).source, "WEBHOOK");
-  }
-  assert.equal((await db.task.findUniqueOrThrow({ where: { id: manual.id } })).source, "MANUAL");
-  const fire = await db.triggerFire.findFirstOrThrow({ where: { templateId: template.id } });
-  assert.equal(fire.source, "WEBHOOK");
-  assert.equal(fire.chainId, chainId);
-  assert.equal(fire.createdAt.toISOString(), firedAt);
-
-  const second = await backfillTaskSource(db);
-  assert.deepEqual(second, { sourceCron: 0, sourceWebhook: 0, recurringLinked: 0, firesCreated: 0 });
-  assert.equal(await db.triggerFire.count(), 1);
-});
-
-test("the backfill skips fires whose template is gone", async () => {
-  const { project } = await seedExecutor("dead-template");
-  const task = await db.task.create({ data: { projectId: project.id, name: "Orphan fire", description: "o" } });
-  await db.taskActivity.create({ data: {
-    taskId: task.id,
-    actorType: "webhook",
-    body: "Template instantiated",
-    metadata: { webhookTemplateId: "template-that-never-existed", firedAt: "2026-08-15T09:00:00.000Z" },
-  } });
-  const result = await backfillTaskSource(db);
-  assert.equal(result.sourceWebhook, 1);
-  assert.equal(result.firesCreated, 0);
-  assert.equal(await db.triggerFire.count(), 0);
-});
-
-test("two backfills running at once produce one ledger row, not two (SOL-REVIEW S1)", async () => {
-  // Sequential re-runnability is not concurrency-idempotency: an unlocked
-  // findFirst followed by a create lets two operators both observe "no row" and
-  // both create one, doubling the fire counts. The deterministic primary key is
-  // the lock — the second writer collides inside the database and skips.
-  const { project } = await seedExecutor("concurrent-backfill");
-  const template = await db.taskTemplate.create({
-    data: { projectId: project.id, name: "template", description: "t", variables: [] },
-  });
-  const firedAt = "2026-08-15T11:00:00.000Z";
-  const task = await db.task.create({ data: {
-    projectId: project.id, name: "Step", description: "s", chainId: "chain-concurrent-backfill", chainIndex: 0, chainLayer: 0,
-  } });
-  await db.taskActivity.create({ data: {
-    taskId: task.id,
-    actorType: "webhook",
-    body: "Template instantiated",
-    metadata: { templateId: template.id, webhookTemplateId: template.id, firedAt },
-  } });
-
-  const other = new PrismaClient({ datasources: { db: { url: testDatabaseUrl } } });
-  try {
-    const results = await Promise.all([backfillTaskSource(db), backfillTaskSource(other)]);
-    // Exactly one invocation may report the row as created.
-    assert.equal(results.reduce((total, result) => total + result.firesCreated, 0), 1);
-  } finally {
-    await other.$disconnect();
-  }
-  assert.equal(await db.triggerFire.count({ where: { templateId: template.id } }), 1);
-
-  // The id carries the provenance the rollback runbook deletes on, so undoing
-  // the backfill cannot take live webhook history with it.
-  const fire = await db.triggerFire.findFirstOrThrow({ where: { templateId: template.id } });
-  assert.equal(fire.id, backfilledFireId(template.id, new Date(firedAt)));
-  assert.match(fire.id, /^backfill:/);
 });
 
 test("the chain-branch migration installs opensPullRequest on Task, TaskTemplateStep and Run, and pushedBranch on Run", async () => {
@@ -543,6 +391,40 @@ test("dispatch binding migration is additive and preserves existing task rows", 
   }
 });
 
+test("dispatch fan-out migration preserves an existing binding and permits a second", {
+  skip: !migrationHarnessEnabled,
+}, async () => {
+  const fixture = await stageBeforeTaskDispatchBinding(taskDispatchFanOutMigration);
+  try {
+    await fixture.execute(`
+      INSERT INTO "Project" ("id", "name", "slug", "updatedAt")
+      VALUES ('fan-out-project', 'fan-out', 'fan-out', NOW());
+      INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "chainLayer", "dispatchAfterTaskId", "updatedAt")
+      VALUES ('fan-out-predecessor', 'fan-out-project', 'predecessor', '', 'fan-out-a', 0, 0, NULL, NOW()),
+             ('fan-out-first', 'fan-out-project', 'first', '', 'fan-out-b', 0, 0, 'fan-out-predecessor', NOW());
+    `);
+    const rows = () => migrationQuery<{ row: unknown }>(fixture, `
+      SELECT to_jsonb(task) AS row FROM "Task" AS task ORDER BY task."id"
+    `);
+    const before = await rows();
+    assert.equal(before.length, 2);
+    const secondBinding = `
+      INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "chainLayer", "dispatchAfterTaskId", "updatedAt")
+      VALUES ('fan-out-second', 'fan-out-project', 'second', '', 'fan-out-c', 0, 0, 'fan-out-predecessor', NOW())
+    `;
+    await assert.rejects(() => fixture.execute(secondBinding), /dispatchAfterTaskId/u);
+    fixture.applyMigration();
+    assert.deepEqual(await rows(), before);
+    await fixture.execute(secondBinding);
+    const bindings = await migrationQuery<{ id: string }>(fixture, `
+      SELECT "id" FROM "Task" WHERE "dispatchAfterTaskId" = 'fan-out-predecessor' ORDER BY "id"
+    `);
+    assert.deepEqual(bindings, [{ id: "fan-out-first" }, { id: "fan-out-second" }]);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Goal 5a0, plan Step 2.8 — catalog assertions for the idempotent execution
 // kernel migration, plus the raw negative inserts Step 2's verification names.
@@ -685,11 +567,12 @@ test("dispatch binding migration installs the storage contract and rejects unsaf
   const indexes = await db.$queryRaw<Array<{ indexname: string; indexdef: string }>>`
     SELECT indexname, indexdef FROM pg_indexes
     WHERE schemaname = ${testDatabaseSchema}
-      AND indexname = 'Task_dispatchAfterTaskId_key'
+      AND indexname IN ('Task_dispatchAfterTaskId_key', 'Task_dispatchAfterTaskId_projectId_key', 'Task_dispatchAfterTaskId_projectId_idx')
   `;
   assert.equal(indexes.length, 1);
-  assert.match(indexes[0]!.indexdef, /CREATE UNIQUE INDEX/u);
-  assert.match(indexes[0]!.indexdef, /\("dispatchAfterTaskId"\)/u);
+  assert.equal(indexes[0]!.indexname, "Task_dispatchAfterTaskId_projectId_idx");
+  assert.match(indexes[0]!.indexdef, /CREATE INDEX/u);
+  assert.match(indexes[0]!.indexdef, /\("dispatchAfterTaskId", "projectId"\)/u);
 
   const foreignKeys = await db.$queryRaw<Array<{ conname: string; confdeltype: string; columns: string[] }>>`
     SELECT c.conname, c.confdeltype,
@@ -745,11 +628,12 @@ test("dispatch binding migration installs the storage contract and rejects unsaf
     dispatchAfterTaskId: predecessor.id,
   } });
   assert.equal(firstSuccessor.dispatchAfterTaskId, predecessor.id);
-  await rejects(db, `
+  await db.$executeRawUnsafe(`
     INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "chainLayer", "dispatchAfterTaskId", "updatedAt")
     VALUES ('dispatch-successor-two-${suffix}', '${project.id}', 'successor two', 'successor two', 'dispatch-chain-c-${suffix}', 1, 1,
             '${predecessor.id}', NOW())
-  `, 'Key ("dispatchAfterTaskId")=');
+  `);
+  assert.equal(await db.task.count({ where: { dispatchAfterTaskId: predecessor.id } }), 2);
 
   await rejects(db, `
     INSERT INTO "Task" ("id", "projectId", "name", "description", "chainId", "chainIndex", "chainLayer", "dispatchAfterTaskId", "updatedAt")

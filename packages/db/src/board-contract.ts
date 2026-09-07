@@ -34,6 +34,24 @@ export type TaskSource = PrismaTaskSource;
 export type AssigneeType = PrismaAssigneeType;
 export type ScheduleKind = PrismaScheduleKind;
 export type RunStatus = PrismaRunStatus;
+/** Runs that still own live work, including resumable Inbox waits. This is
+ * shared by server guards and the board; every persisted status needs an answer. */
+export const RUN_STATUS_IS_ACTIVE = {
+  QUEUED: true,
+  CLAIMED: true,
+  PROVISIONING: true,
+  RUNNING: true,
+  WAITING_INBOX: true,
+  SUCCEEDED: false,
+  FAILED: false,
+  TIMED_OUT: false,
+  CANCELLED: false,
+  LOST: false,
+} satisfies Record<RunStatus, boolean>;
+
+export const ACTIVE_RUN_STATUSES: RunStatus[] = (Object.keys(RUN_STATUS_IS_ACTIVE) as RunStatus[])
+  .filter((status) => RUN_STATUS_IS_ACTIVE[status]);
+
 export type RunnerKind = PrismaRunnerKind;
 export type CodexServiceTier = PrismaCodexServiceTier;
 export type SessionExecutionStatus = PrismaSessionExecutionStatus;
@@ -142,6 +160,11 @@ export type CostsChain<DecimalValue = string> = {
     refreshConflict: number;
     reviewFix: number;
   };
+  /** Pre-authorization merge-readiness requeues across the chain, and the extra
+   *  Run attempts they granted. The grants fund paid Runs already counted in
+   *  `costUsd`; these two make that share attributable. */
+  readinessRequeues: number;
+  readinessGrants: number;
   /** Priced spend only, or null when every run is unpriced. Unpriced runs are
    * represented by costUnavailableRuns rather than fabricated as zero. */
   costUsd: DecimalValue | null;
@@ -246,7 +269,11 @@ export type Session<DateTime = string, DecimalValue = string> = {
    *  session rows nested inside a Run. `run.repo` is a nullable relation, and
    *  its remoteUrl is what makes the Branch field a link. */
   agent?: { id: string; title: string } | null;
-  task?: { id: string; name: string } | null;
+  /** `chainId` is the persisted chain the task belongs to, and what the
+   *  Sessions list filters on. `chainName` is display-only and derived from the
+   *  rows in the same response, so it is null whenever those rows cannot prove
+   *  a name — the id is what addresses the chain either way. */
+  task?: { id: string; name: string; chainId: string | null; chainName: string | null } | null;
   goal?: { id: string; title: string } | null;
   run?: {
     id: string;
@@ -257,6 +284,85 @@ export type Session<DateTime = string, DecimalValue = string> = {
     workspacePath: string | null;
     repo?: { id: string; name: string; remoteUrl: string } | null;
   } | null;
+};
+
+/* Per-run diagnostics derived at read time from the Run row, its Session row
+ * and that session's tool events. Nothing here is persisted, and `null` always
+ * means "unknown": it is never rendered as zero. */
+
+/** Millisecond wall-clock split of a run. Each value is null when either
+ *  bounding timestamp is missing. `executingMs` is measured to now while the
+ *  run is still executing. */
+export type RunPhaseMetrics = {
+  /** Run.readyAt to Session.provisionedAt. */
+  queuedMs: number | null;
+  /** Session.provisionedAt to Session.startedAt. */
+  provisioningMs: number | null;
+  /** Session.startedAt to Session.endedAt, or to now while the run is live. */
+  executingMs: number | null;
+  /** Time the session spent waiting on Inbox replies. The stored data marks
+   *  that a wait happened without bounding it, so this is 0 only when the
+   *  session demonstrably never waited, and null whenever a wait is known to
+   *  be included in `executingMs` but cannot be measured. */
+  inboxWaitMs: number | null;
+  /** Session.cleanupStartedAt to Session.cleanupEndedAt. */
+  cleanupMs: number | null;
+};
+
+/** The canonical input-token split, where `input` already includes both cache
+ *  subsets. `uncachedInput` and `cacheHitRatio` are null when the split is
+ *  internally inconsistent or any component is unknown. */
+export type RunTokenMetrics = {
+  input: number | null;
+  cachedRead: number | null;
+  cacheWrite: number | null;
+  uncachedInput: number | null;
+  output: number | null;
+  /** cachedRead / input, in [0, 1]. */
+  cacheHitRatio: number | null;
+};
+
+export type RunToolNameMetrics = {
+  name: string;
+  calls: number;
+  failed: number;
+};
+
+/** Tool behaviour paired by toolCallId. A completion whose payload cannot be
+ *  read as success or failure counts in `unclassified` rather than as a
+ *  success. */
+export type RunToolMetrics = {
+  calls: number;
+  failed: number;
+  unclassified: number;
+  /** Union of paired call intervals: overlapping tools count wall time once.
+   *  A lower bound when any calls have unknown duration. */
+  totalToolMs: number;
+  /** The five tool names with the most calls, most calls first. */
+  byName: RunToolNameMetrics[];
+};
+
+export type RunTerminationMetrics = {
+  reason: string | null;
+  exitCode: number | null;
+  signal: string | null;
+};
+
+export type RunMetrics = {
+  phases: RunPhaseMetrics;
+  tokens: RunTokenMetrics;
+  tools: RunToolMetrics;
+  /** executingMs minus tool time and Inbox wait, clamped at 0. Null when
+   *  `executingMs` is unknown. */
+  modelActiveMs: number | null;
+  /** True when an unknown subtrahend was treated as 0, so `modelActiveMs` is
+   *  an upper bound and the derived output rate is a lower bound. */
+  modelActiveIsUpperBound: boolean;
+  /** output / (modelActiveMs / 1000): an effective session-average rate over
+   *  model-active time, never a provider peak rate. Null when `output` is
+   *  unknown or `modelActiveMs` is unknown or 0. */
+  outputTokensPerSecond: number | null;
+  termination: RunTerminationMetrics;
 };
 
 /** A serialized Run as embedded by Task detail responses. */
@@ -305,6 +411,9 @@ export type Run<DateTime = string, DecimalValue = string> = {
    *  run but the mechanical executor's. */
   mergeOutcome?: MergeOutcome | null;
   mergeRecovery?: MergeRecovery<DateTime> | null;
+  /** Read-time diagnostics. Task detail attaches it to every run; other run
+   *  projections omit it. */
+  metrics?: RunMetrics | null;
 };
 
 export type ChainProgress = {
@@ -438,8 +547,20 @@ export type BoardCard<DateTime = string> = {
    *  `taskStartability`, which is the only thing that reads a task's configured
    *  budget together with the grants its runs carry. */
   budgetRemaining: boolean;
+  /** How many attempts this task has had refunded because the platform lost a
+   *  Run — lease loss, an invalidated claim, a merge-tail requeue — as opposed
+   *  to attempts its agent spent. Bounded by `LEASE_LOSS_REFUND_CAP`; at the
+   *  bound the platform stops requeueing and parks the task for an operator,
+   *  so this is the number that says whether that is about to happen. */
+  leaseLossRefunds: number;
   /** Carried once by one visible member of each Chain; null otherwise. */
   chainAggregate: ChainAggregate<DateTime> | null;
+  /** How many times merge readiness returned this Step's chain to Regression
+   *  because the base moved before authorization, and how many extra Run
+   *  attempts those requeues granted. Both are zero on every Step that is not
+   *  the chain's readiness Step, which never records a requeue. */
+  readinessRequeues: number;
+  readinessGrants: number;
 };
 
 /** The browser-facing name retained by the web app's existing consumers. */
