@@ -2008,17 +2008,24 @@ approval and evidence renewal preserve the same refusal evidence.
   the first step of a Chain none of whose steps has a Run; a later step, a
   standalone task, or a Chain with so much as one terminal Run returns
   `409 Conflict` with code `chain_binding_immutable_after_start`. A non-null
-  value must name a task of the same project that is not archived and does not
-  belong to the Chain being bound; an archived, foreign, or same-chain target
-  — including the task itself — returns `400 Bad Request` with code
-  `chain_binding_target_invalid`. Binding onto a task that is already `DONE` is
+  value must name a Chain task of the same project that is not archived and does
+  not belong to the Chain being bound; an archived, foreign, standalone, or
+  same-chain target — including the task itself — returns `400 Bad Request` with
+  code `chain_binding_target_invalid`. A standalone predecessor is refused
+  because only a Chain task's completion dispatches a bound successor, so such a
+  binding would never resolve. Binding onto a task that is already `DONE` is
   accepted and resolves the binding immediately, which makes the first step
   startable under the ordinary start guard; `null` releases the binding the
   same way. Neither starts the Chain: only a predecessor's completion
   dispatches a bound successor. A successful change writes one operator
   TaskActivity on the first step naming the previous and new predecessor ids.
   Restating the binding a Chain already carries is accepted, writes no
-  activity, and returns the current task, even after the Chain has started.
+  activity, and returns the current task, even after the Chain has started. A
+  request that changes the binding together with `approvalGate`, a Run budget,
+  or a status commits every field but records the binding activity only, because
+  one PATCH writes one activity row. The named predecessor is read without its
+  own lock, so a concurrent archive of it can win the race; the Chain still has
+  no Run, so re-issuing the PATCH with another predecessor is the remedy.
 - On a Chain step that carries a feature brief, `description` is the brief
   alone. A task with both a `templateId` and a `chainId` whose Step authors a
   brief — every step role except readiness and integrator — keeps its stored

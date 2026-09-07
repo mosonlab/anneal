@@ -328,7 +328,7 @@ test("PATCH accepts the same reassignment once the task's Runs are terminal", as
  */
 const bindingFixture = (options: {
   dispatchAfterTaskId?: string | null;
-  chainRows?: ReadonlyArray<{ id: string }>;
+  chainRows?: ReadonlyArray<{ id: string; chainLayer: number | null; chainIndex: number | null }>;
   runCount?: number;
   predecessors?: ReadonlyArray<{ id: string; name: string; chainId: string | null; archivedAt: Date | null }>;
   chainId?: string | null;
@@ -360,7 +360,10 @@ const bindingFixture = (options: {
     task: {
       findUnique: async () => task,
       findUniqueOrThrow: async () => task,
-      findMany: async () => options.chainRows ?? [{ id: task.id }, { id: "task-second" }],
+      findMany: async () => options.chainRows ?? [
+        { id: task.id, chainLayer: 1, chainIndex: 1 },
+        { id: "task-second", chainLayer: 2, chainIndex: 2 },
+      ],
       findFirst: async ({ where }: { where: { id: string } }) =>
         (options.predecessors ?? []).find((candidate) => candidate.id === where.id) ?? null,
       update: async ({ data }: { data: Record<string, unknown> }) => {
@@ -442,7 +445,10 @@ test("a chain with a Run keeps its binding, as does a later step and a standalon
     { fixture: bindingFixture({ runCount: 1, predecessors: [donePredecessor] }), label: "started chain" },
     {
       fixture: bindingFixture({
-        chainRows: [{ id: "task-zero" }, { id: "task-first" }],
+        chainRows: [
+          { id: "task-zero", chainLayer: 1, chainIndex: 1 },
+          { id: "task-first", chainLayer: 2, chainIndex: 2 },
+        ],
         predecessors: [donePredecessor],
       }),
       label: "later step",
@@ -459,10 +465,30 @@ test("a chain with a Run keeps its binding, as does a later step and a standalon
   }
 });
 
-test("an archived, foreign, or same-chain predecessor is an invalid target", async () => {
+test("a first step whose layer is still null carries the binding", async () => {
+  // The stored layer is authoritative, with the chain index as the legacy
+  // fallback: SQL NULLS LAST ordering would have picked the layered row.
+  const fixture = bindingFixture({
+    dispatchAfterTaskId: "task-old",
+    chainRows: [
+      { id: "task-second", chainLayer: 2, chainIndex: 2 },
+      { id: "task-first", chainLayer: null, chainIndex: 1 },
+    ],
+    predecessors: [donePredecessor],
+  });
+
+  const result = await patchTask(fixture.db, "task-first", { dispatchAfterTaskId: "task-done" });
+
+  assert.ok("task" in result);
+  assert.deepEqual(fixture.writes, [{ dispatchAfterTaskId: "task-done" }]);
+});
+
+test("an archived, foreign, standalone, or same-chain predecessor is an invalid target", async () => {
   const cases = [
     { id: "task-archived", predecessors: [{ ...donePredecessor, id: "task-archived", archivedAt: new Date() }] },
     { id: "task-foreign", predecessors: [] },
+    // A standalone predecessor never dispatches a bound successor.
+    { id: "task-loose", predecessors: [{ ...donePredecessor, id: "task-loose", chainId: null }] },
     { id: "task-second", predecessors: [{ ...donePredecessor, id: "task-second", chainId: "chain-1" }] },
     { id: "task-first", predecessors: [{ ...donePredecessor, id: "task-first", chainId: "chain-1" }] },
   ];

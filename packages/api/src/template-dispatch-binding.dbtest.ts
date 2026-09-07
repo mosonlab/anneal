@@ -605,7 +605,7 @@ test("an unstarted bound chain is re-pointed at a DONE task and becomes startabl
   assert.equal(started.status, 201, JSON.stringify(started.body));
 });
 
-test("an archived, foreign, or same-chain predecessor is refused as an invalid binding target", async () => {
+test("an archived, foreign, standalone, or same-chain predecessor is refused as an invalid binding target", async () => {
   const seed = await fixture("repoint-invalid");
   const stranded = (await instantiate(seed)).at(-1)!;
   const successor = await boundSuccessor(seed, stranded.id, "invalid target successor");
@@ -613,8 +613,20 @@ test("an archived, foreign, or same-chain predecessor is refused as an invalid b
   await db.task.update({ where: { id: archived.id }, data: { archivedAt: new Date() } });
   const other = await fixture("repoint-invalid-other");
   const foreign = (await instantiate(other)).at(-1)!;
+  // A standalone task never advances a chain, so binding onto one would strand
+  // the successor exactly the way an archived predecessor does.
+  const standalone = await db.task.create({
+    data: {
+      projectId: seed.project.id,
+      repoId: seed.repo.id,
+      name: "standalone predecessor",
+      description: "not a chain task",
+      assigneeType: "AGENT",
+      assigneeAgentId: seed.agent.id,
+    },
+  });
 
-  for (const targetId of [archived.id, foreign.id, successor.tasks.at(-1)!.id, successor.first.id]) {
+  for (const targetId of [archived.id, foreign.id, standalone.id, successor.tasks.at(-1)!.id, successor.first.id]) {
     const refused = await operatorRequest(
       `/tasks/${successor.first.id}`, "PATCH", { dispatchAfterTaskId: targetId },
     );

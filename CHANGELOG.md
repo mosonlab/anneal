@@ -13,8 +13,8 @@ written.
   Chain that has no Run, re-pointing or (with `null`) releasing its Chain
   binding instead of forcing the Chain to be deleted and instantiated again. A
   started Chain, a later step, or a standalone task is refused with
-  `chain_binding_immutable_after_start`; an archived, foreign, or same-chain
-  predecessor with `chain_binding_target_invalid`.
+  `chain_binding_immutable_after_start`; an archived, foreign, standalone, or
+  same-chain predecessor with `chain_binding_target_invalid`.
 - Retired the `POST /files/mkdir` and `POST /files/move` routes and their
   underlying store operations.
 - Removed `POST /inbox/messages/:messageId/supersede`;

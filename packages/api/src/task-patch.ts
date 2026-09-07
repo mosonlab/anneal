@@ -23,6 +23,7 @@ import {
   type Task,
   TaskStatus,
 } from "@anneal/db";
+import { compare } from "@anneal/db/chain-order";
 import { z } from "zod";
 
 import { blockingPredecessor } from "./chain.js";
@@ -229,12 +230,25 @@ const gatePatchPlan = (
  *
  * The predecessor is validated the way instantiation validates `afterTaskId`,
  * minus the rules that only make sense before the chain exists: it must be a
- * live task of this project outside the chain being bound. A predecessor that
- * is already DONE is accepted and resolves the binding immediately; it does
- * not start the chain, because only a completion dispatches a bound successor.
+ * live task of this project, outside the chain being bound, and itself a chain
+ * task — only `activateChainSuccessor` dispatches a bound successor and it runs
+ * solely for a predecessor with a `chainId`, so binding onto a standalone task
+ * would strand the chain exactly the way this endpoint exists to undo. A
+ * predecessor that is already DONE is accepted and resolves the binding
+ * immediately; it does not start the chain, because only a completion
+ * dispatches a bound successor.
  *
- * Runs the same reads as `gatePatchPlan`, under the same chain mutex: `locked`
- * comes from `writeTask`, which has already taken every row of this chain.
+ * `locked` comes from `writeTask`, so this chain's rows and the Run count over
+ * them are serialized by the chain mutex. The predecessor is not: it belongs to
+ * another chain, and taking its rows here would invert the predecessor -> successor
+ * lock order `activateChainSuccessor` uses and deadlock against a concurrent
+ * completion. An archive of the predecessor that commits between this read and
+ * the write therefore wins, and the operator re-issues the PATCH — the chain has
+ * no Run, so its binding is still mutable.
+ *
+ * The binding activity takes the single activity slot `TaskWritePlan` allows, so
+ * a request that also toggles the gate or edits a field records the binding
+ * change only; `docs/operator-api.md` states that precedence.
  */
 const bindingPatchPlan = async (
   tx: Prisma.TransactionClient,
@@ -260,9 +274,15 @@ const bindingPatchPlan = async (
   const chainId = locked.chainId;
   const chainRows = await tx.task.findMany({
     where: { projectId: locked.projectId, chainId },
-    orderBy: [{ chainLayer: "asc" }, { chainIndex: "asc" }, { id: "asc" }],
-    select: { id: true },
+    select: { id: true, chainLayer: true, chainIndex: true },
   });
+  // Sorted with the shared execution comparator, not by SQL: a row whose layer
+  // is still null sorts by its chainIndex here, where NULLS LAST would put it
+  // behind every layered row and pick the wrong first step.
+  chainRows.sort((left, right) => compare(
+    { layer: left.chainLayer, index: left.chainIndex, id: left.id },
+    { layer: right.chainLayer, index: right.chainIndex, id: right.id },
+  ));
   if (chainRows[0]?.id !== locked.id) {
     return immutable(`Task ${locked.id} is not the first step of Chain ${chainId}, which is where the binding lives`);
   }
@@ -286,6 +306,9 @@ const bindingPatchPlan = async (
     if (target.archivedAt) return invalid(`Predecessor task ${target.name} (${target.id}) is archived`);
     if (target.id === locked.id || target.chainId === chainId) {
       return invalid(`Predecessor task ${target.name} (${target.id}) belongs to Chain ${chainId} itself`);
+    }
+    if (target.chainId === null) {
+      return invalid(`Predecessor task ${target.name} (${target.id}) is not a Chain task, so its completion would never dispatch Chain ${chainId}`);
     }
   }
   return {
