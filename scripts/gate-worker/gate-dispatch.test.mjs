@@ -97,6 +97,30 @@ test("a slot held by a live pid is refused", (t) => {
   assert.equal(readFileSync(lockFile(root, "local"), "utf8").trim(), String(process.pid));
 });
 
+test("the holder of a slot is readable without touching the lock", (t) => {
+  // What a waiting dispatcher compares across polls to tell a moving queue from
+  // a stuck one. It observes and never acts: the lock must come back untouched.
+  const root = slotRoot(t);
+  writeFileSync(lockFile(root, "remote-1"), `${process.pid}\n`);
+  const result = runBash(`gate_slot_holder "${root}" remote-1`);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, String(process.pid));
+  assert.equal(readFileSync(lockFile(root, "remote-1"), "utf8").trim(), String(process.pid));
+});
+
+test("a free slot and a lock that names no pid have no holder", (t) => {
+  // Nothing, not an error and not a made-up value: "no holder" is the answer
+  // for a slot nobody is gating in and for a lock this script did not write,
+  // and gate_slot_try is the only reader allowed to act on either.
+  const root = slotRoot(t);
+  writeFileSync(lockFile(root, "remote-2"), "held by somebody\n");
+  for (const slot of ["remote-1", "remote-2"]) {
+    const result = runBash(`gate_slot_holder "${root}" ${slot}`);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout, "");
+  }
+});
+
 test("refuses a lock that names no pid rather than reclaiming it", (t) => {
   // The regression. A lock created before its owner was written names nobody,
   // and the whole failure was reading that as "abandoned": two dispatchers then
@@ -1281,6 +1305,78 @@ rm "$TEST_PRIMARY_SLOT"
   assert.match(result.stderr, /running on primary/u);
   assert.doesNotMatch(result.stderr, /running on fallback/u);
   assert.equal(readFileSync(clock, "utf8"), "1060");
+});
+
+test("a slot that changes hands restarts the timeout instead of ending the wait", (t) => {
+  // The 2026-09-06 production shape: many runners behind one slot, each gate
+  // 5-8 minutes, and a fixed wall that cut the tail of the queue off mid-wait
+  // so it re-dispatched at the back. Turnover is the queue moving, and a
+  // dispatch that is moving up the queue keeps its place.
+  const repo = fixtureRepo(t, {});
+  const cache = busyCache(t, ["remote-1", "remote-1-2"]);
+  // A real live pid, because a lock naming a dead one is reclaimed rather than
+  // waited on, and the point here is a slot that stays busy under a new owner.
+  const successor = spawn("sleep", ["300"]);
+  t.after(() => successor.kill());
+  const { env, clock } = dispatchClock(t);
+  writeFileSync(join(dirname(clock), "sleep"), `#!/usr/bin/env bash
+printf '%s' "$(( $(cat "$TEST_CLOCK") + 60 ))" > "$TEST_CLOCK"
+if [ ! -e "$TEST_TURNOVER" ]; then
+  printf '%s\n' "$TEST_SUCCESSOR" > "$TEST_SLOT"
+  : > "$TEST_TURNOVER"
+fi
+`);
+  const result = runDispatch(repo, cache, [repo.head, "--timeout-minutes", "2"], {
+    ...env,
+    TEST_SLOT: join(cache, "gate-dispatch", "remote-1.slot"),
+    TEST_SUCCESSOR: String(successor.pid),
+    TEST_TURNOVER: join(cache, "turned-over"),
+  });
+  assert.equal(result.status, 75, result.stderr);
+  assert.match(result.stderr, /the queue moved \(slot remote-1 changed hands\)/u);
+  // 1000 start, turnover observed at 1060, so the two-minute stagnation timeout
+  // runs from there and the wait ends at 1180 — a minute past the fixed wall
+  // the old dispatcher would have hit at 1120.
+  assert.equal(readFileSync(clock, "utf8"), "1180");
+  assert.match(result.stderr, /no slot freed up or changed hands in 2 minutes/u);
+});
+
+test("a queue that moves without ever admitting this dispatch still ends in 75", (t) => {
+  // Taking a slot is a race for a hard link, not a place in a line, so a
+  // dispatch can watch every gate before it end and still never be the one that
+  // wins the lock. Turnover must not be able to extend the wait forever: the
+  // ceiling of twice the stagnation timeout keeps the capacity signal reachable.
+  const repo = fixtureRepo(t, {});
+  const cache = busyCache(t, ["remote-1", "remote-1-2"]);
+  const holders = [spawn("sleep", ["300"]), spawn("sleep", ["300"])];
+  t.after(() => holders.forEach((holder) => holder.kill()));
+  const { env, clock } = dispatchClock(t);
+  writeFileSync(join(dirname(clock), "sleep"), `#!/usr/bin/env bash
+printf '%s' "$(( $(cat "$TEST_CLOCK") + 60 ))" > "$TEST_CLOCK"
+round=0
+[ -e "$TEST_ROUNDS" ] && round="$(cat "$TEST_ROUNDS")"
+round=$(( round + 1 ))
+printf '%s' "$round" > "$TEST_ROUNDS"
+if [ $(( round % 2 )) -eq 1 ]; then
+  printf '%s\\n' "$TEST_HOLDER_A" > "$TEST_SLOT"
+else
+  printf '%s\\n' "$TEST_HOLDER_B" > "$TEST_SLOT"
+fi
+`);
+  const result = runDispatch(repo, cache, [repo.head, "--timeout-minutes", "2"], {
+    ...env,
+    TEST_SLOT: join(cache, "gate-dispatch", "remote-1.slot"),
+    TEST_HOLDER_A: String(holders[0].pid),
+    TEST_HOLDER_B: String(holders[1].pid),
+    TEST_ROUNDS: join(cache, "rounds"),
+  });
+  assert.equal(result.status, 75, result.stderr);
+  assert.match(result.stderr, /the queue moved \(slot remote-1 changed hands\)/u);
+  // 1000 start, turnover on every poll, so the two-minute stagnation timeout is
+  // reset until it hits the four-minute ceiling and the wait ends at 1240.
+  assert.equal(readFileSync(clock, "utf8"), "1240");
+  assert.match(result.stderr, /no slot came free for this dispatch in 4 minutes/u);
+  assert.match(result.stdout, /GATE DISPATCH: NO SLOT/);
 });
 
 test("a configured grace period controls the fallback boundary", (t) => {
