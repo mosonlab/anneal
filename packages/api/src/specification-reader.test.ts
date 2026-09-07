@@ -13,7 +13,7 @@ import {
   repoMirrorPath,
   type MirrorGitResult,
 } from "./specification-reader.js";
-import { verifyPreparedSpecification } from "./specification-fidelity.js";
+import { specificationDigest, verifyPreparedSpecification } from "./specification-fidelity.js";
 
 const path = ".chain/feat/spec/spec.md";
 const repository = "acme/repo";
@@ -78,7 +78,8 @@ test("serves the pinned file from the exact runner mirror key before GitHub", as
       remoteUrl,
       path,
       implementationHeadSha: commit,
-      authoritativeBytes: bytes,
+      authoritativeDigest: specificationDigest(bytes),
+      currentBrief: { kind: "authority" as const },
     };
     const githubVerdict = await verifyPreparedSpecification(
       verification,
@@ -170,7 +171,8 @@ test("replacement refs cannot change the pinned bytes accepted from a real mirro
       remoteUrl,
       path,
       implementationHeadSha: original.trim(),
-      authoritativeBytes: bytes,
+      authoritativeDigest: specificationDigest(bytes),
+      currentBrief: { kind: "authority" as const },
     };
 
     assert.equal(

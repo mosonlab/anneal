@@ -6,6 +6,7 @@ import { PR_TEMPLATE_NAME } from "@anneal/db";
 import {
   normalizeLineEndings,
   prepareSpecificationVerification,
+  specificationDigest,
   SPEC_TRANSCRIPTION_UNREADABLE_REASON,
   SPEC_TRANSCRIPTION_REFUSAL_REASON,
   specificationMaterializationForDirectImplementation,
@@ -36,7 +37,8 @@ test("faithful pinned materialization accepts normalized line endings and passes
     remoteUrl: "https://github.com/acme/repo.git",
     path: specificationPathForBranch("feature/spec-check"),
     implementationHeadSha: "a".repeat(40),
-    authoritativeBytes: bytes(authoritative),
+    authoritativeDigest: specificationDigest(authoritative),
+    currentBrief: { kind: "authority" as const },
   };
   let call: { repository: string; path: string; commitSha: string } | undefined;
   const verdict = await verifyPreparedSpecification(
@@ -63,7 +65,8 @@ test("faithful pinned materialization accepts one final LF absent from authority
       remoteUrl: "https://github.com/acme/repo.git",
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "a".repeat(40),
-      authoritativeBytes: bytes("authoritative"),
+      authoritativeDigest: specificationDigest("authoritative"),
+    currentBrief: { kind: "authority" },
     },
     { readFileAtCommit: async () => bytes("authoritative\n") },
     new AbortController().signal,
@@ -79,7 +82,8 @@ test("tampered materialization returns one stable operator-visible reason", asyn
       remoteUrl: "https://github.com/acme/repo.git",
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
-      authoritativeBytes: bytes("authoritative"),
+      authoritativeDigest: specificationDigest("authoritative"),
+    currentBrief: { kind: "authority" },
     },
     { readFileAtCommit: async () => bytes("tampered") },
     new AbortController().signal,
@@ -147,7 +151,8 @@ test("a transient repository failure retries with backoff and then accepts faith
       remoteUrl: "https://github.com/acme/repo.git",
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
-      authoritativeBytes: bytes("authoritative"),
+      authoritativeDigest: specificationDigest("authoritative"),
+    currentBrief: { kind: "authority" },
     },
     { readFileAtCommit: async () => {
       reads += 1;
@@ -171,7 +176,8 @@ test("persistent transient repository failure reports retry count and last failu
       remoteUrl: "https://github.com/acme/repo.git",
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
-      authoritativeBytes: bytes("authoritative"),
+      authoritativeDigest: specificationDigest("authoritative"),
+    currentBrief: { kind: "authority" },
     },
     { readFileAtCommit: async () => {
       reads += 1;
@@ -196,7 +202,8 @@ test("a read deadline overrun is transient and exhausts the bounded retry schedu
       remoteUrl: "https://github.com/acme/repo.git",
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
-      authoritativeBytes: bytes("authoritative"),
+      authoritativeDigest: specificationDigest("authoritative"),
+    currentBrief: { kind: "authority" },
     },
     { readFileAtCommit: async (_repository, _path, _commitSha, signal) => {
       reads += 1;
@@ -222,7 +229,8 @@ test("a permanent repository response failure refuses without retrying", async (
       remoteUrl: "https://github.com/acme/repo.git",
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
-      authoritativeBytes: bytes("authoritative"),
+      authoritativeDigest: specificationDigest("authoritative"),
+    currentBrief: { kind: "authority" },
     },
     { readFileAtCommit: async () => {
       reads += 1;
@@ -246,7 +254,8 @@ test("a content mismatch refuses immediately without retrying", async () => {
       remoteUrl: "https://github.com/acme/repo.git",
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "b".repeat(40),
-      authoritativeBytes: bytes("authoritative"),
+      authoritativeDigest: specificationDigest("authoritative"),
+    currentBrief: { kind: "authority" },
     },
     { readFileAtCommit: async () => {
       reads += 1;
@@ -290,7 +299,7 @@ test("direct authority is read from the implementation task and compound authori
     branch: "feature/direct",
   }, "c".repeat(40));
   assert.equal(direct.status, "ready");
-  if (direct.status === "ready") assert.equal(new TextDecoder().decode(direct.verification.authoritativeBytes), brief);
+  if (direct.status === "ready") assert.equal(direct.verification.authoritativeDigest, specificationDigest(brief));
 
   const compoundTx = {
     task: { findMany: async () => [{
@@ -317,7 +326,7 @@ test("direct authority is read from the implementation task and compound authori
     branch: "feature/compound",
   }, "d".repeat(40));
   assert.equal(compound.status, "ready");
-  if (compound.status === "ready") assert.equal(new TextDecoder().decode(compound.verification.authoritativeBytes), "approved compound spec");
+  if (compound.status === "ready") assert.equal(compound.verification.authoritativeDigest, specificationDigest("approved compound spec"));
 });
 
 test("PR review claims prepare identical implementation authority for code review and blind code review", async () => {
@@ -361,13 +370,14 @@ test("PR review claims prepare identical implementation authority for code revie
   assert.equal(sol.status, "ready");
   assert.equal(blind.status, "ready");
   if (sol.status !== "ready" || blind.status !== "ready") return;
-  assert.deepEqual(sol.verification.authoritativeBytes, blind.verification.authoritativeBytes);
+  assert.equal(sol.verification.authoritativeDigest, blind.verification.authoritativeDigest);
+  assert.equal(sol.verification.authoritativeDigest, specificationDigest(brief));
 
   const reads: Array<{ repository: string; path: string; commitSha: string }> = [];
   const reader = {
     readFileAtCommit: async (repository: string, path: string, commitSha: string) => {
       reads.push({ repository, path, commitSha });
-      return sol.verification.authoritativeBytes;
+      return bytes(brief);
     },
   };
   assert.equal(await verifyPreparedSpecification(sol.verification, reader, new AbortController().signal), null);
@@ -460,11 +470,187 @@ test("missing or corrupt authority and an unavailable reader are non-transient r
       remoteUrl: "https://github.com/acme/repo",
       path: ".chain/feature/spec-check/spec.md",
       implementationHeadSha: "f".repeat(40),
-      authoritativeBytes: bytes("authoritative"),
+      authoritativeDigest: specificationDigest("authoritative"),
+    currentBrief: { kind: "authority" },
     },
     null,
     new AbortController().signal,
   );
   assert.equal(unavailableReader?.reason, SPEC_TRANSCRIPTION_UNREADABLE_REASON);
   assert.equal(unavailableReader?.classification, "non-transient");
+});
+
+const AMENDED_AT = new Date("2026-09-06T18:47:00.000Z");
+
+/**
+ * A direct chain whose pinned implementation Run recorded the digest of the
+ * brief it was handed, and whose brief may since have been amended in place.
+ */
+const materializedDirectReview = (materializedBrief: string, currentBrief: string) => {
+  const tx = {
+    task: { findMany: async () => [{
+      id: "direct-implementation",
+      description: composeTemplateTaskDescription({
+        prompt: "Implement the feature below.",
+        featureBrief: currentBrief,
+        priorOutputKinds: [],
+        outputKind: "implementation",
+      }),
+      templateStep: { outputKind: "implementation", priorOutputKinds: [] },
+      stepOutput: {
+        kind: "implementation",
+        body: JSON.stringify({ schemaVersion: 1, headSha: "c".repeat(40) }),
+        run: { specificationDigest: specificationDigest(materializedBrief) },
+      },
+    }] },
+    taskActivity: { findFirst: async () => ({ createdAt: AMENDED_AT }) },
+  } as unknown as Parameters<typeof prepareSpecificationVerification>[0];
+  return prepareSpecificationVerification(tx, {
+    task: {
+      id: "direct-review",
+      projectId: "project",
+      templateId: "direct-template",
+      chainId: "direct-chain",
+      chainIndex: 2,
+      description: "review task description must not become authority",
+      templateStep: { stepIndex: 2, outputKind: "sol-findings", baseFromStepIndex: 1, taskTemplate: { name: "direct-engineer-workflow" } },
+    },
+    repo: { remoteUrl: "git@github.com:acme/repo.git" },
+    branch: "feature/direct",
+  }, "c".repeat(40));
+};
+
+test("the pinned implementation Run's digest outranks the current brief", async () => {
+  const materialized = "the brief the implementer was handed";
+  const prepared = await materializedDirectReview(materialized, "the brief after an operator amendment");
+  assert.equal(prepared.status, "ready");
+  if (prepared.status !== "ready") return;
+  assert.equal(prepared.verification.authoritativeDigest, specificationDigest(materialized));
+  assert.deepEqual(prepared.verification.currentBrief, {
+    kind: "amended",
+    note: `Task direct-implementation had its brief amended at ${AMENDED_AT.toISOString()}, after .chain/feature/direct/spec.md was materialized: that file is the pre-amendment Specification of record, so judge this work against the current brief rather than against the file.`,
+  });
+  assert.equal(
+    await verifyPreparedSpecification(
+      prepared.verification,
+      { readFileAtCommit: async () => bytes(materialized) },
+      new AbortController().signal,
+    ),
+    null,
+  );
+});
+
+test("an amended brief does not excuse a materialization that differs from the recorded digest", async () => {
+  const amended = "the brief after an operator amendment";
+  const prepared = await materializedDirectReview("the brief the implementer was handed", amended);
+  assert.equal(prepared.status, "ready");
+  if (prepared.status !== "ready") return;
+  // Transcribing the amendment onto the branch is exactly the rewrite the
+  // fidelity check exists to catch, amendment or not.
+  const verdict = await verifyPreparedSpecification(
+    prepared.verification,
+    { readFileAtCommit: async () => bytes(amended) },
+    new AbortController().signal,
+  );
+  assert.equal(verdict?.reason, SPEC_TRANSCRIPTION_REFUSAL_REASON);
+  assert.match(verdict?.message ?? "", /the current task brief also differs from that specification/u);
+});
+
+test("a tampered materialization under an unamended brief says the brief still matches", async () => {
+  const materialized = "the brief the implementer was handed";
+  const prepared = await materializedDirectReview(materialized, materialized);
+  assert.equal(prepared.status, "ready");
+  if (prepared.status !== "ready") return;
+  assert.deepEqual(prepared.verification.currentBrief, { kind: "unamended" });
+  const verdict = await verifyPreparedSpecification(
+    prepared.verification,
+    { readFileAtCommit: async () => bytes("tampered") },
+    new AbortController().signal,
+  );
+  assert.equal(verdict?.reason, SPEC_TRANSCRIPTION_REFUSAL_REASON);
+  assert.match(verdict?.message ?? "", /the current task brief still matches that specification/u);
+});
+
+test("an amendment with no recorded edit activity still names the task", async () => {
+  const tx = {
+    task: { findMany: async () => [{
+      id: "legacy-implementation",
+      description: composeTemplateTaskDescription({
+        prompt: "Implement the feature below.",
+        featureBrief: "amended before edits were recorded",
+        priorOutputKinds: [],
+        outputKind: "implementation",
+      }),
+      templateStep: { outputKind: "implementation", priorOutputKinds: [] },
+      stepOutput: {
+        kind: "implementation",
+        body: JSON.stringify({ schemaVersion: 1, headSha: "c".repeat(40) }),
+        run: { specificationDigest: specificationDigest("what the runner was handed") },
+      },
+    }] },
+    taskActivity: { findFirst: async () => null },
+  } as unknown as Parameters<typeof prepareSpecificationVerification>[0];
+  const prepared = await prepareSpecificationVerification(tx, {
+    task: {
+      id: "legacy-review",
+      projectId: "project",
+      templateId: "direct-template",
+      chainId: "direct-chain",
+      chainIndex: 2,
+      description: "review task",
+      templateStep: { stepIndex: 2, outputKind: "sol-findings", baseFromStepIndex: 1, taskTemplate: { name: "direct-engineer-workflow" } },
+    },
+    repo: { remoteUrl: "git@github.com:acme/repo.git" },
+    branch: "feature/direct",
+  }, "c".repeat(40));
+  assert.equal(prepared.status, "ready");
+  if (prepared.status !== "ready") return;
+  assert.equal(prepared.verification.currentBrief.kind, "amended");
+  if (prepared.verification.currentBrief.kind !== "amended") return;
+  assert.match(prepared.verification.currentBrief.note, /Task legacy-implementation had its brief amended at an unrecorded time/u);
+});
+
+test("a pinned Run without a digest keeps comparing against the current brief", async () => {
+  const brief = "the brief as it reads now";
+  const tx = {
+    task: { findMany: async () => [{
+      id: "pre-digest-implementation",
+      description: composeTemplateTaskDescription({
+        prompt: "Implement the feature below.",
+        featureBrief: brief,
+        priorOutputKinds: [],
+        outputKind: "implementation",
+      }),
+      templateStep: { outputKind: "implementation", priorOutputKinds: [] },
+      stepOutput: {
+        kind: "implementation",
+        body: JSON.stringify({ schemaVersion: 1, headSha: "c".repeat(40) }),
+        run: { specificationDigest: null },
+      },
+    }] },
+  } as unknown as Parameters<typeof prepareSpecificationVerification>[0];
+  const prepared = await prepareSpecificationVerification(tx, {
+    task: {
+      id: "pre-digest-review",
+      projectId: "project",
+      templateId: "direct-template",
+      chainId: "direct-chain",
+      chainIndex: 2,
+      description: "review task",
+      templateStep: { stepIndex: 2, outputKind: "sol-findings", baseFromStepIndex: 1, taskTemplate: { name: "direct-engineer-workflow" } },
+    },
+    repo: { remoteUrl: "git@github.com:acme/repo.git" },
+    branch: "feature/direct",
+  }, "c".repeat(40));
+  assert.equal(prepared.status, "ready");
+  if (prepared.status !== "ready") return;
+  assert.equal(prepared.verification.authoritativeDigest, specificationDigest(brief));
+  assert.deepEqual(prepared.verification.currentBrief, { kind: "authority" });
+  const verdict = await verifyPreparedSpecification(
+    prepared.verification,
+    { readFileAtCommit: async () => bytes("something else entirely") },
+    new AbortController().signal,
+  );
+  assert.equal(verdict?.reason, SPEC_TRANSCRIPTION_REFUSAL_REASON);
+  assert.match(verdict?.message ?? "", /does not match the authoritative specification$/u);
 });

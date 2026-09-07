@@ -48,6 +48,7 @@ import { runnerBackendAllowsClaim } from "./runner-backend-health.js";
 import { decryptSecret } from "./secrets.js";
 import {
   prepareSpecificationVerification,
+  specificationDigest,
   specificationReadBudgetExhaustedRefusal,
   specificationMaterializationForDirectImplementation,
   type SpecificationReader,
@@ -1040,6 +1041,20 @@ export const claimRun = async (
         candidate.task,
         run.branch,
       );
+      if (specificationMaterialization) {
+        // Remember what this Run was handed, in the same transaction that
+        // composed it. Every later review claim checks the branch against this
+        // digest, so amending the brief afterwards cannot make a faithful
+        // materialization look tampered with, and no re-derivation from the
+        // description can quietly move the authority.
+        await tx.run.update({
+          where: { id: run.id },
+          data: { specificationDigest: specificationDigest(specificationMaterialization.body) },
+        });
+      }
+      const specificationAmendment = prepared.status === "ready" && prepared.verification.currentBrief.kind === "amended"
+        ? prepared.verification.currentBrief.note
+        : null;
       return {
         outcome: "claimed" as const,
         claim: {
@@ -1123,6 +1138,7 @@ export const claimRun = async (
           priorOutputs,
           operatorNotes,
           ...(operatorFeedback === null ? {} : { operatorFeedback }),
+          ...(specificationAmendment === null ? {} : { specificationAmendment }),
           previousRunHandoff,
           regressionRepairHandoff: regressionRepairHandoff.status === "ok"
             ? regressionRepairHandoff.handoff

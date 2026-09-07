@@ -196,6 +196,13 @@ test("buildPrompt appends operator notes after the task context", () => {
   assert.match(prompt, /Task: Ship it[\s\S]*Do the work[\s\S]*Operator notes:\n- Please preserve the existing API shape\.\n- The deployment window closes at 5pm\./u);
 });
 
+test("buildPrompt states an amendment that landed after the specification was materialized", () => {
+  const note = "Task task-9 had its brief amended at 2026-09-06T18:47:00.000Z, after .chain/feature/x/spec.md was materialized.";
+  const prompt = buildPrompt({ ...claim, specificationAmendment: note });
+  assert.match(prompt, new RegExp(`Do the work[\\s\\S]*Specification of record amended after materialization:\\n- ${note.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}`, "u"));
+  assert.doesNotMatch(buildPrompt(claim), /Specification of record amended after materialization/u);
+});
+
 test("buildPrompt labels approval-gate feedback separately from bounded operator notes", () => {
   const feedback = "x".repeat(8_000);
   const prompt = buildPrompt({ ...claim, operatorFeedback: feedback });

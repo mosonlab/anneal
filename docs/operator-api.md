@@ -2010,6 +2010,19 @@ approval and evidence renewal preserve the same refusal evidence.
   template Step metadata is missing, refuses with `400 Bad Request` and
   `Cannot rewrite task brief: <reason>`. Every other task stores `description`
   verbatim.
+- Amending a brief after the implementation Step has materialized the
+  Specification of record into `.chain/<branchName>/spec.md` is allowed and does
+  not stop the Chain. A review claim checks that file against the brief the
+  implementer was handed — recorded as a digest when its Run was claimed — so a
+  faithful materialization still passes, and every later review Run's prompt
+  carries one line naming the amended task and the time it was amended, so
+  reviewers judge against the amended brief knowingly. The route never rewrites
+  `spec.md` on the branch: the file remains the pre-amendment text. A `spec.md`
+  that differs from what the implementer was handed is still refused with
+  `spec-transcription-mismatch` and parks the review task, whether or not the
+  brief was amended; that refusal also states whether the current brief still
+  matches the materialized specification, which is how tampering on the branch
+  is told apart from an amendment nobody transcribed.
 - A `maxSessionsPerTask` or `description` change is recorded as an operator
   TaskActivity naming the budget's previous and new value, or stating that the
   prompt was edited. The prompt text itself is not copied into the activity.

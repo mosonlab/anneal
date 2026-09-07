@@ -9,6 +9,13 @@ written.
 
 ## Unreleased
 
+- Editing a chain step's brief after implementation has started no longer parks
+  the chain. A review claim now checks the materialized `.chain/<branch>/spec.md`
+  against the brief the implementer was actually handed instead of against the
+  brief as it reads now, and tells the reviewer, in one line, that the brief was
+  amended after materialization. A `spec.md` rewritten on the branch is still
+  refused, and the refusal says whether the current brief also differs. Adds one
+  migration.
 - Retired the `POST /files/mkdir` and `POST /files/move` routes and their
   underlying store operations.
 - Removed `POST /inbox/messages/:messageId/supersede`;

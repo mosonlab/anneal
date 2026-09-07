@@ -1,0 +1,14 @@
+-- The Specification of record a Run was handed, remembered as a digest.
+--
+-- A review claim used to compare the materialized ".chain/<branch>/spec.md"
+-- against the implementation task's brief as it reads *now*, so an operator who
+-- amended the brief after the implementer had already materialized it made
+-- every later review claim fail with "spec-transcription-mismatch" and parked
+-- the chain, although nothing had been tampered with. The claim payload already
+-- carries the exact bytes the runner is told to write, so the claim transaction
+-- records their SHA-256 here and the fidelity check compares against it.
+--
+-- Nullable and never backfilled: Runs claimed before this release genuinely
+-- have no record of what they were handed, and those keep comparing against the
+-- current brief until no such Run is pinned by a review step.
+ALTER TABLE "Run" ADD COLUMN "specificationDigest" TEXT;
