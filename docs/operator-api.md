@@ -1753,11 +1753,100 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/resume" \
     unavailable, lacks the repository grant, or the detached repair task cannot
     resolve the Chain repository, position, and shared branch.
 
+  This route also carries `merge_tail_repair_binding_mismatch`, but a request
+  cannot provoke it: the route repairs the recovery's own `recoveryRunId`, so
+  the repair it creates is bound by construction. The code exists so the repair
+  creation both entrypoints share fails loud and classified — rather than
+  creating an unsettleable repair — if this route ever stops deriving its source
+  Run from the aggregate. The automatic tail is the reachable open-time refusal
+  site.
+
 ```sh
 curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/repair" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
   -d '{"requestId":"reenter-recovery-repair-001","reason":"Fix the regression found during base-drift recovery"}'
 ```
+
+### Settling a chain whose repair cannot bind
+
+Two merge-tail mechanisms can overlap on one Chain: a base-drift recovery
+aggregate bound to its own recovery Run, and an ordinary `gate-fix` or
+`review-fix` repair opened against a different Regression Run. A repair whose
+Chain recovery names another Run can never be settled, so the platform refuses
+it rather than handing an agent work it cannot report.
+
+- At open, both repair entrypoints refuse. The automatic tail parks the
+  regression task in `REVIEW` with a `failureReason` beginning
+  `merge-tail-repair-binding-mismatch:` and writes the ordinary
+  `Autonomous merge tail stopped:` Inbox notice; `POST
+  /tasks/:taskId/merge-tail/repair` answers `409 Conflict` with code
+  `merge_tail_repair_binding_mismatch`. No repair task is created either way.
+- At settlement — a repair opened before the overlap appeared, or one whose
+  aggregate moved while it ran — the completion is rejected rather than failing
+  the Run. `POST /runner/runs/:runId/complete` answers `409 Conflict` with the
+  same reason and a `recoveryId`, `boundRecoveryRunId`, `boundSourceRunId` and
+  `repairedRunId`. This
+  is not an internal error and not an external Run failure: the Run stays
+  terminal and carries the reason in its `failureReason`, the repair task parks
+  in `REVIEW` with it, and the repair's own commit stays on the shared branch.
+- Either way the overlap is recorded as a control-plane TaskActivity on the
+  regression task whose `metadata.kind` is `mergeTailRepair.bindingMismatch`,
+  carrying `recoveryId`, `boundRecoveryRunId`, `boundSourceRunId`,
+  `repairedRunId` and `phase` (`open` or `settlement`). `boundRecoveryRunId` is
+  the Run the recovery is bound to — the aggregate's `recoveryRunId`, the value
+  the invariant compares — while `boundSourceRunId` is the aggregate's column of
+  that name, the Run the recovery was opened from. Read it with `GET
+  /tasks/:taskId/activity`; it names both mechanisms without reading the API
+  journal.
+
+The exit is the reentry route, not another Run of the stranded repair.
+`PATCH /tasks/:taskId` can move the parked repair task's status, but that
+settles nothing: it does not rebind the recovery, reopen the tail, or produce a
+Run that can settle it, and re-running the stranded card reproduces the same
+unbindable completion. `POST /tasks/:taskId/merge-tail/repair` instead opens a
+*new* repair card bound to the recovery's own `recoveryRunId`, with its own Run
+budget — so it works even when the stranded repair task's `maxSessionsPerTask`
+is already spent, and nothing needs `PATCH /tasks/:taskId` to raise a budget.
+
+1. Read the binding-mismatch activity and the parked repair task, and confirm
+   which mechanism owns the Chain.
+
+   ```sh
+   curl "$BASE_URL/tasks/$REGRESSION_TASK_ID/activity" \
+     -H "Authorization: Bearer $OPERATOR_TOKEN" | \
+     jq '[.[] | select(.metadata.kind == "mergeTailRepair.bindingMismatch")]'
+   ```
+
+2. A settlement rejection parks the recovery in `BLOCKED_DOWNSTREAM` with the
+   regression, readiness, and integrator tasks in `REVIEW`, which is exactly
+   the state the reentry route reopens. Call it on the regression task; it
+   charges the existing repair budget and opens a correctly bound repair.
+
+   The rejection parks that state only when no tail task still has an active
+   Run. When the recovery that took the Chain over is still running, the
+   rejection records the activity and the notice and leaves that recovery
+   alone — it is the mechanism that owns the Chain, and it settles the tail on
+   its own. Nothing further is needed unless it, too, stops.
+
+   ```sh
+   curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/repair" \
+     -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+     -d '{"requestId":"settle-unbindable-repair-001","reason":"Recovery and gate-fix repair overlapped on this chain"}'
+   ```
+
+3. If that route refuses — `merge_tail_repair_not_blocked` for a terminal or
+   incomplete aggregate, `merge_tail_repair_verdict_missing` when the stored
+   regression output is no longer the recovery Run's, or
+   `merge_tail_repair_budget_exhausted` — the Chain has no automatic exit left.
+   Carry the delivered branch forward with steps (b) to (e) of
+   [Recovering a merge tail stopped after its repair
+   budget](#recovering-a-merge-tail-stopped-after-its-repair-budget); the
+   repair's commit is already published on the shared branch, so its work is
+   preserved by the successor Chain's first Change.
+
+Whether a Chain should be allowed to run base-drift recovery and a gate-fix
+repair at the same time is not decided here. This refusal names the overlap and
+stops before spending a Run on work the platform would not accept.
 
 ### Recovering a merge tail stopped after its repair budget
 

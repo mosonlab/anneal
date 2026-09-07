@@ -265,7 +265,15 @@ export const requestMergeTailRepair = async (
     now: input.now,
   });
   if ("refusal" in repair) {
-    return refused("merge_tail_repair_creation_failed", `The repair task could not be created: ${repair.refusal}`);
+    // The binding refusal is its own answer: nothing about the repair card is
+    // unstaffed or unresolvable, the recovery simply names another Run. This
+    // route cannot provoke it — `sourceRun` is the aggregate's own
+    // `recoveryRunId`, read under the same lock — so the arm is the invariant
+    // assertion that keeps the shared creation path from ever answering an
+    // unsettleable repair as merely "creation failed".
+    return repair.bindingMismatch
+      ? refused("merge_tail_repair_binding_mismatch", `The repair cannot bind: ${repair.refusal}`)
+      : refused("merge_tail_repair_creation_failed", `The repair task could not be created: ${repair.refusal}`);
   }
   await transitionMergeRecovery(tx, aggregate.id, MergeRecoveryStatus.REPAIRING, {
     failureReason: null,
