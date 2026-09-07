@@ -213,6 +213,13 @@ const seedRegression = async (options: RegressionSeedOptions = {}) => {
       isDefault: options.repairProfile === "default",
       mergeTailRepairAgentId: options.repairProfile === "empty" ? null : repairAgent.id,
     } });
+    if (options.repairProfile === "default") {
+      const root = await db.task.findFirstOrThrow({ where: { chainId }, orderBy: { chainIndex: "asc" } });
+      await db.taskActivity.create({ data: {
+        taskId: root.id, actorType: "operator", body: "ordinary note with colliding metadata",
+        metadata: { staffingProfileId: "not-instantiation-provenance" },
+      } });
+    }
     if (options.repairProfile !== "default") {
       // A different current default must not override the recorded profile.
       await db.staffingProfile.create({ data: {
