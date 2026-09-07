@@ -25,6 +25,7 @@ import {
 } from "@anneal/db";
 import type { PrismaClient } from "@anneal/db";
 import type { Session as SessionContract } from "@anneal/db/board-contract";
+import type { RunMetrics } from "@anneal/db/board-contract";
 import { parseSessionListFilters } from "@anneal/db/session-filter-contract";
 import type { SerializesTo } from "@anneal/db/wire-serialization";
 import { z } from "zod";
@@ -42,6 +43,7 @@ import { grantAdmits, type FileOperation, type GrantLike } from "../files/grants
 import { NotFoundError } from "../files/store.js";
 import { FAILURE_REASON_LIMIT, failureReasonText } from "../failure-reason.js";
 import { InboxRunFenceRefusal, suspendForInbox } from "../inbox.js";
+import { baselineKey, readRunBaselines } from "../run-baseline.js";
 import {
   cancelBoundRevalidationRun,
   isRevalidationStep,
@@ -56,6 +58,13 @@ import {
   type RunFence,
   withFencedRun,
 } from "../run-fence.js";
+import {
+  runMetrics,
+  TOOL_METRIC_EVENT_TYPES,
+  TTFT_METRIC_EVENT_TYPES,
+  type RunMetricsToolEvent,
+  type RunMetricsTtftEvent,
+} from "../run-metrics.js";
 import { sessionListWhere } from "../session-list-query.js";
 import {
   FILE_WRITE_LIMIT,
@@ -191,6 +200,49 @@ const cancelRunInput = z.object({
  * projection must JSON-serialize to, so every `satisfies` below proves the
  * whole wire claim rather than the native half of it. */
 type SessionResponse = SerializesTo<SessionContract<Date, Prisma.Decimal>, SessionContract>;
+type SessionDetailContract<DateTime = string, DecimalValue = string> = SessionContract<DateTime, DecimalValue> & {
+  metrics: RunMetrics | null;
+};
+type SessionDetailResponse = SerializesTo<SessionDetailContract<Date, Prisma.Decimal>, SessionDetailContract>;
+
+type SessionMetricEvent = {
+  type: string;
+  at: Date;
+  toolCallId: string | null;
+  payload: unknown;
+};
+
+/** Read only the provider fields the shared diagnostics calculator needs. The
+ * full event payload can contain a provider response or tool output measured in
+ * megabytes, so it must never be loaded into a session-detail response. */
+const readSessionMetricEvents = async (db: PrismaClient, sessionId: string): Promise<SessionMetricEvent[]> => db.$queryRaw<SessionMetricEvent[]>(Prisma.sql`
+  SELECT "type", "at", "toolCallId",
+    jsonb_build_object(
+      'type', CASE WHEN jsonb_typeof("payload"->'type') = 'string' THEN "payload"->'type' END,
+      'name', CASE WHEN jsonb_typeof("payload"->'name') = 'string' THEN "payload"->'name' END,
+      'toolName', CASE WHEN jsonb_typeof("payload"->'toolName') = 'string' THEN "payload"->'toolName' END,
+      'is_error', CASE WHEN jsonb_typeof("payload"->'is_error') = 'boolean' THEN "payload"->'is_error' END,
+      'isError', CASE WHEN jsonb_typeof("payload"->'isError') = 'boolean' THEN "payload"->'isError' END,
+      'exit_code', CASE WHEN jsonb_typeof("payload"->'exit_code') = 'number' THEN "payload"->'exit_code' END,
+      'error', CASE WHEN "payload"->'error' IS NOT NULL AND "payload"->'error' <> 'null'::jsonb THEN true END,
+      'anneal', CASE WHEN jsonb_typeof("payload"->'anneal') = 'object' THEN jsonb_build_object(
+        'ttftMs', CASE WHEN jsonb_typeof("payload"->'anneal'->'ttftMs') = 'number'
+          THEN "payload"->'anneal'->'ttftMs' END
+      ) END
+    ) AS "payload"
+  FROM "SessionEvent"
+  WHERE "sessionId" = ${sessionId}
+    AND ("type"::text IN (${Prisma.join([...TOOL_METRIC_EVENT_TYPES])}) OR (
+        ("type"::text = 'MODEL_DELTA' AND (
+          "payload"->>'type' = 'assistant'
+          OR ("payload"->>'type' = 'item.completed' AND "payload"->'item'->>'type' = 'agent_message')
+        ))
+        OR ("type"::text = 'MODEL_COMPLETED'
+          AND "payload"->>'type' = 'message_end'
+          AND "payload"->'message'->>'role' = 'assistant')
+    ))
+  ORDER BY "seq" ASC
+`);
 
 export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => void {
   const { db, releaseChainLease, appendFencedActivity } = deps;
@@ -559,6 +611,7 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
       task: {
         select: {
           id: true, name: true,
+          templateStepId: true,
           // The chain the Sessions list filters on, and the template step that
           // is the only lossless proof of an instantiated chain's name.
           chainId: true,
@@ -572,6 +625,7 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
       run: {
         select: {
           id: true, runNumber: true, model: true, branch: true,
+          readyAt: true, status: true, endedAt: true,
           pullRequestUrl: true, workspacePath: true,
           // remoteUrl is what turns the detail page's Branch field into a link.
           repo: { select: { id: true, name: true, remoteUrl: true } },
@@ -659,8 +713,33 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
         include: sessionInclude,
       });
       if (session === null) return context.json({ error: "Session not found" }, 404);
+      const metricEvents = await readSessionMetricEvents(db, session.id);
+      const toolEvents: RunMetricsToolEvent[] = [];
+      const ttftEvents: RunMetricsTtftEvent[] = [];
+      for (const event of metricEvents) {
+        if ((TOOL_METRIC_EVENT_TYPES as readonly string[]).includes(event.type)) {
+          toolEvents.push(event);
+        } else if ((TTFT_METRIC_EVENT_TYPES as readonly string[]).includes(event.type)) {
+          ttftEvents.push(event);
+        }
+      }
+      const stepKey = session.task?.templateStepId === null || session.task?.templateStepId === undefined
+        ? null
+        : { projectId: session.projectId, templateStepId: session.task.templateStepId };
+      const baselines = await readRunBaselines(db, stepKey === null ? [] : [stepKey]);
+      const baseline = stepKey === null ? null : baselines.get(baselineKey(stepKey)) ?? null;
+      const metrics = session.run === null ? null : runMetrics({
+        run: session.run,
+        session,
+        toolEvents,
+        ttftEvents,
+        baseline,
+      });
       const row = withMergeOutcome(session);
-      return context.json(chainIdentityFrom([row])(row) satisfies SessionResponse);
+      return context.json({
+        ...chainIdentityFrom([row])(row),
+        metrics,
+      } satisfies SessionDetailResponse);
     });
 
     app.post("/runs/:runId/cancel", async (context) => {
