@@ -2563,6 +2563,69 @@ does not widen prompt `priorOutputs`, expose sibling evidence to a blind
 review, or derive text from provider output, activity prose, or repository
 contents. Its source is persisted task output and its authentication is the
 claimed session/run identity.
+
+The machine-only `POST /runner/runs/:runId/events` append is bounded on both
+sides, and the two bounds are designed against each other. The API reads at most
+1 MiB + 64 KiB of request body — the batch cap plus envelope allowance — and
+refuses a larger one with `413` and `code: "EVENTS_REQUEST_TOO_LARGE"` before
+parsing it. It then refuses any single event whose `payload` exceeds 256 KiB of
+JSON with `413`, `code: "EVENT_PAYLOAD_TOO_LARGE"`, and the `eventIndex`, `seq`,
+`payloadBytes` and `limitBytes` of the offending event. The index is the point:
+the runner removes events from its queue only once they are accepted, so a
+batch-wide refusal would leave an unacceptable event at the head of an ordered
+queue forever, while a named one costs exactly that event. On receiving it the
+runner drops that event, records an `EVENT_REJECTED` event in its place, and
+resends the rest of the batch. A `413` that names *no* index cannot be resolved
+by losing one event, so the runner answers it by sending less: it halves its
+batch budget for the rest of the Run and retries, down to a floor of one event,
+and only then drops that single event as impossible. That keeps an intermediary
+with a smaller body limit, or a peer carrying the previous cap, from wedging a
+queue that only advances on success. `providerConversationId` is capped at 512
+characters, refused with `400` above it and never sent above it, because it is
+the one envelope field a provider grows and the body cap is sized as the batch
+cap plus a fixed envelope allowance.
+
+A runner does not normally reach either refusal. It truncates any payload above
+the same 256 KiB cap itself, replacing it with `{ truncated: true,
+originalBytes, limitBytes, preview }`, and forms batches by bytes as well as by
+count (at most 250 events or 1 MiB). Both caps live in
+`@anneal/db/session-event-limits`, so the two processes cannot be sized against
+stale copies of each other; a 413 in practice means a rolling deployment in
+which the two sides disagree.
+
+The runner's undelivered queue for one Run is bounded at 32 MiB and 20 000
+events. When it is full the queue drops the oldest liveness events —
+`MODEL_DELTA`, `PROVIDER_RAW`, `PROVIDER_STATUS`, `STDERR`, `TOOL_PROGRESS` and
+`TOOL_COMPLETED` — and records one `EVENTS_DROPPED` event carrying the count,
+bytes, and sequence range lost. Tool output is droppable because a tool result
+carries a file read or a command's stdout and is the largest event a Run
+produces. Lifecycle, terminal and error events — including `TOOL_STARTED`,
+`TOOL_FAILED`, `ADAPTER_ERROR` and `FINAL_OUTPUT` — survive while anything else
+can be given up, and are never dropped. They are not exempt from the bound
+either, because a provider drives some of them too — one `ADAPTER_ERROR` per
+unparsable line, a `TOOL_STARTED` per call. A queue with nothing droppable left
+reduces the oldest of them to a `{ truncated: true, reason: "queue-bound",
+originalBytes, queueMaxBytes }` marker — distinct from the per-event cap's
+marker above, which names the cap it hit — keeping its sequence number, type and
+time, at about a hundred bytes an event instead of the 256 KiB cap a payload may
+reach. `providerEventId` and `toolCallId` go with the payload: they are detail
+too, and no cap covers what a provider puts in them. Once every entry not in
+flight is such a marker, the two oldest adjacent markers merge into one
+`EVENTS_COALESCED` event carrying their summed counts and the inclusive sequence
+range they span, plus the `droppedEvents` and `rejectedEvents` totals of any
+`EVENTS_DROPPED` or `EVENT_REJECTED` record absorbed, whose losses are in no
+other event. Merging repeats until both bounds hold again, and the record of a
+drop is opened inside that accounting rather than appended past it. So the
+queue holds its bounds under any traffic mix, and what a protected event gives
+up under pressure is its detail, never its account: each one is still counted,
+in aggregate, in a marker the control plane receives. The batch in flight is the
+one exemption — it is never dropped from, never merged, and never released by
+position, so a provider streaming during an append cannot cost an event that the
+request did not carry, and the bound it suspends holds again as soon as the
+request settles. Each heartbeat carries the
+current queue size as `eventQueueBytes`; the field is observability only and the
+API neither acts on it nor persists it.
+
 The machine-only `POST /runner/runs/:runId/complete` completion payload and
 `POST /runner/runs/:runId/cancel/acknowledge` cancellation acknowledgement
 accept the optional `worktreeContainmentViolations` array: absolute worktree

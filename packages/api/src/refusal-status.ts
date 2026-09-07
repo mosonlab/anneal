@@ -5,4 +5,4 @@
  * family beside the code, without depending on the module that renders the
  * response.
  */
-export type RefusalStatus = 400 | 403 | 404 | 409 | 422;
+export type RefusalStatus = 400 | 403 | 404 | 409 | 413 | 422;

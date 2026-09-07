@@ -9,6 +9,23 @@ written.
 
 ## Unreleased
 
+- Session events are now bounded end to end. A runner holds at most 32 MiB and
+  20 000 undelivered events per Run. When it fills, the oldest liveness events —
+  streaming deltas, raw provider frames, captured stderr, provider status and
+  tool output — are dropped and an `EVENTS_DROPPED` event records how many and
+  which sequence range were lost. Lifecycle, error and terminal events are never
+  dropped; if the queue is still full once nothing droppable is left, such an
+  event keeps its place, type and sequence number but loses its payload to a
+  `truncated` marker; once every event not in flight is such a marker, the two
+  oldest adjacent markers merge into one `EVENTS_COALESCED` event carrying their
+  summed counts and the sequence range they span, so the queue holds its bounds
+  under any traffic mix while every event it saw is still accounted for.
+  A single event payload above 256 KiB is truncated to a `truncated` marker
+  carrying its original size.
+  `POST /runner/runs/:runId/events` enforces the same per-event cap and a
+  request-body cap, answering 413 with the offending event's index so the runner
+  drops that one event and resends the rest. Heartbeats now carry
+  `eventQueueBytes`.
 - The merge executor verifies its own landed merge from the commit when
   GitHub's pull-request projection cannot. A merge commit whose parents are
   exactly the authorized base and head and which is reachable from the
