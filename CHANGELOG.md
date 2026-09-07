@@ -9,6 +9,9 @@ written.
 
 ## Unreleased
 
+- Briefs for cards dispatched after a predecessor now state premises as of
+  that predecessor's merge, name its card or branch, and avoid "until it lands"
+  language; dependency qualification checks those premises against its outcome.
 - The readiness `merge-executor-offline` recovery guidance now tells operators
   that the manual fallback to automatic re-arm is to retry the Regression
   task, opening a new Regression Run at full rerun cost. It also records

@@ -32,6 +32,12 @@ behavior and the mechanism behind it, naming the actual code concepts
 (models, functions, invariants) so the implementer can anchor the brief to the
 repository without guessing.
 
+If the card will be dispatched after another card through an `afterTaskId`
+binding or a serial line declared in a wave plan, state the premises in
+Background and Changes as of the moment that predecessor has merged, name the
+predecessor by card or branch, and do not use "until X lands", "until it lands",
+or "X has not landed" language about it.
+
 ### Changes
 
 A numbered list. Each item must be independently checkable against the diff:
