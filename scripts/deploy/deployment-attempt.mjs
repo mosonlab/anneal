@@ -46,6 +46,7 @@ export class DeploymentAttempt {
     const migration = this.fact("migration");
     const publication = this.fact("publication");
     const verification = this.fact("serviceVerification");
+    const quietWindowWait = this.fact("quietWindowWait");
     return {
       targetCommit: revisions?.to ?? this.targetCommit,
       ...(preparedRelease?.buildStamp ? { activatedBuildStamp: preparedRelease.buildStamp } : {}),
@@ -72,6 +73,11 @@ export class DeploymentAttempt {
           observationWindowMs: verification.observationWindowMs,
           observedForMs: verification.observedForMs,
         },
+      } : {}),
+      ...(quietWindowWait ? {
+        quietWindowWaitSeconds: quietWindowWait.waitSeconds,
+        quietWindowWaitPolls: quietWindowWait.polls,
+        quietWindowWaitPeakBlockingRuns: quietWindowWait.peakBlockingRuns,
       } : {}),
       ...(this.fact("rollbackPointerOutcome") ? { rollbackPointerOutcome: this.fact("rollbackPointerOutcome") } : {}),
       ...(this.fact("supersededEscalation") ? { supersededEscalation: this.fact("supersededEscalation") } : {}),
