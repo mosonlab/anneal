@@ -18,7 +18,8 @@ const profile = (
   name: string,
   entries: StaffingProfileCarrySource["entries"],
   isDefault = true,
-): StaffingProfileCarrySource => ({ name, isDefault, entries });
+  mergeTailRepairAgentId: string | null = null,
+): StaffingProfileCarrySource => ({ name, isDefault, mergeTailRepairAgentId, entries });
 
 test("the base kind strips only a -vN output-protocol suffix", () => {
   assert.equal(staffingOutputKindBase("implementation"), "implementation");
@@ -47,6 +48,7 @@ test("exact output kinds carry unchanged, with names and default membership", ()
     {
       name: "Default",
       isDefault: true,
+      mergeTailRepairAgentId: null,
       entries: [
         { outputKind: "spec", assigneeAgentId: "agent-spec", include: null },
         { outputKind: "implementation", assigneeAgentId: "agent-impl", include: null },
@@ -56,6 +58,7 @@ test("exact output kinds carry unchanged, with names and default membership", ()
     {
       name: "Fast",
       isDefault: false,
+      mergeTailRepairAgentId: null,
       entries: [
         { outputKind: "spec", assigneeAgentId: "agent-other", include: null },
         // Named nothing about the optional step, so it carries the default.
@@ -172,6 +175,15 @@ test("every optional step of the new graph ends with a boolean the profile never
     { outputKind: "blind-findings", assigneeAgentId: null, include: true },
   ]);
   assert.deepEqual(plan.dropped, []);
+});
+
+test("the dedicated merge-tail repair Agent carries across a canonical rollover", () => {
+  const plan = planStaffingProfileCarry(
+    [profile("Default", [{ outputKind: "implementation", assigneeAgentId: "agent-impl", include: null }], true, "agent-luna")],
+    required("implementation"),
+  );
+
+  assert.equal(plan.profiles[0]!.mergeTailRepairAgentId, "agent-luna");
 });
 
 

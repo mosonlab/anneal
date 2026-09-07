@@ -776,6 +776,8 @@ const unstaffedRepairTx = (fixTask: { id: string; assigneeAgent: null } | null =
   tx.mergeRecoveryAttempt.findFirst = async () => null;
   tx.taskActivity.findMany = async () => [];
   tx.task.findFirst = async () => fixTask;
+  tx.taskActivity.findFirst = async () => null;
+  tx.staffingProfile = { findFirst: async () => null };
   tx.task.create = async (args: Record<string, any>) => {
     created.push(args);
     return { id: "repair-1" };

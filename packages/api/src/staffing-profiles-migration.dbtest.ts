@@ -96,7 +96,11 @@ test("the staffing-profiles migration backfills one default profile per template
 
     const profiles = await db.staffingProfile.findMany({
       orderBy: { taskTemplateId: "asc" },
-      include: { entries: { orderBy: { outputKind: "asc" } } },
+      // Select only columns present at this historical migration boundary.
+      select: {
+        id: true, projectId: true, taskTemplateId: true, name: true, isDefault: true,
+        entries: { orderBy: { outputKind: "asc" } },
+      },
     });
     assert.deepEqual(
       profiles.map(({ id, projectId, taskTemplateId, name, isDefault }) => ({

@@ -31,6 +31,8 @@ export type StaffingProfileCarryEntry = Readonly<{
 export type StaffingProfileCarrySource = Readonly<{
   name: string;
   isDefault: boolean;
+  /** The dedicated merge-tail repair Agent, if the profile names one. */
+  mergeTailRepairAgentId?: string | null;
   entries: readonly StaffingProfileCarryEntry[];
 }>;
 
@@ -129,7 +131,12 @@ export const planStaffingProfileCarry = (
       if (named.has(outputKind)) continue;
       entries.push({ outputKind, assigneeAgentId: null, include: true });
     }
-    carried.push({ name: profile.name, isDefault: profile.isDefault, entries });
+    carried.push({
+      name: profile.name,
+      isDefault: profile.isDefault,
+      mergeTailRepairAgentId: profile.mergeTailRepairAgentId ?? null,
+      entries,
+    });
   }
 
   return { profiles: carried, dropped, reportLines: dropped.map(dropLine) };

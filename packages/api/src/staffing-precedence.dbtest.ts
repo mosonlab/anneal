@@ -67,6 +67,8 @@ before(() => { db = setupTestDb(); });
 beforeEach(async () => {
   await resetTestDb(db);
   await runDbScript("seed.ts");
+  // Each case constructs its own profiles, including the selected default.
+  await db.staffingProfile.deleteMany();
 });
 after(async () => { await db.$disconnect(); });
 

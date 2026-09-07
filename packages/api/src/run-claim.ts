@@ -307,11 +307,11 @@ export const claimRun = async (
     // during a deploy return no work without observing candidates.
     if (!await deployBarrierAllowsClaim(tx)) return null;
     // The dispatch drain of a deploy that has been waiting past its budget.
-    // It is read before any candidate for the same reason as the barrier: the
-    // answer is about the platform, so nothing is inspected, parked, or
-    // charged to a task's session budget on the way to giving it.
+    // Snapshot it before candidate activation, then decide after reading each
+    // Run's step kind whether that Run would start an agent session. Mechanical
+    // merge execution remains admitted until the deploy takes the exclusive
+    // barrier half.
     const drain = await activeDispatchDrain(tx, now);
-    if (drain) return dispatchDrainingRefusal(drain);
     const candidateWhere = {
       where: {
         status: RunStatus.QUEUED,
@@ -659,6 +659,14 @@ export const claimRun = async (
     // claim without one, `claimed` carries the run handed to the runner.
     const activateCandidate = async (candidate: (typeof candidates)[number]): Promise<CandidateDecision> => {
       if (!candidate.task || !candidate.repo) return SKIP;
+      const executionMode = executionModeFor(candidate.task.templateStep);
+      // Refuse agent work before any candidate mutation, including parking a
+      // Task whose Repo grant was revoked. An executor must pass over agent
+      // candidates to reach mechanical work while dispatch is draining.
+      if (drain) {
+        if (!claimantMayTake(executionMode, claimantClass, body.runnerId, executorRunnerIds)) return SKIP;
+        if (executionMode === "agent") return dispatchDrainingRefusal(drain);
+      }
       if (!candidate.agent.repoAccess.some((grant) => grant.repoId === candidate.repoId && grant.projectId === candidate.projectId)) {
         const reason = "repository-grant-missing: restore the agent Repo grant, then retry this run";
         const stranded = await tx.run.updateMany({
@@ -697,7 +705,6 @@ export const claimRun = async (
       // Run row for it, no model runner or merge executor may claim it; the
       // readiness worker consumes the TODO task row directly.
       if (isMergeReadinessStep(candidate.task.templateStep)) return SKIP;
-      const executionMode = executionModeFor(candidate.task.templateStep);
       // §D-P1 rule 3, symmetric and fail-closed: only the independently
       // authenticated merge-executor principal is offered an integrator run,
       // and it is offered nothing else. With `MERGE_EXECUTOR_RUNNER_IDS`
