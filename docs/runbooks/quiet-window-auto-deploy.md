@@ -671,19 +671,44 @@ An existing escalation may be retried unattended only for
 `remote-main-unreadable`, `remote-main-read-timeout`,
 `control-plane-version-unreachable`, `control-plane-commit-unavailable`,
 `source-remote-unreadable`, `source-remote-read-timeout`,
-`quiet-window-query-failed`, or `deploy-barrier-unavailable`. Environment,
-authentication, malformed remote state, build, artifact, verification, and
-filesystem-state failures stay operator-latched.
+`quiet-window-query-failed`, or `deploy-barrier-unavailable`. The reason
+`release-artifact-build-failed` is retryable-transient only when its detail
+matches one of these source clone/fetch transport failures:
+`gnutls_handshake() failed`, `SSL_ERROR_SYSCALL`, `could not fetch … from
+promisor remote`, or `read timeout`. The `read timeout` match is accepted only
+when the detail identifies a source clone or fetch. The allowlist is explicit
+and fail-closed: compile, test, missing-dependency, unknown, and every other
+build detail remains commit-scoped when the marker names a full target commit.
+Environment, authentication, malformed remote state, artifact, verification,
+and filesystem-state failures stay operator-latched.
 
 The initial escalation is attempt 1. Later eligible failures atomically
-replace the marker with an incremented count. Attempts below the fixed cap of
-5 may run again; attempt 5 blocks later ticks like a permanent escalation.
-Admission alone never clears a marker. A full successful deployment, or proof
-that the target is already deployed, must complete before the job reports
-recovery, removes `.agentos-deploy/escalated.json`, and logs
-`SELF-CLEAR escalation reason=<reason> attempts=<n>`. If the recovery
-notification fails, the marker remains. Confirm the SELF-CLEAR entry and
-closed recovery notification before dismissing the original failure.
+replace the marker with an incremented count. A retryable-transient marker at
+attempt 5 carries a `retryAfter` timestamp and waits five minutes before its
+next admission. If that retry fails, later retries wait 10, 20, 40, and then
+60 minutes; 60 minutes is the cap for all subsequent attempts. The marker is
+the single source of truth for this schedule. A legacy capped marker without
+`retryAfter` derives its first deadline from `escalatedAt` plus the delay for
+its attempt count. While the deadline is in the future, the tick stays stopped
+and logs:
+
+```text
+STOP escalation-active scope=retryable-transient retry-after=<ISO> remaining-wait-seconds=<n> path=<path>
+```
+
+When `retryAfter` has expired, the tick admits a normal full attempt. Admission
+does not clear the marker: only a successful full deployment, or proof that
+the target is already deployed, followed by a successful recovery
+notification removes `.agentos-deploy/escalated.json` and logs
+`SELF-CLEAR escalation reason=<reason> attempts=<n>`. If the attempt fails, it
+replaces the marker with the incremented count and the next backoff. If the
+recovery notification fails, the marker remains. Confirm the SELF-CLEAR entry
+and closed recovery notification before dismissing the original failure.
+
+`commit-scoped` and `host-scoped` markers retain their operator-action
+requirement. They do not acquire a retry deadline and continue to stop later
+ticks until the named cause is repaired and an operator runs
+`--clear-escalation`.
 
 ### Escalation classes
 
@@ -692,14 +717,18 @@ target commit `to` first and its `reason` second:
 
 - **retryable-transient** — a reason on the allowlist above, on a marker whose
   `to` is a full commit oid or the literal `unknown` the deploy records when it
-  failed before determining a target. The retry cap and self-clear rules in
-  this section own it end to end; the commit main points at does not change its
-  answer, in either direction. A transient-looking reason on a marker with any
-  other `to` (missing, or a value that is neither) is host-scoped instead: it
-  spends no retry attempt and blocks every deploy.
+  failed before determining a target. A `release-artifact-build-failed`
+  marker qualifies only for the source clone/fetch transport details listed
+  above; every other build detail is commit-scoped. The retry deadline and
+  self-clear rules in this section own a qualifying marker end to end; the
+  commit main points at does not change its answer, in either direction. A
+  transient-looking reason on a marker with any other `to` (missing, or a
+  value that is neither) is host-scoped instead: it spends no retry attempt and
+  blocks every deploy.
 - **commit-scoped** — any other reason on a marker whose `to` is a full commit
-  oid: the failure was determined by that commit (its artifact build, its
-  migration, its verification). It blocks that commit and only that commit.
+  oid: the failure was determined by that commit (its non-transport artifact
+  build, its migration, or its verification). It blocks that commit and only
+  that commit.
 - **host-scoped** — a reason naming host state rather than the commit, or any
   marker whose `to` is missing or is neither a commit oid nor `unknown`,
   whatever its reason. It blocks every deploy.
@@ -752,8 +781,9 @@ read that fails while a commit-scoped marker is latched also stops with
 `STOP escalation-active target-unreadable reason=<reason>`, leaving the marker
 untouched: an unreadable remote cannot prove main moved.
 
-For any host-scoped escalation, an eligible escalation at the cap, or a
-commit-scoped escalation whose commit is still the target,
+For any host-scoped escalation, a retryable-transient marker whose retry
+deadline has not expired, or a commit-scoped escalation whose commit is still
+the target,
 inspect the ledger, logs, pointer identities, service states, and Inbox record;
 repair the named cause, build and verify the artifact again, and rerun
 `--dry-run`.
