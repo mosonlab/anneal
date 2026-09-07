@@ -166,11 +166,10 @@ test("shutdown interrupts a real pending contract recheck", async () => {
   });
   // The property is that shutdown interrupts the recheck rather than waiting
   // out contractRecheckMs, which is 60s above. This bound has to stay well
-  // under that to mean anything, and well over what a saturated event loop
-  // costs a setImmediate-driven abort: on the gate worker of 2026-09-06 (load1
-  // 20-55) sub-second wall clocks were what turned passing suites into FAILs.
-  // This deadline is the whole bound: an elapsed-time assertion after the race
-  // could only restate what the race already decided.
+  // under that to mean anything, and well over what a loaded event loop costs
+  // a setImmediate-driven abort (CONTRIBUTING.md, "Test timing on the gate
+  // worker"). This deadline is the whole bound: an elapsed-time assertion
+  // after the race could only restate what the race already decided.
   const INTERRUPT_BUDGET_MS = 15_000;
   let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -646,9 +645,8 @@ test("the daemon still starts when it is reached through a symlinked release dir
         encoding: "utf8",
         // A refusal this child never prints would otherwise hang the suite for
         // as long as the gate lets it run. Bounded so it fails instead, and
-        // sized for the loaded worker: this is a full `node --import tsx`
-        // startup, which on the saturated worker of 2026-09-06 was still short
-        // of its first line ten seconds in.
+        // sized for a full `node --import tsx` startup on the loaded worker
+        // (CONTRIBUTING.md, "Test timing on the gate worker").
         timeout: 120_000,
       },
     );

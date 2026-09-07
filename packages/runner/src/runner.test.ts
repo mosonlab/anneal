@@ -1998,9 +1998,9 @@ test("a resumed child inherits an execute-phase stall deadline from its predeces
 
     // Patience, not a timing assumption: the poll returns the moment the resume
     // child has launched, and this budget only bounds the failure case. Real
-    // workspace provisioning (git seeding, worktree setup) runs first, and on
-    // the saturated gate worker of 2026-09-06 that work queued behind load1
-    // 20-55, so the bound is sized for that host rather than for an idle one.
+    // workspace provisioning (git seeding, worktree setup) runs first, so the
+    // bound is sized for the loaded worker rather than an idle host
+    // (CONTRIBUTING.md, "Test timing on the gate worker").
     const launchDeadline = Date.now() + 60_000;
     while (resumedHandle === null && Date.now() < launchDeadline) {
       await new Promise<void>((resolve) => setTimeout(resolve, 25));
