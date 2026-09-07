@@ -26,7 +26,7 @@ const task = (id: string, name: string, promptIndex: number, chainId: string | n
   repo: null, runs: [], strandedSalvageBranches: [], chainId, chainIndex: chainId ? 0 : null, source: "MANUAL",
   archivedAt: null, schedulePausedAt: null, recurringSourceTaskId: null,
   templateStep: null, taskCost: null, mergeOutcome: null, mergeRecovery: null,
-  budgetRemaining: true, editableBrief: null,
+  budgetRemaining: true, baseline: null, editableBrief: null,
 });
 
 const output = (taskId: string, body: string): TaskStepOutput => ({
@@ -63,7 +63,7 @@ test("a resumed run identifies Duration as wall-clock time that includes Inbox w
   run.startedAt = "2026-08-17T00:00:00.000Z";
   run.endedAt = "2026-08-17T00:05:00.000Z";
   run.session = { executionStatus: "SUCCEEDED", resumeAttempt: 1 } as NonNullable<Run["session"]>;
-  const markup = renderToStaticMarkup(<table><tbody><RunRow run={run} remoteUrl={null} expanded={false} onToggle={() => undefined} /></tbody></table>);
+  const markup = renderToStaticMarkup(<table><tbody><RunRow run={run} remoteUrl={null} baseline={null} expanded={false} onToggle={() => undefined} /></tbody></table>);
   assert.match(markup, /5m 0s wall-clock \(includes Inbox wait\)/);
 });
 
@@ -71,7 +71,7 @@ test("the run row links its session in a column of its own, with Branch last", (
   const run = sourceRun("task-1");
   run.session = { id: "session-1", executionStatus: "SUCCEEDED", resumeAttempt: 0 } as NonNullable<Run["session"]>;
   const rowMarkup = (expanded: boolean): string => renderToStaticMarkup(
-    <table><tbody><RunRow run={run} remoteUrl={null} expanded={expanded} onToggle={() => undefined} /></tbody></table>,
+    <table><tbody><RunRow run={run} remoteUrl={null} baseline={null} expanded={expanded} onToggle={() => undefined} /></tbody></table>,
   );
 
   const collapsed = rowMarkup(false);

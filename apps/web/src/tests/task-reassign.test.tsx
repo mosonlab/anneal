@@ -130,7 +130,7 @@ const task = (overrides: Partial<TaskDetail> = {}): TaskDetail => ({
   maxDurationMin: 120, stallTimeoutMin: 10, maxSessionsPerTask: 3, createdAt: now, updatedAt: now,
   assigneeAgent: agent(), repo: null, runs: [], strandedSalvageBranches: [], chainId: null, chainIndex: null,
   source: "MANUAL", archivedAt: null, schedulePausedAt: null, recurringSourceTaskId: null, templateStep: null,
-  taskCost: null, mergeOutcome: null, mergeRecovery: null, budgetRemaining: true, editableBrief: null,
+  taskCost: null, mergeOutcome: null, mergeRecovery: null, budgetRemaining: true, baseline: null, editableBrief: null,
   ...overrides,
 });
 

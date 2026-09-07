@@ -27,6 +27,8 @@ export type {
   MergeRecovery,
   RecurringFire,
   Run,
+  RunBaseline,
+  RunBaselineMetric,
   RunMetrics,
   RunPhaseMetrics,
   RunStatus,
