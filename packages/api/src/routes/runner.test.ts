@@ -588,6 +588,7 @@ test("completion refunds an external failure but refuses an automatic retry for 
       },
       taskActivity: {
         findMany: async () => [],
+        findFirst: async () => null,
         count: async () => 0,
         create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
       },
