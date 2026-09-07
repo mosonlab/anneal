@@ -37,6 +37,7 @@ import {
   type CanonicalTemplateName,
   type TemplateStepSource,
 } from "../src/template-sources.js";
+import { installCanonicalDefaultStaffingProfiles } from "../src/staffing-profile-canonical.js";
 
 const SENIOR_DEV_SOL_ROLE = "senior-dev-sol-high";
 const SENIOR_DEV_OPUS_ROLE = "senior-dev-opus-medium";
@@ -705,6 +706,7 @@ export const main = async (
             projectLabel: () => project.slug,
           });
           staffingNotices.push(...installation.staffingNotices);
+          await installCanonicalDefaultStaffingProfiles(tx, project.id);
           await syncCanonicalTemplates(tx, project, templateSources, projectCounters);
 
           if (fullInstallTarget) {
@@ -720,6 +722,7 @@ export const main = async (
               projectLabel: () => project.slug,
             });
             staffingNotices.push(...fullInstallation.staffingNotices);
+            await installCanonicalDefaultStaffingProfiles(tx, project.id);
           }
           return {
             counters: projectCounters,

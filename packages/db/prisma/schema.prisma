@@ -332,6 +332,7 @@ model Agent {
   assignedTasks                       Task[]
   templateSteps                       TaskTemplateStep[]
   staffingProfileEntries              StaffingProfileEntry[]
+  mergeTailRepairProfiles              StaffingProfile[] @relation("StaffingProfileMergeTailRepairAgent")
   sessions                            Session[]
   runs                                Run[]
   inboxMessages                       InboxMessage[]
@@ -577,15 +578,21 @@ model StaffingProfile {
   taskTemplateId String
   name           String
   isDefault      Boolean                @default(false)
+  /// The Agent that receives residual review-fix and gate-fix repairs for a
+  /// chain using this profile. Null deliberately means "fall back to the
+  /// chain's fixed-implementation Agent".
+  mergeTailRepairAgentId String?
   createdAt      DateTime               @default(now())
   updatedAt      DateTime               @updatedAt
   project        Project                @relation(fields: [projectId], references: [id], onDelete: Cascade)
   taskTemplate   TaskTemplate           @relation(fields: [taskTemplateId], references: [id], onDelete: Cascade)
+  mergeTailRepairAgent Agent?            @relation("StaffingProfileMergeTailRepairAgent", fields: [mergeTailRepairAgentId], references: [id], onDelete: Restrict)
   entries        StaffingProfileEntry[]
 
   @@unique([taskTemplateId, name])
   @@index([projectId])
   @@index([taskTemplateId])
+  @@index([mergeTailRepairAgentId])
 }
 
 /// One profile opinion about one template step, keyed by the step's exact
