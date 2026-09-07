@@ -1240,7 +1240,7 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   `staffing_profile_missing_repo_grant`), never under the template's.
 - An omitted optional step is resolved once, at instantiation: the chain has no
   task for it and no later change to any profile alters an existing Chain. The
-  chain root's activity metadata records `staffingProfileId` and
+  chain root's first TaskActivity metadata records `staffingProfileId` and
   `staffingProfileName` when a profile was used. Retained steps keep their
   template `stepIndex`, so the resulting Chain's `chainIndex` values may be
   sparse. If no instantiable step remains, the request is refused with
@@ -1292,6 +1292,12 @@ steps of a custom graph and therefore different entries; nothing is normalised
 on this surface. `assigneeAgentId` null means the profile has no opinion and
 the canonical binding stands.
 
+A profile also carries the nullable `mergeTailRepairAgentId` Agent slot. This
+profile-level slot staffs detached `review-fix` and `gate-fix` merge-tail repair
+cards independently of the `fixed-implementation` step entry. `null` leaves
+the slot empty, and the field is included in profile reads. `refresh-conflict`
+continues to use `MERGE_RESOLVER_ROLE`.
+
 `include` is the profile's decision about an optional step, and a stored
 profile always carries a boolean for every step the template marks `optional`
 and `null` for every other step. A write may omit the flag, or the entry
@@ -1304,11 +1310,21 @@ being optional loses its flag.
 
 Every write takes the template row mutex and then the Agent-row mutex that
 archive and chain instantiation take, so a profile cannot be saved against an
-Agent that is being archived in a concurrent transaction. Repository grants are
-*not* checked here: a profile is a plan, and a grant is checked when a chain is
-actually created.
+Agent that is being archived in a concurrent transaction. Step entries remain
+a plan and their Repository grants are checked when a chain is actually
+created. A non-null `mergeTailRepairAgentId` slot is checked when it is explicitly
+set: it must name an unarchived `AGENT` in the profile's project and hold a
+grant for the resolved Repo. Repo resolution uses an explicit `repoId` in that
+request, then the template's webhook Repo, then the project's sole Repo. A
+foreign Repo or a Repo that is not in the project returns
+`staffing_profile_repo_not_found`; no Repo or multiple project Repos without an
+explicit `repoId` returns `staffing_profile_repo_required`; a missing Agent
+grant returns `staffing_profile_missing_repo_grant`. A foreign, archived,
+non-Agent, or ungranted slot is refused rather than silently substituted;
+the mechanical merge-integrator is refused with `staffing_profile_integrator_binding`;
+`null` clears it.
 
-Validation refusals, in the order they are applied per entry:
+Validation refusals for step entries, in the order they are applied per entry:
 `staffing_profile_entry_duplicate` (the same output kind twice in one request),
 `staffing_profile_unknown_output_kind` (the template has no step producing it),
 `staffing_profile_include_not_optional` (an include flag on a step the template
@@ -1318,13 +1334,17 @@ step), `staffing_profile_step_control_plane` (staffing a step whose
 executes; the message names the step to remove, and an entry with
 `assigneeAgentId: null` for it stays allowed),
 `staffing_profile_agent_not_found` (no such Agent in this project),
-`staffing_profile_agent_archived`, `staffing_profile_integrator_binding` (the
-merge-execution step binds only `merge-integrator`, and `merge-integrator` binds
-nothing else), and `staffing_profile_compound_implementation` (the compound
-implementation root requires an assignee whose effective runner is Codex and
-whose model is a `gpt-*` one). `staffing_profile_step_control_plane` returns `400 Bad Request` with the same
-`{ error, code, outputKind }` body shape as `staffing_profile_step_not_agent`.
-The other eight return `422 Unprocessable Content`.
+`staffing_profile_agent_archived`, `staffing_profile_repo_not_found`,
+`staffing_profile_repo_required`, and `staffing_profile_missing_repo_grant`
+(the merge-tail slot's Repo context and grant checks),
+`staffing_profile_integrator_binding` (the merge-execution step binds only
+`merge-integrator`, and `merge-integrator` binds nothing else), and
+`staffing_profile_compound_implementation` (the compound implementation root
+requires an assignee whose effective runner is Codex and whose model is a
+`gpt-*` one). `staffing_profile_step_control_plane` returns `400 Bad Request`
+with the same `{ error, code, outputKind }` body shape as
+`staffing_profile_step_not_agent`. All other listed validation refusals return
+`422 Unprocessable Content`.
 
 A profile saved before `staffing_profile_step_control_plane` existed is not
 migrated: it keeps its stored entry until the next write, which is refused with
@@ -1338,7 +1358,8 @@ one Agent both implements and reviews under the saved plan.
 
 - Required path parameters: `projectId`, `templateId`.
 - Returns `200 OK` with the template's profiles, the default first and the rest
-  by name, each with its ordered `entries`.
+  by name, each with its ordered `entries` and nullable
+  `mergeTailRepairAgentId`.
 - Refusal: `404 Not Found` with code `staffing_profile_template_not_found` when
   the template is not in the addressed project.
 
@@ -1355,9 +1376,12 @@ curl "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffing-profil
   each `{ "outputKind", "assigneeAgentId"?, "include"? }`). The saved entry list
   is the submitted one plus an `include: true` entry for every optional step it
   did not name.
-- Optional JSON field: `isDefault`. The first profile of a template is always
-  its default regardless of this field; setting it on a later profile clears
-  the previous default in the same transaction.
+- Optional JSON fields: `isDefault`, `mergeTailRepairAgentId` (nullable), and
+  `repoId`. The first profile of a template is always its default regardless of
+  `isDefault`; setting it on a later profile clears the previous default in the
+  same transaction. A non-null merge-tail slot is validated against the Repo
+  selected by `repoId`, the template webhook Repo, or the project's sole Repo,
+  in that order.
 - Returns `201 Created` with `{ "profile": <profile>, "warnings": [...] }`.
 - Refusals: `404 Not Found` with code `staffing_profile_template_not_found`;
   `409 Conflict` with code `staffing_profile_name_taken` when the template
@@ -1366,7 +1390,7 @@ curl "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffing-profil
 ```sh
 curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffing-profiles" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"Fast lane","entries":[{"outputKind":"implementation","assigneeAgentId":"'$AGENT_ID'"},{"outputKind":"blind-findings","include":false}]}'
+  -d '{"name":"Fast lane","entries":[{"outputKind":"implementation","assigneeAgentId":"'$AGENT_ID'"},{"outputKind":"blind-findings","include":false}],"mergeTailRepairAgentId":"'$REPAIR_AGENT_ID'","repoId":"'$REPO_ID'"}'
 ```
 
 ### PUT `/staffing-profiles/:profileId`
@@ -1376,6 +1400,14 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffin
   stored one whole; an omitted output kind loses its opinion rather than
   keeping the previous one, except that every optional step of the template is
   still stored with a boolean `include`, defaulting to `true`.
+- Optional JSON fields: `mergeTailRepairAgentId`, a nullable Agent id for the
+  detached `review-fix` and `gate-fix` repair cards, and `repoId`, the optional
+  Repo context used to validate a non-null slot. Omitting
+  `mergeTailRepairAgentId` preserves the stored slot, even if its Agent has since
+  been archived, and does not require a new
+  `repoId`; sending `null` clears the slot. When a non-null slot is sent, Repo
+  selection is `repoId`, then the template webhook Repo, then the project's
+  sole Repo.
 - Default membership is not part of this body; `PATCH` owns that transition.
 - Returns `200 OK` with `{ "profile": <profile>, "warnings": [...] }`.
 - Refusals: `404 Not Found` with code `staffing_profile_not_found`;
@@ -1385,7 +1417,7 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffin
 ```sh
 curl -X PUT "$BASE_URL/staffing-profiles/$PROFILE_ID" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"name":"Fast lane","entries":[{"outputKind":"implementation","assigneeAgentId":"'$AGENT_ID'"}]}'
+  -d '{"name":"Fast lane","entries":[{"outputKind":"implementation","assigneeAgentId":"'$AGENT_ID'"}],"mergeTailRepairAgentId":"'$REPAIR_AGENT_ID'","repoId":"'$REPO_ID'"}'
 ```
 
 ### PATCH `/staffing-profiles/:profileId`
@@ -1421,8 +1453,21 @@ curl -X DELETE "$BASE_URL/staffing-profiles/$PROFILE_ID" \
 ### POST `/staffing-profiles/:profileId/reset`
 
 - Required path parameter: `profileId`.
+- Optional JSON body: `repoId`, used as the Repo context when the canonical
+  merge-tail repair slot is non-null. An empty body remains valid for the
+  historical reset behavior; without `repoId`, the template webhook Repo or
+  the project's sole Repo is selected. If neither resolves a Repo, reset succeeds
+  with `merge_tail_repair_repo_unresolved` in `warnings` and skips the canonical
+  slot's grant check. An explicit foreign Repo or missing grant still refuses.
 - Replaces the profile's entries with the template's canonical plan: every
-  step's own `assigneeAgentId`, and every optional step included.
+  step's own `assigneeAgentId`, and every optional step included. It also
+  restores the canonical `mergeTailRepairAgentId`; the active direct, PR, and
+  compound canonical profiles set that slot to `senior-dev-luna-max`.
+- If the canonical repair Agent is missing or archived, reset restores the step
+  entries, clears the repair slot, and returns a `merge_tail_repair_agent_unavailable`
+  warning. Profile entry overrides pointing to that unavailable canonical Agent
+  are also cleared to null; template step bindings remain unchanged. Explicit
+  create/PUT assignments still refuse unavailable Agents.
 - Returns `200 OK` with `{ "profile": <profile>, "warnings": [...] }`.
 - Refusal: `404 Not Found` with code `staffing_profile_not_found`.
 
@@ -1975,11 +2020,23 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/resume" \
   `repairAttempt` marker is refused as already open.
 - The accepted operation is one serializable transaction under the Chain lock.
   It charges the existing automatic repair budget, creates the ordinary
-  detached repair task assigned to the Chain's fixed-implementation agent,
-  writes the corresponding `repairAttempt` marker, transitions the aggregate
-  to `REPAIRING`, clears `failureReason`, and records the operator activity on
-  the regression task. It never writes a `repairResult`; the genuine repair
-  completion does that.
+  detached repair task, writes the corresponding `repairAttempt` marker,
+  transitions the aggregate to `REPAIRING`, clears `failureReason`, and
+  records the operator activity on the regression task. It never writes a
+  `repairResult`; the genuine repair completion does that.
+- For `review-fix` and `gate-fix`, the repair Agent is resolved from the
+  profile selected when the Chain was instantiated. The lookup uses the Chain
+  root's first TaskActivity metadata `staffingProfileId`; when that metadata
+  is absent (including a Chain created before staffing profiles or one that
+  recorded none), it uses the template's default profile. A recorded profile
+  id is never replaced by another profile if that row no longer resolves. A
+  non-null profile `mergeTailRepairAgentId` wins. An empty slot falls back to
+  the Chain's `fixed-implementation` Agent. If the selected slot Agent has
+  since been archived, the same fixed-implementation fallback is used and a
+  `TaskActivity` records why. Operator reentry through this route uses this
+  same lookup, so it agrees with automatic repair creation. `refresh-conflict`
+  remains staffed by `MERGE_RESOLVER_ROLE`, and repair cards that already
+  exist keep their assignee.
 - Refusals are `409 Conflict` JSON responses with a typed `code` and no side
   effect:
 
@@ -1999,10 +2056,10 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/resume" \
   - `merge_tail_repair_already_open`: a repair attempt for this recovery
     `sourceRunId` is already present. This takes precedence over the aggregate
     having already moved to `REPAIRING`.
-  - `merge_tail_repair_unstaffed`: the Chain has no fixed-implementation step or that step staffs no Agent,
-    so no Agent it staffed owns this repair. Nothing is substituted for the
-    missing step.
-  - `merge_tail_repair_creation_failed`: the fixed-implementation agent is
+  - `merge_tail_repair_unstaffed`: the profile slot is empty and the Chain has
+    no fixed-implementation Agent to use as the fallback, so no Agent can be
+    resolved for this repair. Nothing is substituted for the missing binding.
+  - `merge_tail_repair_creation_failed`: the resolved repair Agent is
     unavailable, lacks the repository grant, or the detached repair task cannot
     resolve the Chain repository, position, and shared branch.
 

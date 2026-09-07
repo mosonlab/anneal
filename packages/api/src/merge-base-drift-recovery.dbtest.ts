@@ -1372,3 +1372,43 @@ test("a settle after a re-validate opens a fresh answerable card instead of dedu
     "ANSWERED",
   );
 });
+
+for (const outcome of ["review-fail", "gate-fail"] as const) {
+  for (const slot of ["recorded", "default", "empty", "archived", "operator", "webhook"] as const) {
+    test(`operator ${outcome} repair uses ${slot} profile staffing`, async () => {
+      const seeded = await prepareBlockedRecovery("canonical-direct", `profile-${outcome}-${slot}`, outcome);
+      const repairAgent = await db.agent.create({ data: {
+        projectId: seeded.project.id, environmentId: seeded.agent.environmentId,
+        name: "residual-repair", title: "Residual repair", model: "gpt-5.6-luna:max",
+        runnerPreference: "CODEX", foundationalPrompt: "foundation", rolePrompt: "repair",
+        ...(slot === "archived" ? { archivedAt: new Date() } : {}),
+      } });
+      await db.agentRepoAccess.create({ data: {
+        projectId: seeded.project.id, agentId: repairAgent.id, repoId: seeded.repo.id,
+        mountPath: seeded.repo.mountPath, permissions: "GIT_WRITE",
+      } });
+      const profile = await db.staffingProfile.create({ data: {
+        projectId: seeded.project.id, taskTemplateId: seeded.template.id, name: "Repair staffing",
+        isDefault: slot === "default", mergeTailRepairAgentId: slot === "empty" ? null : repairAgent.id,
+      } });
+      if (slot !== "default") {
+        const root = await db.task.findFirstOrThrow({ where: { chainId: seeded.chainId }, orderBy: { chainIndex: "asc" } });
+        await db.taskActivity.create({ data: {
+          taskId: root.id, actorType: slot === "operator" || slot === "webhook" ? slot : "control-plane", body: "Template instantiated",
+          metadata: { staffingProfileId: profile.id },
+        } });
+      }
+      if (slot !== "default") {
+        await db.staffingProfile.create({ data: {
+          projectId: seeded.project.id, taskTemplateId: seeded.template.id,
+          name: "Later default", isDefault: true, mergeTailRepairAgentId: seeded.agent.id,
+        } });
+      }
+      const response = await requestRecoveryRepair(seeded.gateTask.id, `profile-${outcome}-${slot}`);
+      const result = await response.json() as { repairTaskId: string };
+      assert.equal(response.status, 200, JSON.stringify(result));
+      const repair = await db.task.findUniqueOrThrow({ where: { id: result.repairTaskId } });
+      assert.equal(repair.assigneeAgentId, slot === "empty" || slot === "archived" ? seeded.agent.id : repairAgent.id);
+    });
+  }
+}

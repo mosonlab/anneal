@@ -4,6 +4,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import { DependencyProvisioning, type PrismaClient } from "@anneal/db";
 
+import { mergeTailRepairAssignee } from "./merge-tail-actions.js";
 import { createApp } from "./test-app.js";
 import { encryptSecret } from "./secrets.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -388,3 +389,44 @@ test("a malformed JSON body on fire is a named 400 refusal", async () => {
   // An empty body is still the `Fire now` happy path and must keep working.
   assert.equal((await call("POST", `/task-templates/${template.id}/fire`)).status, 201);
 });
+
+for (const source of ["manual", "webhook"] as const) {
+  test(`${source} repairs retain the instantiated default after another profile is promoted`, async () => {
+    const { project, template, agent } = await seedTrigger(`profile-${source}`);
+    const profile = await db.staffingProfile.create({ data: {
+      projectId: project.id, taskTemplateId: template.id, name: "A", isDefault: true,
+      mergeTailRepairAgentId: agent.id,
+    } });
+    const response = source === "manual"
+      ? await call("POST", `/task-templates/${template.id}/fire`)
+      : await (async () => {
+        const result = await createApp(db).request(`/hooks/templates/${template.id}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Anneal-Webhook-Secret": "wh-secret-batch25" },
+          body: JSON.stringify({ issue: { title: "Profile provenance" } }),
+        });
+        return { status: result.status, body: await result.json() };
+      })();
+    assert.equal(response.status, 201, JSON.stringify(response.body));
+    const root = await db.task.findFirstOrThrow({
+      where: { chainId: response.body.chainId }, orderBy: { chainIndex: "asc" },
+    });
+    const provenance = await db.taskActivity.findFirstOrThrow({
+      where: { taskId: root.id, body: { startsWith: "Template instantiated" } },
+    });
+    assert.equal(provenance.actorType, source === "manual" ? "operator" : "webhook");
+    await db.staffingProfile.update({ where: { id: profile.id }, data: { isDefault: false } });
+    const other = await db.staffingProfile.create({ data: {
+      projectId: project.id, taskTemplateId: template.id, name: "B", isDefault: true,
+    } });
+    await db.taskActivity.create({ data: {
+      taskId: root.id, actorType: "operator", body: "Ordinary note with colliding metadata",
+      metadata: { staffingProfileId: other.id },
+    } });
+    for (const repairKind of ["review-fix", "gate-fix"] as const) {
+      assert.deepEqual(await db.$transaction((tx) => mergeTailRepairAssignee(tx, {
+        projectId: project.id, templateId: template.id, chainId: root.chainId, repairKind,
+      })), { kind: "agent", agentId: agent.id, label: agent.name });
+    }
+  });
+}
