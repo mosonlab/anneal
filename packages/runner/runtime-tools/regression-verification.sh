@@ -146,30 +146,124 @@ fetch_base() {
 }
 
 write_state() {
-  local verified_head="$1" base_head="$2"
+  local verified_head="$1" base_head="$2" semantic_verdict="${3:-}" semantic_source_run_id="${4:-}"
   valid_sha "$verified_head" && valid_sha "$base_head" || die "refusing malformed regression state"
+  if [ "$semantic_verdict" = "reused" ]; then
+    [ -n "$semantic_source_run_id" ] || die "refusing reused regression state without a source Run"
+    [[ ! "$semantic_source_run_id" =~ [[:space:]] ]] \
+      || die "refusing reused regression state with a malformed source Run id"
+  fi
   umask 077
   printf 'verifiedHeadSha=%s\nbaseHeadSha=%s\n' "$verified_head" "$base_head" > "$STATE_FILE"
+  if [ "$semantic_verdict" = "reused" ] && [ -n "$semantic_source_run_id" ]; then
+    printf 'semanticVerdict=reused\nsemanticSourceRunId=%s\n' "$semantic_source_run_id" >> "$STATE_FILE"
+  fi
 }
 
 read_state() {
+  local has_semantic_verdict=0 has_semantic_source=0
   [ -f "$STATE_FILE" ] || die "prepare has not recorded regression state"
   VERIFIED_HEAD_SHA="$(sed -n 's/^verifiedHeadSha=//p' "$STATE_FILE")"
   BASE_HEAD_SHA="$(sed -n 's/^baseHeadSha=//p' "$STATE_FILE")"
   valid_sha "$VERIFIED_HEAD_SHA" && valid_sha "$BASE_HEAD_SHA" \
     || die "recorded regression state is malformed"
+  grep -q '^semanticVerdict=' "$STATE_FILE" && has_semantic_verdict=1
+  grep -q '^semanticSourceRunId=' "$STATE_FILE" && has_semantic_source=1
+  SEMANTIC_VERDICT="$(sed -n 's/^semanticVerdict=//p' "$STATE_FILE")"
+  SEMANTIC_SOURCE_RUN_ID="$(sed -n 's/^semanticSourceRunId=//p' "$STATE_FILE")"
+  # A state file with no reuse markers is the normal fresh-review state. A
+  # partial marker is different: silently clearing it here could let finalize
+  # publish reused work as fresh after the model had already skipped review.
+  if [ "$has_semantic_verdict" -eq 0 ] && [ "$has_semantic_source" -eq 0 ]; then
+    SEMANTIC_VERDICT=""
+    SEMANTIC_SOURCE_RUN_ID=""
+  elif [ "$SEMANTIC_VERDICT" != "reused" ] || [ -z "$SEMANTIC_SOURCE_RUN_ID" ]; then
+    die "recorded regression reuse state is malformed"
+  elif [[ "$SEMANTIC_SOURCE_RUN_ID" =~ [[:space:]] ]]; then
+    die "recorded regression reuse source Run id is malformed"
+  fi
+}
+
+clear_reuse_state() {
+  # Keep the exact prepared-head binding so a later finalize still refuses a
+  # workspace that moved, while removing the only marker that could authorize
+  # a reused semantic verdict.
+  write_state "$VERIFIED_HEAD_SHA" "$BASE_HEAD_SHA"
+  SEMANTIC_VERDICT=""
+  SEMANTIC_SOURCE_RUN_ID=""
 }
 
 json_verdict() {
   node -e '
-const [outcome, headSha, baseHeadSha, proofOrSummary, gateFailureExcerpt] = process.argv.slice(1);
+const [outcome, headSha, baseHeadSha, proofOrSummary, gateFailureExcerpt, semanticVerdict, semanticSourceRunId] = process.argv.slice(1);
+const semantic = semanticVerdict === "reused" && typeof semanticSourceRunId === "string" && semanticSourceRunId.length > 0
+  ? { semanticVerdict: "reused", semanticSourceRunId }
+  : {};
 const value = outcome === "pass"
   ? { schemaVersion: 2, outcome, headSha, baseHeadSha, gateVerdict: "PASS", gateProof: proofOrSummary }
   : outcome === "gate-fail"
     ? { schemaVersion: 2, outcome, headSha, baseHeadSha, gateVerdict: "FAIL", gateProof: proofOrSummary, summary: proofOrSummary.slice("MERGE GATE: FAIL (".length, -1), gateFailureExcerpt }
     : { schemaVersion: 2, outcome, headSha, baseHeadSha, summary: proofOrSummary };
-process.stdout.write(JSON.stringify(value));
-' "$1" "$2" "$3" "$4" "${5:-}"
+process.stdout.write(JSON.stringify({ ...value, ...semantic }));
+' "$1" "$2" "$3" "$4" "${5:-}" "${6:-}" "${7:-}"
+}
+
+# Decide semantic reuse from the immutable recovery snapshot handed to this
+# Run. The prior output is persisted control-plane evidence; transcript text is
+# deliberately not consulted. The prepared HEAD is supplied only after the
+# normal target refresh so a merge-created or otherwise moved head can never
+# inherit a verdict from a different diff.
+recovery_reuse_source() {
+  local prepared_head="$1" context="${AGENTOS_REGRESSION_RECOVERY_CONTEXT:-}" source
+  [ -n "$context" ] || return 0
+  source="$(printf '%s' "$context" | PREPARED_HEAD_SHA="$prepared_head" node -e '
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => { input += chunk; });
+process.stdin.on("end", () => {
+  const SHA = /^[0-9a-f]{40}$/u;
+  const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
+  const context = (() => { try { return object(JSON.parse(input)); } catch { return null; } })();
+  const prior = object(context?.priorOutput);
+  if (!context || !prior) return;
+  if (context.state !== "queued" || context.recoveryRunId !== process.env.AGENTOS_RUN_ID) return;
+  if (typeof context.currentBaseSha !== "string" || !SHA.test(context.currentBaseSha)) return;
+  if (typeof context.authorizedHeadSha !== "string" || !SHA.test(context.authorizedHeadSha)) return;
+  if (context.authorizedHeadSha !== process.env.PREPARED_HEAD_SHA) return;
+  if (typeof prior.runId !== "string" || prior.runId.length === 0 || prior.runId === process.env.AGENTOS_RUN_ID) return;
+  if (prior.kind !== "regression-verification-v2") return;
+  if (typeof prior.commitSha !== "string" || !SHA.test(prior.commitSha)) return;
+  if (typeof prior.body !== "string") return;
+  let verdict;
+  try { verdict = object(JSON.parse(prior.body)); } catch { return; }
+  if (!verdict || verdict.schemaVersion !== 2) return;
+  // `pass` and `gate-fail` are the legacy persisted spellings for a semantic
+  // PASS. A semantic review-fail or refresh-conflict is never reusable, even
+  // when its head happens to match the recovery authorization.
+  if (verdict.outcome !== "pass" && verdict.outcome !== "gate-fail") return;
+  if (typeof verdict.headSha !== "string" || !SHA.test(verdict.headSha)) return;
+  if (typeof verdict.baseHeadSha !== "string" || !SHA.test(verdict.baseHeadSha)) return;
+  if (verdict.outcome === "pass") {
+    if (verdict.gateVerdict !== "PASS") return;
+    if (verdict.gateProof !== `MERGE GATE: PASS ${verdict.headSha}`) return;
+  } else {
+    if (verdict.gateVerdict !== "FAIL") return;
+    if (typeof verdict.summary !== "string" || verdict.summary.length === 0) return;
+    if (typeof verdict.gateProof !== "string" || !/^MERGE GATE: FAIL \(.+\)$/u.test(verdict.gateProof)) return;
+    if (Object.hasOwn(verdict, "gateFailureExcerpt") && typeof verdict.gateFailureExcerpt !== "string") return;
+  }
+  const hasReuseField = Object.hasOwn(verdict, "semanticVerdict") || Object.hasOwn(verdict, "semanticSourceRunId");
+  if (hasReuseField) {
+    if (verdict.semanticVerdict !== "reused" || typeof verdict.semanticSourceRunId !== "string"
+      || verdict.semanticSourceRunId.length === 0 || /[\s]/u.test(verdict.semanticSourceRunId)) return;
+  }
+  if (prior.commitSha !== verdict.headSha || verdict.headSha !== process.env.PREPARED_HEAD_SHA) return;
+  if (/[\s]/u.test(prior.runId)) return;
+  process.stdout.write(prior.runId);
+});
+')" || source=""
+  [ -n "$source" ] || return 0
+  printf '%s' "$source"
 }
 
 # Pull only the useful part of a failed worker log into the durable verdict. The
@@ -478,7 +572,7 @@ refresh_onto_target() {
 }
 
 prepare() {
-  local base_head result prepared_head output_dir
+  local base_head result prepared_head output_dir reuse_source
   output_dir="$(dirname "$OUTPUT_FILE")"
   [ ! -L "$output_dir" ] || die "refusing symlinked regression output directory"
   rm -f -- "$OUTPUT_FILE" || die "cannot clear stale regression output handoff"
@@ -487,12 +581,22 @@ prepare() {
   result=$?
   [ "$result" -eq 0 ] || return 0
   prepared_head="$(head_sha)" || die "cannot resolve prepared workspace HEAD"
-  write_state "$prepared_head" "$base_head"
-  printf 'REGRESSION PREPARE: ready %s %s\n' "$prepared_head" "$base_head"
+  reuse_source="$(recovery_reuse_source "$prepared_head")"
+  if [ -n "$reuse_source" ]; then
+    write_state "$prepared_head" "$base_head" reused "$reuse_source"
+    printf 'REGRESSION PREPARE: semantic-reused %s from %s\n' "$prepared_head" "$reuse_source"
+  else
+    write_state "$prepared_head" "$base_head"
+    printf 'REGRESSION PREPARE: ready %s %s\n' "$prepared_head" "$base_head"
+  fi
 }
 
 semantic_stale() {
   local target_head="$1" result refreshed_head
+  # A base move invalidates the prepare-time semantic reuse authorization even
+  # when refreshing the workspace later reports a conflict. Do not leave a
+  # skipped-review marker available to a subsequent finalize invocation.
+  [ "${SEMANTIC_VERDICT:-}" = "reused" ] && clear_reuse_state
   refresh_onto_target "$target_head"
   result=$?
   [ "$result" -eq 0 ] || return 0
@@ -508,6 +612,10 @@ review_fail() {
   read_state
   current="$(head_sha)" || die "cannot resolve review-fail workspace HEAD"
   [ "$current" = "$VERIFIED_HEAD_SHA" ] || die "workspace HEAD changed after prepare; rerun prepare and semantic verification"
+  # The model has now supplied a negative semantic verdict. Clear any
+  # prepare-time reuse marker before publishing it so a later accidental
+  # finalize cannot resurrect the skipped review as a PASS.
+  write_state "$current" "$BASE_HEAD_SHA"
   verdict="$(json_verdict review-fail "$current" "$BASE_HEAD_SHA" "$summary")"
   persist_output "$verdict" "$current"
   printf 'REGRESSION REVIEW-FAIL: persisted %s\n' "$current"
@@ -517,7 +625,10 @@ finalize() {
   local current latest gate_log gate_status gate_proof gate_failure_summary gate_failure_excerpt attempt verdict
   read_state
   current="$(head_sha)" || die "cannot resolve finalize workspace HEAD"
-  [ "$current" = "$VERIFIED_HEAD_SHA" ] || die "workspace HEAD changed after semantic verification"
+  if [ "$current" != "$VERIFIED_HEAD_SHA" ]; then
+    [ "$SEMANTIC_VERDICT" = "reused" ] && clear_reuse_state
+    die "workspace HEAD changed after semantic verification"
+  fi
 
   # Most drift is discovered and integrated before acquire, so no other chain
   # queues behind a tree that still needs another model pass.
@@ -557,7 +668,7 @@ finalize() {
 
   case "$gate_proof" in
     "MERGE GATE: PASS $current")
-      verdict="$(json_verdict pass "$current" "$BASE_HEAD_SHA" "$gate_proof")"
+      verdict="$(json_verdict pass "$current" "$BASE_HEAD_SHA" "$gate_proof" "" "$SEMANTIC_VERDICT" "$SEMANTIC_SOURCE_RUN_ID")"
       persist_output "$verdict" "$current"
       printf 'REGRESSION FINALIZE: pass %s\n' "$current"
       ;;
@@ -566,7 +677,7 @@ finalize() {
       gate_failure_summary="${gate_failure_summary%)}"
       gate_failure_excerpt="$(extract_gate_failure_excerpt "$gate_log" "$gate_failure_summary")" \
         || die "could not extract gate failure excerpt from gate log"
-      verdict="$(json_verdict gate-fail "$current" "$BASE_HEAD_SHA" "$gate_proof" "$gate_failure_excerpt")"
+      verdict="$(json_verdict gate-fail "$current" "$BASE_HEAD_SHA" "$gate_proof" "$gate_failure_excerpt" "$SEMANTIC_VERDICT" "$SEMANTIC_SOURCE_RUN_ID")"
       persist_output "$verdict" "$current"
       printf 'REGRESSION FINALIZE: gate-fail %s\n' "$current"
       ;;
