@@ -555,9 +555,36 @@ export const parseMergeTrainRecord = (
   };
 };
 
-export const parseResolverResult = (
-  body: string | null | undefined,
-): { status: "ok"; result: ResolverResult } | { status: "invalid"; reason: string } => {
+/**
+ * Why one resolver output was refused, with the key that carries the fault. The
+ * key is persisted on the repair task so an operator reads which field failed
+ * instead of the parser.
+ */
+export type ResolverRejection = { status: "invalid"; reason: string; key: string };
+
+export type ResolverParse = { status: "ok"; result: ResolverResult } | ResolverRejection;
+
+const resolverRejection = (key: string, reason: string): ResolverRejection => ({
+  status: "invalid",
+  key,
+  reason: `merge-resolver-opus-medium ${reason}`,
+});
+
+/**
+ * One `tradeOffs` entry in its stored string form, or null when the entry is
+ * neither a string nor the structured shape the role prompt allows. The prompt
+ * asks for "the exact trade-off", which a model reasonably renders as an object
+ * per file; both readings are accepted and only the string form leaves here.
+ */
+const resolverTradeOff = (entry: unknown): string | null => {
+  if (typeof entry === "string") return entry;
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return null;
+  const { file, decision } = entry as Record<string, unknown>;
+  if (typeof file !== "string" || typeof decision !== "string") return null;
+  return `${file}: ${decision}`;
+};
+
+export const parseResolverResult = (body: string | null | undefined): ResolverParse => {
   let value: Record<string, unknown> | null = null;
   try {
     const parsed = JSON.parse(body ?? "null") as unknown;
@@ -565,27 +592,47 @@ export const parseResolverResult = (
       ? parsed as Record<string, unknown>
       : null;
   } catch {
-    return { status: "invalid", reason: "merge-resolver-opus-medium output is not valid JSON" };
+    return resolverRejection("body", "output is not valid JSON");
   }
-  if (!value || value.schemaVersion !== 1 || (value.outcome !== "resolved" && value.outcome !== "unable")) {
-    return { status: "invalid", reason: "merge-resolver-opus-medium output has an unknown schema or outcome" };
+  if (!value) return resolverRejection("body", "output is not a JSON object");
+  if (value.schemaVersion !== 1) return resolverRejection("schemaVersion", "output has an unknown schemaVersion");
+  if (value.outcome !== "resolved" && value.outcome !== "unable") {
+    return resolverRejection("outcome", "output has an unknown outcome");
   }
-  if (typeof value.startHeadSha !== "string" || !SHA.test(value.startHeadSha)
-    || typeof value.targetHeadSha !== "string" || !SHA.test(value.targetHeadSha)) {
-    return { status: "invalid", reason: "merge-resolver-opus-medium output is not bound to well-formed start and target heads" };
+  if (typeof value.startHeadSha !== "string" || !SHA.test(value.startHeadSha)) {
+    return resolverRejection("startHeadSha", "output has no well-formed startHeadSha");
+  }
+  if (typeof value.targetHeadSha !== "string" || !SHA.test(value.targetHeadSha)) {
+    return resolverRejection("targetHeadSha", "output has no well-formed targetHeadSha");
   }
   if (value.outcome === "unable") {
     if (typeof value.blockingContradiction !== "string" || value.blockingContradiction.trim().length === 0) {
-      return { status: "invalid", reason: "merge-resolver-opus-medium unable output has no blocking contradiction" };
+      return resolverRejection("blockingContradiction", "unable output has no blockingContradiction");
     }
     return { status: "ok", result: value as ResolverResult };
   }
-  if (typeof value.resolvedHeadSha !== "string" || !SHA.test(value.resolvedHeadSha)
-    || !Array.isArray(value.tradeOffs) || !value.tradeOffs.every((entry) => typeof entry === "string")
-    || !Array.isArray(value.changedTestExpectations) || !value.changedTestExpectations.every((entry) => typeof entry === "string")) {
-    return { status: "invalid", reason: "merge-resolver-opus-medium resolved output is malformed or has no resolved head" };
+  if (typeof value.resolvedHeadSha !== "string" || !SHA.test(value.resolvedHeadSha)) {
+    return resolverRejection("resolvedHeadSha", "resolved output has no well-formed resolvedHeadSha");
   }
-  return { status: "ok", result: value as ResolverResult };
+  if (!Array.isArray(value.tradeOffs)) {
+    return resolverRejection("tradeOffs", "resolved output tradeOffs is not an array");
+  }
+  const tradeOffs: string[] = [];
+  for (const entry of value.tradeOffs as unknown[]) {
+    const tradeOff = resolverTradeOff(entry);
+    if (tradeOff === null) {
+      return resolverRejection(
+        "tradeOffs",
+        "resolved output tradeOffs entries are not each a string or an object with string file and decision",
+      );
+    }
+    tradeOffs.push(tradeOff);
+  }
+  if (!Array.isArray(value.changedTestExpectations)
+    || !value.changedTestExpectations.every((entry) => typeof entry === "string")) {
+    return resolverRejection("changedTestExpectations", "resolved output changedTestExpectations entries are not each a string");
+  }
+  return { status: "ok", result: { ...value, tradeOffs } as ResolverResult };
 };
 
 export type MergeReadinessStepShape = {

@@ -25,4 +25,10 @@ versioned JSON result:
 - resolved: `{"schemaVersion":1,"outcome":"resolved","startHeadSha":"<40 hex>","targetHeadSha":"<40 hex>","resolvedHeadSha":"<40 hex>","tradeOffs":[],"changedTestExpectations":[]}`
 - unable: `{"schemaVersion":1,"outcome":"unable","startHeadSha":"<40 hex>","targetHeadSha":"<40 hex>","blockingContradiction":"<reason>"}`
 
+`tradeOffs` and `changedTestExpectations` are arrays of strings: one string per
+entry, never an object and never a nested array. Write each trade-off as
+`<file>: <decision> — <reason>`, for example
+`packages/db/src/merge-tail.ts: kept main's fail-loud rejection — the branch's
+silent fallback contradicts current main's stated goal`.
+
 Do not claim resolution without a committed merge and green affected tests.
