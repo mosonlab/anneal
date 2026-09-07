@@ -23,8 +23,8 @@ test("nextIntervalMs holds 2.5s, then doubles per empty poll up to the ceiling",
 });
 
 const invalidPages: [string, unknown][] = [
-  ["retired bare array", [row(1)]],
   ["null", null],
+  ["array body", [row(1)]],
   ["missing events", { hasMore: false, total: 1 }],
   ["wrong events", { events: {}, hasMore: false, total: 1 }],
   ["missing hasMore", { events: [row(1)], total: 1 }],
