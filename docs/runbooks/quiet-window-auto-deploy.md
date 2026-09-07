@@ -73,28 +73,30 @@ from the deployment's `.env`. A control-plane host with local runners and no
 The scheduler still wakes the auto-deploy job every five minutes. A wake-up is
 only a tick: on the control-plane role, when `origin/main` has moved beyond the
 deployed release, the job also checks the time of the last successful automatic
-deploy recorded in the existing `.agentos-deploy` state. A runner-only host
-gets its target from the control plane's `/version`; the same cadence gate
-applies. `AUTO_DEPLOY_MIN_INTERVAL_MINUTES` in `shared/.env` sets the minimum
-interval for both host profiles and defaults to **240 minutes (four hours)**.
-The value is a floor, not a deployment schedule.
+deploy recorded in `.agentos-deploy/auto-deploy-state.json` as
+`lastSuccessfulAutomaticDeployAt`. `AUTO_DEPLOY_MIN_INTERVAL_MINUTES` in
+`shared/.env` sets the minimum interval and defaults to **240 minutes (four
+hours)**. Both host roles read the same positive whole-minute setting; a
+runner-only host retains its existing `/version` follow behavior. The cadence
+floor applies to control-plane automatic deploys, on Linux or macOS.
 
 If the interval has elapsed, the tick enters the normal artifact, quiet-window,
 and activation path. A tick may deploy earlier when its first quiet-window
 query is already open (`blockers=0`); this natural quiet window is the one
 early-deploy exception to the interval floor. When the control-plane `main`
-target has moved, or the runner's `/version` target has changed, but the
-interval has not elapsed and blockers remain, the tick does no build, wait, or
+target has moved but the interval has not elapsed and blockers remain, the tick does no build, wait, or
 dispatch drain. It logs
 `NOOP coalescing next-eligible=<time>` and exits; `next-eligible` is the last
 successful automatic deploy time plus the configured interval. A host with no
 recorded successful automatic deploy is eligible for its first attempt.
 
-The wait budget and its dispatch drain are entered only after the interval is
-eligible. A natural quiet window found at tick time proceeds without either
-one. The setting is read from each host's `shared/.env`, so Linux and macOS
-deploy jobs use the same configured interval even though their service
-schedulers are different.
+For control-plane deploys, the wait budget and its dispatch drain are entered
+only after the interval is eligible. A natural quiet window found at tick time
+proceeds without either one. If blockers appear or the barrier is contended
+before that early window is secured, the tick coalesces instead of waiting.
+The success timestamp is written after verification, notification, and resource
+cleanup succeed, while the deploy process lock is still held. Failed attempts
+and coalesced ticks do not advance it.
 
 ## Runtime layout
 
@@ -417,7 +419,7 @@ launchctl print "gui/$(id -u)/com.agentos.auto-deploy"
 The macOS plist runs `current/scripts/deploy/quiet-window-deploy.mjs` with the
 source remote and absolute toolchain recorded, logs under
 `~/Library/Logs/Anneal`, runs at load, and wakes every five minutes. Each wake
-is subject to the [automatic deploy cadence](#automatic-deploy-cadence), so
+on the control-plane role is subject to the [automatic deploy cadence](#automatic-deploy-cadence), so
 the timer is not a promise to build or deploy every five minutes. The
 installer refuses to overwrite a different existing definition. A runner-only
 host does not need database backup arguments because its backup phase is
@@ -479,9 +481,9 @@ the existing post-barrier `/version` check described in [Runner-only host](#runn
     before recording `VERIFIED` and `SUCCEEDED`, then write the success Inbox
     record.
 
-The sequence has no install, compile, source-checkout mutation, or
-multi-directory publication. The activation unit is the verified release
-directory selected by the pointer.
+Artifact construction, including a refreshed target's rebuild, uses the
+disposable builder directory. Service activation uses the verified release
+directory selected by the pointer and never mutates the source checkout.
 
 ### Post-restart observation window
 
@@ -510,8 +512,8 @@ waits until the platform is quiet for agent work. Mechanical merge execution
 and readiness evaluation are not blockers. The wait is measured, and crossing
 a budget tells the operator without changing when the deploy proceeds.
 
-This step is reached after the cadence gate admits an interval-eligible
-attempt. A tick that is coalesced exits before the wait, and a tick whose first
+On the control-plane role, this step is reached after the cadence gate admits
+an interval-eligible attempt. A tick that is coalesced exits before the wait, and a tick whose first
 query finds a natural quiet window proceeds early without opening the wait
 budget or a dispatch drain.
 
@@ -638,8 +640,9 @@ preflight, migration, Prisma Client generation, prompt sync, backup, and
 service control are budgeted independently. A deadline sends `SIGTERM`, then
 `SIGKILL` if needed, and becomes a `DeployFailure`.
 
-The deploy barrier has an independent watchdog beginning at acquisition. It
-covers hangs outside a child command; expiry is logged, written to
+The deploy barrier has an independent watchdog beginning at acquisition. Its
+control-plane budget includes the post-barrier target read and possible artifact
+rebuild; the runner-role budget is unchanged. It covers hangs outside a child command; expiry is logged, written to
 `.agentos-deploy/escalated.json`, and sent to the operator Inbox through the
 same escalation path as other failures.
 

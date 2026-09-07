@@ -71,10 +71,10 @@ curl "$BASE_URL/version"
 The auto-deploy scheduler wakes every five minutes on both host profiles, but
 each wake is only a tick. On the control-plane role, when `main` has moved, the
 tick consults the last successful automatic deploy recorded under
-`.agentos-deploy`; a runner-only deployment applies the same gate to its
-control-plane `/version` target. Both read
+`.agentos-deploy/auto-deploy-state.json`. Both host roles read
 `AUTO_DEPLOY_MIN_INTERVAL_MINUTES` from that host's `shared/.env` (default
-**240 minutes**). If the target has changed but the interval has not elapsed
+**240 minutes**); runner-only deployment retains its existing `/version`
+follow behavior. If main has changed but the interval has not elapsed
 and blockers remain, the tick coalesces, logs
 `NOOP coalescing next-eligible=<time>`, and does not enter the wait budget or
 open a dispatch drain. A quiet window already open at tick time (`blockers=0`)

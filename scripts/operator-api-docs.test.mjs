@@ -96,6 +96,9 @@ test("auto-deploy docs describe cadence, scoped draining, and target refresh", (
   }
   assert.match(quietWindowRunbook, /wait budget[\s\S]*dispatch drain[\s\S]*only after the interval/u);
   assert.match(quietWindowRunbook, /自动部署等待超时，已开始排空派发/u);
+  assert.match(quietWindowRunbook, /lastSuccessfulAutomaticDeployAt/u);
+  assert.match(quietWindowRunbook, /runner-only host retains its existing `\/version` follow behavior/u);
+  assert.match(serviceStatus, /runner-only deployment retains its existing `\/version`\s+follow behavior/u);
   assert.match(serviceStatus, /control-plane[\s\S]*re-reads\s*`origin\/main`[\s\S]*target-advanced/u);
   assert.match(runners, /only claims that would start an agent session[\s\S]*mechanical merge/u);
   assert.match(claims, /only a[\s\S]*candidate agent Run[\s\S]*agent session/u);
