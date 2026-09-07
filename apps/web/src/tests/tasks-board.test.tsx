@@ -468,9 +468,8 @@ test("a live run reads as its phase and the time in it; ended and absent runs ke
       updatedAt: "2026-08-15T21:12:00.000Z",
       latestRun: boardRun({ status: "QUEUED", phase: "queued", phaseSince: "2026-08-16T00:11:40.000Z" }),
     })), "Queued · 20s");
-    // Nothing records when an Inbox wait began: the phase is named and not
-    // timed, because a null start is unknown and never a zero.
-    assert.equal(cardTime(task({ latestRun: boardRun({ status: "WAITING_INBOX", startedAt: "2026-08-16T00:00:00.000Z" }) })), "Waiting on Inbox");
+    assert.equal(cardTime(task({ latestRun: boardRun({ status: "WAITING_INBOX", startedAt: "2026-08-16T00:00:00.000Z",
+      phase: "waiting-inbox", phaseSince: "2026-08-16T00:11:40.000Z" }) })), "Waiting on Inbox · 20s");
     // A finished run reads exactly as it did.
     assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: boardRun({ startedAt: "2026-08-16T00:00:00.000Z", endedAt: "2026-08-16T00:08:00.000Z" }) })), "8m 0s · 3h ago");
     assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z" })), "3h ago");
@@ -486,31 +485,49 @@ test("a mounted running card advances elapsed time while its props stay unchange
   const originalSetInterval = dom.window.setInterval;
   const originalClearInterval = dom.window.clearInterval;
   let now = new Date("2026-08-16T00:12:00.000Z").getTime();
-  let tick: (() => void) | null = null;
+  const ticks = new Set<() => void>();
+  const tick = () => { for (const callback of ticks) callback(); };
   Date.now = () => now;
   Object.defineProperty(dom.window, "setInterval", {
-    configurable: true, value: (run: () => void) => { tick = run; return 1; },
+    configurable: true, value: (run: () => void) => { ticks.add(run); return run; },
   });
-  Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: () => undefined });
+  Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: (run: () => void) => { ticks.delete(run); } });
   const root = (await reactDom()).createRoot(container);
   const running = task({ latestRun: boardRun({ status: "RUNNING", startedAt: "2026-08-16T00:00:00.000Z" }) });
+  let nameReads = 0;
+  Object.defineProperty(running, "name", { get: () => { nameReads++; return "Ship the thing"; } });
   try {
     await act(async () => root.render(<TaskCard task={running} actions={ACTIONS} />));
     assert.match(container.textContent ?? "", /Executing · 12m 0s/);
+    nameReads = 0;
     now += 60_000;
-    assert.ok(tick);
+    assert.ok(ticks.size);
     await act(async () => tick?.());
     assert.match(container.textContent ?? "", /Executing · 13m 0s/);
+    assert.equal(nameReads, 0, "the phase tick does not render the card body");
+    const waiting = task({ latestRun: boardRun({ status: "WAITING_INBOX", startedAt: "2026-08-16T00:00:00.000Z",
+      phase: "waiting-inbox", phaseSince: new Date(now - 20_000).toISOString() }) });
+    await act(async () => root.render(<TaskCard task={waiting} actions={ACTIONS} />));
+    assert.match(container.textContent ?? "", /Waiting on Inbox · 20s/);
+    now += 10_000;
+    await act(async () => tick());
+    assert.match(container.textContent ?? "", /Waiting on Inbox · 30s/);
     // A new phase restarts the clock: the footer counts time in the phase.
     const cleaning = task({
       latestRun: boardRun({
-        status: "RUNNING", startedAt: "2026-08-16T00:00:00.000Z",
+        status: "SUCCEEDED", startedAt: "2026-08-16T00:00:00.000Z",
+        endedAt: new Date(now - 5_000).toISOString(),
         phase: "cleanup", phaseSince: new Date(now - 5_000).toISOString(),
       }),
     });
     await act(async () => root.render(<TaskCard task={cleaning} actions={ACTIONS} />));
     assert.match(container.textContent ?? "", /Cleaning up · 5s/);
     assert.doesNotMatch(container.textContent ?? "", /13m/);
+    now += 10_000;
+    await act(async () => tick?.());
+    assert.match(container.textContent ?? "", /Cleaning up · 15s/);
+    await act(async () => root.render(<TaskCard task={{ ...cleaning, latestRun: { ...cleaning.latestRun!, phase: "finished" } }} actions={ACTIONS} />));
+    assert.doesNotMatch(container.textContent ?? "", /Cleaning up/);
   } finally {
     await act(async () => root.unmount());
     Date.now = originalNow;
@@ -518,6 +535,18 @@ test("a mounted running card advances elapsed time while its props stay unchange
     Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: originalClearInterval });
     dom.window.close();
   }
+});
+
+test("a queued fixture renders the server's dated phase", () => {
+  const latestRun = boardRun({ status: "QUEUED" });
+  assert.equal(latestRun.phaseSince, "2026-08-16T00:00:00.000Z");
+  const originalNow = Date.now;
+  Date.now = () => new Date("2026-08-16T00:00:20.000Z").getTime();
+  try { assert.match(card({ latestRun }), /Queued · 20s/); }
+  finally { Date.now = originalNow; }
+  const provisioning = boardRun({ status: "PROVISIONING" });
+  assert.equal(provisioning.phase, "provisioning");
+  assert.equal(provisioning.phaseSince, "2026-08-16T00:00:00.000Z");
 });
 
 test("a mounted card calls a run stalled while its props stay unchanged", async () => {
@@ -528,12 +557,13 @@ test("a mounted card calls a run stalled while its props stay unchanged", async 
   const originalSetInterval = dom.window.setInterval;
   const originalClearInterval = dom.window.clearInterval;
   let now = new Date("2026-08-16T00:12:00.000Z").getTime();
-  let tick: (() => void) | null = null;
+  const ticks = new Set<() => void>();
+  const tick = () => { for (const callback of ticks) callback(); };
   Date.now = () => now;
   Object.defineProperty(dom.window, "setInterval", {
-    configurable: true, value: (run: () => void) => { tick = run; return 1; },
+    configurable: true, value: (run: () => void) => { ticks.add(run); return run; },
   });
-  Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: () => undefined });
+  Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: (run: () => void) => { ticks.delete(run); } });
   const root = (await reactDom()).createRoot(container);
   const quiet = task({
     latestRun: boardRun({
@@ -745,6 +775,15 @@ test("a stalled run is badged with the threshold in its hover text", () => {
   assert.doesNotMatch(cardAt({
     latestRun: boardRun({ status: "RUNNING", startedAt: at(-20 * 60_000), lastProgressEventAt: null }),
   }), /data-card-badge/u);
+});
+
+test("terminal runs with an unknown execution end have no duration anomaly", () => {
+  for (const status of ["LOST", "FAILED"] as const) {
+    const latestRun = boardRun({ status, startedAt: at(-30 * 60_000), endedAt: null });
+    assert.equal(badge(cardAt({ baseline: BASELINE, latestRun }), "over-baseline"), null);
+    assert.equal(badge(cardAt({ baseline: BASELINE, latestRun: { ...latestRun, costUsd: "3" } }), "over-baseline"),
+      en("tasks.badge.overBaseline.title", { metric: en("tasks.badge.metric.cost"), n: 7 }));
+  }
 });
 
 test("an over-baseline run names the metric and the sample it was read against", () => {

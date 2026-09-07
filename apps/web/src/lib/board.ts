@@ -338,10 +338,16 @@ const overBaseline = (task: Pick<BoardTask, "baseline">, run: BoardLatestRun, no
   const { baseline } = task;
   if (baseline === null) return null;
   const cost = baseline.costUsd !== null && run.costUsd !== null && Number(run.costUsd) > 2 * baseline.costUsd.p50;
-  const duration = baseline.durationMs !== null && run.startedAt !== null
-    && (run.endedAt === null ? now : ms(run.endedAt)) - ms(run.startedAt) > 2 * baseline.durationMs.p50;
+  const executionEnd = run.endedAt === null
+    ? (run.phase === "executing" || run.phase === "waiting-inbox" ? now : null)
+    : ms(run.endedAt);
+  const duration = baseline.durationMs !== null && run.startedAt !== null && executionEnd !== null
+    && executionEnd - ms(run.startedAt) > 2 * baseline.durationMs.p50;
   if (!cost && !duration) return null;
-  return { kind: "over-baseline", metric: cost && duration ? "both" : cost ? "cost" : "duration", sampleSize: baseline.sampleSize };
+  return { kind: "over-baseline", metric: cost && duration ? "both" : cost ? "cost" : "duration", sampleSize: Math.min(
+    cost ? baseline.costUsd!.sampleSize : Infinity,
+    duration ? baseline.durationMs!.sampleSize : Infinity,
+  ) };
 };
 
 /**

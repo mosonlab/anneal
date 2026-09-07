@@ -1513,15 +1513,18 @@ boundaries `metrics.phases` measures between: `queued` from the Run's
 `readyAt`, `provisioning` from the Session's `provisionedAt`, `executing` from
 its `startedAt`, `cleanup` while `cleanupStartedAt` is set and
 `cleanupEndedAt` is not, and `finished` once the Session ended or the Run
-reached a terminal status. `phaseSince` is the ISO instant the Run entered that
-phase, and is `null` only for `waiting-inbox`: nothing records when an Inbox
-wait began, the same gap `metrics.phases.inboxWaitMs` reports as unknown, so no
-caller may render a time in phase for one. `lastProgressEventAt` is the last
+reached a terminal status. The current runner does not write
+`cleanupStartedAt`, so `cleanup` is currently unreachable in normal execution;
+the projection supports that milestone when recorded. `phaseSince` is the ISO instant the Run entered that
+phase. For `waiting-inbox` it is the creation time of the exact question
+referenced by `Session.waitingOnMessageId`, resolved in one batched lookup for
+the page; a missing question leaves it `null`. Historical total Inbox wait
+remains unknown because resume boundaries are not recorded. `lastProgressEventAt` is the last
 progress the owning runner reported for the Run — the signal its stall timeout
 is measured from — or `null` when none was reported. `maxRunsPerTask` is the
 attempt ceiling snapshotted at Run birth, which is what a card's retry count is
-read against rather than the task's configured budget of the moment. The whole page is answered by one grouped
-query, so the board's query count does not grow with the number of cards. Rows
+read against rather than the task's configured budget of the moment. Baselines
+for the whole page are answered by one grouped query, so the board's query count does not grow with the number of cards. Rows
 of the `full` view carry the same `baseline` field on the same terms, read by
 the same single grouped query.
 For a Chain member, the first emitted member also carries the

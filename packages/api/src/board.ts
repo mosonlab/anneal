@@ -153,6 +153,8 @@ export type BoardRow = {
       cachedInputTokens: number | null;
       cacheCreationInputTokens: number | null;
       outputTokens: number | null;
+      waitingOnMessageId?: string | null;
+      inboxWaitStartedAt?: Date | null;
       executionStatus: SessionExecutionStatus;
       provisionedAt: Date | null;
       startedAt: Date | null;
@@ -930,7 +932,7 @@ const boardChainRows = async (
               cachedInputTokens: true,
               cacheCreationInputTokens: true,
               outputTokens: true,
-              executionStatus: true,
+              waitingOnMessageId: true, executionStatus: true,
               provisionedAt: true,
               startedAt: true,
               endedAt: true,
@@ -1006,7 +1008,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
           session: {
             select: {
               nativeChildUsed: true, costUsd: true, inputTokens: true, cachedInputTokens: true,
-              cacheCreationInputTokens: true, outputTokens: true, executionStatus: true,
+              cacheCreationInputTokens: true, outputTokens: true, waitingOnMessageId: true, executionStatus: true,
               provisionedAt: true, startedAt: true, endedAt: true,
               cleanupStartedAt: true, cleanupEndedAt: true,
             },
@@ -1041,6 +1043,18 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
       primaryRows = [...byId.values()];
     }
   }
+
+  // Resolve the current wait by its exact question ID, in one page-wide query.
+  // Another message in the same Session must never reset this phase's clock.
+  const sessions = [...rows, ...primaryRows].flatMap((row) => (row.runs ?? []).flatMap((run) =>
+    run.session !== null && (run.status === "WAITING_INBOX" || run.session.executionStatus === "WAITING_INBOX")
+      ? [run.session] : []));
+  const questionIds = [...new Set(sessions.flatMap((session) => session.waitingOnMessageId ? [session.waitingOnMessageId] : []))];
+  const questions = questionIds.length === 0 ? [] : await db.inboxMessage.findMany({
+    where: { id: { in: questionIds } }, select: { id: true, createdAt: true },
+  });
+  const waitStarts = new Map(questions.map((question) => [question.id, question.createdAt]));
+  for (const session of sessions) session.inboxWaitStartedAt = waitStarts.get(session.waitingOnMessageId ?? "") ?? null;
 
   // A detached repair may recover complete primary facts, but it cannot be the
   // sole visible owner of a fully archived Chain. Keep repair aggregation when

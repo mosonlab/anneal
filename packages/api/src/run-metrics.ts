@@ -65,6 +65,8 @@ export type RunPhaseRun = {
  *  input so the board's projection selects six timestamps rather than every
  *  token and cost column the diagnostics read. */
 export type RunPhaseSession = {
+  /** Creation of the exact question referenced by Session.waitingOnMessageId. */
+  inboxWaitStartedAt?: Date | null;
   executionStatus: SessionExecutionStatus;
   provisionedAt: Date | null;
   startedAt: Date | null;
@@ -130,7 +132,7 @@ const round = (value: number, decimals: number): number => {
 
 /** The stored data marks *that* a session waited on the Inbox — the same
  *  signal the console's "includes Inbox wait" label reads — without recording
- *  when the wait started or ended. So the wait is 0 only when the session
+ *  all historical resume boundaries. So the wait is 0 only when the session
  *  demonstrably never waited, and otherwise unknown: reporting a bound this
  *  data cannot support would be worse than reporting nothing. */
 const inboxWaitMs = (session: RunMetricsSession | null): number | null => {
@@ -146,17 +148,17 @@ const inboxWaitMs = (session: RunMetricsSession | null): number | null => {
  *  "provisioning" ends up beside a diagnostics table that gave provisioning a
  *  duration and moved on.
  *
- *  Pure over the columns below, so the board's projection needs no clock and no
- *  query of its own. `phaseSince` is null only for `waiting-inbox`: nothing
- *  records when a wait began — the same gap `inboxWaitMs` reports as unknown —
- *  and a wait dated from the executing start would publish the run's whole
- *  working time as time spent waiting on a human. */
+ *  The board resolves the current question's creation time before calling this
+ *  helper. A missing question leaves its wait start unknown; historical total
+ *  Inbox wait remains unknown because resume boundaries are not recorded. */
 export type RunPhaseState = { phase: RunPhase; phaseSince: Date | null };
 
 export const runPhase = (
   run: RunPhaseRun,
   session: RunPhaseSession | null,
 ): RunPhaseState => {
+  // No current writer stamps cleanupStartedAt; this branch supports recorded
+  // milestones but is currently unreachable in normal runner execution.
   // Cleanup outranks the run's own terminality. The control plane settles a
   // run's status while the owning runner is still disposing of its workspace,
   // and "finished" over a workspace still being torn down answers the wrong
@@ -181,7 +183,7 @@ export const runPhase = (
     // enough to say the run is waiting rather than working — and reading only
     // one would let the card's status pill and its phase disagree.
     return session.executionStatus === "WAITING_INBOX" || run.status === "WAITING_INBOX"
-      ? { phase: "waiting-inbox", phaseSince: null }
+      ? { phase: "waiting-inbox", phaseSince: session.inboxWaitStartedAt ?? null }
       : { phase: "executing", phaseSince: session.startedAt };
   }
   if (session?.provisionedAt != null) return { phase: "provisioning", phaseSince: session.provisionedAt };

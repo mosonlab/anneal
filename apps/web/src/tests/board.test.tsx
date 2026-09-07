@@ -265,11 +265,23 @@ test("over baseline names the metric that fired, and needs a figure on both side
   assert.deepEqual(over(executing({ costUsd: "2.50" })), [{ ...overBoth, metric: "cost" }]);
   assert.deepEqual(over(executing({ startedAt: at(-11 * MINUTE) })), [{ ...overBoth, metric: "duration" }]);
   assert.deepEqual(over(executing({ costUsd: "2.50", startedAt: at(-11 * MINUTE) })), [overBoth]);
+  const unequal = baseline({ sampleSize: 20,
+    costUsd: { sampleSize: 9, p50: 1, p90: 2 },
+    durationMs: { sampleSize: 6, p50: 5 * MINUTE, p90: 8 * MINUTE },
+  });
+  assert.deepEqual(over(executing({ costUsd: "3" }), unequal), [{ ...overBoth, metric: "cost", sampleSize: 9 }]);
+  assert.deepEqual(over(executing({ startedAt: at(-11 * MINUTE) }), unequal), [{ ...overBoth, metric: "duration", sampleSize: 6 }]);
+  assert.deepEqual(over(executing({ costUsd: "3", startedAt: at(-11 * MINUTE) }), unequal), [{ ...overBoth, sampleSize: 6 }]);
   // Twice the median exactly is not over it.
   assert.deepEqual(over(executing({ costUsd: "2", startedAt: at(-10 * MINUTE) })), []);
   // A finished run is measured to its own end, not to now.
   assert.deepEqual(over(boardRun({ startedAt: at(-30 * MINUTE), endedAt: at(-22 * MINUTE) })), []);
   assert.deepEqual(over(boardRun({ startedAt: at(-30 * MINUTE), endedAt: at(-19 * MINUTE) })), [{ ...overBoth, metric: "duration" }]);
+  for (const status of ["LOST", "FAILED"] as const) {
+    const incomplete = boardRun({ status, startedAt: at(-30 * MINUTE), endedAt: null });
+    assert.deepEqual(over(incomplete), []);
+    assert.deepEqual(over({ ...incomplete, costUsd: "3" }), [{ ...overBoth, metric: "cost" }]);
+  }
   // Unknown on either side is no comparison: no baseline, a baseline with no
   // cost samples beside a run that is expensive, a run that never reported a
   // cost, and a run that has not started.

@@ -504,11 +504,9 @@ export type BoardLatestRun<DateTime = string> = {
   /** Which phase this Run is in, computed server-side by the one helper the
    *  detail page's phase durations also go through. */
   phase: RunPhase;
-  /** When the Run entered `phase`, which is what a card counts time in phase
-   *  from. Null is *unknown*: a `waiting-inbox` Run is the case the stored data
-   *  cannot date, for the same reason `RunPhaseMetrics.inboxWaitMs` is null
-   *  there — nothing records when the wait began. No caller may render a null
-   *  as a duration. */
+  /** When the Run entered `phase`. For waiting-inbox, the creation timestamp
+   *  of Session.waitingOnMessageId's question. Null if that question is missing;
+   *  no caller may render an unknown start as a duration. */
   phaseSince: DateTime | null;
   /** The last progress the owning runner reported for this Run, which is the
    *  same signal its stall timeout is measured from. Null when none was ever

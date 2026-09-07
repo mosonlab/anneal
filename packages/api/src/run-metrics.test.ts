@@ -128,6 +128,14 @@ test("the phase a run is named by is the phase its executing clock is measured t
   assert.equal(metricsOf().phases.executingMs, 100_000);
 });
 
+test("the shared phase helper uses the current question timestamp for an Inbox wait", () => {
+  const waiting = session({ executionStatus: "WAITING_INBOX", endedAt: null,
+    cleanupStartedAt: null, cleanupEndedAt: null, inboxWaitStartedAt: at(30_000) });
+  const run = { readyAt: READY, status: "WAITING_INBOX" as const, endedAt: null };
+  assert.deepEqual(runPhase(run, waiting), { phase: "waiting-inbox", phaseSince: at(30_000) });
+  assert.deepEqual(runPhase(run, { ...waiting, inboxWaitStartedAt: null }), { phase: "waiting-inbox", phaseSince: null });
+});
+
 test("a live run measures executingMs to now and leaves cleanup unknown", () => {
   const now = new Date(STARTED.getTime() + 42_000);
   const live = metricsOf({

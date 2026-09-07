@@ -738,12 +738,10 @@ test("every phase a run can be in is named, and dated from the timestamp that op
     phaseOf(phaseRun("RUNNING", { provisionedAt: PROVISIONED, startedAt: STARTED, executionStatus: "RUNNING" })),
     { phase: "executing", phaseSince: STARTED },
   );
-  // Nothing records when an Inbox wait began, so the wait is named and left
-  // undated rather than dated from the executing start — which would publish
-  // the run's whole working time as time spent waiting on a human.
+  // The current question dates this wait, independently of execution start.
   assert.deepEqual(
-    phaseOf(phaseRun("WAITING_INBOX", { provisionedAt: PROVISIONED, startedAt: STARTED, executionStatus: "WAITING_INBOX" })),
-    { phase: "waiting-inbox", phaseSince: null },
+    phaseOf(phaseRun("WAITING_INBOX", { provisionedAt: PROVISIONED, startedAt: STARTED, executionStatus: "WAITING_INBOX", inboxWaitStartedAt: SESSION_ENDED })),
+    { phase: "waiting-inbox", phaseSince: SESSION_ENDED },
   );
   // Cleanup outranks the run's own terminality: the control plane settles the
   // status while the runner is still disposing of the workspace.
@@ -760,6 +758,24 @@ test("every phase a run can be in is named, and dated from the timestamp that op
     })),
     { phase: "finished", phaseSince: CLEANUP_ENDED },
   );
+});
+
+test("readBoard dates current Inbox waits with one lookup of the exact question IDs", async () => {
+  const rows = ["first", "second"].map((id) => row({ id, runs: [phaseRun("WAITING_INBOX", {
+    startedAt: STARTED, executionStatus: "WAITING_INBOX", waitingOnMessageId: id,
+  })] }));
+  const { db } = boardReadDatabase({ rows });
+  const lookups: unknown[] = [];
+  Object.assign(db, { inboxMessage: { findMany: async (args: unknown) => {
+    lookups.push(args);
+    return [{ id: "first", createdAt: SESSION_ENDED }, { id: "second", createdAt: CLEANUP_STARTED }];
+  } } });
+  const cards = await readBoard(db, { projectId: "p1", archived: "false" });
+  assert.deepEqual(lookups, [{ where: { id: { in: ["first", "second"] } }, select: { id: true, createdAt: true } }]);
+  const wire = JSON.parse(JSON.stringify(cards));
+  assert.equal(wire[0].latestRun.phaseSince, SESSION_ENDED.toISOString());
+  assert.equal(wire[1].latestRun.phaseSince, CLEANUP_STARTED.toISOString());
+  assert.equal(wire[0].latestRun.phase, "waiting-inbox");
 });
 
 test("a settled run is finished whatever milestone its session stopped at", () => {
