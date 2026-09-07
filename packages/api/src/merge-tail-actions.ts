@@ -747,18 +747,36 @@ export const settleMergeTailCompletion = async (
     const parsedResolver = parseResolverResult(repairOutput?.body);
     const expectedStart = repairMarker.headSha;
     const expectedTarget = repairMarker.baseHeadSha;
-    const bindingError = parsedResolver.status === "invalid"
-      ? parsedResolver.reason
+    const bindingError: { reason: string; key: string } | null = parsedResolver.status === "invalid"
+      ? { reason: parsedResolver.reason, key: parsedResolver.key }
       : parsedResolver.result.startHeadSha !== expectedStart || parsedResolver.result.targetHeadSha !== expectedTarget
-        ? "merge-resolver-opus-medium output is bound to stale start or target heads"
+        ? { reason: "merge-resolver-opus-medium output is bound to stale start or target heads", key: "startHeadSha" }
         : parsedResolver.result.outcome === "resolved" && parsedResolver.result.resolvedHeadSha !== input.body.headSha
-          ? "merge-resolver-opus-medium output resolved head does not match the delivered run head"
+          ? { reason: "merge-resolver-opus-medium output resolved head does not match the delivered run head", key: "resolvedHeadSha" }
           : null;
     if (bindingError) {
       repairUnable = true;
-      const reason = `refresh-conflict repair ${input.task.id} returned invalid output: ${bindingError}`;
+      const reason = `refresh-conflict repair ${input.task.id} returned invalid output: ${bindingError.reason}`;
       await tx.task.update({ where: { id: input.task.id }, data: { status: TaskStatus.DONE, failureReason: reason } });
       await tx.task.update({ where: { id: repairMarker.regressionTaskId }, data: { status: TaskStatus.REVIEW, failureReason: reason } });
+      // The rejection is recorded on the repair task too: the resolver's own
+      // card is where an operator looks, and the key names the field that
+      // failed so nobody has to read the parser to find out.
+      await writeMarker(tx, input.task.id, "repairResult", {
+        actorType: "control-plane",
+        body: `Resolver output rejected on ${bindingError.key}: ${bindingError.reason}`,
+        metadata: {
+          repairKind: "refresh-conflict",
+          repairTaskId: input.task.id,
+          regressionTaskId: repairMarker.regressionTaskId,
+          startHeadSha: expectedStart,
+          targetHeadSha: expectedTarget,
+          resolvedHeadSha: input.body.headSha ?? null,
+          state: "invalid-output",
+          reason: bindingError.reason,
+          rejectedKey: bindingError.key,
+        },
+      });
       await writeMarker(tx, repairMarker.regressionTaskId, "repairResult", {
         actorType: "control-plane",
         body: `Automatic refresh-conflict attempt stopped: ${reason}`,
@@ -769,7 +787,8 @@ export const settleMergeTailCompletion = async (
           targetHeadSha: expectedTarget,
           resolvedHeadSha: input.body.headSha ?? null,
           state: "invalid-output",
-          reason: bindingError,
+          reason: bindingError.reason,
+          rejectedKey: bindingError.key,
         },
       });
       await openMergeTailStopNotice(tx, {
