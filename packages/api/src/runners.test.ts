@@ -250,7 +250,28 @@ test("an unexpired dispatch drain refuses every claim and explains the idle flee
       startedAt: new Date("2026-09-07T01:00:00.000Z"),
       expiresAt: new Date(Date.now() + 60 * 60_000),
     };
-    const app = createApp(makeDatabase([], true, () => { candidateRead = true; }, drain));
+    const candidate = {
+      id: "drained-run",
+      projectId: "project-1",
+      taskId: "drained-task",
+      goalId: null,
+      agentId: "agent-1",
+      repoId: "repo-1",
+      runner: RunnerKind.CLAUDE,
+      runNumber: 1,
+      leaseGeneration: 0,
+      maxDurationMin: 120,
+      session: null,
+      task: { id: "drained-task", chainId: null, chainIndex: null, templateStep: null },
+      repo: { id: "repo-1" },
+      agent: {
+        id: "agent-1",
+        repoAccess: [{ repoId: "repo-1", projectId: "project-1" }],
+        environment: { secrets: [] },
+        secretGrants: [],
+      },
+    };
+    const app = createApp(makeDatabase([candidate], true, () => { candidateRead = true; }, drain));
 
     const refused = await runnerRequest(app, {});
     assert.equal(refused.status, 409);
@@ -260,7 +281,7 @@ test("an unexpired dispatch drain refuses every claim and explains the idle flee
       code: "dispatch-draining",
       expiresAt: drain.expiresAt.toISOString(),
     });
-    assert.equal(candidateRead, false, "a drained claim inspects no candidate, so it can park none");
+    assert.equal(candidateRead, true, "a drained claim checks the candidate step before refusing agent work");
 
     const status = await app.request("/runners", { headers: { Authorization: "Bearer runners-test-operator" } });
     const body = await status.json() as { daemons: Array<{ online: boolean }>; dispatchDrain: unknown };
