@@ -451,8 +451,16 @@ test("a failed mechanical completion keeps the existing lease across its retry",
   assert.equal(await db.taskActivity.count({ where: {
     taskId: chain.integratorTask!.id,
     metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseHandoff },
-  } }), 0);
+  } }), 1);
+  const retry = await db.run.findFirstOrThrow({
+    where: { taskId: chain.integratorTask!.id, runNumber: 2 },
+  });
+  const handoff = await db.mergeLeaseEvent.findFirstOrThrow({
+    where: { chainId: chain.chainId, state: MergeLeaseEventState.HANDOFF_PENDING },
+  });
+  assert.equal(handoff.handedOffRunId, retry.id);
   assert.deepEqual(releasedChainLeases, []);
+  assert.deepEqual(releasedLeaseTargets, []);
 });
 
 test("N16 a recorded stop lands the stop state: run SUCCEEDED, task REVIEW, question open, no chain advance", async () => {

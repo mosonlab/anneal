@@ -19,6 +19,8 @@ import type { MechanicalClaim } from "@anneal/db/claim-contract";
 import { INTEGRATOR_OUTPUT_KIND, MERGE_INTEGRATOR_KIND, MERGE_INTEGRATOR_SCHEMA_VERSION, serializeMergeResult } from "@anneal/db/merge-integrator";
 
 import {
+  AgentOsTransportError,
+  AgentOsResponseError,
   CompletionRejectedError,
   CompletionTransportError,
   makeAgentOsClient,
@@ -62,7 +64,7 @@ export const runClaim = async (
   let runLog = log;
   let redactCompletionEvidence = makeRedactor();
   const complete = async (
-    completion: { succeeded: boolean; outcome: Awaited<ReturnType<typeof execute>> | null; failureReason?: string },
+    completion: { succeeded: boolean; outcome: Awaited<ReturnType<typeof execute>> | null; failureReason?: string; external?: boolean },
   ): Promise<boolean> => {
     try {
       await agentos.complete(claimed, completion, redactCompletionEvidence);
@@ -134,7 +136,11 @@ export const runClaim = async (
       const suffix = minted.httpStatus === undefined ? "" : ` (HTTP ${minted.httpStatus})`;
       const failureReason = `GitHub App installation-token mint failed: ${minted.failure}${suffix}`;
       log.error("GitHub App installation-token mint failed", { runId: claimed.run.id, failure: minted.failure, ...(minted.httpStatus === undefined ? {} : { httpStatus: minted.httpStatus }) });
-      await complete({ succeeded: false, outcome: null, failureReason });
+      await complete({ succeeded: false, outcome: null, failureReason,
+        external: minted.httpStatus === undefined
+          ? true
+          : minted.httpStatus >= 500 || minted.httpStatus === 429,
+      });
       return;
     }
 
@@ -236,7 +242,7 @@ export const runClaim = async (
     // Deep transport errors can contain request headers. The run record names
     // the failed phase without serialising the thrown value into control-plane
     // evidence; the token-aware logger above remains the diagnostic backstop.
-    await complete({ succeeded: false, outcome: null, failureReason: "merge executor crashed during mechanical execution" });
+    await complete({ succeeded: false, outcome: null, failureReason: "merge executor crashed during mechanical execution", external: error instanceof AgentOsTransportError || (error instanceof AgentOsResponseError && error.status >= 500) });
   } finally {
     clearInterval(heartbeat);
   }

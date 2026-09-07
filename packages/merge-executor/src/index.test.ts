@@ -414,9 +414,8 @@ test("any mint failure completes retryably before a GitHub surface or merge writ
     "https://agentos.test/runner/runs/failed-run/complete",
   ]);
   const { outcome } = JSON.parse(requests[2]!.body) as { outcome: RunOutcome };
-  // A crashed executor persists no merge result, so the deliverable is absent
-  // rather than unverifiable: retryable, and the next attempt can still make it.
-  assert.equal(outcome.case, "required-output-unsatisfied");
+  // Credential acquisition is an external failure, preserved on the wire.
+  assert.equal(outcome.case, "provider-failure");
   assert.match("reason" in outcome ? outcome.reason : "", /private-key-read-failed/u);
   assert.equal(requests.some((request) => request.body.includes(secret)), false);
 });
@@ -674,3 +673,20 @@ test("the daemon still starts when it is reached through a symlinked release dir
     rmSync(scratch, { recursive: true, force: true });
   }
 });
+
+for (const httpStatus of [undefined, 503, 403, 404, 422]) {
+  test(`mint failure completion preserves external classification (${httpStatus})`, async () => {
+    let completion: any;
+    await runClaim(config, "/private/app.pem", claimed("classification"), log, async (url, init) => {
+      if (String(url).endsWith("/complete")) completion = JSON.parse(String(init?.body));
+      return compatibleAgentOsResponse(url);
+    }, {
+      mintToken: async () => httpStatus === undefined
+        ? { ok: false, failure: "installation-token-request-failed" }
+        : { ok: false, failure: "installation-token-http-error", httpStatus },
+    });
+    assert.equal(completion.outcome.case, httpStatus === undefined || httpStatus >= 500
+      ? "provider-failure" : "required-output-unsatisfied");
+    if (completion.outcome.case === "provider-failure") assert.equal(completion.outcome.envelope.transient, true);
+  });
+}
