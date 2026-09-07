@@ -1,7 +1,7 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 
 import { api } from "../lib/api";
-import { UNKNOWN, measured, compactTokens, durationMs, durationWithInboxWait, formatDateTime, percent, pullRequestLabel, repoWebUrl, sha, timeAgo, titleCase, tokensPerSecond, usageCostLabel } from "../lib/format";
+import { UNKNOWN, measured, compactTokens, durationMs, durationWithInboxWait, formatDateTime, percent, pullRequestLabel, repoWebUrl, sha, timeAgo, titleCase, tokensPerSecond, usageCostLabel, usageMoney } from "../lib/format";
 import { useAction, usePoll, type Poll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { Link } from "../lib/router";
@@ -9,7 +9,7 @@ import { fatal } from "../lib/poll-state";
 import { isRegressionStep } from "../lib/repair-subtimeline";
 import { sessionsFilterHref } from "../lib/session-list";
 import { partitionTaskPrompt } from "../lib/task-prompt";
-import type { Agent, Chain, ChainStep, Run, RunMetrics, RunPhaseMetrics, TaskActivity, TaskDetail, TaskStartability, TaskStepOutput, TaskStatus } from "../lib/types";
+import type { Agent, Chain, ChainStep, Run, RunBaseline, RunBaselineMetric, RunMetrics, RunPhaseMetrics, TaskActivity, TaskDetail, TaskStartability, TaskStepOutput, TaskStatus } from "../lib/types";
 import { supportsCodexServiceTier } from "../lib/models";
 import { cn } from "../lib/utils";
 import { IconArchive, IconArrowLeft, IconChevron, IconRefresh, IconSend } from "../components/icons";
@@ -211,7 +211,16 @@ const PhaseBar = ({ phases }: { phases: RunPhaseMetrics }): ReactNode => {
 
 /** The per-run diagnostics the Task detail attaches at read time. It carries
  *  session termination with a run-reason fallback for pre-session exits. */
-export const RunDiagnostics = ({ metrics, runTerminationReason }: { metrics: RunMetrics | null | undefined; runTerminationReason?: string | null }): ReactNode => {
+export const RunDiagnostics = ({ metrics, baseline, costUsd, runTerminationReason }: {
+  metrics: RunMetrics | null | undefined;
+  /** What this run's template step usually costs and takes. Null or undefined
+   *  means insufficient history, never 0. */
+  baseline?: RunBaseline | null | undefined;
+  /** The run session's own reported cost, the raw value the baseline ratio
+   *  compares against. */
+  costUsd?: string | null | undefined;
+  runTerminationReason?: string | null | undefined;
+}): ReactNode => {
   const t = useT();
   const title = <div className="text-[12px] font-bold text-muted-foreground">{t("taskDetail.diagnostics.title")}</div>;
   if (metrics === null || metrics === undefined) {
@@ -228,6 +237,33 @@ export const RunDiagnostics = ({ metrics, runTerminationReason }: { metrics: Run
     ? t(`taskDetail.diagnostics.rate.${bound}`, { value: text })
     : text;
   const rate = metrics.outputTokensPerSecond;
+  // A null baseline metric is insufficient history, never 0: the group says so
+  // rather than comparing this run against a number nobody measured. The run's
+  // own reading stays out of that branch, so an absent baseline adds no unknown
+  // markers to a block whose markers all mean "unmeasured reading".
+  const comparison = (
+    metric: RunBaselineMetric | null | undefined,
+    label: string,
+    own: string,
+    ratio: number | null,
+    format: (value: number) => string,
+  ): ReactNode => (
+    <span className="inline-flex flex-wrap items-baseline gap-x-[16px] gap-y-[5px]">
+      {metric === null || metric === undefined ? (
+        <Stat k={label} v={t("taskDetail.diagnostics.baseline.insufficient")} />
+      ) : (
+        <>
+          <Stat k={label} v={own} />
+          <Stat k={t("taskDetail.diagnostics.baseline.p50")} v={format(metric.p50)} />
+          <Stat k={t("taskDetail.diagnostics.baseline.p90")} v={format(metric.p90)} />
+          <Stat
+            k={t("taskDetail.diagnostics.baseline.ratio")}
+            v={measured(ratio) ? t("taskDetail.diagnostics.baseline.ratioValue", { value: ratio.toFixed(2) }) : UNKNOWN}
+          />
+        </>
+      )}
+    </span>
+  );
   return (
     <div data-run-diagnostics="" className="grid gap-[12px] border-t border-[color:var(--border-soft)] pt-[14px]">
       {title}
@@ -254,6 +290,22 @@ export const RunDiagnostics = ({ metrics, runTerminationReason }: { metrics: Run
           />
         ))}
       </DiagnosticsRow>
+      <DiagnosticsRow k={t("taskDetail.diagnostics.baseline.title")}>
+        {comparison(
+          baseline?.costUsd,
+          t("taskDetail.diagnostics.baseline.cost"),
+          costUsd === null || costUsd === undefined ? UNKNOWN : usageMoney(costUsd),
+          metrics.vsBaseline.costRatio,
+          (value) => usageMoney(value),
+        )}
+        {comparison(
+          baseline?.durationMs,
+          t("taskDetail.diagnostics.baseline.duration"),
+          durationMs(phases.executingMs),
+          metrics.vsBaseline.durationRatio,
+          (value) => durationMs(value),
+        )}
+      </DiagnosticsRow>
       <div className="grid gap-[5px]">
         <DiagnosticsRow k={t("taskDetail.diagnostics.rate.label")}>
           {/* Unkeyed: the row heading already names it, and a second "Rate"
@@ -277,7 +329,7 @@ export const RunDiagnostics = ({ metrics, runTerminationReason }: { metrics: Run
   );
 };
 
-export const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remoteUrl: string | null | undefined; expanded: boolean; onToggle: () => void }): ReactNode => {
+export const RunRow = ({ run, remoteUrl, baseline, expanded, onToggle }: { run: Run; remoteUrl: string | null | undefined; baseline: RunBaseline | null | undefined; expanded: boolean; onToggle: () => void }): ReactNode => {
   const t = useT();
   const tierApplies = supportsCodexServiceTier(run.runner, run.model);
   return (
@@ -335,7 +387,7 @@ export const RunRow = ({ run, remoteUrl, expanded, onToggle }: { run: Run; remot
                 // Termination moved into the diagnostics block below, which
                 // states it alongside the exit code and signal it belongs with.
               ]} />
-              <RunDiagnostics metrics={run.metrics} runTerminationReason={run.terminationReason} />
+              <RunDiagnostics metrics={run.metrics} baseline={baseline} costUsd={run.session?.costUsd} runTerminationReason={run.terminationReason} />
               {run.failureReason === null ? null : <ErrorNotice message={run.failureReason} />}
             </div>
           </TableCell>
@@ -882,7 +934,7 @@ const TaskDetailResource = ({ taskId }: { taskId: string }): ReactNode => {
             </TableHeader>
             <TableBody>
               {runs.map((item) => (
-                <RunRow key={item.id} run={item} remoteUrl={task.repo?.remoteUrl} expanded={expanded === item.id}
+                <RunRow key={item.id} run={item} remoteUrl={task.repo?.remoteUrl} baseline={task.baseline} expanded={expanded === item.id}
                   onToggle={() => setExpanded(expanded === item.id ? null : item.id)} />
               ))}
             </TableBody>

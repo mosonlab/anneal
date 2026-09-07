@@ -182,6 +182,7 @@ const unknownMetrics: RunMetrics = {
   modelActiveIsUpperBound: false,
   outputTokensPerSecond: null,
   termination: { reason: null, exitCode: null, signal: null },
+  vsBaseline: { costRatio: null, durationRatio: null },
 };
 
 const measuredMetrics: RunMetrics = {
@@ -192,6 +193,7 @@ const measuredMetrics: RunMetrics = {
   modelActiveIsUpperBound: true,
   outputTokensPerSecond: 20,
   termination: { reason: "completed", exitCode: 0, signal: null },
+  vsBaseline: { costRatio: 1.5, durationRatio: 0.8 },
 };
 
 test("an unmeasured diagnostic renders the unknown marker, never a zero reading", () => {
@@ -274,7 +276,7 @@ test("termination is stated once, in the diagnostics block rather than twice", (
   assert.doesNotMatch(source, /taskDetail\.run\.termination/u);
   assert.match(source, /runTerminationReason=\{run\.terminationReason\}/u);
   const row = source.slice(source.indexOf("const RunRow"), source.indexOf("const Activity"));
-  assert.match(row.slice(row.indexOf("{expanded ?")), /<RunDiagnostics metrics=\{run\.metrics\} runTerminationReason=\{run\.terminationReason\} \/>/u);
+  assert.match(row.slice(row.indexOf("{expanded ?")), /<RunDiagnostics metrics=\{run\.metrics\} baseline=\{baseline\} costUsd=\{run\.session\?\.costUsd\} runTerminationReason=\{run\.terminationReason\} \/>/u);
 });
 
 /* ------------------------------------------------------------ static guards */
@@ -329,4 +331,36 @@ test("a cancelled run without a session retains its run termination reason", () 
   const withSession = renderToStaticMarkup(<RunDiagnostics metrics={measuredMetrics} runTerminationReason="run fallback" />);
   assert.match(withSession, /Reason<\/span><span>completed/u);
   assert.doesNotMatch(withSession, /run fallback/u);
+});
+
+test("a run with a baseline reads its own cost and duration against the step's percentiles", () => {
+  const markup = renderToStaticMarkup(<RunDiagnostics
+    metrics={measuredMetrics}
+    costUsd="3.00"
+    baseline={{
+      sampleSize: 9,
+      costUsd: { sampleSize: 8, p50: 2, p90: 4.5 },
+      durationMs: { sampleSize: 9, p50: 750_000, p90: 900_000 },
+    }}
+  />);
+  assert.match(markup, /Vs baseline/u);
+  // The run's own readings, the two percentiles, and the ratio the server measured.
+  assert.match(markup, /Cost<\/span><span>\$3\.00<\/span>/u);
+  assert.match(markup, /Executing<\/span><span>10m 0s<\/span>/u);
+  assert.match(markup, /p50<\/span><span>\$2\.00<\/span>/u);
+  assert.match(markup, /p90<\/span><span>\$4\.50<\/span>/u);
+  assert.match(markup, /p50<\/span><span>12m 30s<\/span>/u);
+  assert.match(markup, /p90<\/span><span>15m 0s<\/span>/u);
+  assert.match(markup, /vs p50<\/span><span>1.50×<\/span>/u);
+  assert.match(markup, /vs p50<\/span><span>0.80×<\/span>/u);
+  assert.doesNotMatch(markup, /Insufficient history/u);
+});
+
+test("a step with too little history says so rather than comparing against a zero baseline", () => {
+  for (const baseline of [null, undefined, { sampleSize: 2, costUsd: null, durationMs: null }]) {
+    const markup = renderToStaticMarkup(<RunDiagnostics metrics={measuredMetrics} costUsd="3.00" baseline={baseline} />);
+    assert.equal((markup.match(/Insufficient history/gu) ?? []).length, 2);
+    assert.doesNotMatch(markup, /p50/u);
+    assert.doesNotMatch(markup, /\$0/u);
+  }
 });

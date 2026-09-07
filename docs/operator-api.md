@@ -1503,6 +1503,12 @@ invalidated by a late salvage publication, a merge-tail requeue — as opposed t
 attempts its agent spent. It is bounded at three per task; at the bound the
 platform stops requeueing and parks the task for an operator, so a card showing
 `3` is one loss away from `REVIEW`. See "Lost-Run reconciliation" below.
+Every card also carries `baseline`, the same per-template-step cost and
+duration baseline `GET /tasks/:taskId` documents, or `null` for a card with no
+template step or too little history. The whole page is answered by one grouped
+query, so the board's query count does not grow with the number of cards. Rows
+of the `full` view carry the same `baseline` field on the same terms, read by
+the same single grouped query.
 For a Chain member, the first emitted member also carries the
 `chainAggregate` projection. Its `activation.state` is one of
 `parked-unactivated`, `waiting-on-predecessor`, `running`, `idle`, `held`, or
@@ -1629,6 +1635,26 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
     the duration is an upper bound (≤) and this rate is a lower bound (≥).
   - `metrics.termination` carries the Session's own account of how the run
     ended: `reason`, `exitCode` and `signal`.
+  - `metrics.vsBaseline` measures the run against the task-level `baseline`
+    below: `costRatio` is the session's reported cost over the baseline cost
+    p50, and `durationRatio` is `metrics.phases.executingMs` over the baseline
+    duration p50. Each is `null` whenever the baseline metric or the run's own
+    value is unknown; above `1` means dearer or slower than usual. Both use the
+    raw values published beside them, so a ratio and its figures cannot
+    disagree. `durationRatio` is also `null` while the session has not ended:
+    the executing phase of a live run is measured to now, and the baseline is
+    built from completed runs only.
+- The response carries a task-level `baseline`: what this task's template step
+  usually costs and how long it usually takes, over the **terminally
+  successful** (`SUCCEEDED`) runs of the same `templateStepId` in the same
+  project. It is
+  `{sampleSize, costUsd: {sampleSize, p50, p90} | null, durationMs: {sampleSize, p50, p90} | null}`.
+  `costUsd` is in USD over the runs whose session reported a cost; `durationMs`
+  is in milliseconds over the runs whose session has both `startedAt` and
+  `endedAt`, so the two samples can differ in size and each reports its own.
+  A metric with fewer than five samples is `null`, and `baseline` itself is
+  `null` when neither metric survives — including on a task with no
+  `templateStepId`. `null` always means insufficient history, never `0`.
 
 ```sh
 curl "$BASE_URL/tasks/$TASK_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
