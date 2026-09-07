@@ -30,7 +30,13 @@ import {
 import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js";
 import { canonicalOutputRefusal } from "./canonical-task-output.js";
 import type { LeaseOutcome } from "./merge-lease.js";
-import { awaitAuthorization, blockDownstream, exhaust } from "./merge-tail-state.js";
+import type { RetryClass } from "./base-drift-recovery-decision.js";
+import {
+  awaitAuthorization,
+  blockDownstream,
+  exhaust,
+  recoveryClassSettleState,
+} from "./merge-tail-state.js";
 
 /**
  * The autonomous merge tail's own actions: the base-drift recovery aggregate,
@@ -526,6 +532,10 @@ export type StopMergeTailInput =
     reason: string;
     at: Date;
     attempt: number;
+    /** Set when a retry class crossed its own ceiling rather than the
+     *  candidate being ineligible; it names the settle and its refusal. */
+    retryClass?: RetryClass;
+    revalidations?: number;
     recoveryData: RecoveryStopData;
     markerMetadata: Record<string, unknown>;
   }
@@ -656,7 +666,9 @@ export async function stopMergeTail(
     return;
   }
 
-  const state = input.phase === "recovery-validation" ? "ineligible" : "exhausted";
+  const state = input.retryClass
+    ? recoveryClassSettleState(input.retryClass)
+    : input.phase === "recovery-validation" ? "ineligible" : "exhausted";
   await exhaust(tx, {
     aggregateId: input.aggregateId,
     integratorTaskId: input.integratorTaskId,
@@ -665,6 +677,7 @@ export async function stopMergeTail(
     at: input.at,
     attempt: input.attempt,
     state,
+    ...(input.revalidations ? { revalidations: input.revalidations } : {}),
     recoveryData: input.recoveryData,
     markerMetadata: input.markerMetadata,
   });

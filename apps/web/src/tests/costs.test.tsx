@@ -248,12 +248,14 @@ const report = (overrides: Partial<CostsPageReport> = {}): CostsPageReport => ({
     {
       chainId: "slow-chain", chainName: "Slow chain", taskCount: 3, leadMinutes: 131, busyMinutes: 44,
       busyPct: 33.6, repairs: { gateFix: 1, refreshConflict: 0, reviewFix: 0 }, costUsd: "75",
+      readinessRequeues: 0, readinessGrants: 0,
       costByRole: { implementation: "50", repair: "25" }, costUnavailableRuns: 0,
       longestGap: { minutes: 87, beforeTaskName: "Review" }, detailTaskId: "slow-task",
     },
     {
       chainId: "fast-chain", chainName: "Fast chain", taskCount: 2, leadMinutes: 45, busyMinutes: 30,
       busyPct: 66.7, repairs: { gateFix: 0, refreshConflict: 0, reviewFix: 0 }, costUsd: "120",
+      readinessRequeues: 0, readinessGrants: 0,
       costByRole: { implementation: "120" }, costUnavailableRuns: 1,
       longestGap: { minutes: 15, beforeTaskName: null }, detailTaskId: "fast-task",
     },

@@ -488,7 +488,7 @@ for (const matchesBase of [true, false]) {
 const persistImplementationOutput = async (input: {
   bodyBaseSha: string;
   continuation?: boolean;
-  runs: Array<{ runNumber: number; baseSha: string | null }>;
+  runs: Array<{ id?: string; runNumber: number; baseSha: string | null }>;
 }) => {
   const implementationTask = {
     id: "implementation-task",
@@ -510,9 +510,9 @@ const persistImplementationOutput = async (input: {
     run: {
       findFirst: async (query: Record<string, any>) => {
         if (query.select && "baseSha" in query.select) {
-          const rows = input.runs
-            .filter((run) => (query.where?.baseSha?.not === null ? run.baseSha !== null : true))
-            .sort((left, right) => left.runNumber - right.runNumber);
+          // The advisory asks for one Run by id — the fenced one — so the fake
+          // answers by id and never by recency.
+          const rows = input.runs.filter((run) => (run.id ?? "implementation-run") === query.where?.id);
           return rows[0] ?? null;
         }
         return query.select && "taskId" in query.select
@@ -555,10 +555,10 @@ const persistImplementationOutput = async (input: {
   return { result, activities };
 };
 
-test("an implementation body base that disagrees with the platform base is persisted and recorded", async () => {
+test("an implementation body base that disagrees with this Run's own base is persisted and recorded", async () => {
   const { result, activities } = await persistImplementationOutput({
     bodyBaseSha: TYPED_BASE,
-    runs: [{ runNumber: 1, baseSha: RECORDED_BASE }, { runNumber: 2, baseSha: IMPLEMENTATION_HEAD }],
+    runs: [{ id: "implementation-run", runNumber: 1, baseSha: RECORDED_BASE }],
   });
   assert.equal("ok" in result && result.ok, true, "the field no longer decides anything, so it cannot refuse");
   assert.equal(activities.length, 1);
@@ -572,11 +572,36 @@ test("an implementation body base that disagrees with the platform base is persi
     runId: "implementation-run",
     outputKind: "implementation",
     bodyBaseSha: TYPED_BASE,
-    platformBaseSha: RECORDED_BASE,
+    runBaseSha: RECORDED_BASE,
   });
 });
 
-test("an implementation body base that matches the platform base records nothing", async () => {
+test("a recovery Run's body is checked against its own base, not the dead Run's", async () => {
+  // The 2026-09-06 shape: Run 1 died holding an unpublished base, and the pin
+  // skips it — so a Run 2 body naming Run 2's base is correct and silent…
+  const correct = await persistImplementationOutput({
+    bodyBaseSha: RECORDED_BASE,
+    runs: [
+      { id: "dead-run", runNumber: 1, baseSha: TYPED_BASE },
+      { id: "implementation-run", runNumber: 2, baseSha: RECORDED_BASE },
+    ],
+  });
+  assert.deepEqual(correct.activities, []);
+
+  // …while a body still naming the dead Run's base is the typo to report.
+  const stale = await persistImplementationOutput({
+    bodyBaseSha: TYPED_BASE,
+    runs: [
+      { id: "dead-run", runNumber: 1, baseSha: TYPED_BASE },
+      { id: "implementation-run", runNumber: 2, baseSha: RECORDED_BASE },
+    ],
+  });
+  assert.equal(stale.activities.length, 1);
+  assert.equal(stale.activities[0]?.metadata.kind, "canonicalTaskOutput.implementationBaseShaMismatch");
+  assert.equal(stale.activities[0]?.metadata.runBaseSha, RECORDED_BASE);
+});
+
+test("an implementation body base that matches this Run's base records nothing", async () => {
   const { result, activities } = await persistImplementationOutput({
     bodyBaseSha: RECORDED_BASE,
     runs: [{ runNumber: 1, baseSha: RECORDED_BASE }],
@@ -585,7 +610,7 @@ test("an implementation body base that matches the platform base records nothing
   assert.deepEqual(activities, []);
 });
 
-test("an implementation Task with no recorded Run base records the missing authority", async () => {
+test("an implementation Run with no recorded base records the missing authority", async () => {
   const { result, activities } = await persistImplementationOutput({
     bodyBaseSha: TYPED_BASE,
     runs: [{ runNumber: 1, baseSha: null }],

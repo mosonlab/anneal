@@ -1,8 +1,16 @@
 import {
   ACTIVE_RUN_STATUSES,
+  BASE_DRIFT_RETRY_BACKOFF_CAP_MS,
+  BASE_DRIFT_RETRY_BACKOFF_START_MS,
+  BASE_DRIFT_TRANSPORT_CEILING_MS,
+  BASE_DRIFT_VALIDATION_MIN_ELAPSED_MS,
+  BASE_DRIFT_WAITING_CEILING_MS,
+  BASE_DRIFT_CLASS_CEILING_CHOICES,
   INTEGRATOR_OUTPUT_KIND,
-  MAX_BASE_DRIFT_CLASSIFICATION_RETRIES,
+  MAX_BASE_DRIFT_VALIDATION_ATTEMPTS,
   MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
+  MERGE_RECOVERY_CLASS_REFUSAL_CODE,
+  MERGE_RECOVERY_RETRY_CLASS_ENUM,
   MergeRecoveryStatus,
   MERGE_INTEGRATOR_KIND,
   Prisma,
@@ -30,22 +38,41 @@ import {
   classifyDurable,
   classifyFresh,
   classifyRetryBudget,
+  recoveryDeferred,
   type DurableCandidateFacts,
   type Ineligible,
   type RecoveryCandidate,
   type RecoveryIdentity,
   type Retry,
+  type RetryBudgetPolicy,
+  type RetryClass,
 } from "./base-drift-recovery-decision.js";
 import { stopMergeTail } from "./merge-tail-actions.js";
 import {
   ensureRecoveryValidation,
   enterRepair,
-  recordValidationRetry,
+  recordRecoveryClassCeiling,
+  recordRecoveryRetry,
+  recoveryClassCounters,
   recoveryIsReopenableLegacyRefusal,
   retireLegacyRefusal,
 } from "./merge-tail-state.js";
 
 type DbReader = PrismaClient | Prisma.TransactionClient;
+
+/**
+ * The one retry policy this worker classifies against. It is stated here, next
+ * to the tick that applies it, and its numbers live in `@anneal/db` beside the
+ * recovery budget they belong to.
+ */
+const RETRY_BUDGET_POLICY: RetryBudgetPolicy = {
+  maxValidationAttempts: MAX_BASE_DRIFT_VALIDATION_ATTEMPTS,
+  validationMinElapsedMs: BASE_DRIFT_VALIDATION_MIN_ELAPSED_MS,
+  waitingCeilingMs: BASE_DRIFT_WAITING_CEILING_MS,
+  transportCeilingMs: BASE_DRIFT_TRANSPORT_CEILING_MS,
+  backoffStartMs: BASE_DRIFT_RETRY_BACKOFF_START_MS,
+  backoffCapMs: BASE_DRIFT_RETRY_BACKOFF_CAP_MS,
+};
 
 export const baseDriftRecoveryPollIntervalMs = (): number => {
   const raw = Number(process.env.MERGE_BASE_DRIFT_RECOVERY_POLL_INTERVAL_MS);
@@ -125,6 +152,7 @@ export const readCandidateFacts = async (
   facts.existingAttempt = existingAttempt ? {
     status: existingAttempt.status,
     reopenableLegacyRefusal: recoveryIsReopenableLegacyRefusal(existingAttempt),
+    nextEligibleAt: existingAttempt.nextEligibleAt,
   } : null;
   if (!task.chainId || task.chainIndex === null || !task.repoId || !task.repo) return facts;
 
@@ -221,17 +249,33 @@ export const readCandidateFacts = async (
   return facts;
 };
 
-const openAbandonQuestion = async (
+/**
+ * What a settle needs to reach the operator: the resume generation this
+ * attempt has already spent, and whether a class ceiling makes `re-validate`
+ * offerable. Every settle carries the generation, not only the ceilings — a
+ * recovery an operator resumed can settle again, and the answered first card
+ * would otherwise deduplicate the second settle into a task with no open
+ * question and no way out.
+ */
+type RecoverySettleCard = { revalidations: number; ceiling: boolean };
+
+/**
+ * The operator card a settled recovery leaves behind. An ordinary refusal
+ * offers abandoning only; a retry class that crossed its own ceiling also
+ * offers `re-validate`.
+ */
+const openRecoveryQuestion = async (
   tx: Prisma.TransactionClient,
   integratorTaskId: string,
   stopId: string,
+  card: RecoverySettleCard,
 ): Promise<void> => {
   const [task, stop] = await Promise.all([
     tx.task.findUnique({ where: { id: integratorTaskId }, select: { assigneeAgentId: true } }),
     latestRecordedStop(tx, integratorTaskId),
   ]);
   if (!task?.assigneeAgentId || stop?.stopId !== stopId) {
-    throw new Error(`Cannot open abandon-only base-drift question for unresolved stop ${stopId}`);
+    throw new Error(`Cannot open the settled base-drift question for unresolved stop ${stopId}`);
   }
   const session = stop.sourceRunId
     ? await tx.session.findUnique({ where: { runId: stop.sourceRunId }, select: { id: true } })
@@ -243,8 +287,14 @@ const openAbandonQuestion = async (
     evidence: stop.evidence,
     agentId: task.assigneeAgentId,
     sessionId: session?.id ?? null,
+    generation: card.revalidations,
+    ...(card.ceiling ? { choices: BASE_DRIFT_CLASS_CEILING_CHOICES } : {}),
   });
 };
+
+/** A settle a retry class owns: the class, and the instant the classification
+ *  that ended it was taken at. */
+type RetryClassCeiling = { retryClass: RetryClass; at: Date };
 
 const settleIneligibleLocked = async (
   tx: Prisma.TransactionClient,
@@ -252,6 +302,7 @@ const settleIneligibleLocked = async (
   stopId: string,
   reason: string,
   identity?: Partial<RecoveryIdentity>,
+  ceiling?: RetryClassCeiling,
 ): Promise<void> => {
   const attempt = await ensureRecoveryValidation(tx, { integratorTaskId, sourceStopId: stopId });
   await stopMergeTail(tx, {
@@ -260,9 +311,14 @@ const settleIneligibleLocked = async (
     integratorTaskId,
     sourceStopId: stopId,
     reason,
-    at: new Date(),
+    at: ceiling?.at ?? new Date(),
     attempt: attempt.attempt,
+    revalidations: attempt.revalidations,
+    ...(ceiling ? { retryClass: ceiling.retryClass } : {}),
     recoveryData: {
+      ...(ceiling
+        ? { refusalCode: MERGE_RECOVERY_CLASS_REFUSAL_CODE[MERGE_RECOVERY_RETRY_CLASS_ENUM[ceiling.retryClass]] }
+        : {}),
       ...(identity?.repository ? { repository: identity.repository } : {}),
       ...(identity?.prNumber ? { prNumber: identity.prNumber } : {}),
       ...(identity?.targetBranch ? { targetBranch: identity.targetBranch } : {}),
@@ -270,9 +326,16 @@ const settleIneligibleLocked = async (
       ...(identity?.authorizedBaseSha ? { authorizedBaseSha: identity.authorizedBaseSha } : {}),
       ...(identity?.observedBaseSha ? { observedBaseSha: identity.observedBaseSha } : {}),
     },
-    markerMetadata: { ...identity },
+    markerMetadata: {
+      ...identity,
+      ...recoveryClassCounters(attempt),
+      ...(ceiling ? { retryClass: ceiling.retryClass } : {}),
+    },
   });
-  await openAbandonQuestion(tx, integratorTaskId, stopId);
+  await openRecoveryQuestion(tx, integratorTaskId, stopId, {
+    revalidations: attempt.revalidations,
+    ceiling: ceiling !== undefined,
+  });
 };
 
 const settleIneligible = async (
@@ -296,18 +359,29 @@ const settleIneligible = async (
       reason,
       at: new Date(),
     });
-    await openAbandonQuestion(tx, integratorTaskId, stopId);
+    await openRecoveryQuestion(tx, integratorTaskId, stopId, {
+      revalidations: existing.revalidations,
+      ceiling: false,
+    });
     return true;
   }
   await settleIneligibleLocked(tx, integratorTaskId, stopId, reason, identity);
   return true;
 });
 
-const recordClassificationRetry = async (
+/**
+ * The worker's one retry-accounting transaction: classify this tick's failure
+ * against its own class, then either hold the recovery on its backoff or
+ * settle it on that class's ceiling. The tick calls it for every retry; the
+ * recovery dbtests drive it directly to reach classes no live GitHub can
+ * produce on demand.
+ */
+export const recordRecoveryClassificationRetry = async (
   db: PrismaClient,
   integratorTaskId: string,
   stopId: string,
-  reason: string,
+  retry: Retry,
+  now: Date,
 ): Promise<"retryable" | "ineligible" | "skipped"> => db.$transaction(async (tx) => {
   if (!await lockRecoveryChain(tx, integratorTaskId)) return "skipped";
   const currentStop = await latestRecordedStop(tx, integratorTaskId);
@@ -315,30 +389,41 @@ const recordClassificationRetry = async (
   const attempt = await ensureRecoveryValidation(tx, { integratorTaskId, sourceStopId: stopId });
   if (attempt.status !== MergeRecoveryStatus.VALIDATING) return "skipped";
   const decision = classifyRetryBudget({
-    reason,
-    validationAttempts: attempt.validationAttempts,
-    maxAttempts: MAX_BASE_DRIFT_CLASSIFICATION_RETRIES,
+    reason: retry.reason,
+    retryClass: retry.retryClass,
+    now,
+    attempts: {
+      waiting: attempt.waitingAttempts,
+      transport: attempt.transportAttempts,
+      validation: attempt.validationAttempts,
+    },
+    firstFailedAt: {
+      waiting: attempt.waitingFirstAt,
+      transport: attempt.transportFirstAt,
+      validation: attempt.validationFirstAt,
+    },
+    policy: RETRY_BUDGET_POLICY,
   });
   switch (decision.kind) {
     case "ineligible":
+      // The failure that crossed the ceiling is accounted before the settle it
+      // caused, so the refusal text and the stored counters state the same
+      // number of failures.
+      await recordRecoveryClassCeiling(tx, { attempt, decision });
       await settleIneligibleLocked(
-        tx,
-        integratorTaskId,
-        stopId,
-        decision.reason,
+        tx, integratorTaskId, stopId, decision.reason, undefined,
+        { retryClass: decision.retryClass, at: now },
       );
       return "ineligible";
     case "retry":
       break;
   }
-  const classificationAttempt = decision.classificationAttempt;
-  await recordValidationRetry(tx, {
-    aggregateId: attempt.id,
+  await recordRecoveryRetry(tx, {
+    attempt,
     integratorTaskId,
     sourceStopId: stopId,
-    classificationAttempt,
-    maxAttempts: MAX_BASE_DRIFT_CLASSIFICATION_RETRIES,
-    reason,
+    decision,
+    maxValidationAttempts: RETRY_BUDGET_POLICY.maxValidationAttempts,
   });
   return "retryable";
 });
@@ -348,7 +433,7 @@ type QueueRecoveryResult =
   | { kind: "exhausted" }
   | { kind: "skip" }
   | { kind: "ineligible"; reason: string }
-  | { kind: "retry"; reason: string };
+  | Retry;
 
 const queueRecovery = async (
   db: PrismaClient,
@@ -388,7 +473,7 @@ const queueRecovery = async (
     case "skip":
       return { kind: "skip" };
     case "retry":
-      return { kind: "retry", reason: decision.reason };
+      return { kind: "retry", retryClass: decision.retryClass, reason: decision.reason };
     case "ineligible":
       return { kind: "ineligible", reason: decision.reason };
     case "exhausted":
@@ -436,9 +521,13 @@ const queueRecovery = async (
           observedBaseSha: expected.observedBaseSha,
           currentBaseSha,
         },
-        markerMetadata: common,
+        revalidations: aggregate.revalidations,
+        markerMetadata: { ...common, ...recoveryClassCounters(aggregate) },
       });
-      await openAbandonQuestion(tx, expected.integratorTaskId, expected.stopId);
+      await openRecoveryQuestion(tx, expected.integratorTaskId, expected.stopId, {
+        revalidations: aggregate.revalidations,
+        ceiling: false,
+      });
       return { kind: "exhausted" };
     case "queue":
       break;
@@ -462,6 +551,7 @@ const settleRecovery = async (
   task: RecoverySettlementTask,
   stopId: string,
   decision: RecoverySettlementDecision,
+  now: Date,
 ): Promise<RecoveryTickDelta> => {
   const tickDelta: RecoveryTickDelta = { recovered: 0, exhausted: 0, ineligible: 0 };
   switch (decision.kind) {
@@ -472,7 +562,7 @@ const settleRecovery = async (
     case "exhausted":
       return { ...tickDelta, exhausted: 1 };
     case "retry": {
-      const outcome = await recordClassificationRetry(db, task.id, stopId, decision.reason);
+      const outcome = await recordRecoveryClassificationRetry(db, task.id, stopId, decision, now);
       return outcome === "ineligible" ? { ...tickDelta, ineligible: 1 } : tickDelta;
     }
     case "ineligible": {
@@ -516,6 +606,9 @@ export const baseDriftRecoveryTick = async (
       cursor = task.id;
       if (result.examined >= limit) break;
       const candidateFacts = await readCandidateFacts(db, task.id);
+      // A held backoff costs one durable read and nothing else: no GitHub call,
+      // no spent attempt, and no place in this tick's examined budget.
+      if (recoveryDeferred(candidateFacts, now)) continue;
       const candidateDecision = classifyCandidate(candidateFacts);
       switch (candidateDecision.kind) {
         case "skip":
@@ -523,7 +616,7 @@ export const baseDriftRecoveryTick = async (
         case "retry":
         case "ineligible":
           result.examined += 1;
-          addTickDelta(result, await settleRecovery(db, task, candidateDecision.stopId, candidateDecision));
+          addTickDelta(result, await settleRecovery(db, task, candidateDecision.stopId, candidateDecision, now));
           continue;
         case "inspect":
           result.examined += 1;
@@ -568,7 +661,7 @@ export const baseDriftRecoveryTick = async (
           kind: "reader-failure",
           reason: `fresh server-side repository read failed (${error instanceof Error ? error.name : "unknown error"})`,
         });
-        addTickDelta(result, await settleRecovery(db, settlementTask, candidate.stopId, decision));
+        addTickDelta(result, await settleRecovery(db, settlementTask, candidate.stopId, decision, now));
         continue;
       }
       const fresh = classifyFresh({
@@ -582,13 +675,13 @@ export const baseDriftRecoveryTick = async (
       switch (fresh.kind) {
         case "retry":
         case "ineligible":
-          addTickDelta(result, await settleRecovery(db, settlementTask, candidate.stopId, fresh));
+          addTickDelta(result, await settleRecovery(db, settlementTask, candidate.stopId, fresh, now));
           continue;
         case "queue":
           break;
       }
       const outcome = await queueRecovery(db, candidate, fresh.currentBaseSha, now);
-      addTickDelta(result, await settleRecovery(db, settlementTask, candidate.stopId, outcome));
+      addTickDelta(result, await settleRecovery(db, settlementTask, candidate.stopId, outcome, now));
     }
     if (tasks.length < pageSize) break;
   }

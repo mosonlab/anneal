@@ -164,6 +164,14 @@ export const runClaim = async (
       },
     });
     const deps: Deps = {
+      train: {
+        ...github,
+        publishTrain: async (reference, baseRef, publishHead) => {
+          await checkCancellation();
+          return github.publishTrain(reference, baseRef, publishHead);
+        },
+      },
+      logTrainCleanupFailure: (reason) => runLog.warn("Train ref cleanup failed", { reason }),
       readChain: () => agentos.readChain(claimed, chainIndex - 1),
       readOwnIntents: () => agentos.readOwnIntents(claimed, chainIndex),
       readPullRequest: (reference) => github.readPullRequest(reference),
