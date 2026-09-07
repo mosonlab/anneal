@@ -12,6 +12,7 @@ import { LocaleProvider } from "../lib/i18n";
 import { translate } from "../lib/i18n-core";
 import type { BoardTask, ChainAggregate, TaskStatus } from "../lib/types";
 import { useTaskStartConfirmation } from "../pages/Tasks";
+import { boardRun } from "./board-run";
 import { installDom, mountPage, reactDom } from "./dom-harness";
 
 const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
@@ -39,8 +40,8 @@ type AggregateWithRepair = ChainAggregate & {
 };
 
 const runWithTier = (overrides: Partial<RunWithTier> = {}): RunWithTier => ({
-  id: "run-1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT",
-  costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null, ...overrides,
+  ...boardRun({ id: "run-1", model: "gpt-5.6-sol:high", ...overrides }),
+  codexServiceTier: overrides.codexServiceTier ?? "DEFAULT",
 });
 
 const activeRepairAggregate = (overrides: Partial<ChainAggregate> = {}): AggregateWithRepair => ({

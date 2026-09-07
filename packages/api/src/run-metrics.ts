@@ -1,7 +1,9 @@
-import type { Prisma, RunnerKind, SessionExecutionStatus } from "@anneal/db";
+import type { Prisma, RunnerKind, RunStatus, SessionExecutionStatus } from "@anneal/db";
+import { RUN_STATUS_IS_ACTIVE } from "@anneal/db/board-contract";
 import type {
   RunBaseline,
   RunMetrics,
+  RunPhase,
   RunPhaseMetrics,
   RunTerminationMetrics,
   RunTokenMetrics,
@@ -50,22 +52,34 @@ import { vsBaseline } from "./run-baseline.js";
  * record whose marker is missing or of the wrong type — is `unclassified`.
  */
 
-/** The Run columns the metrics need. `readyAt` is when the run became
- *  eligible to be claimed, which is where the queued phase starts. */
-export type RunMetricsRun = {
+/** The Run columns the phase rule needs. `readyAt` is when the run became
+ *  eligible to be claimed, which is where the queued phase starts; `status` and
+ *  `endedAt` are what settle a run whose session stopped short of a milestone. */
+export type RunPhaseRun = {
   readyAt: Date;
+  status: RunStatus;
+  endedAt: Date | null;
 };
 
-/** The Session columns the metrics need. */
-export type RunMetricsSession = {
-  runner: RunnerKind;
+/** The Session columns the phase rule needs. Stated apart from the full metrics
+ *  input so the board's projection selects six timestamps rather than every
+ *  token and cost column the diagnostics read. */
+export type RunPhaseSession = {
   executionStatus: SessionExecutionStatus;
-  resumeAttempt: number;
   provisionedAt: Date | null;
   startedAt: Date | null;
   endedAt: Date | null;
   cleanupStartedAt: Date | null;
   cleanupEndedAt: Date | null;
+};
+
+/** The Run columns the metrics need. */
+export type RunMetricsRun = RunPhaseRun;
+
+/** The Session columns the metrics need. */
+export type RunMetricsSession = RunPhaseSession & {
+  runner: RunnerKind;
+  resumeAttempt: number;
   inputTokens: number | null;
   cachedInputTokens: number | null;
   cacheCreationInputTokens: number | null;
@@ -124,17 +138,70 @@ const inboxWaitMs = (session: RunMetricsSession | null): number | null => {
   return session.executionStatus === "WAITING_INBOX" || session.resumeAttempt > 0 ? null : 0;
 };
 
+/** Where a run is right now, and when it got there.
+ *
+ *  One helper for two readers. The board card names the phase and counts the
+ *  time spent in it; the detail page measures the durations between the same
+ *  boundaries. Stating the boundaries twice is how a card that says
+ *  "provisioning" ends up beside a diagnostics table that gave provisioning a
+ *  duration and moved on.
+ *
+ *  Pure over the columns below, so the board's projection needs no clock and no
+ *  query of its own. `phaseSince` is null only for `waiting-inbox`: nothing
+ *  records when a wait began — the same gap `inboxWaitMs` reports as unknown —
+ *  and a wait dated from the executing start would publish the run's whole
+ *  working time as time spent waiting on a human. */
+export type RunPhaseState = { phase: RunPhase; phaseSince: Date | null };
+
+export const runPhase = (
+  run: RunPhaseRun,
+  session: RunPhaseSession | null,
+): RunPhaseState => {
+  // Cleanup outranks the run's own terminality. The control plane settles a
+  // run's status while the owning runner is still disposing of its workspace,
+  // and "finished" over a workspace still being torn down answers the wrong
+  // question.
+  if (session?.cleanupStartedAt != null && session.cleanupEndedAt == null) {
+    return { phase: "cleanup", phaseSince: session.cleanupStartedAt };
+  }
+  if (session?.cleanupEndedAt != null) return { phase: "finished", phaseSince: session.cleanupEndedAt };
+  if (session?.endedAt != null) return { phase: "finished", phaseSince: session.endedAt };
+  if (!RUN_STATUS_IS_ACTIVE[run.status]) {
+    // A settled run is finished whatever milestone its session last reached: a
+    // FAILED run whose session never started is not still provisioning, and a
+    // card counting time in a phase nothing will ever leave is a clock that
+    // never stops. The instant is the most recent one the rows can prove.
+    return {
+      phase: "finished",
+      phaseSince: run.endedAt ?? session?.startedAt ?? session?.provisionedAt ?? run.readyAt,
+    };
+  }
+  if (session?.startedAt != null) {
+    // Suspension writes both sides in one transaction, so either alone is
+    // enough to say the run is waiting rather than working — and reading only
+    // one would let the card's status pill and its phase disagree.
+    return session.executionStatus === "WAITING_INBOX" || run.status === "WAITING_INBOX"
+      ? { phase: "waiting-inbox", phaseSince: null }
+      : { phase: "executing", phaseSince: session.startedAt };
+  }
+  if (session?.provisionedAt != null) return { phase: "provisioning", phaseSince: session.provisionedAt };
+  return { phase: "queued", phaseSince: run.readyAt };
+};
+
 const phaseMetrics = (
-  run: RunMetricsRun,
   session: RunMetricsSession | null,
   now: Date,
+  phase: RunPhase,
+  readyAt: Date,
 ): RunPhaseMetrics => ({
-  queuedMs: elapsed(run.readyAt, session?.provisionedAt),
+  queuedMs: elapsed(readyAt, session?.provisionedAt),
   provisioningMs: elapsed(session?.provisionedAt, session?.startedAt),
   // A live run has no `endedAt` yet; its executing phase is measured to now so
-  // the diagnostics of a running session are not a blank row.
+  // the diagnostics of a running session are not a blank row. Which runs are
+  // still in that phase is `runPhase`'s answer, not a second reading of the
+  // session's status.
   executingMs: session === null ? null : elapsed(session.startedAt, session.endedAt ?? (
-    session.executionStatus === "RUNNING" || session.executionStatus === "WAITING_INBOX" ? now : null
+    phase === "executing" || phase === "waiting-inbox" ? now : null
   )),
   inboxWaitMs: inboxWaitMs(session),
   cleanupMs: elapsed(session?.cleanupStartedAt, session?.cleanupEndedAt),
@@ -319,7 +386,7 @@ export const runMetrics = (input: {
   now?: Date;
 }): RunMetrics => {
   const { run, session } = input;
-  const phases = phaseMetrics(run, session, input.now ?? new Date());
+  const phases = phaseMetrics(session, input.now ?? new Date(), runPhase(run, session).phase, run.readyAt);
   const tokens = tokenMetrics(session);
   const { unpairedCalls, ...tools } = toolMetrics(session?.runner ?? null, input.toolEvents);
   // Model-active time is what is left of the executing phase once the tools

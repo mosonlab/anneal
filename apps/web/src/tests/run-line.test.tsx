@@ -6,10 +6,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { RunLine } from "../components/run-line";
 import { LocaleProvider } from "../lib/i18n";
 import type { BoardLatestRun } from "../lib/types";
+import { boardRun } from "./board-run";
 
-const run = (overrides: Partial<BoardLatestRun> = {}): BoardLatestRun => ({
-  id: "run-1", runNumber: 7, status: "RUNNING", model: "claude-opus-5:high", codexServiceTier: "DEFAULT",
-  costUsd: null, startedAt: new Date(Date.now() - 23 * 60_000).toISOString(), endedAt: null, pullRequestUrl: null, ...overrides,
+const run = (overrides: Partial<BoardLatestRun> = {}): BoardLatestRun => boardRun({
+  id: "run-1", runNumber: 7, status: "RUNNING", model: "claude-opus-5:high",
+  startedAt: new Date(Date.now() - 23 * 60_000).toISOString(), ...overrides,
 });
 
 const parse = (markup: string): Element => {

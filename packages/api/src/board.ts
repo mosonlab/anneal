@@ -22,6 +22,7 @@ import {
   type PrismaClient,
   type ReadinessRequeueTotals,
   type ScheduleKind,
+  type SessionExecutionStatus,
   type TaskSource,
   type TaskStatus as TaskStatusType,
   type UsageCost,
@@ -52,6 +53,7 @@ import {
   type ChainProgress,
 } from "./chain.js";
 import { baselineKey, readRunBaselines } from "./run-baseline.js";
+import { runPhase } from "./run-metrics.js";
 import { taskMoveAuthority } from "./task-move-authority.js";
 
 /**
@@ -136,6 +138,14 @@ export type BoardRow = {
      * cannot silently erase the operator-facing stranded-salvage signal. */
     pushedBranch: string | null;
     baseSha: string | null;
+    /** Required, like `pullRequestUrl`: the phase a card names is computed from
+     *  these four columns and the session timestamps below, so a select that
+     *  forgets one has to fail to compile rather than project a run that is
+     *  permanently queued. */
+    readyAt: Date;
+    endedAt: Date | null;
+    lastProgressEventAt: Date | null;
+    maxRunsPerTask: number;
     session: {
       nativeChildUsed: boolean;
       costUsd: NonNullable<Parameters<typeof runSessionUsageCost>[0]["session"]>["costUsd"];
@@ -143,8 +153,12 @@ export type BoardRow = {
       cachedInputTokens: number | null;
       cacheCreationInputTokens: number | null;
       outputTokens: number | null;
+      executionStatus: SessionExecutionStatus;
+      provisionedAt: Date | null;
       startedAt: Date | null;
       endedAt: Date | null;
+      cleanupStartedAt: Date | null;
+      cleanupEndedAt: Date | null;
     } | null;
   }>;
   stepOutput?: { kind: string; body: string; runId: string | null } | null;
@@ -293,17 +307,26 @@ const latestRunProjection = (runs: readonly BoardRow["runs"][number][] | null | 
   return run === undefined ? null : latestRunProjectionFromRun(run);
 };
 
-const latestRunProjectionFromRun = (run: BoardRow["runs"][number]): BoardLatestRun => ({
-  id: run.id,
-  runNumber: run.runNumber,
-  status: run.status,
-  model: run.model,
-  codexServiceTier: run.codexServiceTier,
-  costUsd: decimal(run.session?.costUsd),
-  startedAt: run.session?.startedAt ?? null,
-  endedAt: run.session?.endedAt ?? null,
-  pullRequestUrl: run.pullRequestUrl ?? null,
-});
+const latestRunProjectionFromRun = (run: BoardRow["runs"][number]): BoardLatestRun => {
+  // The one phase rule the detail page's diagnostics also go through, so a card
+  // and the table behind it can never name different phases for one run.
+  const phase = runPhase(run, run.session);
+  return {
+    id: run.id,
+    runNumber: run.runNumber,
+    status: run.status,
+    model: run.model,
+    codexServiceTier: run.codexServiceTier,
+    costUsd: decimal(run.session?.costUsd),
+    startedAt: run.session?.startedAt ?? null,
+    endedAt: run.session?.endedAt ?? null,
+    pullRequestUrl: run.pullRequestUrl ?? null,
+    phase: phase.phase,
+    phaseSince: phase.phaseSince,
+    lastProgressEventAt: run.lastProgressEventAt,
+    maxRunsPerTask: run.maxRunsPerTask,
+  };
+};
 
 /** Bind a merge result to the newest Run displayed beside it. */
 const latestRunMergeOutcome = (
@@ -895,6 +918,10 @@ const boardChainRows = async (
           pullRequestUrl: true,
           pushedBranch: true,
           baseSha: true,
+          readyAt: true,
+          endedAt: true,
+          lastProgressEventAt: true,
+          maxRunsPerTask: true,
           session: {
             select: {
               nativeChildUsed: true,
@@ -903,8 +930,12 @@ const boardChainRows = async (
               cachedInputTokens: true,
               cacheCreationInputTokens: true,
               outputTokens: true,
+              executionStatus: true,
+              provisionedAt: true,
               startedAt: true,
               endedAt: true,
+              cleanupStartedAt: true,
+              cleanupEndedAt: true,
             },
           },
         },
@@ -971,11 +1002,13 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
         select: {
           id: true, runNumber: true, status: true, model: true, subagentModel: true, budgetGrants: true,
           leaseLossRefunds: true, codexServiceTier: true, pullRequestUrl: true, pushedBranch: true, baseSha: true,
+          readyAt: true, endedAt: true, lastProgressEventAt: true, maxRunsPerTask: true,
           session: {
             select: {
               nativeChildUsed: true, costUsd: true, inputTokens: true, cachedInputTokens: true,
-              cacheCreationInputTokens: true, outputTokens: true,
-              startedAt: true, endedAt: true,
+              cacheCreationInputTokens: true, outputTokens: true, executionStatus: true,
+              provisionedAt: true, startedAt: true, endedAt: true,
+              cleanupStartedAt: true, cleanupEndedAt: true,
             },
           },
         },

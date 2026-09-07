@@ -17,6 +17,7 @@ import { ProjectProvider } from "../lib/project";
 import { storage } from "../lib/storage";
 import { BOARD_PAGE, ActivateAllDialog, ChainFilterControl, HoldAllDialog, TasksPage, activateAllNotice, archiveDoneNotice, holdAllNotice, moveAction, moveNotAllowedNotice, stableRows, startabilityRefusal, tasksForChain, useTaskStartConfirmation } from "../pages/Tasks";
 import type { BoardTask, ChainAggregate, ChainAggregateState, ChainProgress, TaskStartability, TaskStatus } from "../lib/types";
+import { boardRun } from "./board-run";
 import { type PageHarness, installDom, mountPage, reactDom } from "./dom-harness";
 
 const en = (key: string, vars?: Record<string, string | number>): string => translate("en", key, vars);
@@ -44,10 +45,9 @@ const localizedCard = (locale: "en" | "zh", overrides: Partial<BoardTask> = {}):
 
 test("a member card links its newest run's pull request, after the assignee", () => {
   const withPr = card({
-    latestRun: {
-      id: "r1", runNumber: 1, status: "SUCCEEDED", model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT",
-      costUsd: "0.42", startedAt: null, endedAt: null, pullRequestUrl: "https://github.com/mosonlab/anneal/pull/351",
-    },
+    latestRun: boardRun({
+      model: "gpt-5.6-sol:high", costUsd: "0.42", pullRequestUrl: "https://github.com/mosonlab/anneal/pull/351",
+    }),
   });
   assert.match(withPr, /data-card-assignee=[\s\S]*data-card-pull-request/u);
   assert.match(withPr, /href="https:\/\/github\.com\/mosonlab\/anneal\/pull\/351"/u);
@@ -455,14 +455,14 @@ test("running, ended, and absent runs render only durations their timestamps pro
   const originalNow = Date.now;
   Date.now = () => new Date("2026-08-16T00:12:00.000Z").getTime();
   try {
-    assert.equal(cardTime(task({ latestRun: { id: "r1", runNumber: 1, status: "RUNNING", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: null, pullRequestUrl: null } })), "12m 0s");
+    assert.equal(cardTime(task({ latestRun: boardRun({ status: "RUNNING", startedAt: "2026-08-16T00:00:00.000Z" }) })), "12m 0s");
     // Every live status the run line already gives an elapsed clock to gets the
     // same clock here: the footer used to answer `timeAgo` for a CLAIMED run
     // that the aggregate card was counting up.
-    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "CLAIMED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: null, pullRequestUrl: null } })), "12m 0s");
-    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: "2026-08-16T00:00:00.000Z", endedAt: "2026-08-16T00:08:00.000Z", pullRequestUrl: null } })), "8m 0s · 3h ago");
+    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: boardRun({ status: "CLAIMED", startedAt: "2026-08-16T00:00:00.000Z" }) })), "12m 0s");
+    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: boardRun({ startedAt: "2026-08-16T00:00:00.000Z", endedAt: "2026-08-16T00:08:00.000Z" }) })), "8m 0s · 3h ago");
     assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z" })), "3h ago");
-    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null } })), "3h ago");
+    assert.equal(cardTime(task({ updatedAt: "2026-08-15T21:12:00.000Z", latestRun: boardRun() })), "3h ago");
   } finally {
     Date.now = originalNow;
   }
@@ -481,10 +481,7 @@ test("a mounted running card advances elapsed time while its props stay unchange
   });
   Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: () => undefined });
   const root = (await reactDom()).createRoot(container);
-  const running = task({ latestRun: {
-    id: "r1", runNumber: 1, status: "RUNNING", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null,
-    startedAt: "2026-08-16T00:00:00.000Z", endedAt: null, pullRequestUrl: null,
-  } });
+  const running = task({ latestRun: boardRun({ status: "RUNNING", startedAt: "2026-08-16T00:00:00.000Z" }) });
   try {
     await act(async () => root.render(<TaskCard task={running} actions={ACTIONS} />));
     assert.match(container.textContent ?? "", /12m 0s/);
@@ -590,7 +587,7 @@ test("the model line is the run's snapshot, not the agent's current tier", () =>
   // claude-opus-5:medium showed as gpt-5.6-sol:high.
   const markup = card({
     assigneeAgent: { id: "a1", title: "merge-resolver-opus-medium", model: "gpt-5.6-sol:high" },
-    latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null },
+    latestRun: boardRun(),
   });
   assert.match(markup, /claude-opus-5:medium/);
   assert.doesNotMatch(markup, /gpt-5\.6-sol:high/);
@@ -598,10 +595,8 @@ test("the model line is the run's snapshot, not the agent's current tier", () =>
 });
 
 test("a FAST run adds a fast marker to the single-task model line, but DEFAULT does not", () => {
-  const run = (codexServiceTier: "DEFAULT" | "FAST") => ({
-    id: "r1", runNumber: 1, status: "SUCCEEDED" as const, model: "gpt-5.6-sol:high", codexServiceTier,
-    costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null,
-  } as NonNullable<BoardTask["latestRun"]> & { codexServiceTier: "DEFAULT" | "FAST" });
+  const run = (codexServiceTier: "DEFAULT" | "FAST") =>
+    boardRun({ model: "gpt-5.6-sol:high", codexServiceTier }) as NonNullable<BoardTask["latestRun"]> & { codexServiceTier: "DEFAULT" | "FAST" };
 
   const fast = card({ latestRun: run("FAST") });
   assert.match(fast, /gpt-5\.6-sol:high · fast/u);
@@ -613,10 +608,9 @@ test("a FAST run adds a fast marker to the single-task model line, but DEFAULT d
 });
 
 test("a running single-task card shows the elapsed time alone, in both locales", () => {
-  const latestRun = {
-    id: "r1", runNumber: 1, status: "RUNNING" as const, model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT" as const,
-    costUsd: null, startedAt: new Date(Date.now() - 4 * 60_000).toISOString(), endedAt: null, pullRequestUrl: null,
-  };
+  const latestRun = boardRun({
+    status: "RUNNING", model: "gpt-5.6-sol:high", startedAt: new Date(Date.now() - 4 * 60_000).toISOString(),
+  });
 
   // The run line's amber dot is what says a run is live; the footer says how
   // long, and neither locale spends a word repeating the other.
@@ -639,7 +633,7 @@ test("a task with no runs still shows the agent's configured model", () => {
 test("an unassigned task with a run still shows the run's model snapshot", () => {
   const markup = card({
     assigneeAgent: null,
-    latestRun: { id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null },
+    latestRun: boardRun(),
   });
   assert.match(markup, /claude-opus-5:medium/);
   assert.match(markup, /aria-label="Model claude-opus-5:medium"/);
@@ -685,7 +679,7 @@ test("a NOW card carries no schedule row, and every informative schedule still d
 test("a card with no runs has no run row, and a card with a run reads exactly as before", () => {
   assert.doesNotMatch(card(), /no runs/);
   const withRun = card({
-    latestRun: { id: "r1", runNumber: 3, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null },
+    latestRun: boardRun({ runNumber: 3 }),
   });
   assert.match(withRun, new RegExp(en("tasks.card.run", { n: 3 })));
   assert.match(withRun, new RegExp(en("status.run.SUCCEEDED")));

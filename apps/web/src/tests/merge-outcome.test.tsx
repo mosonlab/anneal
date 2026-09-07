@@ -8,6 +8,7 @@ import { TaskCard } from "../components/task-card";
 import { translate } from "../lib/i18n-core";
 import { lifecycleStat, sessionPill } from "../pages/Sessions";
 import type { BoardTask, ChainAggregate, MergeOutcome, RunStatus } from "../lib/types";
+import { boardRun } from "./board-run";
 
 /**
  * §SF-1 — the merge integrator's outcome as an operator reads it.
@@ -45,7 +46,7 @@ const boardTask = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: "c1", chainIndex: 10,
   chainName: null, updatedAt: "2026-08-18T00:00:00.000Z", assigneeAgent: null, chainProgress: null,
-  latestRun: { id: "run-1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null }, strandedSalvageBranches: [], taskCost: null, budgetRemaining: true, leaseLossRefunds: 0,
+  latestRun: boardRun({ id: "run-1" }), strandedSalvageBranches: [], taskCost: null, budgetRemaining: true, leaseLossRefunds: 0,
   blockedOn: null, mergeOutcome: null, repairOf: null, chainAggregate: null, baseline: null, readinessRequeues: 0, readinessGrants: 0,
   ...overrides,
 });
