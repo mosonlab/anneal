@@ -439,13 +439,32 @@ persist_refresh_conflict() {
   printf 'REGRESSION %s: refresh-conflict %s\n' "$display_mode" "$conflicts"
 }
 
+# The workspace installed its dependencies, and with them generated the Prisma
+# client, before this session started. A refresh that carries a schema change
+# therefore leaves a client the merged tree no longer matches, and the first
+# typecheck the semantic recheck runs reads that staleness as a defect in the
+# code under verification: on 2026-09-06 a refreshed `MergeLeaseEventState.CONTENDED`
+# failed `typecheck -w @anneal/web` and spent a whole verification Run on a
+# finding about generated output nobody had written. Regenerate here, where the
+# tree moved, so the recheck reads the merged tree and nothing else.
+regenerate_prisma_client() {
+  local pre_head="$1" post_head="$2" changed output
+  changed="$(git diff --name-only "$pre_head" "$post_head" -- '*.prisma')" \
+    || die "cannot inspect the refreshed Prisma schema"
+  [ -n "$changed" ] || return 0
+  output="$(npm run db:generate 2>&1)" \
+    || { printf '%s\n' "$output" >&2; die "cannot regenerate the Prisma client for the refreshed tree"; }
+}
+
 refresh_onto_target() {
-  local target_head="$1" pre_head conflicts merge_output merge_status
+  local target_head="$1" pre_head post_head conflicts merge_output merge_status
   valid_sha "$target_head" || die "refusing to merge malformed target head: $target_head"
   pre_head="$(head_sha)" || die "cannot resolve a valid workspace HEAD"
   merge_output="$(git merge --no-edit "$target_head" 2>&1)"
   merge_status=$?
   if [ "$merge_status" -eq 0 ]; then
+    post_head="$(head_sha)" || die "cannot resolve the refreshed workspace HEAD"
+    regenerate_prisma_client "$pre_head" "$post_head"
     return 0
   fi
   conflicts="$(git diff --name-only --diff-filter=U | paste -sd, -)"

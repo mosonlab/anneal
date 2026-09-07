@@ -253,9 +253,18 @@ export type DecisionBinding = {
   inboxMessageId: string;
 };
 
+export type TrainAuthorization = {
+  publishHead: string;
+  predecessorOid: string;
+  ref: string;
+  position: number;
+  trainTaskId: string;
+};
+
 export type AuthorizationPayload = MergeEvidence & {
   issuedAt: string;
   decision: DecisionBinding;
+  train?: TrainAuthorization;
 };
 
 export const authorizationMetadata = (payload: AuthorizationPayload): Record<string, unknown> => ({
@@ -298,6 +307,35 @@ export const parseAuthorizationMetadata = (metadata: unknown): AuthorizationPars
   if (typeof value.issuedAt !== "string" || Number.isNaN(Date.parse(value.issuedAt))) {
     return { status: "malformed", reason: "malformed issuedAt" };
   }
+  let train: TrainAuthorization | undefined;
+  if (value.train !== undefined) {
+    if (typeof value.train !== "object" || value.train === null || Array.isArray(value.train)) {
+      return { status: "malformed", reason: "malformed train publication descriptor" };
+    }
+    const descriptor = value.train as Record<string, unknown>;
+    if (typeof descriptor.publishHead !== "string" || !SHA_PATTERN.test(descriptor.publishHead)) {
+      return { status: "malformed", reason: "malformed train.publishHead" };
+    }
+    if (typeof descriptor.predecessorOid !== "string" || !SHA_PATTERN.test(descriptor.predecessorOid)) {
+      return { status: "malformed", reason: "malformed train.predecessorOid" };
+    }
+    if (descriptor.ref !== `refs/anneal/train/${descriptor.publishHead}`) {
+      return { status: "malformed", reason: "train.ref does not match train.publishHead" };
+    }
+    if (typeof descriptor.position !== "number" || !Number.isInteger(descriptor.position) || descriptor.position <= 0) {
+      return { status: "malformed", reason: "malformed train.position" };
+    }
+    if (typeof descriptor.trainTaskId !== "string" || descriptor.trainTaskId.length === 0) {
+      return { status: "malformed", reason: "missing train.trainTaskId" };
+    }
+    train = {
+      publishHead: descriptor.publishHead,
+      predecessorOid: descriptor.predecessorOid,
+      ref: descriptor.ref,
+      position: descriptor.position,
+      trainTaskId: descriptor.trainTaskId,
+    };
+  }
   // The evidence half is validated by the same parser that reads a card body,
   // so a payload and the block it was copied from cannot diverge in what counts
   // as well-formed.
@@ -316,17 +354,19 @@ export const parseAuthorizationMetadata = (metadata: unknown): AuthorizationPars
   if (evidence.status !== "ok") {
     return { status: "malformed", reason: evidence.status === "unparseable" ? evidence.reason : "missing evidence fields" };
   }
+  const payload: AuthorizationPayload = {
+    ...evidence.evidence,
+    issuedAt: value.issuedAt,
+    decision: {
+      channel: binding.channel,
+      inboxDecisionId: binding.inboxDecisionId,
+      inboxMessageId: binding.inboxMessageId,
+    },
+  };
+  if (train) payload.train = train;
   return {
     status: "ok",
-    payload: {
-      ...evidence.evidence,
-      issuedAt: value.issuedAt,
-      decision: {
-        channel: binding.channel,
-        inboxDecisionId: binding.inboxDecisionId,
-        inboxMessageId: binding.inboxMessageId,
-      },
-    },
+    payload,
   };
 };
 
@@ -483,6 +523,8 @@ export const STOP_CONDITIONS = [
   "unresolved-mergeability",
   "payload-mismatch",
   "changed-underneath-me",
+  "train-precondition-failed",
+  "train-publish-rejected",
   "target-unresolvable",
   "deferred-merge-machinery",
   "missing-or-malformed-result",
@@ -503,6 +545,7 @@ export type Disposition =
   | "terminal-abandoned"
   | "refresh-requested"
   | "repair-requested"
+  | "revalidation-requested"
   | "nonterminal";
 
 export const TERMINAL_DISPOSITIONS: Disposition[] = ["terminal-done", "terminal-abandoned"];
@@ -516,7 +559,8 @@ export type StopChoice =
   | "revert"
   | "accept-foreign-merge"
   | "flag-incident"
-  | "open-repair";
+  | "open-repair"
+  | "re-validate";
 
 const RESUMABLE: StopChoice[] = ["re-authorize", "abandon"];
 
@@ -543,6 +587,8 @@ export const STOP_CHOICES: Record<StopCondition, StopChoice[]> = {
   "unresolved-mergeability": RESUMABLE,
   "payload-mismatch": RESUMABLE,
   "changed-underneath-me": ["accept-foreign-merge", "flag-incident"],
+  "train-precondition-failed": RESUMABLE,
+  "train-publish-rejected": RESUMABLE,
   "target-unresolvable": ["open-repair", "abandon"],
   "deferred-merge-machinery": RESUMABLE,
   "missing-or-malformed-result": RESUMABLE,
@@ -551,6 +597,23 @@ export const STOP_CHOICES: Record<StopCondition, StopChoice[]> = {
 /** The choices the `flag-incident` follow-up question offers — the later exits C3 promised. */
 export const FOLLOW_UP_CHOICES: StopChoice[] = ["accept-foreign-merge", "abandon"];
 
+/**
+ * The wider offering a base-drift recovery opens when one retry class crossed
+ * its own ceiling rather than the candidate being ineligible. Only a ceiling
+ * has counters to reset, so `re-validate` is offered there and nowhere else;
+ * an ordinary refusal keeps the abandon-only card above.
+ */
+export const BASE_DRIFT_CLASS_CEILING_CHOICES: StopChoice[] = ["re-validate", "abandon"];
+
+/**
+ * Every choice a condition can be answered with, which for base drift is wider
+ * than the default offering: the recovery decides per settle which card to
+ * open, and the answer transaction must accept whichever it opened.
+ */
+const ANSWERABLE_CHOICES: Partial<Record<StopCondition, StopChoice[]>> = {
+  "base-drift": [...BASE_DRIFT_CLASS_CEILING_CHOICES, ...STOP_CHOICES["base-drift"]],
+};
+
 const DISPOSITION_OF: Record<StopChoice, Disposition> = {
   accept: "terminal-done",
   revert: "terminal-done",
@@ -558,6 +621,7 @@ const DISPOSITION_OF: Record<StopChoice, Disposition> = {
   abandon: "terminal-abandoned",
   "re-authorize": "refresh-requested",
   "open-repair": "repair-requested",
+  "re-validate": "revalidation-requested",
   "flag-incident": "nonterminal",
 };
 
@@ -571,7 +635,7 @@ export const isStopChoice = (value: unknown): value is StopChoice =>
  */
 export const dispositionFor = (condition: StopCondition, choice: string): Disposition | null => {
   if (!isStopChoice(choice)) return null;
-  if (!STOP_CHOICES[condition].includes(choice)) return null;
+  if (!(ANSWERABLE_CHOICES[condition] ?? STOP_CHOICES[condition]).includes(choice)) return null;
   return DISPOSITION_OF[choice];
 };
 
@@ -589,6 +653,7 @@ export const CHOICE_LABELS: Record<StopChoice, string> = {
   "accept-foreign-merge": "接受他人已完成的合并",
   "flag-incident": "标记为事故，暂不结案",
   "open-repair": "开始修复合并目标",
+  "re-validate": "重新校验（重置该类计数，继续自动恢复）",
 };
 
 export const stopChoicePayload = (choices: StopChoice[]): Array<{ id: string; label: string }> =>
@@ -610,7 +675,10 @@ export const parseStopAnswerMetadata = (metadata: unknown): StopAnswerRecord | n
   if (!isStopCondition(value.condition)) return null;
   if (!isStopChoice(value.choice)) return null;
   const disposition = value.disposition;
-  const known: Disposition[] = ["terminal-done", "terminal-abandoned", "refresh-requested", "repair-requested", "nonterminal"];
+  const known: Disposition[] = [
+    "terminal-done", "terminal-abandoned", "refresh-requested", "repair-requested",
+    "revalidation-requested", "nonterminal",
+  ];
   if (typeof disposition !== "string" || !known.includes(disposition as Disposition)) return null;
   return { stopId: value.stopId, condition: value.condition, choice: value.choice, disposition: disposition as Disposition };
 };

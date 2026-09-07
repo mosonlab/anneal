@@ -25,6 +25,8 @@ export * from "./gate-slot.js";
 export * from "./merge-gate.js";
 export * from "./gate-toggle.js";
 export * from "./merge-tail-markers.js";
+export * from "./readiness-requeue.js";
+export * from "./merge-recovery-revalidate.js";
 export * from "./merge-lease-ledger.js";
 export {
   CHAIN_STRUCTURE_LOCK_CLASS,
@@ -62,6 +64,7 @@ export {
   WorkflowRefusalError,
   type WorkflowRefusalReason,
   attemptRunBirth,
+  basePublishedStamp,
   codexGptCapability,
   compoundImplementationAssigneeValid,
   deriveRunConfig,
@@ -85,6 +88,7 @@ export {
   openRun,
   pinnedImplementationRange,
   platformImplementationBaseSha,
+  recordedImplementationBaseSha,
   resolveRequeueBase,
   resolveRunBranches,
   runBudgetCeiling,

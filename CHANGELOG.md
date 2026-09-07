@@ -17,6 +17,18 @@ written.
   two parent shas. Any missing fact, and any failed or timed-out read, still
   stops `base-drift-post-merge`; the Inbox evidence gains a `directParentCheck`
   field naming what was read.
+- `PATCH /tasks/:taskId` accepts `dispatchAfterTaskId` on the first step of a
+  Chain that has no Run, re-pointing or (with `null`) releasing its Chain
+  binding instead of forcing the Chain to be deleted and instantiated again. A
+  started Chain, a later step, or a standalone task is refused with
+  `chain_binding_immutable_after_start`; an archived, foreign, standalone, or
+  same-chain predecessor with `chain_binding_target_invalid`.
+- An exception thrown while merge readiness evaluates a Chain now requeues the
+  readiness step instead of stopping the merge tail. The retry is bounded by
+  `MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT` (default 3); past the bound the tail
+  stops with `readiness evaluation failed after <n> exception requeues:
+  <message>`. A deliberate refusal, and a missing or mismatched merge-gate
+  operator authorization, still stop the tail on the first occurrence.
 - Retired the `POST /files/mkdir` and `POST /files/move` routes and their
   underlying store operations.
 - Removed `POST /inbox/messages/:messageId/supersede`;

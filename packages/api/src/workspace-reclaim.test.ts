@@ -142,6 +142,43 @@ test("reclaim salvage ACK accepts only the owner's deterministic ref while the i
   assert.deepEqual(activities, []);
 });
 
+test("reclaim salvage ACK marks the base it published as reachable", async () => {
+  // The salvage commit descends from the base its Run was provisioned at, so
+  // pushing it puts that base on the remote too.
+  const ackFor = async (run: { baseSha: string | null; basePublishedAt: Date | null }) => {
+    let written: Record<string, unknown> | null = null;
+    const stored = {
+      id: "run-3", runnerId: "runner-1", taskId: "task-1", runNumber: 3,
+      status: RunStatus.LOST, workspaceReclaimAt: new Date(), workspaceReclaimedAt: null,
+      pushedBranch: null, ...run,
+    };
+    const db: any = {
+      $queryRaw: async () => [{ id: "task-1" }],
+      run: {
+        findUnique: async () => stored,
+        findFirst: async () => null,
+        updateMany: async ({ data }: { data: Record<string, unknown> }) => { written = data; return { count: 1 }; },
+      },
+      task: {
+        findUnique: async () => ({ projectId: "project-1", chainId: null }),
+        findUniqueOrThrow: async () => ({ id: "task-1" }),
+      },
+      taskActivity: { create: async () => ({}) },
+    };
+    db.$transaction = async (operation: (tx: any) => unknown) => operation(db);
+    assert.equal(await acknowledgeReclaimSalvage(db, {
+      runnerId: "runner-1", runId: stored.id, pushedBranch: "agentos/task-1/run-3",
+    }), "none");
+    return written as unknown as { basePublishedAt: Date | null };
+  };
+
+  assert.ok((await ackFor({ baseSha: "base-sha", basePublishedAt: null }))?.basePublishedAt);
+  const stamped = new Date("2026-09-06T00:00:00.000Z");
+  assert.equal((await ackFor({ baseSha: "base-sha", basePublishedAt: stamped }))?.basePublishedAt, stamped);
+  // A Run that never recorded a base published nothing to mark.
+  assert.equal((await ackFor({ baseSha: null, basePublishedAt: null }))?.basePublishedAt, null);
+});
+
 test("reclaim salvage ACK records when a started replacement leaves the branch unconsumed", async () => {
   const activities: Array<Record<string, unknown>> = [];
   const stored = {
