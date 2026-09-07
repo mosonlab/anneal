@@ -190,7 +190,7 @@ test("an exception requeue returns readiness to TODO and records the retry", asy
     data: { status: TaskStatus.TODO, failureReason: null },
   }], "only the readiness Step is returned; the regression evidence stands");
   assert.equal(activities.length, 1);
-  assert.equal(activities[0]?.taskId, "readiness-1");
+  assert.equal(activities[0]?.taskId, "regression-1", "the retry row joins the readiness markers on the regression task");
   assert.match(String(activities[0]?.body), /Merge readiness requeued after evaluation exception 2 of 3: readiness evaluation exception: terminated/u);
   const metadata = activities[0]?.metadata as Record<string, unknown>;
   assert.equal(metadata.kind, MERGE_TAIL_KIND.readiness);

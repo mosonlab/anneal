@@ -1179,9 +1179,9 @@ const terminatingLease: WithMergeLease = async (target) => {
   throw new Error("terminated");
 };
 
-const exceptionRequeueMarkers = (readinessTaskId: string) => db.taskActivity.findMany({
+const exceptionRequeueMarkers = (regressionTaskId: string) => db.taskActivity.findMany({
   where: {
-    taskId: readinessTaskId,
+    taskId: regressionTaskId,
     AND: [
       { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.readiness } },
       { metadata: { path: ["state"], equals: READINESS_EXCEPTION_REQUEUE_STATE } },
@@ -1211,7 +1211,7 @@ test("a readiness evaluation exception requeues the step instead of stopping the
   assert.equal(await db.inboxMessage.count(), 0, "a requeue writes no stop notice");
   assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId]);
 
-  const markers = await exceptionRequeueMarkers(seeded.readiness.id);
+  const markers = await exceptionRequeueMarkers(seeded.regression.id);
   assert.equal(markers.length, 1);
   const metadata = markers[0]!.metadata as Record<string, unknown>;
   assert.equal(metadata.reason, "readiness evaluation exception: terminated");
@@ -1250,7 +1250,7 @@ test("exception requeues are bounded and the stop past the limit counts them", a
   assert.equal(readiness.failureReason, reason);
   assert.equal(regression.status, TaskStatus.REVIEW);
   assert.equal(regression.failureReason, reason);
-  assert.equal((await exceptionRequeueMarkers(seeded.readiness.id)).length, READINESS_EXCEPTION_REQUEUE_LIMIT);
+  assert.equal((await exceptionRequeueMarkers(seeded.regression.id)).length, READINESS_EXCEPTION_REQUEUE_LIMIT);
   const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
   assert.equal(notice.body, `Autonomous merge readiness stopped: ${reason}`);
 });

@@ -314,9 +314,11 @@ export const READINESS_EXCEPTION_REQUEUE_STATE = "requeued-exception";
 
 /**
  * Returns the readiness Step to `TODO` after an evaluation exception so the
- * next tick evaluates it again. The Step is the only row this touches: the
- * Regression evidence it was about to authorize is still valid, and the marker
- * is what the board shows for the retry.
+ * next tick evaluates it again. That Step is the only row whose status this
+ * touches: the Regression evidence it was about to authorize is still valid.
+ * The marker goes where every other readiness-phase marker goes -- the
+ * Regression task, alongside the readiness requeue and stop rows the board
+ * already shows -- so the retries appear in the stream operators read.
  */
 export const requeueReadinessExceptionSettlement = (
   input: {
@@ -336,7 +338,7 @@ export const requeueReadinessExceptionSettlement = (
       where: { id: input.readinessTaskId },
       data: { status: TaskStatus.TODO, failureReason: null },
     });
-    await writeMarker(tx, input.readinessTaskId, "readiness", {
+    await writeMarker(tx, input.regressionTaskId, "readiness", {
       actorType: "control-plane",
       body: `Merge readiness requeued after evaluation exception ${String(input.requeue)}`
         + ` of ${String(input.limit)}: ${input.reason}`,
@@ -356,16 +358,17 @@ export const requeueReadinessExceptionSettlement = (
 });
 
 /**
- * Exception requeues already spent on this readiness Step, counted within the
- * recovery attempt that owns them: a base-drift recovery is a fresh tail, and
- * the requeues its predecessor spent are not charged to it.
+ * Exception requeues already spent on this readiness Step, read from the
+ * Regression task that carries its markers and counted within the recovery
+ * attempt that owns them: a base-drift recovery is a fresh tail, and the
+ * requeues its predecessor spent are not charged to it.
  */
 const spentExceptionRequeues = async (
   db: PrismaClient,
-  readinessTaskId: string,
+  regressionTaskId: string,
   recovery: RecoveryContext | null,
 ): Promise<number> => {
-  const markers = await db.$transaction((tx) => readMarkerHistory(tx, readinessTaskId));
+  const markers = await readMarkerHistory(db as Prisma.TransactionClient, regressionTaskId);
   return markers.filter((marker) => marker.kind === "readiness"
     && marker.state === READINESS_EXCEPTION_REQUEUE_STATE
     && (marker.raw.recoveryAggregateId ?? null) === (recovery?.aggregateId ?? null)).length;
@@ -992,7 +995,7 @@ export const readinessTick = async (
       // child or a restarted deploy therefore costs one requeue of the
       // readiness Step, bounded so a permanent fault still reaches an operator.
       const spent = refusalCode === null
-        ? await spentExceptionRequeues(db, readiness.id, read.recovery)
+        ? await spentExceptionRequeues(db, read.regression.id, read.recovery)
         : 0;
       const requeuing = refusalCode === null && spent < exceptionRequeueLimit;
       // Stopping the tail is not another refusal by the holder either, and the

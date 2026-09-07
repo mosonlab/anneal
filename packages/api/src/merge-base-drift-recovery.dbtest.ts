@@ -727,7 +727,7 @@ test("readiness records and reopens a head-adoption refusal by code, independent
   // A refusal carries a code and is a decision, so it stops on its first
   // occurrence rather than spending an exception requeue.
   assert.equal(await db.taskActivity.count({ where: {
-    taskId: seeded.readinessTask!.id,
+    taskId: seeded.gateTask.id,
     metadata: { path: ["state"], equals: "requeued-exception" },
   } }), 0);
   assert.equal(
