@@ -675,8 +675,12 @@ An existing escalation may be retried unattended only for
 `release-artifact-build-failed` is retryable-transient only when its detail
 matches one of these source clone/fetch transport failures:
 `gnutls_handshake() failed`, `SSL_ERROR_SYSCALL`, `could not fetch … from
-promisor remote`, or `read timeout`. The `read timeout` match is accepted only
-when the detail identifies a source clone or fetch. The allowlist is explicit
+promisor remote`, or `read timeout` (case-insensitive). The detail must contain
+the builder's terminal `DeployFailure: release-artifact-source-unavailable:
+exit-128` header and a matching final `fatal:` diagnostic before that exception
+(allowing Node's throw-site display). This identifies the source clone or
+checkout's promisor fetch; earlier recovered transport errors, terminal
+compile/dependency failures, and ambiguous output do not qualify. The allowlist is explicit
 and fail-closed: compile, test, missing-dependency, unknown, and every other
 build detail remains commit-scoped when the marker names a full target commit.
 Environment, authentication, malformed remote state, artifact, verification,
@@ -690,7 +694,10 @@ before its next admission. If that retry fails, later retries wait 10, 20, 40,
 and then 60 minutes; 60 minutes is the cap for all subsequent attempts. The
 marker is the single source of truth for this schedule. A legacy capped marker
 without `retryAfter` derives its first deadline from `escalatedAt` plus the
-delay for its attempt count. While the deadline is in the future, the tick
+delay for its attempt count. At rollout, a pre-existing capped marker whose
+computed deadline has already passed admits one immediate retry on the first
+tick; operators should not expect a fresh five-minute wait after installation.
+While the deadline is in the future, the tick
 stays stopped and logs:
 
 ```text
@@ -726,7 +733,10 @@ target commit `to` first and its `reason` second:
   above; every other build detail is commit-scoped only when the marker names a
   full target commit. The retry deadline and self-clear rules in this section
   own a qualifying marker end to end; the commit main points at does not change
-  its answer, in either direction. A transient-looking reason on a marker with
+  its answer, in either direction. A transport-detail build failure at the cap
+  therefore blocks newer commits until `retryAfter`, potentially for 60 minutes;
+  `--clear-escalation` is the operator override when deployment must not wait.
+  A transient-looking reason on a marker with
   any other `to` (missing, or neither a full commit oid nor `unknown`) is
   host-scoped instead: it spends no retry attempt and blocks every deploy.
 - **commit-scoped** — any other reason on a marker whose `to` is a full commit

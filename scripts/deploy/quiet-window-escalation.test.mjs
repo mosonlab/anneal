@@ -383,14 +383,19 @@ for (const record of [
   });
 }
 
-for (const detail of [
+const builderFailureDetail = (diagnostic, reason = "release-artifact-source-unavailable") =>
+  `${diagnostic}\nfile:///deploy/scripts/deploy/release-artifact.mjs:291\n    const failure = new DeployFailure(\n                    ^\n\nDeployFailure: ${reason}: exit-128\n    at run (release-artifact.mjs:291:21)\n    at buildReleaseArtifact (release-artifact.mjs:358:27)\n{ reason: '${reason}', detail: 'exit-128' }\nNode.js v24.0.0`;
+
+for (const diagnostic of [
   "fatal: unable to access 'https://source/repo': gnutls_handshake() failed: The TLS connection was non-properly terminated.",
   "fatal: unable to access 'https://source/repo': OpenSSL SSL_connect: SSL_ERROR_SYSCALL",
   "fatal: could not fetch abc123 from promisor remote",
-  "git clone source: read timeout",
-  "git fetch source: Read timed out",
+  "fatal: source clone: read timeout",
+  "fatal: source fetch: Read timed out",
+  "fatal: unable to access source: ssl_error_syscall",
 ]) {
-  test(`source transport detail earns retry backoff: ${detail}`, async (t) => {
+  const detail = builderFailureDetail(diagnostic);
+  test(`source transport detail earns retry backoff: ${diagnostic}`, async (t) => {
     const record = { reason: "release-artifact-build-failed", detail, to: failedCommit };
     assert.equal(escalationScope({ record, retryableReasons, hostScopedReasons }), "retryable-transient");
     const state = fixture(t, { ...record, attempts: 4 });
@@ -409,6 +414,12 @@ for (const detail of [
 }
 
 for (const detail of [undefined, "", "unknown", "compile failed", "test failure", "Cannot find module typescript",
+  builderFailureDetail("fatal: gnutls_handshake() failed\ncompile failed", "release-artifact-build-failed"),
+  builderFailureDetail("fatal: gnutls_handshake() failed\nnpm error missing dependency", "release-artifact-dependencies-failed"),
+  builderFailureDetail("npm error: SSL_ERROR_SYSCALL", "release-artifact-dependencies-failed"),
+  "npm error: git fetch https://github.com/some/dep failed: read timeout",
+  builderFailureDetail("fatal: gnutls_handshake() failed\nfatal: authentication failed"),
+  "fatal: gnutls_handshake() failed",
   "read timeout", "test database read timeout", "npm install: read timeout", "git clone: authentication failed"]) {
   test(`other artifact build detail stays commit-scoped: ${detail}`, async (t) => {
     const record = { reason: "release-artifact-build-failed", detail, to: failedCommit };
@@ -420,3 +431,28 @@ for (const detail of [undefined, "", "unknown", "compile failed", "test failure"
     assert.equal((await checkExistingEscalation(state.options)).active, true);
   });
 }
+
+
+test("writer rejects a missing retryable reason set before persisting", (t) => {
+  const state = fixture(t);
+  const before = readFileSync(state.escalationPath, "utf8");
+  for (const retryableReasons of [undefined, null, []]) {
+    assert.throws(() => writeEscalationWithAttempts({ ...state.options,
+      record: retryableEscalation, retryableReasons }), /retryableReasons-required/u);
+    assert.equal(readFileSync(state.escalationPath, "utf8"), before);
+  }
+});
+
+test("reader and writer share an injected retry cap", async (t) => {
+  const state = fixture(t, { ...retryableEscalation, attempts: 2 });
+  for (const [index, minutes] of [5, 10, 20].entries()) {
+    const marker = writeEscalationWithAttempts({ ...state.options, retryCap: 3,
+      record: retryableEscalation, now: () => new Date(backoffStart) });
+    assert.equal(marker.attempts, index + 3);
+    assert.equal(Date.parse(marker.retryAfter) - backoffStart, minutes * 60_000);
+    assert.equal((await checkExistingEscalation({ ...state.options, retryCap: 3,
+      now: () => new Date(backoffStart) })).active, true);
+    assert.equal((await checkExistingEscalation({ ...state.options, retryCap: 3,
+      now: () => new Date(backoffStart + minutes * 60_000) })).active, false);
+  }
+});

@@ -25,20 +25,35 @@ const retryDeadline = (record, attempts, retryCap) => {
   return escalatedAt + retryBackoffMs(attempts, retryCap);
 };
 
-// Only these source-transport diagnostics earn retries for an artifact build.
-// A generic timeout could be a test, dependency install or compiler failure;
-// require clone/fetch context for that otherwise ambiguous diagnostic.
+// The unchanged builder throws this terminal reason only for source clone or
+// checkout (including a promisor fetch). Its stderr can also contain earlier,
+// recovered clone errors: inspect the final fatal diagnostic before that error,
+// never arbitrary transport substrings anywhere in the aggregate output.
 const ARTIFACT_SOURCE_TRANSPORT_DETAILS = [
   /gnutls_handshake\(\) failed/iu,
-  /\bSSL_ERROR_SYSCALL\b/u,
+  /\bSSL_ERROR_SYSCALL\b/iu,
   /could not fetch\s+.+?\s+from promisor remote/iu,
-  /\b(?:git\s+(?:clone|fetch)|source[- ](?:clone|fetch))\b[^\r\n]*\bread[ -](?:timeout|timed out)\b/iu,
+  /\bread[ -](?:timeout|timed out)\b/iu,
 ];
-const isRetryableFailure = (record, retryableReasons) =>
-  retryableReasons?.has(record?.reason)
-  || (record?.reason === "release-artifact-build-failed"
-    && typeof record.detail === "string"
-    && ARTIFACT_SOURCE_TRANSPORT_DETAILS.some((pattern) => pattern.test(record.detail)));
+const artifactSourceTransportFailure = (detail) => {
+  if (typeof detail !== "string") return false;
+  const failures = [...detail.matchAll(/^DeployFailure: ([^\r\n]+)$/gmu)];
+  if (failures.length !== 1
+    || !/^release-artifact-source-unavailable: exit-128$/u.test(failures[0][1])) return false;
+  // Node prints the throw site before its uncaught exception header.
+  const diagnosticOutput = detail.slice(0, failures[0].index).trimEnd()
+    .replace(/\nfile:\/\/[^\r\n]+:\d+\r?\n[^\r\n]*\r?\n[ \t]*\^[ \t]*$/u, "");
+  const diagnostics = diagnosticOutput.split(/\r?\n/u);
+  const terminalDiagnostic = diagnostics.at(-1) ?? "";
+  return /^fatal: /u.test(terminalDiagnostic)
+    && ARTIFACT_SOURCE_TRANSPORT_DETAILS.some((pattern) => pattern.test(terminalDiagnostic));
+};
+const isRetryableFailure = (record, retryableReasons) => {
+  if (!(retryableReasons instanceof Set)) throw new TypeError("retryableReasons-required");
+  return retryableReasons.has(record?.reason)
+    || (record?.reason === "release-artifact-build-failed"
+      && artifactSourceTransportFailure(record.detail));
+};
 
 const OID = /^[0-9a-f]{40}$/u;
 
@@ -231,6 +246,7 @@ export const writeEscalationWithAttempts = ({
   escalationPath,
   record,
   retryableReasons,
+  retryCap = ESCALATION_RETRY_CAP,
   now = () => new Date(),
 }) => {
   let previous = null;
@@ -245,8 +261,8 @@ export const writeEscalationWithAttempts = ({
   const persisted = attempts === null ? record : {
     ...record,
     attempts,
-    ...(attempts >= ESCALATION_RETRY_CAP
-      ? { retryAfter: new Date(timestamp.getTime() + retryBackoffMs(attempts)).toISOString() }
+    ...(attempts >= retryCap
+      ? { retryAfter: new Date(timestamp.getTime() + retryBackoffMs(attempts, retryCap)).toISOString() }
       : {}),
   };
   writeEscalationRecord({ path: escalationPath, record: persisted, now: () => timestamp });
