@@ -26,7 +26,7 @@ import {
   type SessionSeenState,
 } from "../lib/session-list";
 import { useEventStream } from "../lib/use-event-stream";
-import type { Agent, MergeOutcome, RunnerKind, Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
+import type { Agent, MergeOutcome, RunBaseline, RunMetrics, RunnerKind, Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
 import {
   IconArrowLeft, IconChevron, IconRefresh, IconToolDefault, IconToolEdit, IconToolRead, IconToolRun, IconToolSearch,
   IconToolWeb,
@@ -39,6 +39,7 @@ import {
   type AgentChipAgent, type PillTone,
 } from "../components/ui";
 import { ModelLabel } from "../components/model-picker";
+import { RunDiagnostics } from "../components/run-diagnostics";
 import { Button } from "../components/ui/button";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "../components/ui/hover-card";
 import { Input } from "../components/ui/input";
@@ -146,6 +147,15 @@ const SESSION_TITLE = "min-w-0 flex-1 rounded-sm focus-visible:outline focus-vis
 const SESSION_DAY_HEADING = "flex items-baseline gap-[9px] border-b border-[color:var(--border-soft)] bg-secondary/45 px-[20px] py-[10px]";
 const SESSION_DAY_ROWS = "divide-y divide-[color:var(--border-soft)]";
 
+/** The list projection deliberately omits derived metrics. The detail read
+ *  may carry them, plus the optional baseline population used by the shared
+ *  diagnostics renderer. Keep this local until the wire contract is enriched
+ *  by the API change that owns the route. */
+type SessionWithDiagnostics = Session & {
+  metrics?: RunMetrics | null;
+  baseline?: RunBaseline | null;
+};
+
 const sessionDotTone = (tone: PillTone): string | undefined => {
   if (tone === "green") return DOT_TONE.green;
   if (tone === "amber") return DOT_TONE.amber;
@@ -219,22 +229,57 @@ const SessionHoverCard = ({ session, unseen }: { session: Session; unseen: boole
 };
 
 export const SessionRow = ({ session, unseen = false }: { session: Session; unseen?: boolean }): ReactNode => {
+  const t = useT();
+  const [expanded, setExpanded] = useState(false);
+  // The list projection intentionally stays cheap. Read the enriched session
+  // only after an operator asks for this row's details, and keep the response
+  // on the same poll cadence as the Session detail page while it is open.
+  const detail = usePoll<SessionWithDiagnostics>(expanded ? `/sessions/${encodeURIComponent(session.id)}` : null, POLL_MS);
   const { tone } = sessionPill(session.executionStatus, session.mergeOutcome);
   return (
-    <div
-      data-session-row
-      className={cn(SESSION_ROW, "cursor-pointer")}
-      // Link calls preventDefault and navigates but does not stop propagation,
-      // so without this guard clicking the Task cell would open the session.
-      onClick={(event) => { if (!event.defaultPrevented) navigate(`/sessions/${session.id}`); }}
-    >
-      <span aria-hidden="true" data-session-status className={cn(DOT, sessionDotTone(tone))} />
-      <SessionHoverCard session={session} unseen={unseen} />
-      {unseen ? <span aria-hidden="true" data-session-unseen className={cn(DOT, DOT_TONE.green)} /> : null}
-      <span data-session-time className="shrink-0 text-[11.5px] text-muted-foreground">
-        {timeAgo(session.startedAt ?? session.requestedAt)}
-      </span>
-    </div>
+    <>
+      <div
+        data-session-row
+        className={cn(SESSION_ROW, "cursor-pointer")}
+        // Link calls preventDefault and does not stop propagation, so without
+        // this guard clicking the Task cell would open the session.
+        onClick={(event) => { if (!event.defaultPrevented) navigate(`/sessions/${session.id}`); }}
+      >
+        <button
+          type="button"
+          data-session-row-toggle
+          aria-expanded={expanded}
+          aria-label={t(expanded ? "ui.showMore.less" : "ui.showMore.more")}
+          title={t(expanded ? "ui.showMore.less" : "ui.showMore.more")}
+          className="inline-flex shrink-0 items-center border-0 bg-transparent p-0 text-muted-foreground hover:text-foreground focus-visible:outline focus-visible:outline-1 focus-visible:outline-[color:var(--ring)]"
+          onClick={(event) => { event.stopPropagation(); setExpanded((current) => !current); }}
+        >
+          <IconChevron open={expanded} />
+        </button>
+        <span aria-hidden="true" data-session-status className={cn(DOT, sessionDotTone(tone))} />
+        <SessionHoverCard session={session} unseen={unseen} />
+        {unseen ? <span aria-hidden="true" data-session-unseen className={cn(DOT, DOT_TONE.green)} /> : null}
+        <span data-session-time className="shrink-0 text-[11.5px] text-muted-foreground">
+          {timeAgo(session.startedAt ?? session.requestedAt)}
+        </span>
+      </div>
+      {expanded ? (
+        <div data-session-row-details className="border-b border-[color:var(--border-soft)] bg-[color:var(--surface-run-detail)] px-[20px] py-[14px]">
+          {detail.error !== null && detail.data === null ? (
+            <ErrorNotice message={`${detail.error.status} ${detail.error.message}`} onRetry={detail.reload} />
+          ) : detail.data === null ? (
+            <div className="text-[12.5px] text-muted-foreground">{t("common.loading")}</div>
+          ) : (
+            <RunDiagnostics
+              metrics={detail.data.metrics}
+              baseline={detail.data.baseline}
+              costUsd={detail.data.costUsd}
+              runTerminationReason={detail.data.terminationReason}
+            />
+          )}
+        </div>
+      ) : null}
+    </>
   );
 };
 
@@ -833,7 +878,7 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
   // small request on a page the operator is actively looking at, and late
   // metadata (endedAt, terminationReason, the backfilled token columns) must
   // not sit stale. Only the event stream stops.
-  const { data: session, error, reload } = usePoll<Session>(`/sessions/${sessionId}`, POLL_MS);
+  const { data: session, error, reload } = usePoll<SessionWithDiagnostics>(`/sessions/${sessionId}`, POLL_MS);
   const t = useT();
   const terminal = session ? !isLiveStatus(session.executionStatus) : false;
   const stream = useEventStream(session?.runId ?? null, terminal);
@@ -970,6 +1015,12 @@ export const SessionDetailPage = ({ sessionId }: { sessionId: string }): ReactNo
             { k: t("sessions.detail.termination"), v: session.terminationReason ?? "—" },
             ...(session.resumeAttempt > 0 ? [{ k: t("sessions.detail.resumeAttempts"), v: `${session.resumeAttempt}` }] : []),
           ]} />
+          <RunDiagnostics
+            metrics={session.metrics}
+            baseline={session.baseline}
+            costUsd={session.costUsd}
+            runTerminationReason={session.terminationReason}
+          />
         </Card>
 
         <Card title={t("sessions.stream.title")} extra={<span className={COUNT}>{nodes.length}{plus}</span>}>
