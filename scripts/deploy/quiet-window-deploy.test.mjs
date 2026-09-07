@@ -1040,7 +1040,7 @@ test("retryable escalation self-clears after a successful deployment outcome", a
   assert.deepEqual(state.logs, ["SELF-CLEAR escalation reason=quiet-window-query-failed attempts=2"]);
 });
 
-test("repeated retryable failures persist attempts atomically through the cap and then block", async (t) => {
+test("repeated retryable failures persist attempts atomically through the cap and then wait", async (t) => {
   const state = escalationFixture(t, {
     outcome: "failure",
     reason: "remote-main-unreadable",
@@ -1050,7 +1050,7 @@ test("repeated retryable failures persist attempts atomically through the cap an
   for (const expected of [ESCALATION_RETRY_CAP - 1, ESCALATION_RETRY_CAP]) {
     const persisted = writeEscalationWithAttempts({
       escalationPath: state.escalationPath,
-      record: { outcome: "failure", reason: "remote-main-unreadable" },
+      record: { outcome: "failure", reason: "remote-main-unreadable", to: "unknown" },
       retryableReasons: RETRYABLE_ESCALATION_REASONS,
     });
     assert.equal(persisted.attempts, expected);
@@ -1935,6 +1935,50 @@ test("missing artifact records FAILED without quiet-window, build, or activation
   assert.equal(calls.some((call) => /dependencies|install/u.test(call)), false);
   assert.equal(records.at(-1).state, "FAILED");
 });
+
+for (const [name, diagnostic, terminalReason, retryable] of [
+  ["source TLS", "fatal: gnutls_handshake() failed: The TLS connection was non-properly terminated.", "release-artifact-source-unavailable", true],
+  ["recovered TLS then compile", "fatal: gnutls_handshake() failed\ncompile failed", "release-artifact-build-failed", false],
+  ["dependency TLS", "npm error: SSL_ERROR_SYSCALL", "release-artifact-dependencies-failed", false],
+]) {
+  test(`captured builder stderr preserves escalation policy: ${name}`, async (t) => {
+    withDeployBinaries(t);
+    const stderr = `${"earlier build output\n".repeat(150)}${diagnostic}\nfile:///deploy/scripts/deploy/release-artifact.mjs:291\n    const failure = new DeployFailure(\n                    ^\n\nDeployFailure: ${terminalReason}: exit-128\n    at run (release-artifact.mjs:291:21)\n    at buildReleaseArtifact (release-artifact.mjs:358:27)\nNode.js v24.0.0\n`;
+    const host = createDeployHost({
+      environment: controlPlaneEnvironment(),
+      serviceControl: { platform: "linux" },
+      runCommand: async (_program, args, options) => {
+        assert.ok(args[0].endsWith("/build-release-artifact.mjs"));
+        assert.equal(options.capture, true);
+        return { code: 1, stderr, stdout: "" };
+      },
+    });
+    const attempt = openDeploymentAttempt({
+      deployRoot: "/fixture", targetCommit: revisions.to, transactionId: `captured-${name}`,
+    });
+    let failure;
+    await assert.rejects(host.prepareReleaseArtifact(attempt), (error) => {
+      failure = error;
+      return error.reason === "release-artifact-build-failed";
+    });
+    const record = { reason: failure.reason, detail: failure.detail, to: revisions.to };
+    const state = escalationFixture(t, { ...record, attempts: ESCALATION_RETRY_CAP - 1 });
+    const now = new Date("2026-09-07T12:00:00.000Z");
+    const persisted = writeEscalationWithAttempts({ ...state.options, record, now: () => now });
+    assert.equal(Object.hasOwn(persisted, "retryAfter"), retryable);
+    if (retryable) {
+      assert.equal(persisted.attempts, ESCALATION_RETRY_CAP);
+      assert.equal(persisted.retryAfter, "2026-09-07T12:05:00.000Z");
+      assert.equal(failure.detail, `exit-1: ${stderr.trim().slice(-2_000)}`);
+    } else {
+      assert.equal(Object.hasOwn(persisted, "attempts"), false);
+    }
+    const options = { ...state.options, readRemoteMain: async () => revisions.to };
+    assert.equal((await checkExistingEscalation({ ...options, now: () => now })).active, true);
+    assert.equal((await checkExistingEscalation({ ...options,
+      now: () => new Date(now.getTime() + 300_000) })).active, !retryable);
+  });
+}
 
 test("malformed builder receipt records FAILED before the quiet window opens", async () => {
   const { host, attempt, calls, records } = fixture({ builderOutput: "RELEASE-ARTIFACT {not-json}\n" });
@@ -3343,3 +3387,59 @@ test("a wait longer than the drain deadline extends its row instead of opening a
   assert.equal(opened, 1);
   assert.equal(renewals, 2);
 });
+
+
+test("capped source read failure waits under the lock, retries, and backs off again", async (t) => {
+  let time = Date.parse("2026-09-07T12:00:00.000Z");
+  const marker = escalationFixture(t, {
+    reason: "remote-main-read-timeout", to: "unknown", attempts: 5,
+    retryAfter: new Date(time + 300_000).toISOString(),
+  });
+  let targetReads = 0;
+  const state = startupFixture({
+    checkEscalation: () => checkExistingEscalation({ ...marker.options, now: () => new Date(time) }),
+    readRemoteMain: async () => {
+      targetReads += 1;
+      throw new DeployFailure("remote-main-read-timeout", "read timeout");
+    },
+    persistFailure: async (failure) => writeEscalationWithAttempts({ ...marker.options,
+      record: { reason: failure.reason, detail: failure.detail, to: "unknown" },
+      now: () => new Date(time) }),
+  });
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
+  assert.equal(targetReads, 0);
+  assert.equal(state.calls.at(-1), "release-lock");
+  time += 300_000;
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 1 });
+  assert.equal(targetReads, 1);
+  const persisted = JSON.parse(readFileSync(marker.escalationPath, "utf8"));
+  assert.equal(persisted.attempts, 6);
+  assert.equal(Date.parse(persisted.retryAfter), time + 600_000);
+  assert.deepEqual(await decideInvocation(state.startup, "upgrade"), { mode: "upgrade", exitCode: 2 });
+  assert.equal(targetReads, 1);
+});
+
+for (const noop of [false, true]) {
+  test(`expired capped marker clears after successful ${noop ? "no-op" : "deployment"}`, async (t) => {
+    const marker = escalationFixture(t, {
+      reason: "remote-main-read-timeout", to: "unknown", attempts: 5,
+      retryAfter: "2026-09-07T12:05:00.000Z",
+    });
+    const startup = startupFixture({ checkEscalation: () => checkExistingEscalation({
+      ...marker.options, now: () => new Date("2026-09-07T12:05:00.000Z"),
+    }) });
+    const invocation = await decideInvocation(startup.startup, "upgrade");
+    assert.equal(invocation.targetCommit, revisions.to);
+    const { host, attempt } = fixture();
+    attempt.establish({ retryEscalation: invocation.retryEscalation });
+    if (noop) host.checkAlreadyDeployed = async () => ({ skip: "already-deployed" });
+    host.selfClearEscalation = async (deployment) => selfClearEscalation({
+      ...marker.options, retryEscalation: deployment.fact("retryEscalation"),
+      notify: async (record) => marker.notifications.push(record),
+    });
+    assert.equal((await executeUpgrade(host, attempt)).ok, true);
+    assert.equal(existsSync(marker.escalationPath), false);
+    assert.equal(marker.notifications.at(-1).reason, "escalation-self-cleared");
+    await invocation.lock.release();
+  });
+}

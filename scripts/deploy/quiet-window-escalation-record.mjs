@@ -6,7 +6,7 @@ import { DeployFailure } from "./quiet-window-lib.mjs";
 
 const fail = (reason, detail = "") => { throw new DeployFailure(reason, detail); };
 
-/** A marker at this attempt count latches for manual clearing. */
+/** Retryable markers at this attempt count begin capped exponential backoff. */
 export const ESCALATION_RETRY_CAP = 5;
 
 /** Every write of the marker replaces the whole file through a rename, so a
