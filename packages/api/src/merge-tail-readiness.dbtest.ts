@@ -30,7 +30,12 @@ import {
 } from "./merge-lease.js";
 import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 import { readBoard } from "./board.js";
-import { READINESS_CLAIM_LEASE_MS, readinessTick } from "./merge-readiness-worker.js";
+import {
+  READINESS_CLAIM_LEASE_MS,
+  READINESS_EXCEPTION_REQUEUE_LIMIT,
+  READINESS_EXCEPTION_REQUEUE_STATE,
+  readinessTick,
+} from "./merge-readiness-worker.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -1326,4 +1331,89 @@ test("eligible readiness is not hidden behind the first hundred ineligible candi
     { claimed: 1, authorized: 1, requeued: 0, stopped: 0 },
   );
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
+});
+
+// The 2026-09-06 incident shape: a merge lease stall plus a deploy restart
+// killed readiness mid-evaluation. The exception carries no review-fail or
+// gate-fail verdict, so the stop it used to write could not be re-entered
+// through `merge-tail/repair` and the branch had to be delivered by hand.
+const terminatingLease: WithMergeLease = async (target) => {
+  if (target) leasedTargets.push(target);
+  throw new Error("terminated");
+};
+
+const exceptionRequeueMarkers = (regressionTaskId: string) => db.taskActivity.findMany({
+  where: {
+    taskId: regressionTaskId,
+    AND: [
+      { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.readiness } },
+      { metadata: { path: ["state"], equals: READINESS_EXCEPTION_REQUEUE_STATE } },
+    ],
+  },
+  orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+});
+
+test("a readiness evaluation exception requeues the step instead of stopping the tail", async () => {
+  const seeded = await seedReadiness();
+
+  assert.deepEqual(
+    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, terminatingLease),
+    { claimed: 1, authorized: 0, requeued: 1, stopped: 0 },
+  );
+
+  const [readiness, regression] = await Promise.all([
+    db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } }),
+    db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } }),
+  ]);
+  assert.equal(readiness.status, TaskStatus.TODO);
+  assert.equal(readiness.failureReason, null);
+  assert.equal(readiness.readinessClaimToken, null);
+  assert.equal(regression.status, TaskStatus.DONE, "the regression evidence is untouched");
+  assert.equal(regression.failureReason, null);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1);
+  assert.equal(await db.inboxMessage.count(), 0, "a requeue writes no stop notice");
+  assert.deepEqual(releasedChainLeases, [seeded.readiness.chainId]);
+
+  const markers = await exceptionRequeueMarkers(seeded.regression.id);
+  assert.equal(markers.length, 1);
+  const metadata = markers[0]!.metadata as Record<string, unknown>;
+  assert.equal(metadata.reason, "readiness evaluation exception: terminated");
+  assert.equal(metadata.requeue, 1);
+  assert.equal(metadata.limit, READINESS_EXCEPTION_REQUEUE_LIMIT);
+  assert.equal(metadata.recoveryAggregateId, null);
+  assert.match(markers[0]!.body, /Merge readiness requeued after evaluation exception 1 of 3/u);
+
+  // The requeued step is evaluated again on the next tick.
+  assert.deepEqual(
+    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, runWithMergeLease),
+    { claimed: 1, authorized: 1, requeued: 0, stopped: 0 },
+  );
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
+});
+
+test("exception requeues are bounded and the stop past the limit counts them", async () => {
+  const seeded = await seedReadiness();
+  for (let requeue = 1; requeue <= READINESS_EXCEPTION_REQUEUE_LIMIT; requeue += 1) {
+    assert.deepEqual(
+      await readinessTick(db, reader(), new Date(), 5, releaseChainLease, terminatingLease),
+      { claimed: 1, authorized: 0, requeued: 1, stopped: 0 },
+    );
+  }
+  assert.deepEqual(
+    await readinessTick(db, reader(), new Date(), 5, releaseChainLease, terminatingLease),
+    { claimed: 1, authorized: 0, requeued: 0, stopped: 1 },
+  );
+
+  const reason = "readiness evaluation failed after 3 exception requeues: terminated";
+  const [readiness, regression] = await Promise.all([
+    db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } }),
+    db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } }),
+  ]);
+  assert.equal(readiness.status, TaskStatus.REVIEW);
+  assert.equal(readiness.failureReason, reason);
+  assert.equal(regression.status, TaskStatus.REVIEW);
+  assert.equal(regression.failureReason, reason);
+  assert.equal((await exceptionRequeueMarkers(seeded.regression.id)).length, READINESS_EXCEPTION_REQUEUE_LIMIT);
+  const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
+  assert.equal(notice.body, `Autonomous merge readiness stopped: ${reason}`);
 });

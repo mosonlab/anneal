@@ -1248,9 +1248,14 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   second chain to a predecessor that already has one is accepted, and the
   predecessor records one `Chain <id> bound to predecessor <name>` activity per
   binding. The binding stays one-way and one hop deep. An `afterTaskId` binding
-  is released only by `DELETE /tasks/:taskId/chain` on that bound chain, which
-  leaves the predecessor's other successors bound; archiving a bound chain does
-  not release it.
+  is released by `DELETE /tasks/:taskId/chain` on that bound chain, which
+  leaves the predecessor's other successors bound, or — while that chain has no
+  Run — by `PATCH /tasks/:taskId` with `dispatchAfterTaskId` on its first step,
+  which re-points the binding at another task or releases it with `null`.
+  Archiving releases no binding by itself: neither archiving a bound chain nor
+  archiving the predecessor it waits for, and an archived predecessor never
+  becomes `DONE`, so re-pointing or releasing the binding is how such a chain
+  is recovered.
 
 ```sh
 curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/instantiate" \
@@ -1992,6 +1997,42 @@ Whether a Chain should be allowed to run base-drift recovery and a gate-fix
 repair at the same time is not decided here. This refusal names the overlap and
 stops before spending a Run on work the platform would not accept.
 
+### Readiness evaluation exceptions
+
+An exception thrown while the merge readiness worker evaluates a Chain — a
+killed child process, a killed worker, a service restart mid-tick — is not a
+verdict. The worker returns the readiness task to `TODO` and evaluates it again
+on a later tick, writing one `TaskActivity` on the Regression verification task,
+where the readiness requeue and stop rows already land, whose `metadata.state`
+is `requeued-exception` and whose body reads
+`Merge readiness requeued after evaluation exception <n> of <limit>: readiness
+evaluation exception: <message>`. The Regression evidence and its Run are left
+alone, no stop notice is written, and the merge lease is released exactly as an
+ordinary readiness requeue releases it.
+
+The retry is bounded by `MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT` (default 3),
+read once per worker tick; a value that is not a non-negative integer fails the
+API service at startup. Once that many exception requeues have been spent on the
+same readiness task within the same recovery attempt, the next exception stops
+the tail as before with `failureReason`
+`readiness evaluation failed after <n> exception requeues: <message>`. Outside a
+base-drift recovery that stop parks the regression and readiness tasks in
+`REVIEW` and writes the matching `Autonomous merge readiness stopped:` Inbox
+notice; inside one it takes the recovery stop path instead — the recovery
+attempt becomes `BLOCKED_DOWNSTREAM`, the integrator task is parked as well, and
+the notice reads `Automatic base-drift recovery <n> stopped at readiness:
+<reason>`.
+
+Three readiness failures are not exception requeues and stop the tail on their
+first occurrence. A deliberate refusal — a recovery head-adoption refusal —
+carries a refusal code and stops with `readiness evaluation failed: <message>`.
+A missing, mismatched, or ambiguous operator authorization on a gated readiness
+step is a fail-closed gate decision, not a transient fault, and stops with that
+same reason. A GitHub read that fails for any reason other than a timeout or a
+transport error (those are deferred to the next tick) is a
+`readiness-read-failed` decision, and stops with that same `readiness evaluation
+failed: <message>` reason and no refusal code.
+
 ### Recovering a merge tail stopped after its repair budget
 
 When a regression verdict fails after the automatic repair budget is exhausted,
@@ -2180,7 +2221,8 @@ approval and evidence renewal preserve the same refusal evidence.
   `opensPullRequest`, `maxDurationMin`, `stallTimeoutMin`,
   `maxSessionsPerTask`, `scheduleKind`, `runAt`, `cron`, and `timezone`.
   `status` is a task status (`BACKLOG`, `TODO`, `DOING`, `REVIEW`, `DONE`);
-  `failureReason` may be `null`.
+  `failureReason` may be `null`. `dispatchAfterTaskId` is the Chain binding and
+  may be a task id or `null`.
 - For a Chain task, `approvalGate` can change only when the task's template
   step is one of the two configurable slots — the specification step or merge
   readiness step — and the stored task status is `TODO`. The accepted value is
@@ -2194,6 +2236,30 @@ approval and evidence renewal preserve the same refusal evidence.
   This relaxes the previous blanket refusal that approval gates on dispatched
   Chain tasks are controlled by the Chain. Standalone tasks retain their
   existing `approvalGate` PATCH behavior.
+- `dispatchAfterTaskId` re-points or releases the Chain binding of a Chain that
+  has not run, so an operator whose predecessor was archived or replaced does
+  not have to delete the Chain and instantiate it again. It is accepted only on
+  the first step of a Chain none of whose steps has a Run; a later step, a
+  standalone task, or a Chain with so much as one terminal Run returns
+  `409 Conflict` with code `chain_binding_immutable_after_start`. A non-null
+  value must name a Chain task of the same project that is not archived and does
+  not belong to the Chain being bound; an archived, foreign, standalone, or
+  same-chain target — including the task itself — returns `400 Bad Request` with
+  code `chain_binding_target_invalid`. A standalone predecessor is refused
+  because only a Chain task's completion dispatches a bound successor, so such a
+  binding would never resolve. Binding onto a task that is already `DONE` is
+  accepted and resolves the binding immediately, which makes the first step
+  startable under the ordinary start guard; `null` releases the binding the
+  same way. Neither starts the Chain: only a predecessor's completion
+  dispatches a bound successor. A successful change writes one operator
+  TaskActivity on the first step naming the previous and new predecessor ids.
+  Restating the binding a Chain already carries is accepted, writes no
+  activity, and returns the current task, even after the Chain has started. A
+  request that changes the binding together with `approvalGate`, a Run budget,
+  or a status commits every field but records the binding activity only, because
+  one PATCH writes one activity row. The named predecessor is read without its
+  own lock, so a concurrent archive of it can win the race; the Chain still has
+  no Run, so re-issuing the PATCH with another predecessor is the remedy.
 - On a Chain step that carries a feature brief, `description` is the brief
   alone. A task with both a `templateId` and a `chainId` whose Step authors a
   brief — every step role except readiness and integrator — keeps its stored
@@ -2603,6 +2669,69 @@ does not widen prompt `priorOutputs`, expose sibling evidence to a blind
 review, or derive text from provider output, activity prose, or repository
 contents. Its source is persisted task output and its authentication is the
 claimed session/run identity.
+
+The machine-only `POST /runner/runs/:runId/events` append is bounded on both
+sides, and the two bounds are designed against each other. The API reads at most
+1 MiB + 64 KiB of request body — the batch cap plus envelope allowance — and
+refuses a larger one with `413` and `code: "EVENTS_REQUEST_TOO_LARGE"` before
+parsing it. It then refuses any single event whose `payload` exceeds 256 KiB of
+JSON with `413`, `code: "EVENT_PAYLOAD_TOO_LARGE"`, and the `eventIndex`, `seq`,
+`payloadBytes` and `limitBytes` of the offending event. The index is the point:
+the runner removes events from its queue only once they are accepted, so a
+batch-wide refusal would leave an unacceptable event at the head of an ordered
+queue forever, while a named one costs exactly that event. On receiving it the
+runner drops that event, records an `EVENT_REJECTED` event in its place, and
+resends the rest of the batch. A `413` that names *no* index cannot be resolved
+by losing one event, so the runner answers it by sending less: it halves its
+batch budget for the rest of the Run and retries, down to a floor of one event,
+and only then drops that single event as impossible. That keeps an intermediary
+with a smaller body limit, or a peer carrying the previous cap, from wedging a
+queue that only advances on success. `providerConversationId` is capped at 512
+characters, refused with `400` above it and never sent above it, because it is
+the one envelope field a provider grows and the body cap is sized as the batch
+cap plus a fixed envelope allowance.
+
+A runner does not normally reach either refusal. It truncates any payload above
+the same 256 KiB cap itself, replacing it with `{ truncated: true,
+originalBytes, limitBytes, preview }`, and forms batches by bytes as well as by
+count (at most 250 events or 1 MiB). Both caps live in
+`@anneal/db/session-event-limits`, so the two processes cannot be sized against
+stale copies of each other; a 413 in practice means a rolling deployment in
+which the two sides disagree.
+
+The runner's undelivered queue for one Run is bounded at 32 MiB and 20 000
+events. When it is full the queue drops the oldest liveness events —
+`MODEL_DELTA`, `PROVIDER_RAW`, `PROVIDER_STATUS`, `STDERR`, `TOOL_PROGRESS` and
+`TOOL_COMPLETED` — and records one `EVENTS_DROPPED` event carrying the count,
+bytes, and sequence range lost. Tool output is droppable because a tool result
+carries a file read or a command's stdout and is the largest event a Run
+produces. Lifecycle, terminal and error events — including `TOOL_STARTED`,
+`TOOL_FAILED`, `ADAPTER_ERROR` and `FINAL_OUTPUT` — survive while anything else
+can be given up, and are never dropped. They are not exempt from the bound
+either, because a provider drives some of them too — one `ADAPTER_ERROR` per
+unparsable line, a `TOOL_STARTED` per call. A queue with nothing droppable left
+reduces the oldest of them to a `{ truncated: true, reason: "queue-bound",
+originalBytes, queueMaxBytes }` marker — distinct from the per-event cap's
+marker above, which names the cap it hit — keeping its sequence number, type and
+time, at about a hundred bytes an event instead of the 256 KiB cap a payload may
+reach. `providerEventId` and `toolCallId` go with the payload: they are detail
+too, and no cap covers what a provider puts in them. Once every entry not in
+flight is such a marker, the two oldest adjacent markers merge into one
+`EVENTS_COALESCED` event carrying their summed counts and the inclusive sequence
+range they span, plus the `droppedEvents` and `rejectedEvents` totals of any
+`EVENTS_DROPPED` or `EVENT_REJECTED` record absorbed, whose losses are in no
+other event. Merging repeats until both bounds hold again, and the record of a
+drop is opened inside that accounting rather than appended past it. So the
+queue holds its bounds under any traffic mix, and what a protected event gives
+up under pressure is its detail, never its account: each one is still counted,
+in aggregate, in a marker the control plane receives. The batch in flight is the
+one exemption — it is never dropped from, never merged, and never released by
+position, so a provider streaming during an append cannot cost an event that the
+request did not carry, and the bound it suspends holds again as soon as the
+request settles. Each heartbeat carries the
+current queue size as `eventQueueBytes`; the field is observability only and the
+API neither acts on it nor persists it.
+
 The machine-only `POST /runner/runs/:runId/complete` completion payload and
 `POST /runner/runs/:runId/cancel/acknowledge` cancellation acknowledgement
 accept the optional `worktreeContainmentViolations` array: absolute worktree

@@ -121,3 +121,82 @@ for (const withRecovery of [false, true]) {
   });
 
 }
+
+test("the exception requeue limit defaults to three and refuses an unusable value", async () => {
+  const {
+    READINESS_EXCEPTION_REQUEUE_LIMIT,
+    readinessExceptionRequeueLimit,
+  } = await import("./merge-readiness-worker.js");
+  const previous = process.env.MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT;
+  try {
+    delete process.env.MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT;
+    assert.equal(readinessExceptionRequeueLimit(), READINESS_EXCEPTION_REQUEUE_LIMIT);
+    assert.equal(READINESS_EXCEPTION_REQUEUE_LIMIT, 3);
+    process.env.MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT = "0";
+    assert.equal(readinessExceptionRequeueLimit(), 0);
+    process.env.MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT = "5";
+    assert.equal(readinessExceptionRequeueLimit(), 5);
+    for (const unusable of ["two", "-1", "1.5"]) {
+      process.env.MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT = unusable;
+      assert.throws(
+        () => readinessExceptionRequeueLimit(),
+        /MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT must be a non-negative integer/u,
+      );
+    }
+  } finally {
+    if (previous === undefined) delete process.env.MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT;
+    else process.env.MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT = previous;
+  }
+});
+
+test("an exception requeue returns readiness to TODO and records the retry", async () => {
+  const {
+    READINESS_EXCEPTION_REQUEUE_STATE,
+    requeueReadinessExceptionSettlement,
+  } = await import("./merge-readiness-worker.js");
+  const { MERGE_TAIL_KIND, TaskStatus } = await import("@anneal/db");
+  const updates: Array<{ where: { id: string }; data: Record<string, unknown> }> = [];
+  const activities: Array<Record<string, unknown>> = [];
+  const tx = {
+    task: {
+      update: async (args: typeof updates[number]) => { updates.push(args); return {}; },
+    },
+    taskActivity: {
+      create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return data; },
+    },
+  } as unknown as import("@anneal/db").Prisma.TransactionClient;
+  const claim = {
+    settle: async (client: typeof tx, input: { apply: (client: typeof tx) => Promise<{ value: unknown }> }) => ({
+      settled: true, claim: "released", value: (await input.apply(client)).value,
+    }),
+  } as unknown as import("./readiness-claim.js").ReadinessClaimHandle;
+
+  const settlement = requeueReadinessExceptionSettlement({
+    readinessTaskId: "readiness-1",
+    regressionTaskId: "regression-1",
+    reason: "readiness evaluation exception: terminated",
+    requeue: 2,
+    limit: 3,
+    recovery: null,
+    now: new Date(),
+  });
+  assert.equal(settlement.kind, "requeue");
+  const result = await settlement.body(tx, claim);
+  assert.equal(result.value.applied, true);
+  assert.deepEqual(result.leaseOutcome, { kind: "stop", taskId: "regression-1" });
+
+  assert.deepEqual(updates, [{
+    where: { id: "readiness-1" },
+    data: { status: TaskStatus.TODO, failureReason: null },
+  }], "only the readiness Step is returned; the regression evidence stands");
+  assert.equal(activities.length, 1);
+  assert.equal(activities[0]?.taskId, "regression-1", "the retry row joins the readiness markers on the regression task");
+  assert.match(String(activities[0]?.body), /Merge readiness requeued after evaluation exception 2 of 3: readiness evaluation exception: terminated/u);
+  const metadata = activities[0]?.metadata as Record<string, unknown>;
+  assert.equal(metadata.kind, MERGE_TAIL_KIND.readiness);
+  assert.equal(metadata.state, READINESS_EXCEPTION_REQUEUE_STATE);
+  assert.equal(metadata.reason, "readiness evaluation exception: terminated");
+  assert.equal(metadata.requeue, 2);
+  assert.equal(metadata.limit, 3);
+  assert.equal(metadata.recoveryAggregateId, null);
+});

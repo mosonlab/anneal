@@ -17,7 +17,16 @@ import {
   type StopCondition,
 } from "@anneal/db/merge-integrator";
 
-import type { BranchProtectionRule, MergeResponse, PullRequestRef, PullRequestSnapshot, ReadResult, RepositorySnapshot, TrainGitHub } from "./github.js";
+import type {
+  BranchProtectionRule,
+  DirectCommitRead,
+  MergeResponse,
+  PullRequestRef,
+  PullRequestSnapshot,
+  ReadResult,
+  RepositorySnapshot,
+  TrainGitHub,
+} from "./github.js";
 import { executeTrain } from "./train.js";
 
 export type ChainTarget =
@@ -51,6 +60,13 @@ export type Deps = {
   /** This task's own `mergeIntegrator.intent` history, newest last. */
   readOwnIntents: () => Promise<IntentRecord[]>;
   readPullRequest: (reference: PullRequestRef) => Promise<ReadResult>;
+  /** The landed merge commit, read straight from the repository when the
+   *  pull-request projection cannot confirm it. One bounded attempt; the
+   *  executor's ordinary GitHub read deadline applies. */
+  readLandedCommit: (
+    reference: Pick<PullRequestRef, "owner" | "name" | "baseRef">,
+    mergeCommitSha: string,
+  ) => Promise<DirectCommitRead>;
   merge: (
     reference: { owner: string; name: string; number: number },
     expectedHeadSha: string,
@@ -596,13 +612,33 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
   // The ref can land before GitHub's pull-request mergeCommit projection catches up.
   const refAloneProvesMerge = verify.snapshot.baseRefOid === mergeCommitSha && landed === null;
   if (!landedIdentifiesMerge && !refAloneProvesMerge) {
-    return stop("base-drift-post-merge", JSON.stringify({
-      mergeCommitSha,
-      landed,
-      observedBaseRefOid: verify.snapshot.baseRefOid,
-      authorizedBase: authorization.baseSha,
-      authorizedHead: authorization.headSha,
-    }));
+    // The pull-request projection is not the only evidence about our own merge:
+    // `mergeCommit` can still be null, and `baseRefOid` can already have moved
+    // because a later merge landed. Both leave the commit itself untouched, so
+    // read it — once, under the ordinary read deadline — and apply the same
+    // mechanical criterion an operator applies by hand when answering this
+    // question in the Inbox: the commit's parents are exactly the authorized
+    // base and head, in that order, and the commit is reachable from the base
+    // ref. All three facts, or this is an incident for a human, as before. A
+    // failed or timed-out read supplies none of them and so settles nothing.
+    const direct = await deps.readLandedCommit(reference, mergeCommitSha);
+    const selfVerified = direct.status === "ok"
+      && direct.reachableFromMain
+      && direct.parents.length === 2
+      && direct.parents[0] === authorization.baseSha
+      && direct.parents[1] === authorization.headSha;
+    if (!selfVerified) {
+      return stop("base-drift-post-merge", JSON.stringify({
+        mergeCommitSha,
+        landed,
+        observedBaseRefOid: verify.snapshot.baseRefOid,
+        authorizedBase: authorization.baseSha,
+        authorizedHead: authorization.headSha,
+        directParentCheck: direct.status === "ok"
+          ? { parents: direct.parents, reachableFromMain: direct.reachableFromMain }
+          : { error: direct.reason },
+      }));
+    }
   }
   return { outcome: "merged", mergeCommitSha };
 };

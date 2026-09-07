@@ -28,12 +28,13 @@ import {
 } from "./adapters.js";
 import {
   openControlPlane,
+  isEventsRequestTooLarge,
+  oversizedEventIndex,
   retriableStartupError,
   type ClaimedTask,
   type ControlPlane,
   type PreflightReport,
   type RunSession,
-  type SessionEventPayload,
   type SessionTaskOutput,
 } from "./api.js";
 import {
@@ -64,6 +65,7 @@ import {
   type ProviderRelaunchLeaseFacts,
 } from "./provider-relaunch.js";
 import { createRunLease, deliverUnderLease, type RunLease, type RunLeaseClock } from "./run-lease.js";
+import { createSessionEventQueue } from "./session-event-queue.js";
 import { openSessionConfig, type SessionConfigLease } from "./session-config-lease.js";
 import { readMergeTrainOutputHandoff } from "./merge-train-output-handoff.js";
 import { readRegressionOutputHandoff, type RegressionOutputHandoffBlock } from "./regression-output-handoff.js";
@@ -292,11 +294,14 @@ export const executeClaim = async (
   const now = dependencies.runLeaseClock?.now ?? Date.now;
   const runLeaseClock = dependencies.runLeaseClock;
   const claimStartedAt = new Date(now());
+  const pendingEvents = createSessionEventQueue({ nextSeq: claim.nextEventSeq });
   const runLease = createRunLease<RuntimeHandle>({
     heartbeatIntervalMs: config.heartbeatIntervalMs,
     leaseSeconds: config.leaseSeconds,
     initialPhase: { name: "provision", startedAt: claimStartedAt },
-    send: (evidence) => session.heartbeat(evidence),
+    // Queue bytes ride every heartbeat, in each phase, so an operator can see a
+    // runner holding events it cannot deliver before the bound starts dropping.
+    send: (evidence) => session.heartbeat({ ...evidence, eventQueueBytes: pendingEvents.bytes }),
     stopProvider: (target, reason) => adapter.kill(target, reason),
     acknowledgeCancellation: async (request) => session.acknowledgeCancellation(
       request,
@@ -309,8 +314,6 @@ export const executeClaim = async (
     onRenewalError: (error) => { console.error("Run Lease renewal failed", error); },
     ...(runLeaseClock ? { clock: runLeaseClock } : {}),
   });
-  let seq = claim.nextEventSeq;
-  let pendingEvents: SessionEventPayload[] = [];
   let eventFlushPromise: Promise<void> | null = null;
   let providerConversationId = claim.resume?.providerConversationId ?? null;
   const rememberProviderConversationId = (): string | null => {
@@ -318,17 +321,7 @@ export const executeClaim = async (
     if (reported) providerConversationId = reported;
     return providerConversationId;
   };
-  const sink = (event: AdapterEvent): void => {
-    pendingEvents.push({
-      seq: seq++,
-      at: new Date().toISOString(),
-      source: event.source,
-      type: event.type,
-      payload: event.payload,
-      ...(event.providerEventId !== undefined ? { providerEventId: event.providerEventId } : {}),
-      ...(event.toolCallId !== undefined ? { toolCallId: event.toolCallId } : {}),
-    });
-  };
+  const sink = (event: AdapterEvent): void => { pendingEvents.push(event); };
   const flushEvents = (): Promise<void> => {
     if (eventFlushPromise) return eventFlushPromise;
     eventFlushPromise = (async () => {
@@ -336,9 +329,34 @@ export const executeClaim = async (
         // Keep the batch in the queue until the API accepts it. A failed append
         // therefore remains the head of the queue for the next flush attempt,
         // while the single worker prevents a later batch overtaking it.
-        const batch = pendingEvents.slice(0, 250);
-        await session.emit(batch, rememberProviderConversationId());
-        pendingEvents.splice(0, batch.length);
+        const batch = pendingEvents.batch();
+        try {
+          await session.emit(batch, rememberProviderConversationId());
+        } catch (error) {
+          // The two failures the queue can resolve itself. Every other one —
+          // 5xx, network, lost authority — belongs to the caller's retry, with
+          // the queue's own bound protecting memory meanwhile.
+          const index = oversizedEventIndex(error);
+          if (index !== null) {
+            // The API refused a single event of this batch by index: lose it.
+            const refused = batch[index];
+            if (!refused || !pendingEvents.reject(refused.seq, "payload-too-large")) throw error;
+            continue;
+          }
+          if (isEventsRequestTooLarge(error)) {
+            // The refusal names no event, so send less rather than resend the
+            // same body. Once a batch is one event and is still refused, that
+            // event alone is impossible and the queue loses it.
+            if (pendingEvents.reduceBatch()) {
+              console.warn(`Run ${claim.run.id} events request refused as too large; retrying with a smaller batch`);
+              continue;
+            }
+            const refused = batch[0];
+            if (refused && pendingEvents.reject(refused.seq, "request-too-large")) continue;
+          }
+          throw error;
+        }
+        pendingEvents.release(batch);
       }
     })().finally(() => { eventFlushPromise = null; });
     return eventFlushPromise;
