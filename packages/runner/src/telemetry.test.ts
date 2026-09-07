@@ -89,7 +89,7 @@ test("a control-plane call that connects but never answers fails instead of hold
   try {
     const started = Date.now();
     await assert.rejects(
-      openRunSession(config, claim).heartbeat({ processAlive: true, lastProgressEventAt: null, inFlightTool: null }),
+      openRunSession(config, claim).heartbeat({ processAlive: true, lastProgressEventAt: null, inFlightTool: null, eventQueueBytes: 0 }),
       /timed out after 300ms/,
     );
     assert.ok(Date.now() - started < 5_000, "the request was not abandoned near its ceiling");
