@@ -61,6 +61,8 @@ export const claudeArgs = (spec: RunSpec, resume?: ResumeSpec): string[] => {
     // cross-agent ~/.agents/skills root used by Codex and PI.
     // Authentication remains the CLI's existing Keychain flow: no
     // CLAUDE_CONFIG_DIR or HOME override is supplied here.
+    // The guard is self-contained in this file: OS isolation also stages it
+    // outside the release tree, so hook commands cannot depend on repo paths.
     "--setting-sources", "project,local", "--settings", claudePlatformSettingsPath(),
     // strict keeps the operator's personal MCP servers out of an agent session:
     // the manifest is supposed to be the whole tool surface.
@@ -171,7 +173,9 @@ const promptSections = (claim: ClaimedTask): string[] => {
   if (claim.run.subagentModel !== null || claim.run.subagentMaxConcurrent !== null) {
     throw new Error("Native implementation subagents require a Codex root Run");
   }
-  return [];
+  return [
+    "Claude native subagent dispatch: Explicitly set model to opus for implementation and reasoning, sonnet only for simple exploration, or haiku only for mechanical scanning. Fable, omitted model, and inherit are blocked by the platform PreToolUse guard. A fork ignores model and is allowed only when its transcript proves an Opus, Sonnet, or Haiku parent. Keep simple branch merges and integration verification in the main agent; delegate integration only when it is independent, complex work and explain why. Parallel implementation slices need clear file boundaries and separate worktrees for concurrent edits.",
+  ];
 };
 
 export const claudeDeclaration: AdapterDeclaration = Object.freeze({

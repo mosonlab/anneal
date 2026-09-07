@@ -1,3 +1,17 @@
 {
-  "autoMemoryEnabled": false
+  "autoMemoryEnabled": false,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(Agent|Task)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node -e 'const fs = require(\"node:fs\");\nconst deny = reason => process.stdout.write(JSON.stringify({hookSpecificOutput: {hookEventName: \"PreToolUse\", permissionDecision: \"deny\", permissionDecisionReason: \"Anneal subagent model policy: \" + reason}}));\ntry {\n  const input = JSON.parse(fs.readFileSync(0, \"utf8\"));\n  if (![\"Agent\", \"Task\"].includes(input.tool_name)) throw new Error(\"unexpected tool input\");\n  const tool = input.tool_input;\n  if (!tool || typeof tool !== \"object\" || Array.isArray(tool)) throw new Error(\"missing tool_input\");\n  if (tool.subagent_type === \"fork\") {\n    const rows = fs.readFileSync(input.transcript_path, \"utf8\").split(\"\\n\").filter(line => line.trim()).map(line => JSON.parse(line));\n    const parent = rows.filter(row => row.type === \"assistant\" && row.isSidechain !== true).at(-1)?.message.model;\n    if (typeof parent !== \"string\" || !/^(?:opus|sonnet|haiku|claude-(?:opus|sonnet|haiku)-[0-9][a-z0-9.-]*)$/.test(parent)) deny(\"fork ignores model and inherits its parent; the transcript must prove an Opus, Sonnet, or Haiku parent. Use a regular subagent with explicit model opus, sonnet, or haiku.\");\n  } else if (![\"opus\", \"sonnet\", \"haiku\"].includes(tool.model)) {\n    deny(\"Fable and inherited/unspecified models are prohibited. Set model explicitly: opus for implementation and reasoning, sonnet for simple exploration, haiku for mechanical scanning.\");\n  }\n} catch (error) {\n  deny(\"cannot validate this spawn (\" + error.message + \"). Repair the hook input or transcript before retrying; do not bypass the guard.\");\n}' || { echo 'Anneal subagent model guard failed to execute' >&2; exit 2; }",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
 }
