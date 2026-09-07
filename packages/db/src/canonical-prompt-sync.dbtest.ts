@@ -332,6 +332,7 @@ test("sync creates the canonical-project PR template when a same-name row exists
   assert.ok(syncedForeign.steps
     .filter(({ stepIndex }) => stepIndex !== 2 && stepIndex !== 3)
     .every(({ provisionDependencies }) => provisionDependencies === true));
+  await prisma.staffingProfile.deleteMany({ where: { projectId: foreignProject.id } });
   await prisma.project.delete({ where: { id: foreignProject.id } });
 });
 
@@ -1200,6 +1201,11 @@ test("sync recreates a missing regression verifier and restores canonical bindin
     where: { id: { in: regressionSteps.map(({ id }) => id) } },
     data: { assigneeAgentId: source.id },
   });
+  // Model missing inventory without leaving restrictive staffing references.
+  await prisma.staffingProfileEntry.updateMany({
+    where: { assigneeAgentId: existingVerifier.id },
+    data: { assigneeAgentId: null },
+  });
   await prisma.agent.delete({ where: { id: existingVerifier.id } });
 
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
@@ -1260,6 +1266,11 @@ test("sync recreates a missing spec revalidator with read-only repository covera
     await prisma.repo.delete({ where: { id: repo.id } });
   });
 
+  // Model missing inventory without leaving restrictive staffing references.
+  await prisma.staffingProfileEntry.updateMany({
+    where: { assigneeAgentId: existingRevalidator.id },
+    data: { assigneeAgentId: null },
+  });
   await prisma.agent.delete({ where: { id: existingRevalidator.id } });
 
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
@@ -1606,6 +1617,8 @@ test("sync rolls model-neutral review output across all canonical templates and 
     // Reconstruct the deployed output contract without changing review labels.
     await restoreModelSpecificReviewOutput(template.id);
 
+    // This historical fixture supplies its own default and retired output keys.
+    await prisma.staffingProfile.deleteMany({ where: { taskTemplateId: template.id } });
     const profile = await prisma.staffingProfile.create({
       data: {
         projectId: project.id,
