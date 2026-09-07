@@ -28,6 +28,7 @@ import {
   STOP_CHOICES,
   type Disposition,
   type IntegratorStepShape,
+  type StopChoice,
   type StopCondition,
   dispositionFor,
   followUpDispositionFor,
@@ -40,6 +41,7 @@ import {
   isTerminalDisposition,
   parseStopAnswerMetadata,
 } from "./merge-integrator.js";
+import { revalidateAfterClassCeiling } from "./merge-recovery-revalidate.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -480,7 +482,15 @@ export const settleIntegratorTerminal = async (
 export const STOP_QUESTION_PREFIX = "merge-stop";
 export const FOLLOW_UP_QUESTION_PREFIX = "merge-stop-followup";
 
-export const stopQuestionKey = (stopId: string): string => `${STOP_QUESTION_PREFIX}:${stopId}`;
+/**
+ * A stop asks its question once. A base-drift recovery an operator resumed with
+ * `re-validate` can settle again, so its later questions carry a generation
+ * suffix; generation zero keeps the historical key exactly. Stop ids are cuids
+ * and never contain a colon, so the binding is the segment after the prefix.
+ */
+export const stopQuestionKey = (stopId: string, generation = 0): string => (
+  generation > 0 ? `${STOP_QUESTION_PREFIX}:${stopId}:r${String(generation)}` : `${STOP_QUESTION_PREFIX}:${stopId}`
+);
 export const followUpQuestionKey = (stopId: string): string => `${FOLLOW_UP_QUESTION_PREFIX}:${stopId}`;
 
 export type StopQuestionBinding = { stopId: string; followUp: boolean };
@@ -491,7 +501,8 @@ export const parseStopQuestionKey = (dedupeKey: string | null | undefined): Stop
     return { stopId: dedupeKey.slice(FOLLOW_UP_QUESTION_PREFIX.length + 1), followUp: true };
   }
   if (dedupeKey.startsWith(`${STOP_QUESTION_PREFIX}:`)) {
-    return { stopId: dedupeKey.slice(STOP_QUESTION_PREFIX.length + 1), followUp: false };
+    const [stopId] = dedupeKey.slice(STOP_QUESTION_PREFIX.length + 1).split(":");
+    return stopId ? { stopId, followUp: false } : null;
   }
   return null;
 };
@@ -520,13 +531,18 @@ export const openStopQuestion = async (
     agentId: string;
     sessionId: string | null;
     followUp?: boolean;
+    /** The offering this settle opens, when it is wider than the condition's default. */
+    choices?: StopChoice[];
+    generation?: number;
   },
 ): Promise<{ id: string } | null> => {
   const followUp = input.followUp ?? false;
-  const dedupeKey = followUp ? followUpQuestionKey(input.stopId) : stopQuestionKey(input.stopId);
+  const dedupeKey = followUp
+    ? followUpQuestionKey(input.stopId)
+    : stopQuestionKey(input.stopId, input.generation ?? 0);
   const existing = await tx.inboxMessage.findFirst({ where: { dedupeKey } });
   if (existing) return null;
-  const choices = followUp ? FOLLOW_UP_CHOICES : STOP_CHOICES[input.condition];
+  const choices = followUp ? FOLLOW_UP_CHOICES : input.choices ?? STOP_CHOICES[input.condition];
   const card = await tx.inboxMessage.create({ data: {
     from: InboxSender.AGENT,
     agentId: input.agentId,
@@ -842,6 +858,13 @@ export const applyStopAnswer = async (
 
   if (disposition === "repair-requested") {
     // Nothing further until POST /tasks/:taskId/merge-target lands a correction.
+    return outcome;
+  }
+
+  if (disposition === "revalidation-requested") {
+    // The class ceiling's resume: reset the exhausted class and hand the
+    // recovery back to the worker. Nothing merges, and no other class moves.
+    await revalidateAfterClassCeiling(tx, { integratorTaskId: task.id, sourceStopId: binding.stopId });
     return outcome;
   }
 

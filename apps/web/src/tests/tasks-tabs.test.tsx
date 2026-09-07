@@ -29,7 +29,7 @@ const task = (overrides: Partial<TaskList> = {}): TaskList => ({
   createdAt: "2026-08-16T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
   assigneeAgent: null, repo: null, runs: [], strandedSalvageBranches: [],
   chainId: null, chainIndex: null, source: "MANUAL", archivedAt: "2026-08-16T09:00:00.000Z",
-  schedulePausedAt: null, recurringSourceTaskId: null, templateStep: null, chainProgress: null,
+  schedulePausedAt: null, recurringSourceTaskId: null, templateStep: null, chainProgress: null, baseline: null,
   recurringLastFiredAt: null, recurringFireCount: 0,
   ...overrides,
 });

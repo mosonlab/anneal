@@ -76,7 +76,7 @@ changes a file below `.github/workflows/`.
 | Administration | Read | Mandatory | GraphQL `READ_QUERY`: `repository.branchProtectionRules` and each rule's required-check policy. An unreadable rule is not treated as no protection. |
 | Checks | Read | Mandatory | GraphQL `READ_QUERY`: `commit.statusCheckRollup.contexts` entries of type `CheckRun`. |
 | Commit statuses | Read | Mandatory | GraphQL `READ_QUERY`: `commit.statusCheckRollup.contexts` entries of type `StatusContext`. |
-| Contents | Read and write | Mandatory | REST `GET /repos/{owner}/{repo}/git/commits/{head}` and `GET /git/trees/{tree}?recursive=1`; REST `POST /git/trees` (`createSanitizedTree`) and `POST /git/commits` (`createMergeCommit`); GraphQL `updateRefs` (`updateBaseRef`). |
+| Contents | Read and write | Mandatory | REST `GET /repos/{owner}/{repo}/git/commits/{head}`, `GET /git/trees/{tree}?recursive=1`, and `GET /repos/{owner}/{repo}/compare/{mergeSha}...{baseRef}` (`readLandedCommit`); REST `POST /git/trees` (`createSanitizedTree`) and `POST /git/commits` (`createMergeCommit`); GraphQL `updateRefs` (`updateBaseRef`). |
 | Merge queues | Read and write | Mandatory | GraphQL `READ_QUERY`: `repository.mergeQueue` and `pullRequest.mergeQueueEntry`; GraphQL `dequeuePullRequest` (`dequeuePullRequest`). Read failure is never interpreted as no queue. |
 | Metadata | Read | Mandatory | GraphQL `READ_QUERY`: repository identity, ref, object IDs, and ordinary repository metadata used to bind all other reads. GitHub includes Metadata read as the App baseline. |
 | Pull requests | Read and write | Mandatory | GraphQL `READ_QUERY`: PR state, head/base, mergeability, merge commit, author, auto-merge, and queue state; GraphQL `disablePullRequestAutoMerge` (`disablePullRequestAutoMerge`). |
@@ -120,6 +120,31 @@ A run that stops `api-error` after an uncertain ref update has sent exactly one
 ref update. Before re-authorizing, read the base ref: if it is a two-parent
 merge commit whose parents are the authorized base and head, the merge landed
 and the stop is a reporting failure, not a merge failure.
+
+### When a landed merge stops `base-drift-post-merge`
+
+Once the ref update is acknowledged, the executor verifies the merge it has just
+landed. It reads the pull request first, which settles the question when the
+projection names the merge commit with the authorized parents, or when the base
+ref is still exactly that commit. Neither holds if GitHub's `mergeCommit`
+projection lags, or if the base ref has already moved because a later merge
+landed. The executor then reads the merge commit itself, once and under the
+ordinary GitHub read deadline, and records the run as merged when its parents
+are exactly the authorized base and head, in that order, and the commit is
+reachable from the authorized base ref — the same mechanical criterion an
+operator applies by hand.
+
+An operator decision is needed when one of those three facts is missing, or when
+the direct read fails or times out. The run then stops `base-drift-post-merge`
+as before, and the Inbox message's evidence carries `directParentCheck` with the
+parents and reachability that were read, or with the read's error, so the
+question says why the mechanical check did not settle it. The same condition
+also stops the run when the pull-request read itself failed: neither
+projection-side predicate can be evaluated then, so no direct read is taken and
+the evidence names the failed read under `reason` with no `directParentCheck` at
+all. Answer `accept` only after establishing those same three facts yourself: a
+commit whose parents are not the authorized base and head is an unauthorized
+merge, not a reporting failure.
 
 ## Run the capture wizard
 
@@ -550,6 +575,84 @@ update. It does not prove the two disarm mutations or workflow-file support;
 exercise the controlled cases in the mutation table when those capabilities are
 part of the installation.
 
+### Train-prefix publication
+
+The merge executor may receive a `merge-authorization` with an optional `train`
+object. The control plane produces this object; operators do not construct or
+edit it. It identifies a cumulative prefix commit and the candidate's position
+within that prefix:
+
+```json
+{
+  "train": {
+    "publishHead": "<40-hex prefix SHA>",
+    "predecessorOid": "<40-hex predecessor SHA>",
+    "ref": "refs/anneal/train/<publishHead>",
+    "position": 1,
+    "trainTaskId": "<train task id>"
+  }
+}
+```
+
+An authorization without `train` keeps the ordinary single-candidate behavior
+described above. For a train authorization, the executor completes every live
+state check before making a write. The pull request head must equal the
+authorized `headSha`; `refs/anneal/train/<publishHead>` must exist and resolve
+to `publishHead`; `publishHead` must contain the authorized head as an
+ancestor; and the default branch must equal `baseSha` at position 1, or be an
+ancestor of `publishHead` at later positions. A failed check records the
+`train-precondition-failed` stop with the failing check and makes no GitHub
+write.
+
+These checks are additional to the pre-merge defense list, not a replacement
+for it. Publishing a prefix moves the default branch, so a train candidate
+still has to clear required status checks, the open and non-draft state, clean
+mergeability, and the positive synchronous-execution determination with its
+disarm, and it stops with the same conditions an ordinary candidate would —
+`check-failure-or-absence`, `non-clean-mergeability`, `unresolved-mergeability`
+or `deferred-merge-machinery`. The single relaxation is the base check above:
+at a later position the live base is the prefix commit the predecessor already
+published, and that commit is accepted in place of `baseSha`.
+
+A GitHub read that does not answer is never reported as drift. An unreadable
+pull request, default branch, train ref, ancestry comparison or commit records
+`api-error` with the failing phase; `train-precondition-failed` and
+`changed-underneath-me` are reserved for state the executor positively observed.
+
+Once those checks pass, the executor publishes the prefix by updating
+`refs/heads/<default branch>` to `publishHead` through GitHub's git-refs API
+with the App installation token. The update is never forced and must be a
+fast-forward. The send is bounded by `GUARDED_MERGE_SENDS`, records the intent
+under the same idempotency key, follows the same `confirmedWrite` read-back
+discipline as the ordinary merge path, and rechecks `superseded-authorization`
+at the same points. Replay acceptance differs from the ordinary path in one
+respect: it is governed by the prefix lineage below rather than by finding a
+prior intent of this run, because a peer candidate of the same prefix may have
+performed the publication. If the default branch already equals `publishHead`
+or contains it, the update is skipped. A GitHub non-fast-forward refusal — a
+409 or 422 on the ref update — records `train-publish-rejected`. A 401, 403 or
+404 is an access or addressing failure, not a refused fast-forward, and records
+`api-error`; check the App installation's `contents: write` permission and any
+branch protection that forbids the App from updating the default branch.
+
+After publication, and on replay when the ref update already happened, the
+executor reads the candidate pull request again. It reports `merged` only when
+the pull request is merged and its merge commit is the prefix commit for this
+candidate: the commit reachable from `publishHead` whose second parent is the
+authorized `headSha`, with parents exactly `(predecessor, headSha)`. The
+predecessor is `baseSha` at position 1 and the previous prefix commit at later
+positions, verified by walking exactly `position - 1` first-parent merge steps
+from the predecessor down to `baseSha`, so the check costs `position` commit
+reads and never crawls a chain of unknown length. The GitHub `mergedByLogin` value need not be the executor identity
+for this path; the prefix lineage supplies the authorization check. A merged
+pull request with another shape still records `changed-underneath-me`.
+
+When the candidate at the highest position in a prefix reports `merged`, the
+executor deletes `refs/anneal/train/<publishHead>`. A deletion failure is
+logged for operator follow-up and does not stop the run. Once the default
+branch contains the prefix, replay relies on immutable commit lineage and does
+not require the staging ref to remain present.
+
 ## Rotation and recovery
 
 ### Rotate the executor API token
@@ -587,7 +690,10 @@ On Linux with the follower installed, adoption is automatic after the control
 plane deploys. Darwin stays manual. The following manual adoption procedure
 remains available for installation and recovery:
 
-1. stop the executor and leave the API running fail closed;
+1. hold the chains queued at merge readiness, then stop the executor and leave
+   the API running fail closed. Readiness authorizes nothing while no executor
+   is online and parks a waiting chain in `REVIEW` after fifteen minutes, so an
+   upgrade window is not a way to drain;
 2. fetch and check out the intended tag or commit in an unprivileged clean
    staging checkout;
 3. install locked dependencies, build, run the merge-executor tests and the

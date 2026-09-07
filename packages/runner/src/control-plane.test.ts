@@ -2,8 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  SESSION_EVENT_CONVERSATION_ID_MAX_CHARS,
+  SESSION_EVENTS_REQUEST_TOO_LARGE_CODE,
+} from "@anneal/db/session-event-limits";
+
+import {
   authorityFor,
   ControlPlaneError,
+  isEventsRequestTooLarge,
   openRunSession,
   retriableStartupError,
   type RunSessionClaim,
@@ -35,7 +41,7 @@ test("heartbeat cancellation is an Authority verdict with its durable request", 
       status: 200, headers: { "Content-Type": "application/json" },
     });
   };
-  const progress = { processAlive: true, lastProgressEventAt: null, inFlightTool: null };
+  const progress = { processAlive: true, lastProgressEventAt: null, inFlightTool: null, eventQueueBytes: 0 };
   try {
     answer({ ok: false, cancellation: request });
     assert.deepEqual(await session().heartbeat(progress), { held: false, reason: "cancelled", request });
@@ -110,4 +116,38 @@ test("session status refuses a payload that is not the decided answer", async ()
       restore();
     }
   }
+});
+
+test("an events envelope never carries a provider conversation id past its cap", async () => {
+  const originalFetch = globalThis.fetch;
+  const bodies: Array<Record<string, unknown>> = [];
+  globalThis.fetch = async (_input, init?: RequestInit) => {
+    bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+    return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  const event = { seq: 0, at: new Date(0).toISOString(), source: "CLAUDE" as const, type: "MODEL_DELTA", payload: { text: "hi" } };
+  try {
+    const legal = "t".repeat(SESSION_EVENT_CONVERSATION_ID_MAX_CHARS);
+    await session().emit([event], legal);
+    await session().emit([event], `${legal}x`);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(bodies[0]?.["providerConversationId"], "t".repeat(SESSION_EVENT_CONVERSATION_ID_MAX_CHARS));
+  // The body cap is the batch cap plus a fixed envelope allowance, so an
+  // identifier the provider grew without limit would refuse a legal batch for
+  // something no smaller batch can fix. Dropped, not truncated: a mangled
+  // identifier reads as a real one.
+  assert.equal(bodies[1]?.["providerConversationId"], null, "an identifier past the cap is not sent at all");
+});
+
+test("only the whole-request refusal is answered by sending less", () => {
+  assert.equal(
+    isEventsRequestTooLarge(new ControlPlaneError(413, "too large", SESSION_EVENTS_REQUEST_TOO_LARGE_CODE)),
+    true,
+  );
+  assert.equal(isEventsRequestTooLarge(new ControlPlaneError(413, "too large", "EVENT_PAYLOAD_TOO_LARGE")), false);
+  assert.equal(isEventsRequestTooLarge(new ControlPlaneError(503, "unavailable")), false);
+  assert.equal(isEventsRequestTooLarge(new Error("connection reset")), false);
 });

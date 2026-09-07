@@ -14,7 +14,7 @@ import { isSessionUnseen, sessionSeenKey } from "../lib/session-list";
 import { storage } from "../lib/storage";
 import { TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES } from "../lib/session-stream";
 import type { Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
-import { installFetchFunction } from "./dom-harness";
+import { installFetch, installFetchFunction } from "./dom-harness";
 
 // Radix chooses useLayoutEffect or useEffect when its module is first loaded.
 // Seed a browser global before importing Sessions so portaled hover-card content
@@ -381,6 +381,36 @@ test("sessions are grouped by day, capped at five, and expandable in both locale
   }
 });
 
+test("a 404 from GET /sessions renders the standard error state", async () => {
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const fetchHarness = installFetch({
+    "/projects": [{ id: "p1", name: "Demo" }],
+    "GET /sessions": () => new Response(JSON.stringify({ error: "Session list is gone" }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" },
+    }),
+  });
+  const { ProjectProvider } = await import("../lib/project");
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<LocaleProvider initialLocale="en"><ProjectProvider><SessionsPage /></ProjectProvider></LocaleProvider>);
+    });
+    await fetchHarness.settle();
+
+    const body = container.textContent ?? "";
+    assert.match(body, /404 Session list is gone/u);
+    assert.match(body, /Retry/u);
+    assert.doesNotMatch(body, /The control plane has no .*GET \/sessions/u);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+    fetchHarness.dispose();
+  }
+});
+
 test("day expansion resets when the Project scope changes", async () => {
   const localIso = (offset: number, hour: number): string => {
     const now = new Date();
@@ -578,8 +608,17 @@ test("focusing the title opens the translated hover card, including Inbox-wait d
         await act(async () => {
           title.focus();
           title.dispatchEvent(new dom.window.FocusEvent("focusin", { bubbles: true }));
-          await new Promise((resolve) => dom.window.setTimeout(resolve, 240));
         });
+        // The card opens on its own delay, so wait for the card rather than for
+        // a sleep chosen to outlast that delay. Bounded at 600 polls so a card
+        // that never opens fails at the assertion below rather than hanging the
+        // suite, and counted rather than clocked so the bound scales with the
+        // loaded gate worker rather than an idle host (CONTRIBUTING.md, "Test
+        // timing on the gate worker").
+        for (let poll = 0; poll < 600 && dom.window.document.querySelector("[data-slot='hover-card-content']") === null; poll += 1) {
+          await act(async () => { await new Promise((resolve) => dom.window.setTimeout(resolve, 25)); });
+        }
+        assert.ok(dom.window.document.querySelector("[data-slot='hover-card-content']"), "the hover card never opened");
         await act(async () => { await Promise.resolve(); });
         await act(async () => { await new Promise((resolve) => dom.window.setTimeout(resolve, 0)); });
         const body = dom.window.document.body.textContent ?? "";

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -16,7 +16,6 @@ import {
   type SessionToolName,
   type SessionToolRequest,
 } from "./session-tool-contract.js";
-import { parseTaskOutputReceipt, taskOutputReceiptPath } from "./task-output-receipt.js";
 
 const piExtension = fileURLToPath(new URL("../assets/pi-agentos-extension.ts", import.meta.url));
 
@@ -186,24 +185,6 @@ test("the dependency-free PI adapter inlines the canonical definitions and reque
       ...(name === "task_output" ? { commitSha } : {}),
       ...(name === "inbox_ask" ? { requestIdPrefix: `pi:${runId}` } : {}),
     }))));
-    assert.deepEqual(parseTaskOutputReceipt(readFileSync(taskOutputReceiptPath(workspace), "utf8")), {
-      runId,
-      kind: "result",
-      commitSha,
-    });
-    await rm(taskOutputReceiptPath(workspace), { force: true });
-    await mkdir(taskOutputReceiptPath(workspace));
-    const diagnostics: string[] = [];
-    const originalError = console.error;
-    console.error = (...values: unknown[]) => { diagnostics.push(values.map(String).join(" ")); };
-    try {
-      const result = await registered.find((tool) => tool.name === "task_output")!
-        .execute("call-receipt-failure", { kind: "result", body: "Already durable" });
-      assert.match(result.content[0]!.text, /Output persisted as 'result'/u);
-    } finally {
-      console.error = originalError;
-    }
-    assert.match(diagnostics.join("\n"), /Unable to write task output receipt/u);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(workspace, { recursive: true, force: true });

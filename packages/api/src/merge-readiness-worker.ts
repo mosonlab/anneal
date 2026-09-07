@@ -13,10 +13,14 @@ import {
   isGatedMergeReadinessTask,
   isMergeReadinessStep,
   latestRecordedStop,
+  mergeExecutorRunnerIds,
+  MergeGateAuthorizationError,
   MERGE_TAIL_KIND,
   parseRegressionVerdict,
+  readMarkerHistory,
   requireMergeGateAuthorization,
   REGRESSION_VERIFICATION_OUTPUT_KINDS,
+  recordReadinessRequeue,
   recoveryContext,
   resolveChainTarget,
   writeMarker,
@@ -25,6 +29,7 @@ import {
 } from "@anneal/db";
 
 import { lockTaskMutationRows } from "./task-write.js";
+import { RUNNER_FORGET_MS, type DaemonSnapshot } from "./runners.js";
 import { openDefenseAuditNotice, stopMergeTail } from "./merge-tail-actions.js";
 import {
   adoptRecoveryHead,
@@ -69,6 +74,26 @@ import {
 export const readinessPollIntervalMs = (): number => {
   const raw = Number(process.env.MERGE_READINESS_POLL_INTERVAL_MS);
   return Number.isFinite(raw) && raw >= 250 ? Math.floor(raw) : 2_000;
+};
+
+export const READINESS_EXCEPTION_REQUEUE_LIMIT = 3;
+
+/**
+ * How many times one readiness Step may be requeued after an evaluation
+ * exception before the tail stops. A misconfigured limit is not silently
+ * replaced by the default: an unusable bound would decide, unseen, whether a
+ * transient failure costs a retry or a manual delivery.
+ */
+export const readinessExceptionRequeueLimit = (): number => {
+  const raw = process.env.MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT;
+  if (raw === undefined || raw.trim() === "") return READINESS_EXCEPTION_REQUEUE_LIMIT;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(
+      `MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT must be a non-negative integer, got ${raw}`,
+    );
+  }
+  return parsed;
 };
 
 export { READINESS_READ_BUDGET_MS };
@@ -289,6 +314,70 @@ const stopReadinessSettlement = (
   },
 });
 
+export const READINESS_EXCEPTION_REQUEUE_STATE = "requeued-exception";
+
+/**
+ * Returns the readiness Step to `TODO` after an evaluation exception so the
+ * next tick evaluates it again. That Step is the only row whose status this
+ * touches: the Regression evidence it was about to authorize is still valid.
+ * The marker goes where every other readiness-phase marker goes -- the
+ * Regression task, alongside the readiness requeue and stop rows the board
+ * already shows -- so the retries appear in the stream operators read.
+ */
+export const requeueReadinessExceptionSettlement = (
+  input: {
+    readinessTaskId: string;
+    regressionTaskId: string;
+    reason: string;
+    requeue: number;
+    limit: number;
+    recovery: RecoveryContext | null;
+    now: Date;
+  },
+): ReadinessSettlement => readinessSettlement("requeue", {
+  taskId: input.regressionTaskId,
+  at: input.now,
+  apply: async (tx) => {
+    await tx.task.update({
+      where: { id: input.readinessTaskId },
+      data: { status: TaskStatus.TODO, failureReason: null },
+    });
+    await writeMarker(tx, input.regressionTaskId, "readiness", {
+      actorType: "control-plane",
+      body: `Merge readiness requeued after evaluation exception ${String(input.requeue)}`
+        + ` of ${String(input.limit)}: ${input.reason}`,
+      metadata: {
+        state: READINESS_EXCEPTION_REQUEUE_STATE,
+        reason: input.reason,
+        requeue: input.requeue,
+        limit: input.limit,
+        recoveryAggregateId: input.recovery?.aggregateId ?? null,
+      },
+    });
+    return {
+      ownership: "released",
+      leaseOutcome: { kind: "stop", taskId: input.regressionTaskId },
+    };
+  },
+});
+
+/**
+ * Exception requeues already spent on this readiness Step, read from the
+ * Regression task that carries its markers and counted within the recovery
+ * attempt that owns them: a base-drift recovery is a fresh tail, and the
+ * requeues its predecessor spent are not charged to it.
+ */
+const spentExceptionRequeues = async (
+  db: PrismaClient,
+  regressionTaskId: string,
+  recovery: RecoveryContext | null,
+): Promise<number> => {
+  const markers = await readMarkerHistory(db as Prisma.TransactionClient, regressionTaskId);
+  return markers.filter((marker) => marker.kind === "readiness"
+    && marker.state === READINESS_EXCEPTION_REQUEUE_STATE
+    && (marker.raw.recoveryAggregateId ?? null) === (recovery?.aggregateId ?? null)).length;
+};
+
 export type ReadinessTickResult = { claimed: number; authorized: number; requeued: number; stopped: number };
 
 export const requeueRegressionSettlement = (
@@ -336,6 +425,17 @@ export const requeueRegressionSettlement = (
         }
         return { ownership: "released", leaseOutcome: { kind: "stop", taskId: input.regressionTaskId } };
       }
+      // The counter shares this transaction with the grant it counts, so a
+      // rolled-back settlement leaves neither behind, and a refused requeue
+      // returns above without granting or counting anything.
+      await recordReadinessRequeue(tx, {
+        readinessTaskId: input.readinessTaskId,
+        regressionTaskId: input.regressionTaskId,
+        staleBaseSha: input.staleBaseSha,
+        currentBaseSha: input.currentBaseSha,
+        budgetGrant: 1,
+        reason: input.reason,
+      });
       await writeMarker(tx, input.regressionTaskId, "readiness", {
         actorType: "control-plane",
         body: `Merge readiness returned to regression: ${input.reason}; ${input.staleBaseSha} -> ${input.currentBaseSha}`,
@@ -353,6 +453,202 @@ export const requeueRegressionSettlement = (
     };
   },
 });
+
+/**
+ * The daemon liveness `GET /runners` reports, read by the readiness worker so
+ * an authorization is written only while a merge executor can claim it. One
+ * reader, one rule: the registry snapshot decides `online`, and this worker
+ * never re-derives liveness from a second clock. The reader carries its own
+ * clock because the guard that matters runs under the Merge Lease, seconds
+ * after the timestamp the tick started with, and must read liveness as of then.
+ */
+export type DaemonSnapshotReader = () => DaemonSnapshot[];
+
+const EXECUTOR_OFFLINE_STATE = "requeued-executor-offline";
+export const MERGE_EXECUTOR_OFFLINE_REASON = "merge-executor-offline";
+
+/**
+ * How long readiness waits at the door for a merge executor before the tail
+ * stops. It is `RUNNER_FORGET_MS` because that is the existing ceiling on the
+ * same liveness fact: past it the registry has forgotten the daemon entirely,
+ * so this is no longer a restart to wait out. It is not a new configuration
+ * surface, and the wait spends no regression repair budget: nothing is rerun.
+ */
+export const MERGE_EXECUTOR_OFFLINE_WAIT_MS = RUNNER_FORGET_MS;
+
+/**
+ * The configured merge executors when none of them is online, which is exactly
+ * when an authorization must not be written; empty when one is online, and
+ * empty for an unconfigured allowlist too: with no executor named, readiness
+ * authorizes exactly as it did before this check existed.
+ */
+export const executorsBlockingAuthorization = (
+  daemons: DaemonSnapshotReader,
+): string[] => {
+  const allowlist = mergeExecutorRunnerIds();
+  if (allowlist.length === 0) return [];
+  const online = new Set(
+    daemons().filter((daemon) => daemon.online).map((daemon) => daemon.runnerId),
+  );
+  return allowlist.some((runnerId) => online.has(runnerId)) ? [] : allowlist;
+};
+
+const executorOfflineDetail = (executorRunnerIds: string[]): string =>
+  `${MERGE_EXECUTOR_OFFLINE_REASON}: no merge executor in ${executorRunnerIds.join(", ")} is online`;
+
+/**
+ * Readiness returning itself to the queue: the regression evidence and its Run
+ * are untouched, nothing is authorized, and the next tick asks again.
+ *
+ * The wait surrenders the chain's Merge Lease rather than holding it, which is
+ * what settlement kind `requeue` means here. Holding it would block the whole
+ * delivery line for as long as the outage lasts, and it buys nothing: the
+ * allowlist is global, so while it is offline no chain can be authorized, and
+ * a base that moves some other way is caught by the evidence check on the tick
+ * that finally authorizes.
+ */
+const executorOfflineRequeueSettlement = (
+  input: {
+    readinessTaskId: string;
+    regressionTaskId: string;
+    executorRunnerIds: string[];
+    episodeStartedAt: Date;
+    now: Date;
+  },
+): ReadinessSettlement => readinessSettlement("requeue", {
+  taskId: input.regressionTaskId,
+  at: input.now,
+  apply: async (tx) => {
+    await tx.taskActivity.create({ data: {
+      taskId: input.readinessTaskId,
+      actorType: "control-plane",
+      body: `Merge readiness withheld its authorization: ${executorOfflineDetail(input.executorRunnerIds)}`,
+      metadata: {
+        kind: MERGE_TAIL_KIND.readiness,
+        state: EXECUTOR_OFFLINE_STATE,
+        reason: MERGE_EXECUTOR_OFFLINE_REASON,
+        executorRunnerIds: input.executorRunnerIds,
+        episodeStartedAt: input.episodeStartedAt.toISOString(),
+      },
+    } });
+    await tx.task.update({
+      where: { id: input.readinessTaskId },
+      data: { status: TaskStatus.TODO, failureReason: null },
+    });
+    return {
+      ownership: "released",
+      leaseOutcome: { kind: "stop", taskId: input.regressionTaskId },
+    };
+  },
+});
+
+type ExecutorOfflineMarker = { id: string; createdAt: Date; metadata: Prisma.JsonValue };
+
+/** The newest skipped authorization on this readiness Step, the outage anchor. */
+const latestExecutorOfflineMarker = async (
+  db: PrismaClient,
+  readinessTaskId: string,
+): Promise<ExecutorOfflineMarker | null> => db.taskActivity.findFirst({
+  where: {
+    taskId: readinessTaskId,
+    metadata: { path: ["state"], equals: EXECUTOR_OFFLINE_STATE },
+  },
+  orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  select: { id: true, createdAt: true, metadata: true },
+});
+
+/**
+ * When the outage this marker belongs to began, or `null` once that outage has
+ * ended. An episode ends on an observed fact rather than after an elapsed time:
+ * readiness closes it on the tick that finds an executor online or settles the
+ * Step some other way, and on the stop it writes at the ceiling. Elapsed time
+ * cannot decide this -- `MERGE_READINESS_POLL_INTERVAL_MS` sets the distance
+ * between two skipped authorizations of one outage, so any fixed gap an
+ * interval can exceed would restart the wait every tick and let an executor
+ * stay offline forever without ever reaching the ceiling.
+ */
+const openEpisodeStart = (marker: ExecutorOfflineMarker | null): Date | null => {
+  if (!marker) return null;
+  const metadata = marker.metadata as {
+    episodeStartedAt?: unknown;
+    episodeClosed?: unknown;
+  } | null;
+  if (metadata?.episodeClosed === true) return null;
+  const recorded = metadata?.episodeStartedAt;
+  if (typeof recorded !== "string") return marker.createdAt;
+  const started = new Date(recorded);
+  return Number.isNaN(started.getTime()) ? marker.createdAt : started;
+};
+
+/**
+ * Ends the outage readiness was waiting out, so the next one waits out its own
+ * ceiling. Only the newest marker is closed because only the newest is ever
+ * read: an older one is already behind a closed episode.
+ */
+const closeExecutorOfflineEpisode = async (
+  db: PrismaClient,
+  readinessTaskId: string,
+): Promise<void> => {
+  const marker = await latestExecutorOfflineMarker(db, readinessTaskId);
+  if (!marker || openEpisodeStart(marker) === null) return;
+  const metadata = (marker.metadata ?? {}) as Prisma.JsonObject;
+  await db.taskActivity.update({
+    where: { id: marker.id },
+    data: { metadata: { ...metadata, episodeClosed: true } },
+  });
+};
+
+/**
+ * The decision an authorization must survive: it is written only while a merge
+ * executor is online, so an outage costs a requeue rather than an authorization
+ * the executor will meet as base drift when it comes back. The wait is bounded
+ * by the current outage; past the ceiling the tail parks in REVIEW naming the
+ * outage, like every other readiness stop.
+ */
+const settleExecutorOffline = async (
+  db: PrismaClient,
+  read: ClaimedReadiness,
+  executorRunnerIds: string[],
+  result: ReadinessTickResult,
+  runner: ReadinessSettlementRunner,
+): Promise<Extract<ReadinessSettlementApplication, { kind: "settled" }>> => {
+  const { readiness, regression, recovery, claim } = read;
+  const now = read.input.now;
+  const episodeStartedAt = openEpisodeStart(await latestExecutorOfflineMarker(db, readiness.id)) ?? now;
+  const waitedMs = now.getTime() - episodeStartedAt.getTime();
+  if (waitedMs >= MERGE_EXECUTOR_OFFLINE_WAIT_MS) {
+    // This outage is over as far as the wait is concerned: it has been paid in
+    // full and answered with a stop. Closing before the stop is applied means
+    // an interrupted stop costs another wait rather than an operator retry that
+    // stops again on its first tick without waiting at all.
+    await closeExecutorOfflineEpisode(db, readiness.id);
+    const stopped = await runner.apply(stopReadinessSettlement({
+      readinessTaskId: readiness.id,
+      regressionTaskId: regression.id,
+      reason: `${executorOfflineDetail(executorRunnerIds)} after ${Math.round(waitedMs / 60_000)} minutes`,
+      recovery,
+      refusalCode: null,
+      now,
+    }), claim);
+    if (stopped.kind === "acquire-lease") {
+      throw new Error("Readiness stop requested a Merge Lease");
+    }
+    if (stopped.outcome.value.applied) result.stopped += 1;
+    return stopped;
+  }
+  const application = await runner.apply(executorOfflineRequeueSettlement({
+    readinessTaskId: readiness.id,
+    regressionTaskId: regression.id,
+    executorRunnerIds,
+    episodeStartedAt,
+    now,
+  }), claim);
+  if (application.kind === "acquire-lease") {
+    throw new Error("Readiness executor-offline requeue requested a Merge Lease");
+  }
+  if (application.outcome.value.applied) result.requeued += 1;
+  return application;
+};
 
 type ClaimedReadiness = {
   claimed: true;
@@ -774,6 +1070,7 @@ const runReadinessDecision = async (
   releaseChainLease: ReleaseMergeLease,
   runWithMergeLease: WithMergeLease,
   reader: PullRequestReader,
+  daemons: DaemonSnapshotReader,
 ): Promise<void> => {
   const { readiness, regression, claim } = read;
   const preAcquireRunner = createReadinessSettlementRunner(db, {
@@ -783,6 +1080,31 @@ const runReadinessDecision = async (
   const target: MergeLeaseTarget | null = readiness.chainId
     ? { projectId: readiness.projectId, chainId: readiness.chainId }
     : null;
+
+  // An authorization nobody can claim is a base-drift stop waiting to happen,
+  // so it is refused rather than written and left standing: the chain waits at
+  // readiness while its executor is down. The check that decides is the one
+  // under the Lease, below; this one only spares an outage the cost of taking
+  // a Lease every tick, exactly as the pre-acquire read spares a base move one.
+  // Settling here also ends the contention episode below.
+  const blockedExecutors = decision.kind === "authorize"
+    ? executorsBlockingAuthorization(daemons)
+    : [];
+  if (blockedExecutors.length > 0) {
+    await forgetContention(db, target, readiness.id, read.input.now, claim);
+    await settleExecutorOffline(db, read, blockedExecutors, result, preAcquireRunner);
+    return;
+  }
+
+  // The outage ends only when this tick observed it ending: an authorization
+  // reached the liveness read and nothing blocked it, or the Step settles for
+  // good and its next readiness starts a wait of its own. A deferred or skipped
+  // tick observed nothing about the executor, so the episode it may be inside
+  // stays open and keeps its start; otherwise one transport timeout inside the
+  // wait would hand the outage a fresh window.
+  if (decision.kind === "authorize" || decision.kind === "requeue-regression" || decision.kind === "stop") {
+    await closeExecutorOfflineEpisode(db, readiness.id);
+  }
 
   // The alert window measures continuous contention, so anything other than
   // another refusal breaks the run. Only an authorization reaches for the
@@ -824,6 +1146,24 @@ const runReadinessDecision = async (
       release: releaseChainLease,
     });
     const leasedDecision = await evaluateReadiness(reader, read.input);
+
+    // Repeat the liveness read too, for the same reason: an executor that went
+    // down while this tick was acquiring the Lease and re-reading GitHub must
+    // not have an authorization written for it. This is the read that decides.
+    const leasedBlockedExecutors = leasedDecision.kind === "authorize"
+      ? executorsBlockingAuthorization(daemons)
+      : [];
+    if (leasedBlockedExecutors.length > 0) {
+      const settlement = await settleExecutorOffline(
+        db,
+        read,
+        leasedBlockedExecutors,
+        result,
+        heldRunner,
+      );
+      return { leaseOutcome: settlement.outcome.leaseOutcome, value: "settled" as const };
+    }
+
     const leasedApplication = await applyReadinessDecision(
       read,
       leasedDecision,
@@ -877,8 +1217,10 @@ export const readinessTick = async (
   limit: number,
   releaseChainLease: ReleaseMergeLease,
   runWithMergeLease: WithMergeLease,
+  daemons: DaemonSnapshotReader,
 ): Promise<ReadinessTickResult> => {
   const result: ReadinessTickResult = { claimed: 0, authorized: 0, requeued: 0, stopped: 0 };
+  const exceptionRequeueLimit = readinessExceptionRequeueLimit();
   const pageSize = Math.max(limit * 20, 100);
   for await (const readiness of readinessCandidates(db, pageSize)) {
     if (result.claimed >= limit) break;
@@ -897,13 +1239,28 @@ export const readinessTick = async (
         releaseChainLease,
         runWithMergeLease,
         reader,
+        daemons,
       );
     } catch (error: unknown) {
       if (error instanceof LeaseReleaseDeferralRecordError) throw error;
       const refusalCode = error instanceof MergeRecoveryRefusalError ? error.refusalCode : null;
-      const reason = `readiness evaluation failed: ${error instanceof Error ? error.message : String(error)}`;
+      const message = error instanceof Error ? error.message : String(error);
+      // A refusal is a decision and stops the tail on its first occurrence. So
+      // is a missing or mismatched operator authorization: the gate is
+      // fail-closed, and retrying it would re-ask the same settled question
+      // three more times. An unexpected exception is neither: the stop it would
+      // write carries no review-fail or gate-fail verdict, so
+      // `merge-tail/repair` refuses to re-enter it and only a manual delivery
+      // finishes the branch. A killed child or a restarted deploy therefore
+      // costs one requeue of the readiness Step, bounded so a permanent fault
+      // still reaches an operator.
+      const decided = refusalCode !== null || error instanceof MergeGateAuthorizationError;
+      const spent = decided
+        ? 0
+        : await spentExceptionRequeues(db, read.regression.id, read.recovery);
+      const requeuing = !decided && spent < exceptionRequeueLimit;
       // Stopping the tail is not another refusal by the holder either, and the
-      // stop below releases the claim this write is fenced by.
+      // settlement below releases the claim this write is fenced by.
       await forgetContention(
         db,
         readiness.chainId ? { projectId: readiness.projectId, chainId: readiness.chainId } : null,
@@ -915,25 +1272,39 @@ export const readinessTick = async (
         kind: "pre-acquire",
         release: releaseChainLease,
       });
-      const stopped = await runner.apply(stopReadinessSettlement({
-        readinessTaskId: readiness.id,
-        regressionTaskId: read.regression.id,
-        reason,
-        recovery: read.recovery,
-        refusalCode,
-        now: new Date(),
-      }), read.claim);
-      if (stopped.kind === "acquire-lease") {
-        throw new Error("Readiness stop requested a Merge Lease");
+      const settlement = requeuing
+        ? requeueReadinessExceptionSettlement({
+          readinessTaskId: readiness.id,
+          regressionTaskId: read.regression.id,
+          reason: `readiness evaluation exception: ${message}`,
+          requeue: spent + 1,
+          limit: exceptionRequeueLimit,
+          recovery: read.recovery,
+          now: new Date(),
+        })
+        : stopReadinessSettlement({
+          readinessTaskId: readiness.id,
+          regressionTaskId: read.regression.id,
+          reason: spent === 0
+            ? `readiness evaluation failed: ${message}`
+            : `readiness evaluation failed after ${String(spent)} exception requeues: ${message}`,
+          recovery: read.recovery,
+          refusalCode,
+          now: new Date(),
+        });
+      const settled = await runner.apply(settlement, read.claim);
+      if (settled.kind === "acquire-lease") {
+        throw new Error(`Readiness ${settlement.kind} requested a Merge Lease`);
       }
-      if (stopped.outcome.value.applied) {
-        result.stopped += 1;
+      if (settled.outcome.value.applied) {
+        if (requeuing) result.requeued += 1;
+        else result.stopped += 1;
       }
       // A failed release/hold recording can happen after stopMergeTail has
       // already committed its state transition. A second stop then returns
       // false and must not turn that failure into a successful-looking tick.
       // Surface it to the worker caller so the missing evidence is observable.
-      if (!stopped.outcome.value.applied) throw error;
+      if (!settled.outcome.value.applied) throw error;
     }
   }
   return result;
@@ -942,7 +1313,11 @@ export const readinessTick = async (
 export const startReadinessWorker = (
   db: PrismaClient,
   reader: PullRequestReader,
+  daemons: DaemonSnapshotReader,
 ): ReturnType<typeof setInterval> => {
+  // Read once here so a misconfigured bound fails the service at startup rather
+  // than inside the first tick that hits an exception.
+  readinessExceptionRequeueLimit();
   let inFlight = false;
   const timer = setInterval(() => {
     if (inFlight) return;
@@ -955,6 +1330,7 @@ export const startReadinessWorker = (
         5,
         releaseMergeLease,
         withMergeLease,
+        daemons,
       ))
       .catch((error: unknown) => console.error("Merge readiness tick failed", error))
       .finally(() => {

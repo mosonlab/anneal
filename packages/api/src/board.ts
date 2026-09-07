@@ -2,11 +2,15 @@ import { createHash } from "node:crypto";
 
 import {
   ACTIVE_RUN_STATUSES,
+  EMPTY_READINESS_REQUEUE_TOTALS,
   readChainControls,
   isIntegratorStep,
   markerFromMetadata,
+  MERGE_READINESS_OUTPUT_KIND,
   MERGE_TAIL_KIND,
   projectMergeOutcome,
+  readinessRequeueActivityWhere,
+  readinessRequeueTotals,
   runOwnsMergeOutcome,
   runSessionUsageCost,
   sumUsageCosts,
@@ -16,6 +20,7 @@ import {
   type Marker,
   type Prisma,
   type PrismaClient,
+  type ReadinessRequeueTotals,
   type ScheduleKind,
   type TaskSource,
   type TaskStatus as TaskStatusType,
@@ -23,6 +28,7 @@ import {
 } from "@anneal/db";
 import type {
   BoardCard as BoardContractCard,
+  RunBaseline as BoardContractRunBaseline,
   BoardChainActivationState as BoardContractChainActivationState,
   BoardLatestRun as BoardContractLatestRun,
   BoardMoveTarget as BoardContractMoveTarget,
@@ -45,6 +51,7 @@ import {
   taskStartability,
   type ChainProgress,
 } from "./chain.js";
+import { baselineKey, readRunBaselines } from "./run-baseline.js";
 import { taskMoveAuthority } from "./task-move-authority.js";
 
 /**
@@ -99,6 +106,9 @@ export type BoardRow = {
   chainIndex: number | null;
   chainLayer: number | null;
   dispatchAfterTaskId: string | null;
+  /** The card's baseline population key. Not projected itself — it is what the
+   *  one grouped baseline query for the page is keyed by. */
+  templateStepId: string | null;
   createdAt: Date;
   updatedAt: Date;
   assigneeAgent: { id: string; name?: string; title: string; model: string; archivedAt: Date | null } | null;
@@ -526,6 +536,8 @@ export const boardCard = (
   display: ChainDisplay = { chainName: taskChainName(row), displayName: row.name },
   predecessor: BoardBlockedOnTask | null = null,
   repairOf: RepairBinding | null = null,
+  baseline: BoardContractRunBaseline | null = null,
+  readiness: ReadinessRequeueTotals = EMPTY_READINESS_REQUEUE_TOTALS,
 ): BoardCard => {
   const taskCost = sumUsageCosts(row.runs.flatMap((item) => item.session === null
     ? []
@@ -594,6 +606,11 @@ export const boardCard = (
     budgetRemaining: startability.checklist.budgetRemaining,
     leaseLossRefunds,
     chainAggregate: null,
+    baseline,
+    // Only the readiness Step records requeues, so every other card carries the
+    // empty totals rather than a nullable field the web would have to branch on.
+    readinessRequeues: readiness.readinessRequeues,
+    readinessGrants: readiness.readinessGrants,
   } satisfies BoardCard;
 };
 
@@ -897,6 +914,38 @@ const boardChainRows = async (
   return chainRows as unknown as BoardChainMember[];
 };
 
+/**
+ * The pre-authorization requeue totals of every readiness Step on this page.
+ *
+ * Merge readiness records one activity per requeue on its own Task, so the
+ * count and the granted attempts are a fold over those rows. Steps of any other
+ * output kind never record one and are not queried.
+ */
+const readReadinessRequeueTotals = async (
+  db: PrismaClient,
+  rows: readonly Pick<BoardRow, "id" | "templateStep">[],
+): Promise<Map<string, ReadinessRequeueTotals>> => {
+  const readinessTaskIds = rows
+    .filter((row) => row.templateStep?.outputKind === MERGE_READINESS_OUTPUT_KIND)
+    .map((row) => row.id);
+  const totals = new Map<string, ReadinessRequeueTotals>();
+  if (readinessTaskIds.length === 0) return totals;
+  const activities = await db.taskActivity.findMany({
+    where: readinessRequeueActivityWhere({ in: readinessTaskIds }),
+    select: { taskId: true, metadata: true },
+  });
+  const byTask = new Map<string, { metadata: Prisma.JsonValue }[]>();
+  for (const activity of activities) {
+    const group = byTask.get(activity.taskId) ?? [];
+    group.push({ metadata: activity.metadata });
+    byTask.set(activity.taskId, group);
+  }
+  for (const taskId of readinessTaskIds) {
+    totals.set(taskId, readinessRequeueTotals(byTask.get(taskId) ?? []));
+  }
+  return totals;
+};
+
 /** Read the complete board card model, including every lookup needed to project it. */
 export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise<BoardCard[]> => {
   const rows: BoardRow[] = await db.task.findMany({
@@ -907,7 +956,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
       assigneeAgentId: true, repoId: true, archivedAt: true, maxSessionsPerTask: true, failureReason: true,
       scheduleKind: true, runAt: true, cron: true, timezone: true, approvalGate: true,
       templateId: true, source: true, chainId: true, chainIndex: true, chainLayer: true, createdAt: true, updatedAt: true,
-      dispatchAfterTaskId: true,
+      dispatchAfterTaskId: true, templateStepId: true,
       assigneeAgent: { select: { id: true, name: true, title: true, model: true, archivedAt: true } },
       templateStep: {
         select: {
@@ -1004,6 +1053,11 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     for (const predecessor of predecessors) predecessorById.set(predecessor.id, predecessor);
   }
 
+  // Requeue counters, read only for the Steps that can record one. Merge
+  // readiness writes its requeue activity on the readiness Task, so the board
+  // needs one query per page rather than a per-card scan.
+  const readinessByTask = await readReadinessRequeueTotals(db, rows);
+
   const grantInputs = rows.flatMap((row) => (
     row.assigneeAgentId === null || row.repoId === null
       ? []
@@ -1090,6 +1144,14 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
     ));
   }
 
+  // One grouped statement for every template step on the page, whatever the
+  // page size: the board's query count must not grow with the number of cards.
+  const baselines = await readRunBaselines(db, rows.flatMap((row) => (
+    row.templateStepId === null
+      ? []
+      : [{ projectId: row.projectId, templateStepId: row.templateStepId }]
+  )));
+
   const emittedAggregates = new Set<string>();
   return rows.map((row) => {
     const repairKey = row.chainId === null ? repairChainKeyByTask.get(row.id) : undefined;
@@ -1119,6 +1181,10 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
       displayByTask.get(row.id),
       row.dispatchAfterTaskId === null ? null : predecessorById.get(row.dispatchAfterTaskId) ?? null,
       repairByTask.get(row.id) ?? null,
+      row.templateStepId === null
+        ? null
+        : baselines.get(baselineKey({ projectId: row.projectId, templateStepId: row.templateStepId })) ?? null,
+      readinessByTask.get(row.id),
     );
     const aggregate = key === undefined || emittedAggregates.has(key)
       ? null
@@ -1189,9 +1255,19 @@ export const readTaskList = async (
     _count: { _all: true },
   });
   const firedByDefinition = new Map(firedGroups.map((group) => [group.recurringSourceTaskId, group]));
+  // One grouped statement for every template step in the list, whatever its
+  // length: the same constraint the board read carries.
+  const baselines = await readRunBaselines(db, tasks.flatMap((task) => (
+    task.templateStepId === null
+      ? []
+      : [{ projectId: task.projectId, templateStepId: task.templateStepId }]
+  )));
 
   return tasks.map((task) => ({
     ...task,
+    baseline: task.templateStepId === null
+      ? null
+      : baselines.get(baselineKey({ projectId: task.projectId, templateStepId: task.templateStepId })) ?? null,
     strandedSalvageBranches: strandedSalvageBranchesFromRuns(salvageRunsByTask.get(task.id) ?? []),
     executionOwner: chainExecutionOwner(task),
     chainProgress: progressFor(task),
