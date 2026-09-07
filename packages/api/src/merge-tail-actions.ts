@@ -1043,10 +1043,17 @@ export const handleRegressionCompletion = async (
     task: { id: string; projectId: string; repoId: string | null; templateId: string | null; chainId: string | null; chainIndex: number | null; targetBranch: string | null; templateStep?: RegressionTaskIdentity["templateStep"] };
     run: { id: string; agentId: string; branch: string | null; headSha: string | null; sessionId: string };
     qualifiedVerdict?: RegressionVerdict;
+    /** A merge-train gate-fix is bound to the train prefix rather than an
+     *  active base-drift aggregate. The train worker has already serialized
+     *  that decision under its Merge Lease, so it may explicitly bypass the
+     *  ordinary recovery lookup for this synthetic gate verdict. */
+    ignoreRecovery?: boolean;
     now: Date;
   },
 ): Promise<"advance" | "handled"> => {
-  const recovery = await baseDriftRecoveryContext(tx, input.task.id, input.run.id);
+  const recovery = input.ignoreRecovery
+    ? null
+    : await baseDriftRecoveryContext(tx, input.task.id, input.run.id);
   const stop = async (reason: string): Promise<"handled"> => {
     await stopMergeTail(tx, {
       phase: "regression",
