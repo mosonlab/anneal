@@ -56,6 +56,7 @@ export type DurableCandidateFacts = {
   existingAttempt: {
     status: string;
     reopenableLegacyRefusal: boolean;
+    nextEligibleAt: Date | null;
   } | null;
   sourceRun: {
     id: string;
@@ -129,8 +130,22 @@ export type FreshRecoveryFacts =
       observedAdvance: Comparison | null;
     };
 
+/**
+ * Why one classification tick did not conclude. The three classes are
+ * accounted separately because they are evidence about different things:
+ * `waiting` says the chain is busy, `transport` says the repository did not
+ * deliver usable facts, and only `validation` says something about this
+ * candidate.
+ *
+ * A read that returned no usable comparison is `transport`, not `validation`:
+ * the candidate never got classified, so its counted budget must not pay for
+ * the upstream's silence.
+ */
+export const retryClasses = ["waiting", "transport", "validation"] as const;
+export type RetryClass = (typeof retryClasses)[number];
+
 export type Skip = { kind: "skip" };
-export type Retry = { kind: "retry"; reason: string };
+export type Retry = { kind: "retry"; reason: string; retryClass: RetryClass };
 export type Ineligible = { kind: "ineligible"; reason: string };
 export type Inspect = { kind: "inspect"; candidate: RecoveryCandidate };
 export type Queue = { kind: "queue"; candidate: RecoveryCandidate; currentBaseSha: string };
@@ -141,7 +156,27 @@ type CandidateRefusal = { code: CandidateRefusalCode; stopId: string };
 export type CandidateDecision = Skip | (Retry & CandidateRefusal) | (Ineligible & CandidateRefusal) | Inspect;
 export type FreshDecision = Retry | Ineligible | Queue;
 export type DurableDecision = Skip | Retry | Ineligible | Exhausted | Queue;
-export type RetryBudgetDecision = (Retry & { classificationAttempt: number }) | Ineligible;
+
+export type RetryBudgetDecision =
+  | {
+    kind: "retry";
+    reason: string;
+    retryClass: RetryClass;
+    classAttempt: number;
+    firstFailedAt: Date;
+    /** The hold `waiting` and `transport` take before the next tick. Null for
+     *  `validation`, which is bounded by its count and elapsed time alone. */
+    nextEligibleAt: Date | null;
+    elapsedMs: number;
+  }
+  | {
+    kind: "ineligible";
+    reason: string;
+    retryClass: RetryClass;
+    classAttempt: number;
+    firstFailedAt: Date;
+    elapsedMs: number;
+  };
 
 const refusalReason = (code: CandidateRefusalCode, detail?: string): string => {
   switch (code) {
@@ -187,12 +222,12 @@ export const classifyCandidate = (facts: DurableCandidateFacts): CandidateDecisi
     && facts.existingAttempt.status !== "VALIDATING"
     && !facts.existingAttempt.reopenableLegacyRefusal) return { kind: "skip" };
 
-  const refuse = (code: CandidateRefusalCode, detail?: string): CandidateDecision => ({
-    kind: code === "chain-active" ? "retry" : "ineligible",
-    code,
-    reason: refusalReason(code, detail),
-    stopId: stop.stopId,
-  });
+  const refuse = (code: CandidateRefusalCode, detail?: string): CandidateDecision => (
+    code === "chain-active"
+      // The chain's own Run holds the recovery; that is waiting, not a verdict.
+      ? { kind: "retry", retryClass: "waiting", code, reason: refusalReason(code), stopId: stop.stopId }
+      : { kind: "ineligible", code, reason: refusalReason(code, detail), stopId: stop.stopId }
+  );
   if (!task.chainId || task.chainIndex === null || !task.repoId || !task.repositoryPresent) {
     return refuse("identity-incomplete");
   }
@@ -276,7 +311,7 @@ export function classifyFresh(facts: Extract<FreshRecoveryFacts, { kind: "snapsh
 export function classifyFresh(facts: FreshRecoveryFacts): FreshDecision {
   switch (facts.kind) {
     case "reader-failure":
-      return { kind: "retry", reason: facts.reason };
+      return { kind: "retry", retryClass: "transport", reason: facts.reason };
     case "snapshot":
       break;
   }
@@ -307,7 +342,10 @@ export function classifyFresh(facts: FreshRecoveryFacts): FreshDecision {
     return { kind: "ineligible", reason: "server-side ancestry comparison is unavailable" };
   }
   if (!facts.authorizedAdvance) {
-    return { kind: "retry", reason: "authorized-base ancestry facts are incomplete" };
+    // The repository read returned no usable comparison, so nothing was
+    // decided about this candidate. That is the upstream failing to answer,
+    // and it is held under the transport ceiling rather than counted.
+    return { kind: "retry", retryClass: "transport", reason: "authorized-base ancestry facts are incomplete" };
   }
   if (facts.authorizedAdvance.status !== "ahead" || facts.authorizedAdvance.behindBy !== 0) {
     return {
@@ -317,7 +355,11 @@ export function classifyFresh(facts: FreshRecoveryFacts): FreshDecision {
   }
   if (candidate.observedBaseSha !== snapshot.baseSha) {
     if (!facts.observedAdvance) {
-      return { kind: "retry", reason: "executor-observed-base ancestry facts are incomplete" };
+      return {
+        kind: "retry",
+        retryClass: "transport",
+        reason: "executor-observed-base ancestry facts are incomplete",
+      };
     }
     if ((facts.observedAdvance.status !== "ahead" && facts.observedAdvance.status !== "identical")
       || facts.observedAdvance.behindBy !== 0) {
@@ -343,7 +385,11 @@ export const classifyDurable = (facts: {
     case "skip":
       return { kind: "ineligible", reason: "durable chain state changed during fresh recovery verification" };
     case "retry":
-      return { kind: "retry", reason: facts.candidateDecision.reason };
+      return {
+        kind: "retry",
+        retryClass: facts.candidateDecision.retryClass,
+        reason: facts.candidateDecision.reason,
+      };
     case "ineligible":
       return { kind: "ineligible", reason: facts.candidateDecision.reason };
     case "inspect":
@@ -361,17 +407,119 @@ export const classifyDurable = (facts: {
   return { kind: "queue", candidate: facts.expected, currentBaseSha: facts.currentBaseSha };
 };
 
-export const classifyRetryBudget = (facts: {
+
+/** The class ceilings and the count budget, supplied by the caller that owns them. */
+export type RetryBudgetPolicy = {
+  maxValidationAttempts: number;
+  validationMinElapsedMs: number;
+  waitingCeilingMs: number;
+  transportCeilingMs: number;
+  backoffStartMs: number;
+  backoffCapMs: number;
+};
+
+export type RetryBudgetFacts = {
   reason: string;
-  validationAttempts: number;
-  maxAttempts: number;
-}): RetryBudgetDecision => {
-  const classificationAttempt = facts.validationAttempts + 1;
-  if (classificationAttempt > facts.maxAttempts) {
-    return {
-      kind: "ineligible",
-      reason: `classification retry limit ${facts.maxAttempts} reached after transient failure: ${facts.reason}`,
-    };
+  retryClass: RetryClass;
+  now: Date;
+  attempts: Record<RetryClass, number>;
+  firstFailedAt: Record<RetryClass, Date | null>;
+  policy: RetryBudgetPolicy;
+};
+
+/** Whole units only: these strings are read by operators, not parsed. */
+export const formatElapsed = (milliseconds: number): string => {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1_000));
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  if (hours > 0) return `${String(hours)}h${String(minutes).padStart(2, "0")}m`;
+  if (minutes > 0) return `${String(minutes)}m`;
+  return `${String(totalSeconds)}s`;
+};
+
+/**
+ * The doubling hold between two classification ticks of `waiting` or
+ * `transport`: one worker tick after the first failure, then twice as long
+ * each time, capped. The cap is what keeps a chain that stays active for hours
+ * off the reader. `validation` takes no hold — it is bounded by its count and
+ * its elapsed time, and delaying it would only slow a recovery down.
+ */
+export const retryBackoffMs = (
+  classAttempt: number,
+  policy: Pick<RetryBudgetPolicy, "backoffStartMs" | "backoffCapMs">,
+): number => Math.min(
+  policy.backoffCapMs,
+  policy.backoffStartMs * 2 ** Math.max(0, classAttempt - 1),
+);
+
+/**
+ * A classification tick that did not conclude, accounted against its own
+ * class. `waiting` and `transport` never spend the count budget: they end only
+ * by outlasting their ceiling, which is measured from the class's first
+ * failure and stated in the refusal. `validation` needs both — the count and a
+ * minimum elapsed time — so a burst of failures inside one incident leaves the
+ * recovery alive.
+ */
+export const classifyRetryBudget = (facts: RetryBudgetFacts): RetryBudgetDecision => {
+  const { policy, retryClass } = facts;
+  const classAttempt = facts.attempts[retryClass] + 1;
+  const firstFailedAt = facts.firstFailedAt[retryClass] ?? facts.now;
+  const elapsedMs = Math.max(0, facts.now.getTime() - firstFailedAt.getTime());
+  const refuse = (reason: string): RetryBudgetDecision => ({
+    kind: "ineligible", reason, retryClass, classAttempt, firstFailedAt, elapsedMs,
+  });
+  const elapsed = formatElapsed(elapsedMs);
+
+  switch (retryClass) {
+    case "waiting":
+      if (elapsedMs >= policy.waitingCeilingMs) {
+        return refuse(
+          `waiting-ceiling reached: the chain stayed active for ${elapsed}`
+          + ` (limit ${formatElapsed(policy.waitingCeilingMs)}); last classification: ${facts.reason}`,
+        );
+      }
+      break;
+    case "transport":
+      if (elapsedMs >= policy.transportCeilingMs) {
+        return refuse(
+          `transport-ceiling reached: repository reads failed for ${elapsed}`
+          + ` (limit ${formatElapsed(policy.transportCeilingMs)}); last read failure: ${facts.reason}`,
+        );
+      }
+      break;
+    case "validation":
+      if (classAttempt >= policy.maxValidationAttempts && elapsedMs >= policy.validationMinElapsedMs) {
+        return refuse(
+          `validation-budget exhausted: ${String(classAttempt)} classification failures over ${elapsed}`
+          + ` (limit ${String(policy.maxValidationAttempts)} attempts spanning`
+          + ` ${formatElapsed(policy.validationMinElapsedMs)}); last classification: ${facts.reason}`,
+        );
+      }
+      break;
   }
-  return { kind: "retry", reason: facts.reason, classificationAttempt };
+  return {
+    kind: "retry",
+    reason: facts.reason,
+    retryClass,
+    classAttempt,
+    firstFailedAt,
+    elapsedMs,
+    // Only the two classes that are not evidence about the candidate are held
+    // off the reader; a validation failure stays eligible at the next tick and
+    // is bounded by its count and elapsed time instead.
+    nextEligibleAt: retryClass === "validation"
+      ? null
+      : new Date(facts.now.getTime() + retryBackoffMs(classAttempt, policy)),
+  };
+};
+
+/**
+ * Whether a stored backoff still holds this candidate. The worker asks before
+ * it reads GitHub, so a chain that is merely waiting costs one cheap durable
+ * read per tick instead of an API call and a spent attempt.
+ */
+export const recoveryDeferred = (facts: DurableCandidateFacts, now: Date): boolean => {
+  const attempt = facts.existingAttempt;
+  if (!attempt || attempt.status !== "VALIDATING" || !attempt.nextEligibleAt) return false;
+  return attempt.nextEligibleAt.getTime() > now.getTime();
 };
