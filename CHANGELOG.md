@@ -9,6 +9,12 @@ written.
 
 ## Unreleased
 
+- Merge-tail repair staffing preserves webhook and manual-trigger profile provenance.
+  Repair slots refuse the mechanical merge-integrator; profile edits preserve an
+  omitted archived slot. Reset restores entries with warnings when its canonical
+  repair Agent or Repo context is unavailable, and new Default profiles capture
+  canonical step bindings after synchronization.
+
 - An auto-deploy whose quiet-window wait outlives its budget now stops the
   platform from admitting new Runs until that deploy lands: it opens a
   platform-wide dispatch drain, every claim is refused with `dispatch-draining`

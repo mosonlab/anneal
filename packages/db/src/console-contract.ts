@@ -172,7 +172,7 @@ export type StaffingProfileResetInput = {
 /** Warnings describe the plan being saved and never block the write. Entries
  *  dropped by a step-graph replacement are reported by that route instead, in
  *  its own authoring warning shape. */
-export type StaffingProfileWarningCode = "same_agent_implements_and_reviews";
+export type StaffingProfileWarningCode = "same_agent_implements_and_reviews" | "merge_tail_repair_agent_unavailable" | "merge_tail_repair_repo_unresolved";
 
 export type StaffingProfileWarning = {
   code: StaffingProfileWarningCode;

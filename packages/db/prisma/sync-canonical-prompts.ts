@@ -706,7 +706,6 @@ export const main = async (
             projectLabel: () => project.slug,
           });
           staffingNotices.push(...installation.staffingNotices);
-          await installCanonicalDefaultStaffingProfiles(tx, project.id);
           await syncCanonicalTemplates(tx, project, templateSources, projectCounters);
 
           if (fullInstallTarget) {
@@ -722,8 +721,8 @@ export const main = async (
               projectLabel: () => project.slug,
             });
             staffingNotices.push(...fullInstallation.staffingNotices);
-            await installCanonicalDefaultStaffingProfiles(tx, project.id);
           }
+          await installCanonicalDefaultStaffingProfiles(tx, project.id);
           return {
             counters: projectCounters,
             runtimeConfigAdoptions: transactionAdoptions,

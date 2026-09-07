@@ -1036,8 +1036,10 @@ export const mergeTailRepairAssignee = async (
       orderBy: { chainIndex: "asc" },
       select: { id: true },
     });
+    // Trigger callers write this activity as operator or webhook. Its body
+    // identifies instantiation and excludes ordinary notes with colliding metadata.
     const provenance = root ? await tx.taskActivity.findFirst({
-      where: { taskId: root.id, actorType: "control-plane", metadata: { path: ["staffingProfileId"], not: Prisma.AnyNull } },
+      where: { taskId: root.id, body: { startsWith: "Template instantiated" }, metadata: { path: ["staffingProfileId"], not: Prisma.AnyNull } },
       orderBy: { createdAt: "asc" },
       select: { metadata: true },
     }) : null;

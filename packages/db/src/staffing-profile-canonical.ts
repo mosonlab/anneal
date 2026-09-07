@@ -21,6 +21,15 @@ export type MergeTailRepairProfileTemplateName =
 /** The source-owned profile name installed for a canonical template. */
 export const CANONICAL_STAFFING_PROFILE_NAME = "Default" as const;
 
+/** Canonical profile entries share the platform's merge-readiness predicate. */
+export const canonicalStaffingEntries = (
+  steps: readonly { stepIndex: number; outputKind: string; assigneeAgentId: string | null; optional: boolean }[],
+): { outputKind: string; assigneeAgentId: string | null; include: boolean | null }[] => steps.map((step) => ({
+  outputKind: step.outputKind,
+  assigneeAgentId: isMergeReadinessStep(step) ? null : step.assigneeAgentId,
+  include: step.optional ? true : null,
+}));
+
 /**
  * Resolve the source-owned repair slot for a template. Custom and retired
  * template names intentionally return null; their profiles retain the
@@ -85,11 +94,7 @@ export const installCanonicalDefaultStaffingProfiles = async (
         isDefault: true,
         mergeTailRepairAgentId: agent.id,
         entries: {
-          create: template.steps.map((step) => ({
-            outputKind: step.outputKind,
-            assigneeAgentId: isMergeReadinessStep(step) ? null : step.assigneeAgentId,
-            include: step.optional ? true : null,
-          })),
+          create: canonicalStaffingEntries(template.steps),
         },
       },
     });

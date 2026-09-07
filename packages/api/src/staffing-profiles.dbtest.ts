@@ -569,6 +569,30 @@ test("the merge-tail repair slot round-trips, checks its Repo grant and refuses 
   assert.equal(archived.status, 422, JSON.stringify(archived.body));
   assert.equal(archived.body.code, "staffing_profile_agent_archived");
 
+  await db.agentRepoAccess.create({ data: {
+    projectId: fixture.project.id, agentId: fixture.integrator.id, repoId: fixture.repo.id,
+    mountPath: "/repo", permissions: "GIT_WRITE",
+  } });
+  const beforeSentinel = await db.staffingProfile.findUniqueOrThrow({
+    where: { id: created.body.profile.id }, include: { entries: true },
+  });
+  const sentinel = await call("PUT", `/staffing-profiles/${created.body.profile.id}`, {
+    name: "Invalid sentinel slot", entries: [], mergeTailRepairAgentId: fixture.integrator.id,
+    repoId: fixture.repo.id,
+  });
+  assert.equal(sentinel.status, 422, JSON.stringify(sentinel.body));
+  assert.equal(sentinel.body.code, "staffing_profile_integrator_binding");
+  assert.deepEqual(await db.staffingProfile.findUniqueOrThrow({
+    where: { id: created.body.profile.id }, include: { entries: true },
+  }), beforeSentinel);
+
+  await db.agent.update({ where: { id: fixture.repairAgent.id }, data: { archivedAt: new Date() } });
+  const preservedArchived = await call("PUT", `/staffing-profiles/${created.body.profile.id}`, {
+    name: "Archived slot preserved", entries: minimalEntries(fixture),
+  });
+  assert.equal(preservedArchived.status, 200, JSON.stringify(preservedArchived.body));
+  assert.equal(preservedArchived.body.profile.mergeTailRepairAgentId, fixture.repairAgent.id);
+
   const cleared = await call("PUT", `/staffing-profiles/${created.body.profile.id}`, {
     name: "Repair slot cleared",
     entries: minimalEntries(fixture),
@@ -578,7 +602,7 @@ test("the merge-tail repair slot round-trips, checks its Repo grant and refuses 
   assert.equal(cleared.body.profile.mergeTailRepairAgentId, null);
 });
 
-test("reset restores the canonical Luna repair slot and refuses its archived identity", async () => {
+test("reset restores the canonical Luna repair slot and warns for unavailable defaults", async () => {
   const fixture = await seed(INTEGRATOR_TEMPLATE_NAME);
   const created = await createProfile(fixture, {
     name: "Reset repair slot",
@@ -593,10 +617,27 @@ test("reset restores the canonical Luna repair slot and refuses its archived ide
   assert.equal(reset.status, 200, JSON.stringify(reset.body));
   assert.equal(reset.body.profile.mergeTailRepairAgentId, fixture.repairAgent.id);
 
+  await db.repo.create({ data: {
+    projectId: fixture.project.id, name: "second-reset-repo", remoteUrl: "https://example.test/second.git",
+    mountPath: "/second", dependencyProvisioning: "NONE",
+  } });
+  const ambiguousReset = await call("POST", resetPath);
+  assert.equal(ambiguousReset.status, 200, JSON.stringify(ambiguousReset.body));
+  assert.equal(ambiguousReset.body.profile.mergeTailRepairAgentId, fixture.repairAgent.id);
+  assert.ok(ambiguousReset.body.warnings.some((warning: { code: string }) => warning.code === "merge_tail_repair_repo_unresolved"));
+
   await db.agent.update({ where: { id: fixture.repairAgent.id }, data: { archivedAt: new Date() } });
   const archivedReset = await call("POST", resetPath, { repoId: fixture.repo.id });
-  assert.equal(archivedReset.status, 422, JSON.stringify(archivedReset.body));
-  assert.equal(archivedReset.body.code, "staffing_profile_agent_archived");
+  assert.equal(archivedReset.status, 200, JSON.stringify(archivedReset.body));
+  assert.equal(archivedReset.body.profile.mergeTailRepairAgentId, null);
+  assert.ok(archivedReset.body.warnings.some((warning: { code: string }) => warning.code === "merge_tail_repair_agent_unavailable"));
+  await db.agent.update({ where: { id: fixture.repairAgent.id },
+    data: { name: "former-repair-agent", canonicalRole: null } });
+  await db.agent.update({ where: { id: fixture.archivedAgent.id }, data: { name: "former-legacy-repair-agent" } });
+  const missingReset = await call("POST", resetPath);
+  assert.equal(missingReset.status, 200, JSON.stringify(missingReset.body));
+  assert.equal(missingReset.body.profile.mergeTailRepairAgentId, null);
+  assert.ok(missingReset.body.warnings.some((warning: { code: string }) => warning.code === "merge_tail_repair_agent_unavailable"));
 });
 
 test("copying profiles preserves the merge-tail repair slot", async () => {

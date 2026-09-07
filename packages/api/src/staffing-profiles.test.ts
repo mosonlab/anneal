@@ -102,3 +102,9 @@ test("control-plane ownership takes precedence over HUMAN assignee type", () => 
   assert.match(refusal?.message ?? "", /Merge readiness.*remove its entry/u);
   assert.equal(staffingAssigneeRefusal(null, readiness, AGENTS, CONTEXT), null);
 });
+
+test("merge-tail repair slot refuses the mechanical integrator", () => {
+  const agent = { ...AGENTS.get("agent-1")!, name: "merge-integrator" };
+  assert.equal(mergeTailRepairAgentRefusal(agent.id, new Map([[agent.id, agent]]), CONTEXT)?.code,
+    "staffing_profile_integrator_binding");
+});

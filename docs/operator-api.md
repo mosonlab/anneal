@@ -1214,7 +1214,7 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   `staffing_profile_missing_repo_grant`), never under the template's.
 - An omitted optional step is resolved once, at instantiation: the chain has no
   task for it and no later change to any profile alters an existing Chain. The
-  the chain root's first TaskActivity metadata records `staffingProfileId` and
+  chain root's first TaskActivity metadata records `staffingProfileId` and
   `staffingProfileName` when a profile was used. Retained steps keep their
   template `stepIndex`, so the resulting Chain's `chainIndex` values may be
   sparse. If no instantiable step remains, the request is refused with
@@ -1286,8 +1286,8 @@ Every write takes the template row mutex and then the Agent-row mutex that
 archive and chain instantiation take, so a profile cannot be saved against an
 Agent that is being archived in a concurrent transaction. Step entries remain
 a plan and their Repository grants are checked when a chain is actually
-created. A non-null `mergeTailRepairAgentId` slot is checked when it is set or
-reset: it must name an unarchived `AGENT` in the profile's project and hold a
+created. A non-null `mergeTailRepairAgentId` slot is checked when it is explicitly
+set: it must name an unarchived `AGENT` in the profile's project and hold a
 grant for the resolved Repo. Repo resolution uses an explicit `repoId` in that
 request, then the template's webhook Repo, then the project's sole Repo. A
 foreign Repo or a Repo that is not in the project returns
@@ -1295,6 +1295,7 @@ foreign Repo or a Repo that is not in the project returns
 explicit `repoId` returns `staffing_profile_repo_required`; a missing Agent
 grant returns `staffing_profile_missing_repo_grant`. A foreign, archived,
 non-Agent, or ungranted slot is refused rather than silently substituted;
+the mechanical merge-integrator is refused with `staffing_profile_integrator_binding`;
 `null` clears it.
 
 Validation refusals for step entries, in the order they are applied per entry:
@@ -1376,7 +1377,8 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/staffin
 - Optional JSON fields: `mergeTailRepairAgentId`, a nullable Agent id for the
   detached `review-fix` and `gate-fix` repair cards, and `repoId`, the optional
   Repo context used to validate a non-null slot. Omitting
-  `mergeTailRepairAgentId` preserves the stored slot and does not require a new
+  `mergeTailRepairAgentId` preserves the stored slot, even if its Agent has since
+  been archived, and does not require a new
   `repoId`; sending `null` clears the slot. When a non-null slot is sent, Repo
   selection is `repoId`, then the template webhook Repo, then the project's
   sole Repo.
@@ -1428,11 +1430,16 @@ curl -X DELETE "$BASE_URL/staffing-profiles/$PROFILE_ID" \
 - Optional JSON body: `repoId`, used as the Repo context when the canonical
   merge-tail repair slot is non-null. An empty body remains valid for the
   historical reset behavior; without `repoId`, the template webhook Repo or
-  the project's sole Repo is selected.
+  the project's sole Repo is selected. If neither resolves a Repo, reset succeeds
+  with `merge_tail_repair_repo_unresolved` in `warnings` and skips the canonical
+  slot's grant check. An explicit foreign Repo or missing grant still refuses.
 - Replaces the profile's entries with the template's canonical plan: every
   step's own `assigneeAgentId`, and every optional step included. It also
   restores the canonical `mergeTailRepairAgentId`; the active direct, PR, and
   compound canonical profiles set that slot to `senior-dev-luna-max`.
+- If the canonical repair Agent is missing or archived, reset restores the step
+  entries, clears the repair slot, and returns a `merge_tail_repair_agent_unavailable`
+  warning. Explicit create/PUT slot assignments still refuse unavailable Agents.
 - Returns `200 OK` with `{ "profile": <profile>, "warnings": [...] }`.
 - Refusal: `404 Not Found` with code `staffing_profile_not_found`.
 

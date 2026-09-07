@@ -14,9 +14,10 @@ const fixture = (options: { recorded?: string; slot?: typeof repairAgent | null;
       ? { id: "fix", assigneeAgent: fixAgent }
       : { id: "root" } },
     taskActivity: {
-      findFirst: async (query: { where: { taskId: string; actorType: string } }) => {
+      findFirst: async (query: { where: { taskId: string; actorType?: string; body: unknown } }) => {
         assert.equal(query.where.taskId, "root");
-        assert.equal(query.where.actorType, "control-plane");
+        assert.equal(query.where.actorType, undefined);
+        assert.deepEqual(query.where.body, { startsWith: "Template instantiated" });
         return options.recorded ? { metadata: { staffingProfileId: options.recorded } } : null;
       },
       create: async (query: typeof activities[number]) => { activities.push(query); },

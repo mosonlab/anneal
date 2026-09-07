@@ -19,6 +19,8 @@ import {
   AssigneeType,
   catalogRunnerForModel,
   canonicalMergeTailRepairAgentRole,
+  canonicalStaffingEntries,
+  CANONICAL_STAFFING_PROFILE_NAME,
   findCanonicalAgent,
   integratorBindingRefusal,
   isCompoundImplementationStep,
@@ -45,7 +47,8 @@ import { serializable } from "./transaction.js";
 type Tx = Prisma.TransactionClient;
 
 /** The name a bootstrap- or clone-installed profile is created under. */
-export const DEFAULT_STAFFING_PROFILE_NAME = "Default";
+export const DEFAULT_STAFFING_PROFILE_NAME = CANONICAL_STAFFING_PROFILE_NAME;
+export { canonicalStaffingEntries } from "@anneal/db";
 
 export type StaffingProfileEntryInput = {
   outputKind: string;
@@ -135,6 +138,8 @@ export const mergeTailRepairAgentRefusal = (
       `Merge-tail repair Agent ${agent.name} is archived`,
     );
   }
+  const bindingRefusal = integratorBindingRefusal(agent.name, null);
+  if (bindingRefusal) return refuse("staffing_profile_integrator_binding", bindingRefusal);
   return null;
 };
 
@@ -216,6 +221,42 @@ const validateMergeTailRepairGrant = async (
       `Merge-tail repair Agent ${agentId} has no grant for Repo ${repo.name}`,
     );
   }
+};
+
+/** Explicit writes are strict; reset can restore entries despite unavailable defaults. */
+const resolveRepairSlot = async (
+  tx: Tx,
+  input: {
+    projectId: string; taskTemplateId: string; agentId: string | null;
+    repoId: string | undefined; agents: ReadonlyMap<string, ValidationAgent>;
+    resetWarnings?: StaffingProfileWarning[];
+  },
+): Promise<string | null> => {
+  try {
+    validateMergeTailRepairAgent(input.agentId, input.agents, input);
+  } catch (error) {
+    if (!input.resetWarnings || !(error instanceof StaffingProfileRefusal)
+      || !["staffing_profile_agent_not_found", "staffing_profile_agent_archived"].includes(error.code)) throw error;
+    input.resetWarnings.push({ code: "merge_tail_repair_agent_unavailable",
+      message: `${error.message}; reset leaves the repair slot empty` });
+    return null;
+  }
+  if (input.agentId === null) return null;
+  let repo: ProfileRepo;
+  try {
+    repo = await profileRepoFor(tx, {
+      projectId: input.projectId, taskTemplateId: input.taskTemplateId,
+      ...(input.repoId === undefined ? {} : { repoId: input.repoId }),
+    });
+  } catch (error) {
+    if (!input.resetWarnings || !(error instanceof StaffingProfileRefusal)
+      || error.code !== "staffing_profile_repo_required") throw error;
+    input.resetWarnings.push({ code: "merge_tail_repair_repo_unresolved",
+      message: `${error.message}; reset restored the canonical slot without checking its Repo grant` });
+    return input.agentId;
+  }
+  await validateMergeTailRepairGrant(tx, input.agentId, repo, input.projectId);
+  return input.agentId;
 };
 
 /** The template graph facts a profile is validated against. */
@@ -429,18 +470,6 @@ export const validateStaffingEntries = (
   return { entries: normalized, warnings };
 };
 
-/** The canonical plan: every step's own binding, and every optional step kept.
- *  A control-plane step states no assignee here, because a profile cannot
- *  express one for it — its row keeps whatever binding gives its task an
- *  assignee, and no plan changes who executes it. */
-export const canonicalStaffingEntries = (
-  steps: readonly ValidationStep[],
-): StaffingProfileEntryContract[] => steps.map((step) => ({
-  outputKind: step.outputKind,
-  assigneeAgentId: isControlPlaneStep(step) ? null : step.assigneeAgentId,
-  include: step.optional ? true : null,
-}));
-
 const stepSelect = {
   stepIndex: true,
   name: true,
@@ -602,16 +631,10 @@ export const createStaffingProfile = async (
     ...input.entries.flatMap((entry) => entry.assigneeAgentId ? [entry.assigneeAgentId] : []),
     ...(input.mergeTailRepairAgentId ? [input.mergeTailRepairAgentId] : []),
   ]);
-  const repairAgentId = input.mergeTailRepairAgentId ?? null;
-  validateMergeTailRepairAgent(repairAgentId, agents, { projectId });
-  if (repairAgentId !== null) {
-    const repo = await profileRepoFor(tx, {
-      projectId,
-      taskTemplateId: template.id,
-      ...(input.repoId === undefined ? {} : { repoId: input.repoId }),
-    });
-    await validateMergeTailRepairGrant(tx, repairAgentId, repo, projectId);
-  }
+  const repairAgentId = await resolveRepairSlot(tx, {
+    projectId, taskTemplateId: template.id, agentId: input.mergeTailRepairAgentId ?? null,
+    repoId: input.repoId, agents,
+  });
   const validated = validateStaffingEntries(input.entries, steps, agents, {
     projectId,
     templateName: template.name,
@@ -652,14 +675,11 @@ export const replaceStaffingProfile = async (
     ...input.entries.flatMap((entry) => entry.assigneeAgentId ? [entry.assigneeAgentId] : []),
     ...(requestedRepairAgentId ? [requestedRepairAgentId] : []),
   ]);
-  validateMergeTailRepairAgent(requestedRepairAgentId, agents, { projectId: existing.projectId });
-  if (requestedRepairAgentId !== null && input.mergeTailRepairAgentId !== undefined) {
-    const repo = await profileRepoFor(tx, {
-      projectId: existing.projectId,
-      taskTemplateId: template.id,
-      ...(input.repoId === undefined ? {} : { repoId: input.repoId }),
+  if (input.mergeTailRepairAgentId !== undefined) {
+    await resolveRepairSlot(tx, {
+      projectId: existing.projectId, taskTemplateId: template.id,
+      agentId: input.mergeTailRepairAgentId, repoId: input.repoId, agents,
     });
-    await validateMergeTailRepairGrant(tx, requestedRepairAgentId, repo, existing.projectId);
   }
   const validated = validateStaffingEntries(input.entries, steps, agents, {
     projectId: existing.projectId,
@@ -689,25 +709,19 @@ export const resetStaffingProfile = async (
     canonicalRole: resetRepairRole,
     activeOnly: false,
   });
+  const resetWarnings: StaffingProfileWarning[] = [];
   if (resetRepairRole !== null && defaultRepairAgent === null) {
-    throw refuse(
-      "staffing_profile_agent_not_found",
-      `Canonical merge-tail repair Agent ${resetRepairRole} was not found in project ${existing.projectId}`,
-    );
+    resetWarnings.push({ code: "merge_tail_repair_agent_unavailable",
+      message: `Canonical merge-tail repair Agent ${resetRepairRole} is missing; reset leaves the slot empty` });
   }
   const agents = await lockedAgents(tx, [
     ...entries.flatMap((entry) => entry.assigneeAgentId ? [entry.assigneeAgentId] : []),
     ...(defaultRepairAgent ? [defaultRepairAgent.id] : []),
   ]);
-  validateMergeTailRepairAgent(defaultRepairAgent?.id ?? null, agents, { projectId: existing.projectId });
-  if (defaultRepairAgent) {
-    const repo = await profileRepoFor(tx, {
-      projectId: existing.projectId,
-      taskTemplateId: template.id,
-      ...(repoId === undefined ? {} : { repoId }),
-    });
-    await validateMergeTailRepairGrant(tx, defaultRepairAgent.id, repo, existing.projectId);
-  }
+  const repairAgentId = await resolveRepairSlot(tx, {
+    projectId: existing.projectId, taskTemplateId: template.id,
+    agentId: defaultRepairAgent?.id ?? null, repoId, agents, resetWarnings,
+  });
   const validated = validateStaffingEntries(entries, steps, agents, {
     projectId: existing.projectId,
     templateName: template.name,
@@ -715,9 +729,9 @@ export const resetStaffingProfile = async (
   await writeEntries(tx, existing.id, validated.entries);
   await tx.staffingProfile.update({
     where: { id: existing.id },
-    data: { mergeTailRepairAgentId: defaultRepairAgent?.id ?? null },
+    data: { mergeTailRepairAgentId: repairAgentId },
   });
-  return { profile: await readProfile(tx, existing.id), warnings: validated.warnings };
+  return { profile: await readProfile(tx, existing.id), warnings: [...validated.warnings, ...resetWarnings] };
 });
 
 export const setStaffingProfileDefault = async (

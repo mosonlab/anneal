@@ -62,7 +62,7 @@ type RegressionSeedOptions = {
   gateFailureExcerpt?: string;
   /** Give the canonical conflict resolver an operator-chosen name, as R9 allows. */
   renamedResolver?: boolean;
-  repairProfile?: "recorded" | "default" | "empty" | "archived";
+  repairProfile?: "recorded" | "default" | "empty" | "archived" | "operator" | "webhook";
 };
 
 const seedRegression = async (options: RegressionSeedOptions = {}) => {
@@ -228,7 +228,8 @@ const seedRegression = async (options: RegressionSeedOptions = {}) => {
       } });
       const root = await db.task.findFirstOrThrow({ where: { chainId }, orderBy: { chainIndex: "asc" } });
       await db.taskActivity.create({ data: {
-        taskId: root.id, actorType: "control-plane", body: "Template instantiated",
+        taskId: root.id, actorType: options.repairProfile === "operator" || options.repairProfile === "webhook"
+          ? options.repairProfile : "control-plane", body: "Template instantiated",
         metadata: { staffingProfileId: profile.id },
       } });
     }
@@ -1871,7 +1872,7 @@ test("a rejected repair leaves a recovery that is still running alone", async ()
 });
 
 for (const [outcome, repairKind] of [["review-fail", "review-fix"], ["gate-fail", "gate-fix"]] as const) {
-  for (const repairProfile of ["recorded", "default", "empty", "archived"] as const) {
+  for (const repairProfile of ["recorded", "default", "empty", "archived", "operator", "webhook"] as const) {
     test(`${repairKind} honors ${repairProfile} profile repair staffing`, async () => {
       const seeded = await exercise(outcome, { repairProfile });
       const repair = await repairFor(seeded, repairKind);

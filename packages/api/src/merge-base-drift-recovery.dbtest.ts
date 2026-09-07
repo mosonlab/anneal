@@ -1374,7 +1374,7 @@ test("a settle after a re-validate opens a fresh answerable card instead of dedu
 });
 
 for (const outcome of ["review-fail", "gate-fail"] as const) {
-  for (const slot of ["recorded", "default", "empty", "archived"] as const) {
+  for (const slot of ["recorded", "default", "empty", "archived", "operator", "webhook"] as const) {
     test(`operator ${outcome} repair uses ${slot} profile staffing`, async () => {
       const seeded = await prepareBlockedRecovery("canonical-direct", `profile-${outcome}-${slot}`, outcome);
       const repairAgent = await db.agent.create({ data: {
@@ -1394,8 +1394,14 @@ for (const outcome of ["review-fail", "gate-fail"] as const) {
       if (slot !== "default") {
         const root = await db.task.findFirstOrThrow({ where: { chainId: seeded.chainId }, orderBy: { chainIndex: "asc" } });
         await db.taskActivity.create({ data: {
-          taskId: root.id, actorType: "control-plane", body: "Template instantiated",
+          taskId: root.id, actorType: slot === "operator" || slot === "webhook" ? slot : "control-plane", body: "Template instantiated",
           metadata: { staffingProfileId: profile.id },
+        } });
+      }
+      if (slot !== "default") {
+        await db.staffingProfile.create({ data: {
+          projectId: seeded.project.id, taskTemplateId: seeded.template.id,
+          name: "Later default", isDefault: true, mergeTailRepairAgentId: seeded.agent.id,
         } });
       }
       const response = await requestRecoveryRepair(seeded.gateTask.id, `profile-${outcome}-${slot}`);
