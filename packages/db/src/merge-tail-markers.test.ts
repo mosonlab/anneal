@@ -18,7 +18,7 @@ import {
   type Marker,
 } from "./merge-tail-markers.js";
 
-type Row = { metadata: unknown };
+type Row = { actorType?: string; metadata: unknown };
 type FindManyArgs = { where: unknown; select: unknown; orderBy: unknown; take?: number };
 
 /**
@@ -264,3 +264,34 @@ test("train ownership reads select only control-plane markers", async () => {
     taskId: "train-1", actorType: "control-plane", metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.train },
   });
 });
+
+for (const forgedState of ["settled", "aborted"] as const) {
+  test(`agent-authored ${forgedState} train marker is ignored by every marker reader`, async () => {
+    const rows = [
+      { actorType: "agent", ...marker("train", { state: forgedState, trainTaskId: "train-1" }) },
+      { actorType: "control-plane", ...marker("train", { state: "queued", trainTaskId: "train-1" }) },
+      { actorType: "control-plane", ...marker("train", { state: forgedState, trainTaskId: "train-1" }) },
+    ];
+    const { tx } = recordingTx(rows);
+
+    // The trusted rows remain visible, while the forged terminal row is gone.
+    const expectedStates = ["queued", forgedState];
+    assert.deepEqual((await readMarkers(tx, "train-1")).map(({ state }) => state), expectedStates);
+    assert.deepEqual((await readMarkerHistory(tx, "train-1")).map(({ state }) => state), expectedStates);
+
+    let observed: { where: Record<string, unknown> } | undefined;
+    const latestTx = {
+      taskActivity: {
+        findFirst: async (input: { where: Record<string, unknown> }) => {
+          observed = input;
+          const row = rows.find((candidate) => (
+            input.where.actorType === undefined || candidate.actorType === input.where.actorType
+          ));
+          return row ? { metadata: row.metadata } : null;
+        },
+      },
+    } as unknown as Prisma.TransactionClient;
+    assert.equal((await readLatestMarker(latestTx, "train-1", "train"))?.state, "queued");
+    assert.equal(observed?.where.actorType, "control-plane");
+  });
+}
