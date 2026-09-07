@@ -254,6 +254,26 @@ export const enterRepair = async (
     throw new Error(`Merge recovery ${input.aggregateId} repair intent does not match ${aggregate.status}`);
   }
 
+  // The current Regression output is the only durable record of the verdict
+  // immediately before this recovery. Capture it before the fresh recovery
+  // clears step outputs below; storing the snapshot on the queued marker lets
+  // the exact replacement Run carry it through the claim without a schema
+  // migration or a lookup that could accidentally find an older verdict.
+  const priorRegressionOutput = !requeue
+    ? await tx.taskStepOutput.findUnique({
+      where: { taskId: context.regressionTaskId },
+      select: { runId: true, kind: true, body: true, commitSha: true },
+    })
+    : null;
+  const priorOutput = priorRegressionOutput?.runId
+    ? {
+      runId: priorRegressionOutput.runId,
+      kind: priorRegressionOutput.kind,
+      body: priorRegressionOutput.body,
+      commitSha: priorRegressionOutput.commitSha,
+    }
+    : null;
+
   if (!requeue) {
     await closeIntegratorQuestions(tx, context.integratorTaskId);
     await tx.taskStepOutput.deleteMany({
@@ -328,6 +348,7 @@ export const enterRepair = async (
     currentBaseSha: input.currentBaseSha,
     recoveryRunId: run.id,
     state: requeue ? "readiness-requeued" : "queued",
+    ...(!requeue ? { priorOutput } : {}),
   };
   if (requeue) {
     const requeueMetadata = {
