@@ -14,7 +14,7 @@ export type Poll<T> = {
   reload: () => void;
 };
 
-/** Polls a GET endpoint. Pass `null` to stay idle (e.g. no project selected).
+/** Polls a GET endpoint. Pass a null path to stay idle, or a null interval to fetch once.
  *
  *  The poll is change-aware at two levels. The outer one is the HTTP validator:
  *  the held `ETag` rides out as `If-None-Match`, and a 304 ends the poll before
@@ -27,7 +27,7 @@ export type Poll<T> = {
  *  information. Keeping the previous reference lets React bail out of the update
  *  entirely, and lets `React.memo` downstream mean something. Comparing the raw
  *  *text* also skips the `JSON.parse`, which was itself a long task. */
-export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> => {
+export const usePoll = <T>(path: string | null, intervalMs: number | null = POLL_MS): Poll<T> => {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<ApiError | null>(null);
   const [loading, setLoading] = useState(path !== null);
@@ -103,10 +103,10 @@ export const usePoll = <T>(path: string | null, intervalMs = POLL_MS): Poll<T> =
       }
     };
     void load();
-    const timer = window.setInterval(() => void load(), intervalMs);
+    const timer = intervalMs === null ? null : window.setInterval(() => void load(), intervalMs);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      if (timer !== null) window.clearInterval(timer);
     };
   }, [path, intervalMs, nonce]);
 

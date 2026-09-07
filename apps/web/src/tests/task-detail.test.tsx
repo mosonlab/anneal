@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { durationMs, percent, pullRequestLabel, tokensPerSecond } from "../lib/format";
-import { RunDiagnostics, StartabilityChecklist, StepOutput, StrandedSalvageList, TaskPrompt, branchUrl } from "../pages/TaskDetail";
+import { RunDiagnostics } from "../components/run-diagnostics";
+import { StartabilityChecklist, StepOutput, StrandedSalvageList, TaskPrompt, branchUrl } from "../pages/TaskDetail";
 import { partitionTaskPrompt } from "../lib/task-prompt";
 import type { RunMetrics, TaskStartability, TaskStepOutput } from "../lib/types";
 import prompts from "./fixtures/tc-ux-v1-prompts.json";
