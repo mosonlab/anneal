@@ -165,6 +165,20 @@ enum MergeRecoveryRefusalCode {
   HEAD_ADOPTION_CONFLICT         @map("head-adoption-conflict")
   PRE_INTENT                     @map("pre-intent")
   TARGET_BRANCH_MISMATCH         @map("target-branch-mismatch")
+  WAITING_CEILING                @map("waiting-ceiling")
+  TRANSPORT_CEILING              @map("transport-ceiling")
+  VALIDATION_BUDGET              @map("validation-budget")
+}
+
+/// Why one base-drift classification tick did not conclude. Only VALIDATION —
+/// a classification that ran against real facts and failed — spends the
+/// bounded validation budget; WAITING (the chain's own Run is still active)
+/// and TRANSPORT (the repository read failed) are held on their own backoff
+/// and their own elapsed-time ceilings.
+enum MergeRecoveryRetryClass {
+  WAITING    @map("waiting")
+  TRANSPORT  @map("transport")
+  VALIDATION @map("validation")
 }
 
 enum MergeLeaseEventState {
@@ -763,7 +777,23 @@ model MergeRecoveryAttempt {
   sourceStopId            String
   attempt                 Int
   status                  MergeRecoveryStatus       @default(VALIDATING)
+  /// Per-class classification-failure counters. Only `validationAttempts` is
+  /// budgeted by count; the other two are bounded by elapsed time alone.
   validationAttempts      Int                       @default(0)
+  waitingAttempts         Int                       @default(0)
+  transportAttempts       Int                       @default(0)
+  /// First failure of each class, and the moment the next tick may classify
+  /// this attempt again. A null first-failure time means the class has never
+  /// failed, so its elapsed time is zero.
+  validationFirstAt       DateTime?
+  waitingFirstAt          DateTime?
+  transportFirstAt        DateTime?
+  nextEligibleAt          DateTime?
+  lastRetryClass          MergeRecoveryRetryClass?
+  /// How many times an operator answered a class-ceiling refusal with
+  /// `re-validate`. It generations the stop question and stop notice dedupe
+  /// keys so a second ceiling still reaches the operator.
+  revalidations           Int                       @default(0)
   boundSourceRunId        String?
   authorizationActivityId String?
   recoveryRunId           String?
