@@ -21,4 +21,3 @@ Acceptance: the survey from Change 1 is recorded in the implementation output wi
 Route: implementation=senior-dev-opus-medium - a bounded, well-evidenced test-timing change with two concrete instances and a survey; no product behaviour changes
 
 Route: implementation=senior-dev-opus-medium - a bounded, well-evidenced test-timing change with two concrete instances and a survey; no product behaviour changes
-
