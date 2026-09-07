@@ -2,7 +2,11 @@ import { RUN_STATUS_IS_ACTIVE } from "@anneal/db/board-contract";
 import { type ChainControlActionKind, chainControlAction } from "./chain-aggregate";
 import { formatDateTime, formatT } from "./format";
 import { cronProse } from "./schedule";
-import type { BoardLatestRun, BoardTask, ChainAggregate, RunStatus, TaskStatus } from "./types";
+import type { BoardClaimRefusal, BoardLatestRun, BoardTask, ChainAggregate, RunStatus, TaskStatus } from "./types";
+
+// Keep the board helper's existing type export stable while the canonical
+// declaration lives in the shared wire contract.
+export type { BoardClaimRefusal } from "./types";
 
 /** The board's five columns, in the order they are read. Backlog is first: it is
  *  where work waits before it is queued, and the scheduler never picks anything
@@ -314,29 +318,9 @@ export const STALLED_AFTER_MS = 5 * 60_000;
 /** Which baseline comparison the over-baseline badge fired on. */
 export type OverBaselineMetric = "cost" | "duration" | "both";
 
-/** The control-plane evidence for a mechanical claim refused because the
- * executor and API carry different completion-contract versions. The API
- * projection owns when this optional field is present; the board only renders
- * the evidence it receives. */
-export type BoardClaimRefusal = {
-  code: string;
-  executorVersion: number | null;
-  apiVersion: number;
-  since: string;
-};
-
-/** `BoardLatestRun` is shared with the API package. Keep this narrow adapter
- * here until the shared contract's optional field is present on every caller;
- * it also leaves older board responses valid while the field is absent. */
-type BoardLatestRunWithClaimRefusal = BoardLatestRun & {
-  claimRefusal?: BoardClaimRefusal | null;
-};
-
-/** Read the optional refusal without turning an older board payload into a
- * rendering error. `null` and `undefined` are both absence on the wire. */
 export const claimRefusalFromRun = (
   run: BoardLatestRun | null | undefined,
-): BoardClaimRefusal | null => (run as BoardLatestRunWithClaimRefusal | null | undefined)?.claimRefusal ?? null;
+): BoardClaimRefusal | null => run?.claimRefusal ?? null;
 
 /** One anomaly a card calls out on its newest run, with the figures its hover
  *  text names. */

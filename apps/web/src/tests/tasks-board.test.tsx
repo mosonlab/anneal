@@ -861,6 +861,8 @@ test("a mechanical claim refusal is a red localized badge on cards and the phone
   assert.match(localizedCard("zh", { latestRun: claimRefusalRun(null) }), /执行器未提供版本 ≠ API v2/u);
   assert.notEqual(en("tasks.badge.claimRefusal"), translate("zh", "tasks.badge.claimRefusal"));
   assert.notEqual(en("tasks.badge.claimRefusal.unversioned"), translate("zh", "tasks.badge.claimRefusal.unversioned"));
+  // Restore the provider-free helpers' default locale for following tests.
+  localizedCard("en", { latestRun: run });
 });
 
 test("a task with no runs still shows the agent's configured model", () => {
