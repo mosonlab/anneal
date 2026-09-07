@@ -9,6 +9,12 @@ written.
 
 ## Unreleased
 
+- A base-drift recovery that stopped on a merge gate FAIL the branch did not
+  cause can be re-run from the API:
+  `POST /tasks/:taskId/merge-tail/rerun` on the Regression task opens the next
+  recovery attempt against the same head and queues a fresh Regression Run. It
+  opens no repair task and charges no repair budget, and it is bounded at two
+  re-runs per recovery stop.
 - Retired the `POST /files/mkdir` and `POST /files/move` routes and their
   underlying store operations.
 - Removed `POST /inbox/messages/:messageId/supersede`;

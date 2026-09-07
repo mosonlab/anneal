@@ -11,6 +11,7 @@ import {
   MergeRecoveryRefusalCode,
   Prisma,
   PrismaClient,
+  readMarkerHistory,
   readMarkers,
   latestMarker,
   recordIntegratorStop,
@@ -303,16 +304,17 @@ const addRepairTailFixtures = async (
   } });
 };
 
-const prepareBlockedRecovery = async (
-  shape: "canonical-direct" | "canonical-compound-readiness",
-  label: string,
+/**
+ * Stops the recovery Run that the named attempt is bound to, with the verdict
+ * the tail would have recorded for it. The tail parks every recovery FAIL in
+ * `BLOCKED_DOWNSTREAM`, so this is the state both operator reentry routes read.
+ */
+const failRecoveryRegression = async (
+  seeded: Awaited<ReturnType<typeof seedStopped>>,
+  aggregateId: string,
+  outcome: "review-fail" | "gate-fail",
 ) => {
-  const seeded = await seedStopped(shape, label);
-  const documentation = await addRepairTailFixtures(seeded, shape === "canonical-compound-readiness");
-  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
-  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
-    where: { integratorTaskId: seeded.integratorTask!.id },
-  });
+  const aggregate = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregateId } });
   const recoveryRun = await db.run.findUniqueOrThrow({ where: { id: aggregate.recoveryRunId! } });
   await db.run.update({ where: { id: recoveryRun.id }, data: {
     status: "SUCCEEDED",
@@ -321,31 +323,36 @@ const prepareBlockedRecovery = async (
     targetBranch: "master",
     headSha: HEAD,
   } });
+  const body = JSON.stringify(outcome === "review-fail"
+    ? {
+      schemaVersion: 1,
+      outcome,
+      headSha: HEAD,
+      baseHeadSha: BASE_2,
+      summary: "recovery exposed a semantic defect",
+    }
+    : {
+      schemaVersion: 1,
+      outcome,
+      headSha: HEAD,
+      baseHeadSha: BASE_2,
+      gateVerdict: "FAIL",
+      summary: "unit tests (all workspaces)",
+      gateFailureExcerpt: "a mismatched daemon process stays alive and still exits 0 on SIGTERM",
+    });
   await db.taskStepOutput.upsert({
     where: { taskId: seeded.gateTask.id },
     create: {
       taskId: seeded.gateTask.id,
       runId: recoveryRun.id,
       kind: "regression-verification",
-      body: JSON.stringify({
-        schemaVersion: 1,
-        outcome: "review-fail",
-        headSha: HEAD,
-        baseHeadSha: BASE_2,
-        summary: "recovery exposed a semantic defect",
-      }),
+      body,
       commitSha: HEAD,
     },
     update: {
       runId: recoveryRun.id,
       kind: "regression-verification",
-      body: JSON.stringify({
-        schemaVersion: 1,
-        outcome: "review-fail",
-        headSha: HEAD,
-        baseHeadSha: BASE_2,
-        summary: "recovery exposed a semantic defect",
-      }),
+      body,
       commitSha: HEAD,
     },
   });
@@ -360,6 +367,21 @@ const prepareBlockedRecovery = async (
     },
     now: new Date(),
   })), "handled");
+  return recoveryRun;
+};
+
+const prepareBlockedRecovery = async (
+  shape: "canonical-direct" | "canonical-compound-readiness",
+  label: string,
+  outcome: "review-fail" | "gate-fail" = "review-fail",
+) => {
+  const seeded = await seedStopped(shape, label);
+  const documentation = await addRepairTailFixtures(seeded, shape === "canonical-compound-readiness");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  });
+  const recoveryRun = await failRecoveryRegression(seeded, aggregate.id, outcome);
   return { ...seeded, documentation, aggregateId: aggregate.id, recoveryRun };
 };
 
@@ -377,6 +399,51 @@ const requestRecoveryRepair = async (taskId: string, requestId: string) => {
     else process.env.OPERATOR_TOKEN = prior;
   }
 };
+
+const requestRecoveryRerun = async (taskId: string, requestId: string) => {
+  const prior = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = OPERATOR;
+  try {
+    return await createApp(db).request(`/tasks/${taskId}/merge-tail/rerun`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId, reason: "the failing test is not in this branch's change set" }),
+    });
+  } finally {
+    if (prior === undefined) delete process.env.OPERATOR_TOKEN;
+    else process.env.OPERATOR_TOKEN = prior;
+  }
+};
+
+type RerunResult = {
+  aggregateId: string;
+  attempt: number;
+  recoveryRunId: string;
+  headSha: string;
+  baseHeadSha: string;
+};
+
+const acceptedRerun = async (taskId: string, requestId: string): Promise<RerunResult> => {
+  const response = await requestRecoveryRerun(taskId, requestId);
+  const result = await response.json() as RerunResult;
+  assert.equal(response.status, 200, JSON.stringify(result));
+  return result;
+};
+
+const refusedRerun = async (taskId: string, requestId: string, code: string) => {
+  const response = await requestRecoveryRerun(taskId, requestId);
+  const body = await response.json() as { error: string; code: string };
+  assert.equal(response.status, 409, JSON.stringify(body));
+  assert.equal(body.code, code, body.error);
+};
+
+const repairSpend = async (seeded: Awaited<ReturnType<typeof prepareBlockedRecovery>>) => ({
+  repairTasks: await db.task.count({
+    where: { projectId: seeded.project.id, name: { startsWith: "Autonomous merge tail:" } },
+  }),
+  repairAttempts: (await readMarkerHistory(db, seeded.gateTask.id))
+    .filter((marker) => marker.kind === "repairAttempt").length,
+});
 
 const completeQueuedTask = async (taskId: string, headSha: string, output?: { kind: string; body: string }) => {
   const task = await db.task.findUniqueOrThrow({ where: { id: taskId } });
@@ -575,6 +642,110 @@ test("operator recovery repair reentry carries the Documentation hop and surface
   assert.equal(notices.length, 2);
   assert.match(notices[1]!.body, /second current defect/u);
   assert.match(notices[1]!.dedupeKey ?? "", new RegExp(`${rerun.id}$`, "u"));
+});
+
+test("an operator rerun requeues a host-caused gate FAIL without opening a repair", async () => {
+  const seeded = await prepareBlockedRecovery("canonical-direct", "operator-rerun-gate-fail", "gate-fail");
+  const stopped = await db.task.findUniqueOrThrow({ where: { id: seeded.gateTask.id } });
+  assert.equal(stopped.status, TaskStatus.REVIEW);
+  assert.match(stopped.failureReason ?? "", /merge gate FAIL/u);
+  const blocked = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: seeded.aggregateId } });
+
+  const result = await acceptedRerun(seeded.gateTask.id, "recovery-rerun-1");
+  assert.notEqual(result.aggregateId, seeded.aggregateId);
+  assert.deepEqual(
+    { attempt: result.attempt, headSha: result.headSha, baseHeadSha: result.baseHeadSha },
+    { attempt: blocked.attempt + 1, headSha: HEAD, baseHeadSha: BASE_2 },
+  );
+
+  const reran = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: result.aggregateId } });
+  assert.equal(reran.status, "REPAIRING");
+  assert.equal(reran.failureReason, null);
+  assert.equal(reran.sourceStopId, blocked.sourceStopId);
+  assert.equal(reran.authorizedHeadSha, blocked.authorizedHeadSha);
+  assert.equal(reran.currentBaseSha, blocked.currentBaseSha);
+  assert.equal(reran.recoveryRunId, result.recoveryRunId);
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({
+    where: { id: seeded.aggregateId },
+  })).status, "BLOCKED_DOWNSTREAM");
+
+  const queued = await db.run.findUniqueOrThrow({ where: { id: result.recoveryRunId } });
+  assert.equal(queued.status, "QUEUED");
+  assert.equal(queued.taskId, seeded.gateTask.id);
+  const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.gateTask.id } });
+  assert.equal(regression.status, TaskStatus.TODO);
+  assert.equal(regression.failureReason, null);
+  assert.equal((await db.task.findUniqueOrThrow({
+    where: { id: seeded.readinessTask!.id },
+  })).failureReason, null);
+  assert.deepEqual(await repairSpend(seeded), { repairTasks: 0, repairAttempts: 0 });
+
+  const activity = await db.taskActivity.findFirstOrThrow({
+    where: { taskId: seeded.gateTask.id, actorType: "operator" },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  const metadata = activity.metadata as Record<string, unknown>;
+  assert.match(activity.body, /Operator re-ran recovery attempt 2/u);
+  assert.deepEqual(
+    {
+      action: metadata.action,
+      requestId: metadata.requestId,
+      reason: metadata.reason,
+      attempt: metadata.attempt,
+      aggregateId: metadata.aggregateId,
+    },
+    {
+      action: "merge-tail-rerun-request",
+      requestId: "recovery-rerun-1",
+      reason: "the failing test is not in this branch's change set",
+      attempt: result.attempt,
+      aggregateId: result.aggregateId,
+    },
+  );
+
+  const replay = await requestRecoveryRerun(seeded.gateTask.id, "recovery-rerun-1");
+  assert.equal(replay.status, 200, await replay.text());
+  assert.deepEqual(await replay.json(), result);
+  assert.equal(await db.mergeRecoveryAttempt.count({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  }), 2);
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 1);
+});
+
+test("an operator rerun refuses a semantic recovery FAIL", async () => {
+  const seeded = await prepareBlockedRecovery("canonical-direct", "operator-rerun-review-fail");
+  await refusedRerun(seeded.gateTask.id, "recovery-rerun-1", "merge_tail_rerun_verdict_not_gate_fail");
+  assert.equal(await db.mergeRecoveryAttempt.count({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  }), 1);
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 0);
+});
+
+test("an operator rerun refuses a tail that still has an active Run", async () => {
+  const seeded = await prepareBlockedRecovery("canonical-direct", "operator-rerun-active-run", "gate-fail");
+  await db.run.update({ where: { id: seeded.recoveryRun.id }, data: { status: "RUNNING" } });
+  await refusedRerun(seeded.gateTask.id, "recovery-rerun-1", "merge_tail_rerun_active_run");
+  assert.equal(await db.mergeRecoveryAttempt.count({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  }), 1);
+});
+
+test("a third operator rerun of one recovery stop is refused as budget exhausted", async () => {
+  const seeded = await prepareBlockedRecovery("canonical-direct", "operator-rerun-budget", "gate-fail");
+  const first = await acceptedRerun(seeded.gateTask.id, "recovery-rerun-1");
+  await failRecoveryRegression(seeded, first.aggregateId, "gate-fail");
+  const second = await acceptedRerun(seeded.gateTask.id, "recovery-rerun-2");
+  assert.equal(second.attempt, first.attempt + 1);
+  await failRecoveryRegression(seeded, second.aggregateId, "gate-fail");
+
+  await refusedRerun(seeded.gateTask.id, "recovery-rerun-3", "merge_tail_rerun_budget_exhausted");
+  assert.equal(await db.mergeRecoveryAttempt.count({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  }), 3);
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({
+    where: { id: second.aggregateId },
+  })).status, "BLOCKED_DOWNSTREAM");
+  assert.deepEqual(await repairSpend(seeded), { repairTasks: 0, repairAttempts: 0 });
 });
 
 test("the durable reader selects the direct and compound recovery facts", async () => {

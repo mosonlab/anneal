@@ -421,6 +421,22 @@ test("POST merge-tail repair is operator-authenticated and returns the action's 
   });
 });
 
+test("POST merge-tail rerun is operator-authenticated and returns the action's typed result", async () => {
+  await withTokens(async () => {
+    const tx = { task: { findUnique: async () => null } };
+    const database = {
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/tasks/missing/merge-tail/rerun", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId: "rerun-request-1" }),
+    });
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: "Task not found" });
+  });
+});
+
 test("public task creation assigns a linear layer and rejects layer/dependency inputs", async () => {
   await withTokens(async () => {
     let stored: Record<string, unknown> | undefined;
