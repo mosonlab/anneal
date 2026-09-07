@@ -16,7 +16,7 @@ const TITLE = "text-foreground [overflow-wrap:anywhere] hover:underline focus-vi
  * min-content width; this is what keeps schedule prose inside narrow columns. */
 const META = "mt-[9px] grid grid-cols-[minmax(0,1fr)] gap-[6px] text-[11.5px] text-muted-foreground";
 /** Plain text and a 20px pill share a stable row height. */
-const META_ROW = "flex min-h-[20px] flex-wrap items-center gap-[8px]";
+const META_ROW = "empty:hidden flex min-h-[20px] flex-wrap items-center gap-[8px]";
 const FAILURE = "line-clamp-3 text-[var(--destructive-fg)] [overflow-wrap:anywhere]";
 /** Board icons are 13px; the generic button rule would otherwise make them 16px. */
 const FOOT = "mt-[10px] flex items-center gap-[10px] text-[11.5px] text-muted-foreground [&_svg]:size-[13px] [&_svg]:flex-none [&_svg]:opacity-85";
