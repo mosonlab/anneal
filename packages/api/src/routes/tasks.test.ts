@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
   InboxStatus,
+  LEASE_LOSS_REFUND_EXHAUSTED_PREFIX,
   RunnerKind,
   RunnerPreference,
   type PrismaClient,
@@ -182,8 +183,10 @@ const retryRequest = async (
     outputKind?: string;
     taskTemplate?: { name: string };
   } | null = null,
+  options: { leaseLossRefunds?: number; taskStatus?: string; failureReason?: string | null; maxSessionsPerTask?: number } = {},
 ) => {
   let created: Record<string, unknown> | undefined;
+  const activities: Array<Record<string, unknown>> = [];
   const currentTemplateStep = templateStep
     ? { stepIndex: 1, outputKind: "result", taskTemplate: { name: "direct-engineer-workflow" }, ...templateStep }
     : null;
@@ -207,10 +210,13 @@ const retryRequest = async (
     // Nothing granted, so the retry ceiling is the task's configured budget —
     // which is what `maxRunsPerTask: 4` already was.
     budgetGrants: 0,
+    leaseLossRefunds: options.leaseLossRefunds ?? 0,
   };
   const currentTask = {
     id: "task-1",
     projectId: "project-1",
+    status: options.taskStatus ?? "TODO",
+    failureReason: options.failureReason ?? null,
     name: "Retry me",
     description: "Use current config",
     assigneeType: "AGENT",
@@ -219,7 +225,7 @@ const retryRequest = async (
     repo: null,
     templateId: null,
     templateStepId: currentTemplateStep ? "step-1" : null,
-    maxSessionsPerTask: 4,
+    maxSessionsPerTask: options.maxSessionsPerTask ?? 4,
     maxDurationMin: 120,
     stallTimeoutMin: 10,
     opensPullRequest: true,
@@ -246,7 +252,14 @@ const retryRequest = async (
       },
       run: {
         count: async () => 0,
-        findFirst: async () => null,
+        findFirst: async ({ where }: { where?: Record<string, unknown> } = {}) => (
+          where && Object.keys(where).length === 1 && where.taskId === "task-1" ? last : null
+        ),
+        update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+          if (where.id === "run-2" && created) Object.assign(created, data);
+          else Object.assign(last, data);
+          return last;
+        },
         groupBy: async () => [{
           taskId: "task-1",
           status: "FAILED",
@@ -259,14 +272,19 @@ const retryRequest = async (
         },
       },
       agentRepoAccess: { count: async () => 1 },
-      taskActivity: { create: async () => ({}) },
+      taskActivity: {
+        create: async ({ data }: { data: Record<string, unknown> }) => {
+          activities.push(data);
+          return data;
+        },
+      },
     }),
   } as unknown as PrismaClient;
   const response = await createApp(database).request("/tasks/task-1/retry", {
     method: "POST",
     headers: { Authorization: "Bearer operator-unit-token" },
   });
-  return { response, created, last };
+  return { response, created, last, activities };
 };
 
 type SessionEventQuery = { where?: Record<string, any>; select?: Record<string, unknown>; sql?: string; values?: unknown[] };
@@ -296,11 +314,21 @@ const taskDetailDatabase = (
     assert.match(query.sql, /jsonb_build_object/u);
     assert.doesNotMatch(query.sql, /SELECT[\s\S]*?,\s*"payload"\s*(?:,|FROM)/u);
     const keys = [...query.sql.matchAll(/'([^']+)',/gu)].map((match) => match[1]!);
-    assert.deepEqual(keys, ["type", "name", "toolName", "is_error", "isError", "exit_code", "error"]);
-    return (events.rows ?? []).map((row) => ({
-      ...row,
-      payload: Object.fromEntries(Object.entries(row.payload as Record<string, unknown>).filter(([key]) => keys.includes(key))),
-    }));
+    assert.deepEqual(keys, ["type", "name", "toolName", "is_error", "isError", "exit_code", "error", "anneal", "ttftMs"]);
+    return (events.rows ?? []).flatMap((row) => {
+      const payload = row.payload as Record<string, unknown>;
+      const item = payload.item as Record<string, unknown> | undefined;
+      const message = payload.message as Record<string, unknown> | undefined;
+      const completion = row.type === "MODEL_DELTA" && (
+        payload.type === "assistant"
+        || (payload.type === "item.completed" && item?.type === "agent_message")
+      ) || row.type === "MODEL_COMPLETED" && payload.type === "message_end" && message?.role === "assistant";
+      if (!completion && row.type !== "TOOL_STARTED" && row.type !== "TOOL_COMPLETED") return [];
+      return [{
+        ...row,
+        payload: Object.fromEntries(Object.entries(payload).filter(([key]) => keys.includes(key))),
+      }];
+    });
   },
   sessionEvent: {
     findMany: async (args: SessionEventQuery) => {
@@ -729,6 +757,78 @@ test("operator retry re-derives runtime configuration and clears promptHash unti
     assert.equal(created?.branch, last.branch);
     assert.equal(created?.targetBranch, last.targetBranch);
     assert.equal(created?.maxRunsPerTask, last.maxRunsPerTask);
+  });
+});
+
+test("operator retry resets an exhausted lease-loss counter for Regression", async () => {
+  await withTokens(async () => {
+    const { response, created, last, activities } = await retryRequest({
+      id: "old-agent",
+      model: "old-model",
+      runnerPreference: RunnerPreference.CLAUDE,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+    }, {
+      runner: RunnerKind.CLAUDE,
+      outputKind: "regression-verification-v2",
+    }, { leaseLossRefunds: 3, taskStatus: "REVIEW", failureReason: `Lease-loss retry refused: ${LEASE_LOSS_REFUND_EXHAUSTED_PREFIX} after 3 platform-refunded attempts; raise maxSessionsPerTask and retry` });
+    assert.equal(response.status, 201, JSON.stringify(await response.json()));
+    assert.equal(created?.leaseLossRefunds, 0);
+    assert.equal(last.leaseLossRefunds, 3, "the historical source Run remains unchanged");
+    assert.deepEqual(activities, [{
+      taskId: "task-1",
+      actorType: "operator",
+      body: "Lease-loss refund counter reset from 3 to 0 by operator retry",
+      metadata: { kind: "lease-loss-refunds-reset", previous: 3, current: 0 },
+    }, {
+      taskId: "task-1",
+      actorType: "operator",
+      body: "Run 2 queued by operator retry",
+    }]);
+  });
+});
+
+test("operator retry does not reset the lease-loss counter on an ordinary task", async () => {
+  await withTokens(async () => {
+    const { response, created, last, activities } = await retryRequest({
+      id: "old-agent",
+      model: "old-model",
+      runnerPreference: RunnerPreference.CLAUDE,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+    }, null, { leaseLossRefunds: 3, taskStatus: "REVIEW", failureReason: `Lease-loss retry refused: ${LEASE_LOSS_REFUND_EXHAUSTED_PREFIX} after 3 platform-refunded attempts; raise maxSessionsPerTask and retry` });
+    assert.equal(response.status, 201);
+    assert.equal(created?.leaseLossRefunds, 3);
+    assert.equal(last.leaseLossRefunds, 3);
+    assert.deepEqual(activities, [{
+      taskId: "task-1",
+      actorType: "operator",
+      body: "Run 2 queued by operator retry",
+    }]);
+  });
+});
+
+test("a refused Regression retry leaves its lease-loss counter and reset activity untouched", async () => {
+  await withTokens(async () => {
+    const { response, created, last, activities } = await retryRequest({
+      id: "old-agent",
+      model: "old-model",
+      runnerPreference: RunnerPreference.CLAUDE,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+    }, {
+      runner: RunnerKind.CLAUDE,
+      outputKind: "regression-verification-v2",
+    }, {
+      leaseLossRefunds: 3,
+      taskStatus: "REVIEW",
+      failureReason: `Lease-loss retry refused: ${LEASE_LOSS_REFUND_EXHAUSTED_PREFIX} after 3 platform-refunded attempts; raise maxSessionsPerTask and retry`,
+      maxSessionsPerTask: 1,
+    });
+    assert.equal(response.status, 409);
+    assert.equal(created, undefined);
+    assert.equal(last.leaseLossRefunds, 3);
+    assert.deepEqual(activities, []);
   });
 });
 
@@ -1302,6 +1402,18 @@ const DIAGNOSTICS_TOOL_EVENTS = [
   toolEventRow("session-1", 5, "TOOL_COMPLETED", "toolu_9", { type: "tool_result", tool_use_id: "toolu_9", is_error: true }),
 ];
 
+const TTFT_EVENTS = [
+  toolEventRow("session-2", 10, "MODEL_DELTA", "", { type: "assistant", anneal: { ttftMs: 10 } }),
+  // A first item event can be an observed chunk, but only the completed agent
+  // message carries the turn's persisted measurement.
+  toolEventRow("session-2", 11, "MODEL_DELTA", "", { type: "item.started", item: { type: "agent_message" }, anneal: { ttftMs: 999 } }),
+  toolEventRow("session-2", 12, "MODEL_DELTA", "", { type: "item.completed", item: { type: "agent_message" }, anneal: { ttftMs: 20 } }),
+  // PI repeats assistant messages on turn_end; it is not the completion row
+  // that owns the persisted measurement.
+  toolEventRow("session-2", 13, "MODEL_COMPLETED", "", { type: "turn_end", message: { role: "assistant" }, anneal: { ttftMs: 888 } }),
+  toolEventRow("session-2", 14, "MODEL_COMPLETED", "", { type: "message_end", message: { role: "assistant" }, anneal: { ttftMs: 30 } }),
+];
+
 const diagnosticsTask = (): Record<string, unknown> => taskRow({
   id: "task-1",
   projectId: "project-1",
@@ -1490,7 +1602,7 @@ test("a full list with no template step anywhere asks for no baseline at all", a
   });
 });
 
-test("task detail attaches read-time diagnostics to every run from one tool-event query", async () => {
+test("task detail attaches read-time diagnostics to every run from one metric-event query", async () => {
   await withTokens(async () => {
     const queries: SessionEventQuery[] = [];
     const database = taskDetailDatabase(diagnosticsTask(), { rows: DIAGNOSTICS_TOOL_EVENTS, queries });
@@ -1526,5 +1638,29 @@ test("task detail attaches read-time diagnostics to every run from one tool-even
     const oldest = body.runs.find((run) => run.runNumber === 1)!;
     assert.equal(oldest.metrics.tools.calls, 1);
     assert.equal(oldest.metrics.tools.failed, 1);
+    assert.equal(newest.metrics.ttft, null);
+  });
+});
+
+test("task detail computes TTFT from completion rows and excludes non-completions", async () => {
+  await withTokens(async () => {
+    const queries: SessionEventQuery[] = [];
+    const database = taskDetailDatabase(diagnosticsTask(), { rows: TTFT_EVENTS, queries });
+    const response = await createApp(database).request("/tasks/task-1", {
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { runs: Array<{ runNumber: number; metrics: { ttft: unknown } }> };
+    const newest = body.runs.find((run) => run.runNumber === 2)!;
+    assert.deepEqual(newest.metrics.ttft, { p50Ms: 20, p90Ms: 28, samples: 3 });
+    assert.equal(body.runs.find((run) => run.runNumber === 1)!.metrics.ttft, null);
+
+    const metricQuery = queries.find((query) => query.sql !== undefined && /FROM "SessionEvent"/u.test(query.sql));
+    assert.ok(metricQuery);
+    assert.deepEqual(metricQuery.values, ["session-2", "session-1", "TOOL_STARTED", "TOOL_COMPLETED"]);
+    assert.match(metricQuery.sql!, /'anneal'/u);
+    assert.match(metricQuery.sql!, /WHERE[\s\S]*OR[\s\S]*'item.completed'[\s\S]*'message_end'/u);
+    assert.doesNotMatch(metricQuery.sql!, /'completion'/u);
+    assert.doesNotMatch(metricQuery.sql!, /PROVIDER_RAW/u);
   });
 });

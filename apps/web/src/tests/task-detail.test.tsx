@@ -178,6 +178,7 @@ const unknownMetrics: RunMetrics = {
   phases: { queuedMs: null, provisioningMs: null, executingMs: null, inboxWaitMs: null, cleanupMs: null },
   tokens: { input: null, cachedRead: null, cacheWrite: null, uncachedInput: null, output: null, cacheHitRatio: null },
   tools: { calls: 0, failed: 0, unclassified: 0, totalToolMs: 0, byName: [] },
+  ttft: null,
   modelActiveMs: null,
   modelActiveIsUpperBound: false,
   outputTokensPerSecond: null,
@@ -189,6 +190,7 @@ const measuredMetrics: RunMetrics = {
   phases: { queuedMs: 12_000, provisioningMs: 3_000, executingMs: 600_000, inboxWaitMs: null, cleanupMs: 250 },
   tokens: { input: 120_000, cachedRead: 90_000, cacheWrite: 5_000, uncachedInput: 25_000, output: 8_000, cacheHitRatio: 0.75 },
   tools: { calls: 42, failed: 3, unclassified: 1, totalToolMs: 200_000, byName: [{ name: "Bash", calls: 20, failed: 1 }] },
+  ttft: { p50Ms: 250, p90Ms: 1_500, samples: 4 },
   modelActiveMs: 400_000,
   modelActiveIsUpperBound: true,
   outputTokensPerSecond: 20,
@@ -198,12 +200,13 @@ const measuredMetrics: RunMetrics = {
 
 test("an unmeasured diagnostic renders the unknown marker, never a zero reading", () => {
   const markup = renderToStaticMarkup(<RunDiagnostics metrics={unknownMetrics} />);
-  // Five phases, five token figures, the rate, the model-active time and three
-  // termination fields: every one of them unknown.
-  assert.equal((markup.match(/—/gu) ?? []).length, 15);
+  // Five phases, five token figures, two TTFT percentiles, the rate, the
+  // model-active time and three termination fields: every one is unknown.
+  assert.equal((markup.match(/—/gu) ?? []).length, 17);
   for (const zero of [/0%/u, /0ms/u, /\b0s\b/u, /0 tok\/s/u]) assert.doesNotMatch(markup, zero);
-  // A measured `0` is still a measurement: the three tool counters keep it.
-  assert.equal((markup.match(/<span>0<\/span>/gu) ?? []).length, 3);
+  // A measured `0` is still a measurement: the three tool counters and the
+  // zero-sized TTFT sample set keep it.
+  assert.equal((markup.match(/<span>0<\/span>/gu) ?? []).length, 4);
   // The phase bar draws no segment at all when nothing was measured.
   assert.match(markup, /data-run-phase-bar=""><\/div>/u);
 });
@@ -221,6 +224,22 @@ test("measured diagnostics render their phases, tokens, tools and termination", 
   ]) assert.match(markup, shown);
   // Widths are proportional to the measured phases: 12s of a 615.25s bar.
   assert.match(markup, /width:1\.950426655830963%/u);
+});
+
+test("measured diagnostics render TTFT percentiles and their sample count", () => {
+  const markup = renderToStaticMarkup(<RunDiagnostics metrics={measuredMetrics} />);
+  assert.match(markup, /Time to first token/iu);
+  assert.match(markup, /p50<\/span><span>250ms/u);
+  assert.match(markup, /p90<\/span><span>2s/u);
+  assert.match(markup, /Samples<\/span><span>4<\/span>/u);
+});
+
+test("diagnostics render an empty TTFT histogram as unknown percentiles with zero samples", () => {
+  const markup = renderToStaticMarkup(<RunDiagnostics metrics={unknownMetrics} />);
+  assert.match(markup, /Time to first token/iu);
+  assert.match(markup, /p50<\/span><span>—/u);
+  assert.match(markup, /p90<\/span><span>—/u);
+  assert.match(markup, /Samples<\/span><span>0<\/span>/u);
 });
 
 test("the output rate is labelled a session average and marked when it is a lower bound", () => {
@@ -360,7 +379,7 @@ test("a step with too little history says so rather than comparing against a zer
   for (const baseline of [null, undefined, { sampleSize: 2, costUsd: null, durationMs: null }]) {
     const markup = renderToStaticMarkup(<RunDiagnostics metrics={measuredMetrics} costUsd="3.00" baseline={baseline} />);
     assert.equal((markup.match(/Insufficient history/gu) ?? []).length, 2);
-    assert.doesNotMatch(markup, /p50/u);
+    assert.doesNotMatch(markup, /vs p50/u);
     assert.doesNotMatch(markup, /\$0/u);
   }
 });
