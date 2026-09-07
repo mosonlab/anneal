@@ -53,9 +53,9 @@ test("hostNeutralEnv strips the gate's configuration and keeps the rest", () => 
 
 // --- the list is still the whole list ----------------------------------------
 
-// The gate scripts a fixture spawns. provision.sh and the two bench-*.sh are
-// deliberately outside it: no fixture runs them, so what they read out of an
-// operator's environment is not a question about this environment.
+// The gate scripts a fixture spawns. provision.sh is deliberately outside it:
+// no fixture runs it, so what it reads out of an operator's environment is not
+// a question about this environment.
 const GATE_SCRIPTS = [
   join(here, "..", "merge-gate.sh"),
   join(runtimeGateWorker, "lib.sh"),

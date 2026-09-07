@@ -68,9 +68,8 @@ the CPU share together rather than running out of lanes. `NODE_COMPILE_CACHE`
 was measured and rejected: 80 seconds cold against 82 warm, for 77 MiB of cache.
 That tuning direction is closed: the ceiling is work-bound, and the measurements
 behind it are recorded in operator records outside this repository. The lane
-widths stay overridable (`AGENTOS_GATE_UNIT_LANES`, `AGENTOS_GATE_DB_LANES`) so
-a measurement can hold one width fixed across runs that would otherwise differ;
-a gate never chooses them itself.
+widths stay overridable (`AGENTOS_GATE_UNIT_LANES`, `AGENTOS_GATE_DB_LANES`); a
+gate never chooses them itself.
 
 `packages/db` and `packages/api` hand their database files to one pool rather
 than two waves. Dividing lanes between a five-file wave and a forty-two-file one
