@@ -1230,9 +1230,14 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   second chain to a predecessor that already has one is accepted, and the
   predecessor records one `Chain <id> bound to predecessor <name>` activity per
   binding. The binding stays one-way and one hop deep. An `afterTaskId` binding
-  is released only by `DELETE /tasks/:taskId/chain` on that bound chain, which
-  leaves the predecessor's other successors bound; archiving a bound chain does
-  not release it.
+  is released by `DELETE /tasks/:taskId/chain` on that bound chain, which
+  leaves the predecessor's other successors bound, or — while that chain has no
+  Run — by `PATCH /tasks/:taskId` with `dispatchAfterTaskId` on its first step,
+  which re-points the binding at another task or releases it with `null`.
+  Archiving releases no binding by itself: neither archiving a bound chain nor
+  archiving the predecessor it waits for, and an archived predecessor never
+  becomes `DONE`, so re-pointing or releasing the binding is how such a chain
+  is recovered.
 
 ```sh
 curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/instantiate" \
@@ -1886,6 +1891,42 @@ Whether a Chain should be allowed to run base-drift recovery and a gate-fix
 repair at the same time is not decided here. This refusal names the overlap and
 stops before spending a Run on work the platform would not accept.
 
+### Readiness evaluation exceptions
+
+An exception thrown while the merge readiness worker evaluates a Chain — a
+killed child process, a killed worker, a service restart mid-tick — is not a
+verdict. The worker returns the readiness task to `TODO` and evaluates it again
+on a later tick, writing one `TaskActivity` on the Regression verification task,
+where the readiness requeue and stop rows already land, whose `metadata.state`
+is `requeued-exception` and whose body reads
+`Merge readiness requeued after evaluation exception <n> of <limit>: readiness
+evaluation exception: <message>`. The Regression evidence and its Run are left
+alone, no stop notice is written, and the merge lease is released exactly as an
+ordinary readiness requeue releases it.
+
+The retry is bounded by `MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT` (default 3),
+read once per worker tick; a value that is not a non-negative integer fails the
+API service at startup. Once that many exception requeues have been spent on the
+same readiness task within the same recovery attempt, the next exception stops
+the tail as before with `failureReason`
+`readiness evaluation failed after <n> exception requeues: <message>`. Outside a
+base-drift recovery that stop parks the regression and readiness tasks in
+`REVIEW` and writes the matching `Autonomous merge readiness stopped:` Inbox
+notice; inside one it takes the recovery stop path instead — the recovery
+attempt becomes `BLOCKED_DOWNSTREAM`, the integrator task is parked as well, and
+the notice reads `Automatic base-drift recovery <n> stopped at readiness:
+<reason>`.
+
+Three readiness failures are not exception requeues and stop the tail on their
+first occurrence. A deliberate refusal — a recovery head-adoption refusal —
+carries a refusal code and stops with `readiness evaluation failed: <message>`.
+A missing, mismatched, or ambiguous operator authorization on a gated readiness
+step is a fail-closed gate decision, not a transient fault, and stops with that
+same reason. A GitHub read that fails for any reason other than a timeout or a
+transport error (those are deferred to the next tick) is a
+`readiness-read-failed` decision, and stops with that same `readiness evaluation
+failed: <message>` reason and no refusal code.
+
 ### Recovering a merge tail stopped after its repair budget
 
 When a regression verdict fails after the automatic repair budget is exhausted,
@@ -2074,7 +2115,8 @@ approval and evidence renewal preserve the same refusal evidence.
   `opensPullRequest`, `maxDurationMin`, `stallTimeoutMin`,
   `maxSessionsPerTask`, `scheduleKind`, `runAt`, `cron`, and `timezone`.
   `status` is a task status (`BACKLOG`, `TODO`, `DOING`, `REVIEW`, `DONE`);
-  `failureReason` may be `null`.
+  `failureReason` may be `null`. `dispatchAfterTaskId` is the Chain binding and
+  may be a task id or `null`.
 - For a Chain task, `approvalGate` can change only when the task's template
   step is one of the two configurable slots — the specification step or merge
   readiness step — and the stored task status is `TODO`. The accepted value is
@@ -2088,6 +2130,30 @@ approval and evidence renewal preserve the same refusal evidence.
   This relaxes the previous blanket refusal that approval gates on dispatched
   Chain tasks are controlled by the Chain. Standalone tasks retain their
   existing `approvalGate` PATCH behavior.
+- `dispatchAfterTaskId` re-points or releases the Chain binding of a Chain that
+  has not run, so an operator whose predecessor was archived or replaced does
+  not have to delete the Chain and instantiate it again. It is accepted only on
+  the first step of a Chain none of whose steps has a Run; a later step, a
+  standalone task, or a Chain with so much as one terminal Run returns
+  `409 Conflict` with code `chain_binding_immutable_after_start`. A non-null
+  value must name a Chain task of the same project that is not archived and does
+  not belong to the Chain being bound; an archived, foreign, standalone, or
+  same-chain target — including the task itself — returns `400 Bad Request` with
+  code `chain_binding_target_invalid`. A standalone predecessor is refused
+  because only a Chain task's completion dispatches a bound successor, so such a
+  binding would never resolve. Binding onto a task that is already `DONE` is
+  accepted and resolves the binding immediately, which makes the first step
+  startable under the ordinary start guard; `null` releases the binding the
+  same way. Neither starts the Chain: only a predecessor's completion
+  dispatches a bound successor. A successful change writes one operator
+  TaskActivity on the first step naming the previous and new predecessor ids.
+  Restating the binding a Chain already carries is accepted, writes no
+  activity, and returns the current task, even after the Chain has started. A
+  request that changes the binding together with `approvalGate`, a Run budget,
+  or a status commits every field but records the binding activity only, because
+  one PATCH writes one activity row. The named predecessor is read without its
+  own lock, so a concurrent archive of it can win the race; the Chain still has
+  no Run, so re-issuing the PATCH with another predecessor is the remedy.
 - On a Chain step that carries a feature brief, `description` is the brief
   alone. A task with both a `templateId` and a `chainId` whose Step authors a
   brief — every step role except readiness and integrator — keeps its stored

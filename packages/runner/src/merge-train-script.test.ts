@@ -134,6 +134,9 @@ if (behavior === "delayed-pass") {
   say("MERGE GATE: FAIL (fixture failure)");
   process.exit(1);
 } else if (behavior === "noisy-fail" || behavior === "noisy-pass") {
+  // This branch writes far more than a pipe holds; say() blocks until the
+  // reader drains, as the real gate's shell writes do, so the trailing verdict
+  // line survives the process.exit() below.
   say("run-gate: failure excerpt (last 200 lines per failing step)");
   for (let line = 0; line < 200; line += 1) say("noise ".repeat(12) + line);
   if (behavior === "noisy-pass") {
