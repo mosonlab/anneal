@@ -260,7 +260,8 @@ const seedScenario = async (options: {
     },
   });
   const brief = options.routeLine
-    ? `Exercise judged implementation tier routing.\nRoute: implementation=${routeAgent.name} - operator override`
+    ? `Exercise judged implementation tier routing.
+Route: implementation=${routeAgent.name} - operator override`
     : "Exercise judged implementation tier routing.";
   const stepOverrides = stepOverrideAgent === null
     ? undefined
