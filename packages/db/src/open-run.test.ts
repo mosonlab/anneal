@@ -8,6 +8,7 @@ import {
   Prisma,
   RunnerKind,
   RunnerPreference,
+  RunStatus,
 } from "@prisma/client";
 
 import {
@@ -22,6 +23,7 @@ import {
   LEASE_LOSS_REFUND_CAP,
   leaseLossRefundAvailable,
   leaseLossRefundDecision,
+  basePublishedStamp,
   openRun,
   parksInsteadOfRaising,
   pinnedImplementationRange,
@@ -562,17 +564,45 @@ test("a Task without a Repo is born with no publish head at all", async () => {
   assert.equal(creates[0]?.branch, null);
 });
 
+type PinnedRunRow = {
+  runNumber: number;
+  baseSha: string | null;
+  basePublishedAt?: Date | null;
+  pushedBranch?: string | null;
+  status?: RunStatus;
+};
+
+/** The publication clause the selector sends, emulated on the seeded rows. */
+const matchesPublishedBase = (
+  where: Record<string, any> | undefined,
+  run: PinnedRunRow,
+): boolean => {
+  const clauses = where?.OR;
+  if (!Array.isArray(clauses)) return true;
+  return clauses.some((clause: Record<string, any>) => {
+    if (clause.basePublishedAt?.not === null) return (run.basePublishedAt ?? null) !== null;
+    if ((run.basePublishedAt ?? null) !== null) return false;
+    return clause.pushedBranch?.not === null
+      ? (run.pushedBranch ?? null) !== null
+      : (run.status ?? RunStatus.FAILED) === clause.status;
+  });
+};
+
 /**
  * The pinning fake answers the two reads the derivation makes: the referenced
  * step's canonical output, and the implementation Task's own Runs. The Run read
  * is emulated from the query it receives — filtered and ordered as Prisma would
  * — so a test that seeds several Runs proves which one the derivation picks.
+ * A seeded Run with no marker and no status is an unpublished failure, which
+ * is the row shape the 2026-09-06 incident left behind.
  */
 const pinningTx = (options: {
   output?: { taskId?: string; kind?: string; commitSha?: string | null; body?: string } | null;
-  runs?: Array<{ runNumber: number; baseSha: string | null }>;
+  runs?: PinnedRunRow[];
 }) => {
-  const seen: { outputWhere?: unknown; runQuery?: Record<string, any> } = {};
+  const seen: { outputWhere?: unknown; runQuery?: Record<string, any>; runQueries: Array<Record<string, any>> } = {
+    runQueries: [],
+  };
   const output = options.output === null ? null : {
     taskId: "implementation-task",
     kind: "implementation",
@@ -590,9 +620,11 @@ const pinningTx = (options: {
     run: {
       findFirst: async (query: Record<string, any>) => {
         seen.runQuery = query;
+        seen.runQueries.push(query);
         const rows = (options.runs ?? [])
           .filter(() => query.where?.taskId === output?.taskId)
           .filter((run) => (query.where?.baseSha?.not === null ? run.baseSha !== null : true))
+          .filter((run) => matchesPublishedBase(query.where, run))
           .sort((left, right) => (query.orderBy?.runNumber === "asc"
             ? left.runNumber - right.runNumber
             : right.runNumber - left.runNumber));
@@ -606,6 +638,7 @@ const pinningTx = (options: {
 const implementationHead = "2".repeat(40);
 const bodyBase = "9".repeat(40);
 const recordedBase = "1".repeat(40);
+const publishedBase = "7".repeat(40);
 
 const reviewTask = {
   id: "review-task",
@@ -616,7 +649,7 @@ const reviewTask = {
 };
 
 test("a pinned base follows the template Step when conditional tasks use dense chain ordinals", async () => {
-  const { tx, seen } = pinningTx({ runs: [{ runNumber: 1, baseSha: recordedBase }] });
+  const { tx, seen } = pinningTx({ runs: [{ runNumber: 1, baseSha: recordedBase, basePublishedAt: now }] });
   const range = await pinnedImplementationRange(tx, reviewTask);
 
   assert.deepEqual(range, {
@@ -632,7 +665,15 @@ test("a pinned base follows the template Step when conditional tasks use dense c
     },
   });
   assert.deepEqual(seen.runQuery, {
-    where: { taskId: "implementation-task", baseSha: { not: null } },
+    where: {
+      taskId: "implementation-task",
+      baseSha: { not: null },
+      OR: [
+        { basePublishedAt: { not: null } },
+        { basePublishedAt: null, pushedBranch: { not: null } },
+        { basePublishedAt: null, status: RunStatus.SUCCEEDED },
+      ],
+    },
     orderBy: { runNumber: "asc" },
     select: { baseSha: true },
   });
@@ -643,7 +684,7 @@ test("the pinned base is the Run the platform recorded, not the SHA the implemen
   // every review sibling failed provisioning fetching it.
   const { tx } = pinningTx({
     output: { body: JSON.stringify({ schemaVersion: 1, baseSha: bodyBase, headSha: implementationHead }) },
-    runs: [{ runNumber: 1, baseSha: recordedBase }],
+    runs: [{ runNumber: 1, baseSha: recordedBase, basePublishedAt: now }],
   });
   const range = await pinnedImplementationRange(tx, reviewTask);
   assert.equal(range?.implementationBaseSha, recordedBase);
@@ -653,9 +694,9 @@ test("the pinned base is the Run the platform recorded, not the SHA the implemen
 test("a recovery Run's own base never moves the pinned range", async () => {
   const { tx } = pinningTx({
     runs: [
-      { runNumber: 2, baseSha: implementationHead },
-      { runNumber: 1, baseSha: recordedBase },
-      { runNumber: 3, baseSha: "8".repeat(40) },
+      { runNumber: 2, baseSha: implementationHead, basePublishedAt: now },
+      { runNumber: 1, baseSha: recordedBase, basePublishedAt: now },
+      { runNumber: 3, baseSha: "8".repeat(40), basePublishedAt: now },
     ],
   });
   const range = await pinnedImplementationRange(tx, reviewTask);
@@ -668,17 +709,81 @@ test("an implementation Task whose Runs recorded no base refuses instead of trus
     () => pinnedImplementationRange(tx, reviewTask),
     (error: Error) => {
       assert.equal(error.name, "PinnedBaseCommitError");
-      assert.match(error.message, /implementation task implementation-task has no Run with a recorded baseSha/u);
+      assert.match(error.message, /implementation task implementation-task has no Run that published a baseSha/u);
       assert.doesNotMatch(error.message, new RegExp(bodyBase, "u"));
       return true;
     },
   );
 });
 
+test("a base only a dead Run recorded never pins the range", async () => {
+  // The 2026-09-06 incident: Run 1 died before its push with the specification
+  // commit only in its own workspace, and Run 2 published a different one.
+  const { tx } = pinningTx({
+    runs: [
+      { runNumber: 1, baseSha: recordedBase, status: RunStatus.FAILED },
+      { runNumber: 2, baseSha: publishedBase, basePublishedAt: now, status: RunStatus.SUCCEEDED },
+    ],
+  });
+  const range = await pinnedImplementationRange(tx, reviewTask);
+  assert.equal(range?.implementationBaseSha, publishedBase);
+});
+
+test("an unpublished base refuses and names the commit and the implementation Task", async () => {
+  const { tx, seen } = pinningTx({ runs: [{ runNumber: 1, baseSha: recordedBase, status: RunStatus.FAILED }] });
+  await assert.rejects(
+    () => pinnedImplementationRange(tx, reviewTask),
+    (error: Error & { unpublishedBase?: { implementationTaskId: string; baseSha: string | null } }) => {
+      assert.equal(error.name, "PinnedBaseCommitError");
+      assert.match(error.message, new RegExp(`implementation task implementation-task recorded baseSha ${recordedBase}`, "u"));
+      assert.deepEqual(error.unpublishedBase, {
+        implementationTaskId: "implementation-task",
+        baseSha: recordedBase,
+      });
+      return true;
+    },
+  );
+  // The refusal costs the second read — the recorded base it names — and the
+  // published selection costs the first. Nothing else asks the Runs anything.
+  assert.equal(seen.runQueries.length, 2);
+  assert.deepEqual(seen.runQueries[0]?.where?.OR?.length, 3);
+  assert.deepEqual(seen.runQueries[1]?.where, { taskId: "implementation-task", baseSha: { not: null } });
+});
+
+test("a pre-marker Run that published its branch pins the range even though it failed", async () => {
+  // `resolveRunBranches`'s standing rule, applied here: a Run that pushed and
+  // then died in `gh` is recorded FAILED with the ref on the remote, so its
+  // base is fetchable and it still owns the specification commit.
+  const { tx } = pinningTx({
+    runs: [
+      { runNumber: 1, baseSha: recordedBase, status: RunStatus.FAILED, pushedBranch: "agentos/chain/c1" },
+      { runNumber: 2, baseSha: publishedBase, basePublishedAt: now, status: RunStatus.SUCCEEDED },
+    ],
+  });
+  assert.equal((await pinnedImplementationRange(tx, reviewTask))?.implementationBaseSha, recordedBase);
+});
+
+test("a Run written before the marker existed is read through its own outcome", async () => {
+  const succeeded = pinningTx({ runs: [{ runNumber: 1, baseSha: recordedBase, status: RunStatus.SUCCEEDED }] });
+  assert.equal(
+    (await pinnedImplementationRange(succeeded.tx, reviewTask))?.implementationBaseSha,
+    recordedBase,
+  );
+  const lost = pinningTx({ runs: [{ runNumber: 1, baseSha: recordedBase, status: RunStatus.LOST }] });
+  await assert.rejects(() => pinnedImplementationRange(lost.tx, reviewTask), /no Run published a base/u);
+});
+
+test("a publication ACK stamps a recorded base once and never restamps it", () => {
+  const later = new Date(now.getTime() + 60_000);
+  assert.equal(basePublishedStamp({ baseSha: recordedBase, basePublishedAt: null }, now), now);
+  assert.equal(basePublishedStamp({ baseSha: recordedBase, basePublishedAt: now }, later), now);
+  assert.equal(basePublishedStamp({ baseSha: null, basePublishedAt: null }, now), null);
+});
+
 test("an implementation output body with no baseSha still pins from the platform record", async () => {
   const { tx } = pinningTx({
     output: { body: JSON.stringify({ schemaVersion: 1, headSha: implementationHead }) },
-    runs: [{ runNumber: 1, baseSha: recordedBase }],
+    runs: [{ runNumber: 1, baseSha: recordedBase, basePublishedAt: now }],
   });
   assert.deepEqual(await pinnedImplementationRange(tx, reviewTask), {
     implementationBaseSha: recordedBase,

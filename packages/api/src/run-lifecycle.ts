@@ -1,4 +1,5 @@
 import {
+  basePublishedStamp,
   CleanupStatus,
   executionModeFor,
   landIntegratorStop,
@@ -257,7 +258,10 @@ export const publishRun = async (
             fencingToken: input.body.fencingToken,
             OR: [{ pushedBranch: null }, { pushedBranch: input.body.pushedBranch }],
           },
-      data: { pushedBranch: input.body.pushedBranch },
+      // The ACK is also when this Run's provisioning base became fetchable:
+      // git accepted a branch that carries it. Nothing downstream may pin a
+      // range to a base without that evidence.
+      data: { pushedBranch: input.body.pushedBranch, basePublishedAt: basePublishedStamp(run, now) },
     });
     if (updated.count !== 1) throw new Error(`Run ${input.runId} changed while its publication transition held the lock`);
 
