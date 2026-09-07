@@ -62,7 +62,7 @@ const aggregate = (position: number | null, done: number, stepCount = 12): Chain
   statusCounts: { BACKLOG: 0, TODO: stepCount - done, DOING: 0, REVIEW: 0, DONE: done },
   detailTaskId: "step-3", status: "TODO",
   frontier: { taskId: "step-3", title: "Implement release", status: "TODO", latestRun: null, mergeOutcome: null, failureReason: null, position },
-  activeRepair: null, activation: activation("running", null), totalCost: null,
+  activeRepair: null, activation: activation("running", null), totalCost: null, firstRunStartedAt: null,
   createdAt: "2026-08-28T00:00:00.000Z", updatedAt: "2026-08-28T01:00:00.000Z",
 });
 
@@ -96,20 +96,26 @@ test("the figures state the server's chain cost, never a client re-sum of the vi
   assert.equal(chainAggregateFigures(aggregate(3, 2), [cheaper], NOW).cost, null);
 });
 
-test("lead time runs from the earliest known start to now while a run is active, and to the last end once none is", () => {
+test("lead time uses the first failed attempt even when the board only projects its retry", () => {
+  const retry = member({ latestRun: boardRun({ status: "RUNNING", runNumber: 2, startedAt: at(2) }) });
+  const projection = { ...aggregate(1, 0), firstRunStartedAt: at(30) };
+  assert.equal(chainAggregateFigures(projection, [retry], NOW).leadTimeMs, 30 * HOUR);
+});
+
+test("lead time runs from the authoritative first start to now while a run is active, and to the last end once none is", () => {
   const first = member({ id: "step-1", latestRun: boardRun({ startedAt: at(30), endedAt: at(29) }) });
   const second = member({ id: "step-2", latestRun: boardRun({ startedAt: at(20), endedAt: at(18) }) });
-  const running = { ...aggregate(3, 2), frontier: { ...aggregate(3, 2).frontier, latestRun: boardRun({ status: "RUNNING", startedAt: at(1) }) } };
+  const running = { ...aggregate(3, 2), firstRunStartedAt: at(30), frontier: { ...aggregate(3, 2).frontier, latestRun: boardRun({ status: "RUNNING", startedAt: at(1) }) } };
   assert.equal(chainAggregateFigures(running, [first, second], NOW).leadTimeMs, 30 * HOUR);
   // A queued frontier has not started but the chain is still going: the span
   // keeps ticking rather than stopping at the last recorded end.
-  const queued = { ...aggregate(3, 2), frontier: { ...aggregate(3, 2).frontier, latestRun: boardRun({ status: "QUEUED" }) } };
+  const queued = { ...aggregate(3, 2), firstRunStartedAt: at(30), frontier: { ...aggregate(3, 2).frontier, latestRun: boardRun({ status: "QUEUED" }) } };
   assert.equal(chainAggregateFigures(queued, [first, second], NOW).leadTimeMs, 30 * HOUR);
-  const settled = { ...aggregate(3, 2), frontier: { ...aggregate(3, 2).frontier, latestRun: boardRun({ startedAt: at(3), endedAt: at(2) }) } };
+  const settled = { ...aggregate(3, 2), firstRunStartedAt: at(30), frontier: { ...aggregate(3, 2).frontier, latestRun: boardRun({ startedAt: at(3), endedAt: at(2) }) } };
   assert.equal(chainAggregateFigures(settled, [first, second], NOW).leadTimeMs, 28 * HOUR);
   // The frontier and the active repair count even when their rows are off the page.
   const repairing = { ...settled, activeRepair: { repairKind: "gate-fix", latestRun: boardRun({ status: "RUNNING", startedAt: at(1) }) } };
-  assert.equal(chainAggregateFigures(repairing, [], NOW).leadTimeMs, 3 * HOUR);
+  assert.equal(chainAggregateFigures(repairing, [], NOW).leadTimeMs, 30 * HOUR);
 });
 
 test("lead time is unknown, not zero, until a run has started or once nothing dates the end", () => {

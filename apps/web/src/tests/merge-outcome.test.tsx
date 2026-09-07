@@ -98,7 +98,7 @@ test("a succeeded frontier Run with a stopped merge outcome does not render the 
     },
     activeRepair: null,
     activation: { state: "settled", predecessor: null, taskId: "merge-step", hold: null },
-    totalCost: null,
+    totalCost: null, firstRunStartedAt: null,
     createdAt: "2026-08-17T00:00:00.000Z",
     updatedAt: "2026-08-18T00:00:00.000Z",
   };

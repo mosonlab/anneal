@@ -30,7 +30,7 @@ const aggregate = (overrides: Partial<ChainAggregate> = {}): ChainAggregate => (
   statusCounts: { BACKLOG: 0, TODO: 10, DOING: 0, REVIEW: 0, DONE: 2 }, status: "TODO",
   frontier: { taskId: "step-3", title: "Implement release", status: "TODO", latestRun: null, mergeOutcome: null, failureReason: null, position: 3 },
   activeRepair: null,
-  activation: { state: "running", predecessor: null, taskId: "step-1", hold: null }, totalCost: null,
+  activation: { state: "running", predecessor: null, taskId: "step-1", hold: null }, totalCost: null, firstRunStartedAt: null,
   createdAt: "2026-08-28T00:00:00.000Z", updatedAt: "2026-08-28T01:00:00.000Z", ...overrides,
 });
 
@@ -453,6 +453,7 @@ const measuredChain = (): { projection: ChainAggregate; rows: BoardTask[] } => {
   const now = Date.now();
   const projection = aggregate({
     totalCost: COST,
+    firstRunStartedAt: new Date(now - 26.5 * HOUR).toISOString(),
     frontier: {
       taskId: "step-3", title: "Implement release", status: "DOING",
       latestRun: runWithTier({ status: "RUNNING", startedAt: new Date(now - 4 * 60_000).toISOString() }),
@@ -460,7 +461,7 @@ const measuredChain = (): { projection: ChainAggregate; rows: BoardTask[] } => {
     },
   });
   const rows = [
-    chainStep("step-1", 1, "DONE", projection, { latestRun: runWithTier({ startedAt: new Date(now - 26.5 * HOUR).toISOString(), endedAt: new Date(now - 25 * HOUR).toISOString() }) }),
+    chainStep("step-1", 1, "DONE", projection, { latestRun: runWithTier({ runNumber: 2, startedAt: new Date(now - 26.5 * HOUR).toISOString(), endedAt: new Date(now - 25 * HOUR).toISOString() }) }),
     task({ id: "fix-1", displayName: "Gate fix", status: "DONE", chainId: projection.chainId, repairOf: REPAIR, latestRun: runWithTier({ startedAt: new Date(now - 10 * HOUR).toISOString(), endedAt: new Date(now - 9 * HOUR).toISOString() }) }),
     chainStep("step-3", 3, "DOING", projection),
   ];
@@ -481,6 +482,13 @@ test("the figures row states the cost, the lead time and the repair rounds from 
   );
   assert.equal(element(chinese, "[data-chain-lead-time]").textContent, "历时 1 天 2 小时");
   assert.equal(element(chinese, "[data-chain-repair-rounds]").textContent, "修复 1");
+});
+
+test("the aggregate card dates lead time from the failed first attempt rather than its retry", () => {
+  const { projection, rows } = measuredChain();
+  const retried = { ...projection, firstRunStartedAt: new Date(Date.now() - 50 * HOUR).toISOString() };
+  const markup = renderToStaticMarkup(<LocaleProvider initialLocale="en"><ChainAggregateCard aggregate={retried} members={rows} /></LocaleProvider>);
+  assert.equal(element(markup, "[data-chain-lead-time]").textContent, "Lead 2d 2h");
 });
 
 test("a chain with no repairs carries no repairs pill, and one whose runs never started no lead time", () => {

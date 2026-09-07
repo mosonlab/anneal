@@ -1528,7 +1528,12 @@ for the whole page are answered by one grouped query, so the board's query count
 of the `full` view carry the same `baseline` field on the same terms, read by
 the same single grouped query.
 For a Chain member, the first emitted member also carries the
-`chainAggregate` projection. Its `activation.state` is one of
+`chainAggregate` projection. Its `firstRunStartedAt` is the earliest non-null
+`Run.startedAt` across the complete primary-Step run history, including failed
+attempts and archived primary Steps, or `null` before any primary Run starts.
+The browser uses this origin for Chain lead time so a retry cannot shorten it;
+the server computes it from existing full-chain reads without per-card requests.
+Its `activation.state` is one of
 `parked-unactivated`, `waiting-on-predecessor`, `running`, `idle`, `held`, or
 `settled`; `held` is a derived aggregate state, not a persisted Task status.
 The aggregate's `activation.hold` is either `null` or

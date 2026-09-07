@@ -581,6 +581,8 @@ export type ChainAggregate<DateTime = string> = {
     } | null;
   };
   totalCost: UsageCost | null;
+  /** Earliest Run.startedAt across every primary Step attempt, or null before any start. */
+  firstRunStartedAt: DateTime | null;
   createdAt: DateTime;
   updatedAt: DateTime;
 };

@@ -143,6 +143,8 @@ export type BoardRow = {
      *  forgets one has to fail to compile rather than project a run that is
      *  permanently queued. */
     readyAt: Date;
+    /** Run start, retained across all attempts for the Chain lead-time origin. */
+    startedAt: Date | null;
     endedAt: Date | null;
     lastProgressEventAt: Date | null;
     maxRunsPerTask: number;
@@ -496,6 +498,10 @@ export const chainAggregate = (
       hold,
     },
     totalCost: serializeUsageCost(totalCost),
+    firstRunStartedAt: primary.flatMap((member) => member.runs ?? []).reduce<Date | null>(
+      (first, run) => run.startedAt != null && (first === null || run.startedAt < first) ? run.startedAt : first,
+      null,
+    ),
     createdAt,
     updatedAt,
   } satisfies BoardContractChainAggregate<Date>;
@@ -920,7 +926,7 @@ const boardChainRows = async (
           pullRequestUrl: true,
           pushedBranch: true,
           baseSha: true,
-          readyAt: true,
+          readyAt: true, startedAt: true,
           endedAt: true,
           lastProgressEventAt: true,
           maxRunsPerTask: true,
@@ -1004,7 +1010,7 @@ export const readBoard = async (db: PrismaClient, scope: TaskReadScope): Promise
         select: {
           id: true, runNumber: true, status: true, model: true, subagentModel: true, budgetGrants: true,
           leaseLossRefunds: true, codexServiceTier: true, pullRequestUrl: true, pushedBranch: true, baseSha: true,
-          readyAt: true, endedAt: true, lastProgressEventAt: true, maxRunsPerTask: true,
+          readyAt: true, startedAt: true, endedAt: true, lastProgressEventAt: true, maxRunsPerTask: true,
           session: {
             select: {
               nativeChildUsed: true, costUsd: true, inputTokens: true, cachedInputTokens: true,

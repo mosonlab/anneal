@@ -121,14 +121,10 @@ const epoch = (value: string): number => new Date(value).getTime();
  * `taskCost` client-side would understate a chain whose members are not all
  * visible.
  *
- * `leadTimeMs` runs from the earliest known run start to the chain's most
- * recent known end, or to `now` while any known run is still active — a queued
- * frontier counts, since the chain is still going. Each row carries only its
- * *latest* run, so the start is the earliest the board can prove rather than
- * the chain's true first run: a Step that has been retried has forgotten when
- * its first attempt began. `null` when no run has started, and `null` again
- * when nothing is active and no end was ever recorded — an unmeasured span is
- * not a zero one.
+ * `leadTimeMs` runs from the server's first primary Run start across all
+ * attempts to the chain's most recent known end, or to `now` while a known
+ * Run is active. Retrying the first Step cannot move the origin forward.
+ * A missing origin or an inactive chain with no known end remains unknown.
  *
  * `repairRounds` counts the visible repair rows. A detached repair whose own
  * row is off the page still shows through `activeRepair`, which is the one
@@ -140,11 +136,11 @@ export const chainAggregateFigures = (
   now = Date.now(),
 ): ChainAggregateFigures => {
   const runs = knownRuns(aggregate, members);
-  const starts = runs.flatMap((run) => (run.startedAt === null ? [] : [epoch(run.startedAt)]));
+  const start = aggregate.firstRunStartedAt === null ? null : epoch(aggregate.firstRunStartedAt);
   const ends = runs.flatMap((run) => (run.endedAt === null ? [] : [epoch(run.endedAt)]));
   const active = runs.some((run) => RUN_STATUS_IS_ACTIVE[run.status]);
   const end = active ? now : ends.length === 0 ? null : Math.max(...ends);
-  const leadTimeMs = starts.length === 0 || end === null ? null : Math.max(0, end - Math.min(...starts));
+  const leadTimeMs = start === null || end === null ? null : Math.max(0, end - start);
   const visibleRepairs = members.filter((member) => member.repairOf !== null).length;
   const repairRounds = visibleRepairs === 0 && aggregate.activeRepair !== null ? 1 : visibleRepairs;
   return { cost: aggregate.totalCost, leadTimeMs, repairRounds };

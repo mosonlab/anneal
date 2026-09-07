@@ -387,7 +387,7 @@ test("Archive All confirms the project-wide Done scope even while one chain is v
     chainId, chainName, detailTaskId: taskId, stepCount: 1,
     statusCounts: { BACKLOG: 0, TODO: 0, DOING: 0, REVIEW: 0, DONE: 1 }, status: "DONE" as const,
     frontier: { taskId, title: "Review", status: "DONE" as const, latestRun: null, mergeOutcome: null, failureReason: null, position: 1 }, activeRepair: null,
-    activation: { state: "settled" as const, predecessor: null, taskId, hold: null }, totalCost: null,
+    activation: { state: "settled" as const, predecessor: null, taskId, hold: null }, totalCost: null, firstRunStartedAt: null,
     createdAt: "2026-08-15T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
   });
   const rows = [
@@ -1140,7 +1140,7 @@ const chainRow = (options: {
       taskId: options.activationTaskId === undefined ? headId : options.activationTaskId,
       hold: options.hold ?? null,
     },
-    totalCost: null, createdAt: "2026-08-15T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
+    totalCost: null, firstRunStartedAt: null, createdAt: "2026-08-15T00:00:00.000Z", updatedAt: "2026-08-16T00:00:00.000Z",
   };
   return task({
     id: headId, name: `${options.name ?? options.chainId}: Implementation`, displayName: "Implementation", status,

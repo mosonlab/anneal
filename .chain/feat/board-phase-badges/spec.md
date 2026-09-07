@@ -14,10 +14,12 @@ Changes:
 
 Out of scope: TaskDetail; the Costs page; the semantics of metrics or baselines; new polling endpoints or per-card fetches; board column semantics and card movement rules; archived view.
 
-Constraints: no additional request per card. Badges never render on null inputs. The board payload grows only by the fields listed. Existing card layouts for finished tasks are unchanged except for the added aggregate figures.
+Constraints: no additional request per card. Badges never render on null inputs. The board payload grows only by the phase fields listed in change 1, `latestRun.maxRunsPerTask` for the retry denominator, and `chainAggregate.firstRunStartedAt` for lead time. `firstRunStartedAt` is the earliest non-null `Run.startedAt` across complete primary-Step run history, computed server-side from the existing full-chain reads and consumed by `chain-aggregate.ts`; it is null if no primary Run has started. Existing card layouts for finished tasks are unchanged except for the added aggregate figures.
 
 Acceptance: board projection tests prove phase and phaseSince for each phase and a live-run case; web tests prove each badge appears under its condition and is absent when inputs are null (including null baseline), the phase label and time in phase render for a live run, and the aggregate card shows cost, lead time and repair rounds from fixture rows; existing card tests are updated rather than deleted; `npm run lint`, `npm run typecheck`, `npm run test -w @anneal/api` and `npm run test -w @anneal/web` are green; docs/operator-api.md documents the fields.
 
 Depends on: API: task detail and the board carry a per-template-step baseline - consumes `baseline` on board rows and the shared phase helper
 
 Route: implementation=frontend-dev-opus-high - operator chose Opus high for this board surface
+
+Review-fix decision: the operator explicitly authorized these two additional fields via Anneal Inbox (`authorize-fields`), resolving SPEC-002 and SPEC-003 / BR-4 without per-card requests.
