@@ -48,8 +48,12 @@ export const DEPLOY_BARRIER_PHASE_TIMEOUT_MS = Object.freeze({
   "restart-services": serviceRestartBudget,
   "verify-services": serviceSweepBudget,
 });
+// Control-plane refresh adds a builder under the held barrier. Two minutes
+// covers the three 30-second remote reads and their 2/5-second retry delays.
+// Runner hosts retain their existing target check and watchdog budget.
+export const DEPLOY_BARRIER_TARGET_REFRESH_TIMEOUT_MS = DEPLOY_STEP_TIMEOUT_MS.releaseArtifactBuild + minutes(2);
 export const DEPLOY_BARRIER_BUDGETED_WORK_MS = Object.values(DEPLOY_BARRIER_PHASE_TIMEOUT_MS)
-  .reduce((total, timeoutMs) => total + timeoutMs, 0);
+  .reduce((total, timeoutMs) => total + timeoutMs, DEPLOY_BARRIER_TARGET_REFRESH_TIMEOUT_MS);
 export const DEPLOY_BARRIER_RECOVERY_BUDGET_MS = DEFAULT_SERVICE_COUNT
   * DEPLOY_STEP_TIMEOUT_MS.previousServiceRestore;
 export const DEPLOY_BARRIER_WATCHDOG_MARGIN_MS = minutes(5);
@@ -69,6 +73,7 @@ export const deployBarrierTimeoutMsForRole = (role, serviceCount = DEFAULT_SERVI
     .filter(({ scope }) => scope === "upgrade")
     .reduce((total, { name }) => total + (phaseTimeouts[name] ?? 0), 0);
   return budgetedWork
+    + (role === "control-plane" ? DEPLOY_BARRIER_TARGET_REFRESH_TIMEOUT_MS : 0)
     + serviceCount * DEPLOY_STEP_TIMEOUT_MS.previousServiceRestore
     + DEPLOY_BARRIER_WATCHDOG_MARGIN_MS;
 };
@@ -169,6 +174,10 @@ export const waitForQuietWithWatchdog = async ({
   onBlockingRuns = () => undefined,
   onBarrierContended = () => undefined,
   onRacedBlockingRuns = () => undefined,
+  /** A naturally open window may be admitted before the cadence floor. If
+   * blockers appear before its barrier is obtained, the tick must coalesce
+   * instead of entering the wait budget and dispatch drain. */
+  allowWaiting = () => true,
 }) => {
   const startedAt = now();
   let polls = 0;
@@ -220,14 +229,22 @@ export const waitForQuietWithWatchdog = async ({
     polls += 1;
     const before = await blockingRuns();
     if (before.length > 0) {
-      onBlockingRuns(before, observe(before));
+      const progress = observe(before);
+      if (!await allowWaiting({ stage: "before-barrier", runs: before, progress })) {
+        return { skip: "coalesced", quietWindowWait: completedWait() };
+      }
+      onBlockingRuns(before, progress);
       alertIfOverBudget(before);
       await wait();
       continue;
     }
     const barrier = await acquireBarrier();
     if (barrier === null) {
-      onBarrierContended(observe([]));
+      const progress = observe([]);
+      if (!await allowWaiting({ stage: "barrier-contended", runs: [], progress })) {
+        return { skip: "coalesced", quietWindowWait: completedWait() };
+      }
+      onBarrierContended(progress);
       alertIfOverBudget([]);
       await wait();
       continue;
@@ -241,10 +258,15 @@ export const waitForQuietWithWatchdog = async ({
       // crossing is reported here too: a completed over-budget wait is never
       // silent just because the last poll succeeded.
       if (after.length === 0) {
-        alertIfOverBudget([]);
+        if (await allowWaiting({ stage: "quiet", runs: [], progress: observe([]) })) alertIfOverBudget([]);
         return { barrier, watchdog, quietWindowWait: completedWait() };
       }
       raced = after;
+      if (!await allowWaiting({ stage: "after-barrier", runs: raced, progress: observe(raced) })) {
+        await watchdog.release();
+        await barrier.release();
+        return { skip: "coalesced", quietWindowWait: completedWait() };
+      }
       await watchdog.release();
       await barrier.release();
       onRacedBlockingRuns(after, observe(after));
@@ -320,6 +342,34 @@ export const createBarrierWatchdog = async ({
   });
   await ready;
   return Object.freeze({
+    // Acknowledge the new record before artifact construction can block this
+    // process. The independent child's original deadline is never restarted.
+    updateEscalationRecord: (record) => new Promise((resolve, reject) => {
+      if (released || exited || timeoutReported) {
+        reject(new DeployFailure("deploy-barrier-watchdog-unavailable", "target-update-after-exit"));
+        return;
+      }
+      const cleanup = () => {
+        child.off("message", updated);
+        child.off("close", closed);
+      };
+      const updated = (message) => {
+        if (message?.type !== "record-updated") return;
+        cleanup();
+        resolve();
+      };
+      const closed = () => {
+        cleanup();
+        reject(new DeployFailure("deploy-barrier-watchdog-unavailable", "target-update-unacknowledged"));
+      };
+      child.on("message", updated);
+      child.once("close", closed);
+      child.send({ type: "update-record", record }, (error) => {
+        if (!error) return;
+        cleanup();
+        reject(new DeployFailure("deploy-barrier-watchdog-unavailable", "target-update-failed"));
+      });
+    }),
     release: async () => {
       if (released) return;
       released = true;

@@ -5,20 +5,26 @@ import { randomUUID } from "node:crypto";
 import { after, before, beforeEach, test } from "node:test";
 
 import {
+  AssigneeType,
   DependencyProvisioning,
   enqueueTaskRun,
   PrismaClient,
+  RunnerPreference,
   RunStatus,
   TaskStatus,
 } from "@anneal/db";
 import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
 import { createApp } from "./test-app.js";
+import { seedIntegratorChain } from "./merge-integrator-fixture.js";
+import { claimReadinessStep } from "./readiness-claim.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
 const RUNNER_TOKEN = "dispatch-drain-runner-token";
 const OPERATOR_TOKEN = "dispatch-drain-operator-token";
 const RUNNER_ID = "dispatch-drain-runner";
+const EXECUTOR_TOKEN = "dispatch-drain-merge-executor-token";
+const EXECUTOR_RUNNER_ID = "dispatch-drain-merge-executor";
 const READY_AT = new Date("2026-08-01T00:00:00.000Z");
 
 let db: PrismaClient;
@@ -29,11 +35,15 @@ let app: ReturnType<typeof createApp>;
 const previousEnvironment = {
   runner: process.env.RUNNER_TOKEN,
   operator: process.env.OPERATOR_TOKEN,
+  executor: process.env.MERGE_EXECUTOR_TOKEN,
+  executorIds: process.env.MERGE_EXECUTOR_RUNNER_IDS,
 };
 
 before(() => {
   process.env.RUNNER_TOKEN = RUNNER_TOKEN;
   process.env.OPERATOR_TOKEN = OPERATOR_TOKEN;
+  process.env.MERGE_EXECUTOR_TOKEN = EXECUTOR_TOKEN;
+  process.env.MERGE_EXECUTOR_RUNNER_IDS = EXECUTOR_RUNNER_ID;
   db = setupTestDb();
 });
 beforeEach(async () => {
@@ -45,6 +55,8 @@ after(async () => {
   for (const [key, value] of [
     ["RUNNER_TOKEN", previousEnvironment.runner],
     ["OPERATOR_TOKEN", previousEnvironment.operator],
+    ["MERGE_EXECUTOR_TOKEN", previousEnvironment.executor],
+    ["MERGE_EXECUTOR_RUNNER_IDS", previousEnvironment.executorIds],
   ] as const) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -99,11 +111,15 @@ const seedQueuedRun = async () => {
 };
 
 const claim = async (): Promise<{ status: number; body: any }> => {
+  return claimAs(RUNNER_TOKEN, RUNNER_ID);
+};
+
+const claimAs = async (token: string, runnerId: string): Promise<{ status: number; body: any }> => {
   const response = await app.request("/runner/tasks/claim", {
     method: "POST",
-    headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({
-      runnerId: RUNNER_ID,
+      runnerId,
       leaseSeconds: 60,
       contractVersion: RUN_COMPLETION_CONTRACT_VERSION,
     }),
@@ -176,6 +192,48 @@ test("an unexpired dispatch drain refuses every claim and charges the task nothi
   assert.equal(status.body.online, 1);
 });
 
+test("a drain scopes refusal to agent Runs while mechanical merge and readiness work continue", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "drain-scope",
+    shape: "canonical-compound-readiness",
+    gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask);
+  assert.ok(chain.integratorTask);
+
+  // Queue an ordinary Run first so the merge executor has to pass over an
+  // agent candidate before it reaches the mechanical merge Run.
+  const ordinaryTask = await db.task.create({ data: {
+    projectId: chain.project.id,
+    repoId: chain.repo.id,
+    name: "Drain scope implementation",
+    description: "agent work must wait for the drain",
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: chain.agent.id,
+    status: TaskStatus.TODO,
+  } });
+  const ordinaryRun = await db.$transaction((tx) => enqueueTaskRun(tx, ordinaryTask.id, READY_AT));
+  const mechanicalRun = await db.$transaction((tx) => enqueueTaskRun(tx, chain.integratorTask!.id, READY_AT));
+  const drain = await openDrain(new Date(Date.now() + 30 * 60_000));
+
+  const refused = await claim();
+  assert.equal(refused.status, 409, JSON.stringify(refused.body));
+  assert.equal(refused.body.reason, "dispatch-draining");
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: ordinaryRun.id } })).status, RunStatus.QUEUED);
+
+  // Readiness evaluation is a server-owned Task claim, so the dispatch drain
+  // does not block it. The unexpired row remains in force for the executor
+  // claim below.
+  const readiness = await claimReadinessStep(db, chain.readinessTask.id, new Date());
+  assert.ok(readiness, "readiness evaluation should remain claimable during a drain");
+
+  const claimed = await claimAs(EXECUTOR_TOKEN, EXECUTOR_RUNNER_ID);
+  assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
+  assert.equal(claimed.body.run.id, mechanicalRun.id);
+  assert.equal(claimed.body.executionMode, "mechanical");
+  assert.equal((await db.dispatchDrain.findUniqueOrThrow({ where: { id: drain.id } })).id, drain.id);
+});
+
 test("deleting the drain admits the very next claim", async () => {
   const { task, run } = await seedQueuedRun();
   const drain = await openDrain(new Date(Date.now() + 30 * 60_000));
@@ -201,4 +259,60 @@ test("an expired drain is absent: a dead deploy cannot drain the fleet for good"
   // The row is still there; it is the deadline, not a delete, that ended it.
   assert.notEqual(await db.dispatchDrain.findUnique({ where: { id: expired.id } }), null);
   assert.equal((await runners()).body.dispatchDrain, null);
+});
+
+test("a drained claim cannot park a Task after its Repo grant is revoked", async () => {
+  const { task } = await seedQueuedRun();
+  await db.agentRepoAccess.deleteMany({ where: { agentId: task.assigneeAgentId! } });
+  const before = await accounting(task.id);
+  await openDrain(new Date(Date.now() + 30 * 60_000));
+  const refused = await claim();
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.code, "dispatch-draining");
+  assert.deepEqual(await accounting(task.id), before);
+  assert.equal((await accounting(task.id)).task.status, TaskStatus.TODO);
+});
+
+test("quiet-window SQL excludes active mechanical Steps and preserves agent and host scope", async () => {
+  const { blockingRunsStatement } = await import(new URL("../../../scripts/deploy/deploy-preflight.mjs", import.meta.url).href);
+  const chain = await seedIntegratorChain(db, { label: "blocker-scope", shape: "canonical-compound-readiness", gatedReadiness: true });
+  assert.ok(chain.integratorTask);
+  assert.ok(chain.readinessTask);
+  // Compound implementation Run birth requires a Codex/gpt-capable Agent;
+  // the shared merge-tail fixture uses Claude for its Regression predecessor.
+  await db.agent.update({ where: { id: chain.agent.id }, data: {
+    model: "gpt-6-astra:medium", runnerPreference: RunnerPreference.CODEX,
+  } });
+  const implementationStep = await db.taskTemplateStep.create({ data: {
+    taskTemplateId: chain.template.id, stepIndex: 0, layer: 0, name: "Implementation",
+    assigneeType: AssigneeType.AGENT, assigneeAgentId: chain.agent.id,
+    prompt: "implement", outputKind: "implementation",
+  } });
+  const implementationTask = await db.task.create({ data: {
+    projectId: chain.project.id, repoId: chain.repo.id, templateId: chain.template.id,
+    templateStepId: implementationStep.id, assigneeAgentId: chain.agent.id,
+    name: "Blocker implementation", description: "active agent work", status: TaskStatus.TODO,
+  } });
+  const agentRun = await db.$transaction((tx) => enqueueTaskRun(tx, implementationTask.id, READY_AT));
+  const mechanicalRun = await db.$transaction((tx) => enqueueTaskRun(tx, chain.integratorTask!.id, READY_AT));
+  await db.run.update({ where: { id: agentRun.id }, data: { status: RunStatus.RUNNING, runnerId: "agent-host" } });
+  await db.run.update({ where: { id: mechanicalRun.id }, data: { status: RunStatus.RUNNING, runnerId: "merge-host" } });
+  const read = async (runnerIds: string[] | null = null) => {
+    const statement = blockingRunsStatement(undefined, runnerIds);
+    return db.$queryRawUnsafe<Array<{ id: string }>>(statement.sql, ...statement.parameters);
+  };
+  assert.deepEqual((await read()).map(({ id }) => id), [agentRun.id]);
+  assert.deepEqual(await read(["merge-host"]), []);
+  assert.deepEqual((await read(["agent-host"])).map(({ id }) => id), [agentRun.id]);
+  await db.run.update({ where: { id: agentRun.id }, data: { status: RunStatus.SUCCEEDED } });
+  assert.deepEqual(await read(), [], "mechanical work alone leaves the natural quiet window open");
+  const { automaticCadenceForTick } = await import(new URL("../../../scripts/deploy/quiet-window-deploy.mjs", import.meta.url).href);
+  const cadence = await automaticCadenceForTick({
+    targetCommit: "b".repeat(40), readDeployed: () => "a".repeat(40),
+    readBlockingRuns: read, environment: {},
+    now: () => new Date("2026-09-07T12:00:00Z"),
+    readLastSuccessful: () => new Date("2026-09-07T11:00:00Z"),
+  });
+  assert.notEqual(cadence.coalesced, true);
+  assert.equal(cadence.allowWait, false, "the mechanical-only tick takes the early quiet-window exception");
 });

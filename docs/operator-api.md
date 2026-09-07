@@ -58,13 +58,33 @@ curl "$BASE_URL/version"
 ### GET `/runners`
 
 - Required parameters: none.
-- `dispatchDrain` is `null` while the platform is admitting Runs, and otherwise
-  `{reason, startedAt, expiresAt}`: the platform-wide dispatch drain an
+- `dispatchDrain` is `null` when no unexpired dispatch drain exists, and
+  otherwise `{reason, startedAt, expiresAt}`: the platform-wide drain an
   auto-deploy opens when its quiet-window wait outlives its budget. `reason`
   names the waiting host, its deploy role, and the two commits. While it is
-  present every claim is refused, so the daemons below are online and idle
-  rather than lost. An expired drain reads as `null` here and is ignored by the
-  claim route, whether or not its row was deleted.
+  present, only claims that would start an agent session are refused; the
+  mechanical merge and readiness flow continues. The daemons below remain
+  online and report themselves rather than being treated as lost. An expired
+  drain reads as `null` here and is ignored by the claim route, whether or not
+  its row was deleted.
+
+The auto-deploy scheduler wakes every five minutes on both host profiles, but
+each wake is only a tick. On the control-plane role, when `main` has moved, the
+tick consults the last successful automatic deploy recorded under
+`.agentos-deploy/auto-deploy-state.json`. Both host roles read
+`AUTO_DEPLOY_MIN_INTERVAL_MINUTES` from that host's `shared/.env` (default
+**240 minutes**); runner-only deployment retains its existing `/version`
+follow behavior. If main has changed but the interval has not elapsed
+and blockers remain, the tick coalesces, logs
+`NOOP coalescing next-eligible=<time>`, and does not enter the wait budget or
+open a dispatch drain. A quiet window already open at tick time (`blockers=0`)
+is an early natural-quiet exception to the interval floor. Once the quiet
+window and deploy barrier are obtained, a control-plane auto-deploy re-reads
+`origin/main`; if it advanced beyond the tick target, it logs
+`target-advanced from=<old> to=<new>` and builds the artifact for the new head
+before publication. Runner-only deployment keeps its target from the control
+plane's `/version` contract. See the [quiet-window auto-deploy runbook](runbooks/quiet-window-auto-deploy.md#automatic-deploy-cadence)
+for the operator procedure.
 
 ```sh
 curl "$BASE_URL/runners" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -3230,14 +3250,21 @@ the runner serves every kind; when it is declared, the control plane offers
 that claim agent Runs only for the listed kinds. Mechanical claims are
 unaffected, and an unknown kind is refused with `400 Bad Request`.
 
-While a dispatch drain is in force, every `POST /runner/tasks/claim` — agent
-and mechanical alike — is refused with `409 Conflict`, code and reason
-`dispatch-draining`, and the drain's `expiresAt`. The refusal is decided before
-any candidate Run is read: it claims nothing, parks no Task, and consumes
-neither `maxSessionsPerTask` nor any transient budget, so a runner that keeps
-polling through the drain loses only the poll. The claim still records the
-runner's telemetry, so `GET /runners` reports it online throughout. A drain
-whose `expiresAt` has passed is treated as absent and admits claims again.
+While a dispatch drain is in force, `POST /runner/tasks/claim` refuses only a
+candidate agent Run whose template Step would start an agent session. The
+refusal is `409 Conflict`, with code and reason `dispatch-draining`, and carries
+the drain's `expiresAt`. The scope is decided from the Run's persisted template
+Step kind, not from runner identity: an `implementation` or other agent Step
+is refused, while mechanical merge execution (`merge-result`) and readiness
+evaluation (`merge-authorization`) remain admitted. The deploy barrier is the
+exclusive half that protects the release once deployment starts. An already
+claimed Run is never interrupted. A refused claim creates no session, claims
+no Run, parks no Task, and consumes neither `maxSessionsPerTask` nor any
+transient budget, so a runner that keeps polling through the drain loses only
+the poll. Drain refusal precedes repository-grant handling, so a revoked Repo
+grant cannot cause a drained agent claim to park its Task. The claim still
+records the runner's telemetry, so `GET /runners` reports it online throughout. A drain whose `expiresAt` has passed is treated
+as absent and admits claims again.
 
 The machine-only `POST /runner/tasks/claim` request used by the merge executor
 also carries the required `contractVersion` field. It is the completion

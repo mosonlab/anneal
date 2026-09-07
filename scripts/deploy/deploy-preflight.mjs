@@ -87,6 +87,9 @@ export const pruneDeployHistory = ({
   });
 };
 
+// Step output kinds are the persisted execution semantics (see step-role).
+// Missing Task/Step rows remain blockers; only known mechanical work is
+// excluded. The exclusive deploy barrier still serializes merge execution.
 export const blockingRunsStatement = (statuses = BLOCKING_RUN_STATUSES, runnerIds = null) => {
   if (runnerIds !== null && (!Array.isArray(runnerIds) || runnerIds.length === 0)) {
     throw new DeployFailure("quiet-window-runner-inventory-invalid", "runner-ids-empty");
@@ -96,7 +99,7 @@ export const blockingRunsStatement = (statuses = BLOCKING_RUN_STATUSES, runnerId
     ? ""
     : ` AND "runnerId" IN (${runnerIds.map((_, index) => `$${statuses.length + index + 1}`).join(",")})`;
   return {
-    sql: `SELECT "id", "status"::text AS "status", "runnerId" FROM "Run" WHERE "status"::text IN (${placeholders})${runnerPredicate} ORDER BY "id"`,
+    sql: `SELECT "id", "status"::text AS "status", "runnerId" FROM "Run" WHERE "status"::text IN (${placeholders})${runnerPredicate} AND NOT EXISTS (SELECT 1 FROM "Task" AS task JOIN "TaskTemplateStep" AS step ON step."id" = task."templateStepId" WHERE task."id" = "Run"."taskId" AND step."outputKind" IN ('merge-result','merge-authorization')) ORDER BY "id"`,
     parameters: [...statuses, ...(runnerIds ?? [])],
   };
 };

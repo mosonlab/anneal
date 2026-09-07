@@ -11,6 +11,7 @@ import { writeEscalationRecord } from "./quiet-window-escalation-record.mjs";
 import { DeployFailure, executeUpgrade } from "./quiet-window-lib.mjs";
 import {
   DEPLOY_BARRIER_BUDGETED_WORK_MS,
+  DEPLOY_BARRIER_TARGET_REFRESH_TIMEOUT_MS,
   DEPLOY_BARRIER_PHASE_TIMEOUT_MS,
   DEPLOY_BARRIER_RECOVERY_BUDGET_MS,
   BARRIER_TIMEOUT_REASON,
@@ -85,7 +86,7 @@ test("deploy deadlines are step-specific and preserve the observed build margin"
   assert.deepEqual(Object.keys(DEPLOY_BARRIER_PHASE_TIMEOUT_MS), supervisedPhases);
   assert.equal(
     DEPLOY_BARRIER_BUDGETED_WORK_MS,
-    Object.values(DEPLOY_BARRIER_PHASE_TIMEOUT_MS).reduce((total, timeoutMs) => total + timeoutMs, 0),
+    Object.values(DEPLOY_BARRIER_PHASE_TIMEOUT_MS).reduce((total, timeoutMs) => total + timeoutMs, DEPLOY_BARRIER_TARGET_REFRESH_TIMEOUT_MS),
   );
   assert.equal(
     DEPLOY_BARRIER_TIMEOUT_MS,
@@ -547,4 +548,36 @@ test("barrier watchdog can be cancelled", async () => {
   assert.equal(cancelledFired, false);
   assert.equal(existsSync(escalationPath), false);
   rmSync(directory, { recursive: true, force: true });
+});
+
+test("control-plane watchdog budgets the post-barrier target rebuild without changing runner budgets", () => {
+  const serviceCount = 6;
+  const runnerBudget = deployBarrierTimeoutMsForRole("runner", serviceCount);
+  const controlPlaneOnlyPhases = DEPLOY_STEP_TIMEOUT_MS.databaseBackup
+    + DEPLOY_STEP_TIMEOUT_MS.migrationPreflight + DEPLOY_STEP_TIMEOUT_MS.migrationDeploy
+    + DEPLOY_STEP_TIMEOUT_MS.prismaClientGeneration + DEPLOY_STEP_TIMEOUT_MS.canonicalPromptSync;
+  assert.ok(deployBarrierTimeoutMsForRole("control-plane", serviceCount)
+    >= runnerBudget + controlPlaneOnlyPhases + DEPLOY_STEP_TIMEOUT_MS.releaseArtifactBuild + 97_000);
+});
+
+test("watchdog target update preserves the deadline and persists the refreshed target", { timeout: 10_000 }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), "anneal-watchdog-retarget-"));
+  const escalationPath = join(directory, "escalated.json");
+  let timedOut;
+  const expired = new Promise((resolve) => { timedOut = resolve; });
+  const watchdog = await createBarrierWatchdog({
+    timeoutMs: 500,
+    escalationPath,
+    escalationRecord: { outcome: "failure", reason: BARRIER_TIMEOUT_REASON, ...revisions },
+    onTimeout: timedOut,
+  });
+  try {
+    await watchdog.updateEscalationRecord({ outcome: "failure", reason: BARRIER_TIMEOUT_REASON,
+      from: revisions.from, to: "c".repeat(40) });
+    await expired;
+    assert.equal(JSON.parse(readFileSync(escalationPath, "utf8")).to, "c".repeat(40));
+  } finally {
+    await watchdog.release();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
