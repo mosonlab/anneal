@@ -167,6 +167,10 @@ const withTrainLease = async <T>(
   train: PendingTrain, now: Date,
   fn: () => Promise<{ value: T; leaseOutcome: HeldLeaseOutcome }>,
 ): Promise<void> => {
+  // The advisory lock provides exclusion here. Settlement commits through
+  // separate transactions while this one stays open, so later contention
+  // projections must see those commits (including their updated Task rows).
+  // A serializable snapshot can fail those writes with a concurrent update.
   await db.$transaction(async (mutexTx) => {
     if (!await tryRepositoryMutex(mutexTx, train.repoId)) return;
     // Use a fresh read after acquisition, not the outer transaction's snapshot.
@@ -194,7 +198,7 @@ const withTrainLease = async <T>(
       return;
     }
     await clearTrainLeaseUnavailable(mutexTx, train, now);
-  }, { ...serializable, timeout: 300_000 });
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, timeout: 300_000 });
 };
 
 const lockCandidates = async (tx: Prisma.TransactionClient, candidates: TrainCandidateBinding[]): Promise<void> => {
