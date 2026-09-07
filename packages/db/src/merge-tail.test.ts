@@ -206,6 +206,28 @@ test("Regression v2 gate failure excerpts are optional strings", () => {
   }
 });
 
+test("Regression v2 reused semantics require provenance and a completed semantic pass", () => {
+  const pass = {
+    schemaVersion: 2, outcome: "pass", headSha: A, baseHeadSha: B,
+    gateVerdict: "PASS", gateProof: `MERGE GATE: PASS ${A}`,
+    semanticVerdict: "reused", semanticSourceRunId: "prior-regression-run",
+  };
+  assert.deepEqual(parseRegressionVerdict(JSON.stringify(pass)), { status: "ok", verdict: pass });
+  assert.equal(parseRegressionVerdict(JSON.stringify({
+    ...pass, outcome: "gate-fail", gateVerdict: "FAIL",
+    gateProof: "MERGE GATE: FAIL (tests)", summary: "tests",
+  })).status, "ok");
+  for (const patch of [
+    { semanticSourceRunId: undefined }, { semanticSourceRunId: " " },
+    { semanticSourceRunId: 42 }, { semanticVerdict: undefined },
+    { semanticVerdict: "PASS" }, { schemaVersion: 1 },
+    { outcome: "review-fail", summary: "defect" },
+    { outcome: "refresh-conflict", summary: "conflict" },
+  ]) {
+    assert.equal(parseRegressionVerdict(JSON.stringify({ ...pass, ...patch })).status, "invalid", JSON.stringify(patch));
+  }
+});
+
 test("merge train records are versioned and validate the contiguous passing prefix", () => {
   const chainId = "00000000-0000-4000-8000-000000000001";
   const record = {

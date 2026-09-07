@@ -2120,6 +2120,25 @@ curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/rerun" \
   -d '{"requestId":"rerun-recovery-gate-001","reason":"The failing test is outside this branch and timed out under host load"}'
 ```
 
+### Regression semantic verdict reuse during base-drift recovery
+
+A fresh Regression Run opened by base-drift recovery receives
+`regressionRecoveryContext` in its runner claim: `state: "queued"`,
+`currentBaseSha`, `authorizedHeadSha`, `recoveryRunId`, and `priorOutput` (the
+latest persisted regression output snapshotted before recovery clears it, or
+`null`). The snapshot carries the prior `runId`, `kind`, `body`, and `commitSha`.
+
+`regression-verification.sh prepare` decides once from that snapshot. It reuses
+semantic PASS only when the prepared head, after target refresh, matches the
+prior output's exact head and the latest output records semantic success
+(`pass` or `gate-fail`). A different head, a latest `review-fail` or
+`refresh-conflict`, or missing or invalid evidence requires the normal semantic
+recheck. A reused verdict skips that recheck; `finalize` still runs the Merge
+gate. The persisted v2 result adds `semanticVerdict: "reused"` and
+`semanticSourceRunId` naming the prior Run. A target refresh that changes the
+head invalidates reuse; first regressions and changed heads retain semantic
+verification.
+
 ### Regression verdict precedence after an external Run failure
 
 A Regression verification Run can persist its `regression-verification-v2`
