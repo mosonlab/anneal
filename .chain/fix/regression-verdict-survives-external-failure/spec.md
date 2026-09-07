@@ -1,0 +1,19 @@
+Regression: a persisted semantic verdict survives a later external failure in the same Run
+
+Goal: when the Regression Run has already persisted its `regression-verification-v2` outcome (review-fail, or refresh-conflict at prepare) and then fails for an external reason (git TLS during salvage or target refresh, a dropped provider stream that is not a PROTOCOL_ERROR), the persisted verdict is what the merge tail acts on; the Chain never lands in a REVIEW with no repair path.
+
+Background: `packages/api/src/run-completion.ts` ~718-736 already keeps a durable negative verdict, but only for a retryable `PROTOCOL_ERROR` completion bound to the same Run and head (`regressionVerdictForRun`), and deliberately excludes PASS. Two samples on 2026-09-07 fell outside it. (a) d78f7efe idx5 run 2 (02:47Z): semantic review FAIL (BR-10) was persisted, the Run was then recorded as `external failure`, run 3 was refused `no successful review-fix result binds ef08a0e5… to 66f6bf68…`, `merge-tail/repair` answered `not_blocked`; the Chain was carried forward by hand (successor b93ab0f9). (b) 20803e21 idx5 run 1 (09:00Z): prepare persisted `refresh-conflict` for three files, workspace disposal then hit `gnutls_handshake() failed`; the Run was settled `external failure was not eligible for a budget refund` and the task moved to REVIEW with no automatic refresh-conflict repair queued; the operator retry (run 2) was refused with the handoff-invalid message. Both are the same shape: the verdict exists, the Run's terminal status hides it.
+
+Changes:
+1. Run completion for a Regression Run checks for a persisted v2 outcome bound to this Run and head before classifying any external failure (task-failed git errors, salvage failures, provider failures), not only `PROTOCOL_ERROR`. If one exists it is validated at the same canonical boundary as today (Run ownership, JSON body, authored commit, exact head; `merge-tail-actions.ts` ~144-179) and the merge tail settles on it: review-fail → review-fix repair, refresh-conflict → refresh-conflict repair; the external failure is recorded as a TaskActivity, not as the Run's verdict. PASS stays excluded unless the completion names the exact head the verdict was recorded for and the gate verdict for that head is persisted too.
+2. Inside a base-drift recovery Run the same precedence applies, but the settlement is the recovery stop with the persisted verdict's reason (`merge-tail-actions.ts` ~1106-1124), not an automatic repair, so the recovery ceiling and `merge-tail/repair` keep working as documented.
+3. Where the external failure happened after the verdict but before WIP salvage, the persisted verdict's head is the branch head the repair binds to; no manual carry-forward is required.
+4. `docs/operator-api.md` Regression section documents the precedence: persisted verdict over Run failure, and the PASS exclusion.
+
+Out of scope: refund accounting for the external failure; the salvage mechanism; deferred-stop exits (chain 2e621a8a); malformed resolver output (separate card).
+
+Constraints: a Run with no persisted outcome keeps today's external-failure path; no verdict is ever synthesized from Run text or TaskActivity.
+
+Acceptance: a dbtest persists a review-fail outcome then fails the Run with a task-failed git error and asserts a review-fix repair is queued against the persisted head; the same for a refresh-conflict outcome; a dbtest inside a recovery Run asserts the recovery stop carries the persisted reason; a dbtest with a persisted PASS and an external failure asserts no advance; `npm run test -w @anneal/api` green; `npm run lint` clean.
+
+Route: implementation=senior-dev-astra-medium - it changes what the merge tail settles on after a failed Run; a wrong precedence would queue repairs against the wrong head or advance on an unverified PASS
