@@ -7,9 +7,12 @@ import { MERGE_TAIL_KIND } from "./merge-tail.js";
 import {
   MERGE_TAIL_MARKER_SCAN,
   latestMarker,
+  mergeTrainClaimMetadata,
   markerFromMetadata,
+  parseMergeTrainMarker,
   readMarkerHistory,
   readMarkers,
+  readLatestMarker,
   recoveryContext,
   writeMarker,
   type Marker,
@@ -109,6 +112,42 @@ test("markerFromMetadata narrows both sides of a repair binding", () => {
   assert.equal(repairSide?.repairTaskId, null);
   assert.equal(chainSide?.regressionTaskId, null);
   assert.equal(chainSide?.repairTaskId, "repair-1");
+});
+
+test("merge-train markers qualify the full claim payload and sparse readiness markers", () => {
+  const candidate = {
+    taskId: "readiness-1",
+    chainId: "00000000-0000-4000-8000-000000000001",
+    headSha: "a".repeat(40),
+    branch: "agentos/chain-1",
+  };
+  const full = markerFromMetadata({
+    kind: MERGE_TAIL_KIND.train,
+    schemaVersion: 1,
+    state: "queued",
+    trainTaskId: "train-1",
+    regressionTaskId: "regression-1",
+    baseSha: "b".repeat(40),
+    width: 1,
+    candidates: [candidate],
+  });
+  assert.equal(parseMergeTrainMarker(full?.raw).status, "ok");
+  assert.deepEqual(mergeTrainClaimMetadata(full), {
+    schemaVersion: 1,
+    baseSha: "b".repeat(40),
+    width: 1,
+    candidates: [candidate],
+  });
+
+  const sparse = markerFromMetadata({
+    kind: MERGE_TAIL_KIND.train,
+    schemaVersion: 1,
+    state: "queued",
+    trainTaskId: "train-1",
+    position: 1,
+  });
+  assert.equal(parseMergeTrainMarker(sparse?.raw).status, "ok");
+  assert.equal(mergeTrainClaimMetadata(sparse), null);
 });
 
 test("latestMarker selects from the newest end", () => {
@@ -211,4 +250,17 @@ test("alreadyAttempted sees an attempt buried past the recent-state window (app.
   // The failure this site's window exists to prevent: with take 20 the older
   // attempt is invisible and a second automatic repair would be created.
   assert.equal(attempted(recent), false);
+});
+
+
+test("train ownership reads select only control-plane markers", async () => {
+  let observed: unknown;
+  const tx = { taskActivity: { findFirst: async (input: unknown) => {
+    observed = input;
+    return null;
+  } } } as unknown as Prisma.TransactionClient;
+  assert.equal(await readLatestMarker(tx, "train-1", "train", "control-plane"), null);
+  assert.deepEqual((observed as { where: unknown }).where, {
+    taskId: "train-1", actorType: "control-plane", metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.train },
+  });
 });
