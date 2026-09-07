@@ -21,6 +21,19 @@ export type MergeTailRepairProfileTemplateName =
 /** The source-owned profile name installed for a canonical template. */
 export const CANONICAL_STAFFING_PROFILE_NAME = "Default" as const;
 
+/** The tier keys persisted by every staffing profile. Keep this list ordered
+ * for stable API payloads and deterministic writes. */
+export const STAFFING_PROFILE_TIERS = ["default", "frontend", "hard", "hazard"] as const;
+export type StaffingProfileTierKey = (typeof STAFFING_PROFILE_TIERS)[number];
+
+/** Canonical Agent role installed for each implementation tier. */
+export const CANONICAL_STAFFING_TIER_ROLES: Readonly<Record<StaffingProfileTierKey, string>> = {
+  default: "senior-dev-luna-max",
+  frontend: "frontend-dev-opus-medium",
+  hard: "senior-dev-astra-low",
+  hazard: "senior-dev-astra-medium",
+};
+
 /** Canonical profile entries share the platform's merge-readiness predicate. */
 export const canonicalStaffingEntries = (
   steps: readonly { stepIndex: number; outputKind: string; assigneeAgentId: string | null; optional: boolean }[],
@@ -78,6 +91,16 @@ export const installCanonicalDefaultStaffingProfiles = async (
   // for this pass; full installation calls again after installing the role.
   if (!agent) return 0;
 
+  const tierAgents = new Map<StaffingProfileTierKey, string>();
+  for (const tier of STAFFING_PROFILE_TIERS) {
+    const tierAgent = await findCanonicalAgent(tx, {
+      projectId,
+      canonicalRole: CANONICAL_STAFFING_TIER_ROLES[tier],
+      activeOnly: true,
+    });
+    if (tierAgent) tierAgents.set(tier, tierAgent.id);
+  }
+
   let created = 0;
   for (const template of templates) {
     // A template with any profile is operator-owned. Recreating a missing
@@ -95,6 +118,9 @@ export const installCanonicalDefaultStaffingProfiles = async (
         mergeTailRepairAgentId: agent.id,
         entries: {
           create: canonicalStaffingEntries(template.steps),
+        },
+        tiers: {
+          create: [...tierAgents].map(([tier, agentId]) => ({ tier, agentId })),
         },
       },
     });

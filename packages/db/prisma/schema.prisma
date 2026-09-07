@@ -332,6 +332,7 @@ model Agent {
   assignedTasks                       Task[]
   templateSteps                       TaskTemplateStep[]
   staffingProfileEntries              StaffingProfileEntry[]
+  staffingProfileTiers                StaffingProfileTier[]
   mergeTailRepairProfiles              StaffingProfile[] @relation("StaffingProfileMergeTailRepairAgent")
   sessions                            Session[]
   runs                                Run[]
@@ -588,6 +589,7 @@ model StaffingProfile {
   taskTemplate   TaskTemplate           @relation(fields: [taskTemplateId], references: [id], onDelete: Cascade)
   mergeTailRepairAgent Agent?            @relation("StaffingProfileMergeTailRepairAgent", fields: [mergeTailRepairAgentId], references: [id], onDelete: Restrict)
   entries        StaffingProfileEntry[]
+  tiers          StaffingProfileTier[]
 
   @@unique([taskTemplateId, name])
   @@index([projectId])
@@ -613,6 +615,21 @@ model StaffingProfileEntry {
 
   @@id([profileId, outputKind])
   @@index([assigneeAgentId])
+}
+
+/// One of the four implementation-tier staffing slots on a profile. The
+/// string key deliberately lives in its own relation instead of sharing the
+/// step entry's exact `outputKind` key space; an output kind named `hard` is a
+/// valid step and must not be mistaken for the hard implementation tier.
+model StaffingProfileTier {
+  profileId String
+  tier      String
+  agentId   String
+  profile   StaffingProfile @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  agent     Agent           @relation(fields: [agentId], references: [id], onDelete: Restrict)
+
+  @@id([profileId, tier])
+  @@index([agentId])
 }
 
 model Task {
