@@ -1037,7 +1037,7 @@ export const mergeTailRepairAssignee = async (
       select: { id: true },
     });
     const provenance = root ? await tx.taskActivity.findFirst({
-      where: { taskId: root.id, metadata: { path: ["staffingProfileId"], not: Prisma.AnyNull } },
+      where: { taskId: root.id, actorType: "control-plane", metadata: { path: ["staffingProfileId"], not: Prisma.AnyNull } },
       orderBy: { createdAt: "asc" },
       select: { metadata: true },
     }) : null;
