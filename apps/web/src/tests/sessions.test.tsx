@@ -14,7 +14,7 @@ import { isSessionUnseen, sessionSeenKey } from "../lib/session-list";
 import { storage } from "../lib/storage";
 import { TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES } from "../lib/session-stream";
 import type { Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
-import { installFetchFunction } from "./dom-harness";
+import { installFetch, installFetchFunction } from "./dom-harness";
 
 // Radix chooses useLayoutEffect or useEffect when its module is first loaded.
 // Seed a browser global before importing Sessions so portaled hover-card content
@@ -378,6 +378,36 @@ test("sessions are grouped by day, capped at five, and expandable in both locale
     }
   } finally {
     setFormatLocale("en", (key, vars) => translate("en", key, vars));
+  }
+});
+
+test("a 404 from GET /sessions renders the standard error state", async () => {
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const fetchHarness = installFetch({
+    "/projects": [{ id: "p1", name: "Demo" }],
+    "GET /sessions": () => new Response(JSON.stringify({ error: "Session list is gone" }), {
+      status: 404,
+      headers: { "Content-Type": "application/json" },
+    }),
+  });
+  const { ProjectProvider } = await import("../lib/project");
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<LocaleProvider initialLocale="en"><ProjectProvider><SessionsPage /></ProjectProvider></LocaleProvider>);
+    });
+    await fetchHarness.settle();
+
+    const body = container.textContent ?? "";
+    assert.match(body, /404 Session list is gone/u);
+    assert.match(body, /Retry/u);
+    assert.doesNotMatch(body, /The control plane has no .*GET \/sessions/u);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+    fetchHarness.dispose();
   }
 });
 
