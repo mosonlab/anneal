@@ -1,12 +1,14 @@
 import type { ReactNode } from "react";
 
 import { type ChainControlAction, chainAggregateFigures, chainControlAction, chainStepPosition } from "../lib/chain-aggregate";
+import { claimRefusalBadge } from "../lib/board";
 import { spanMs, timeAgo, usageCostAmount } from "../lib/format";
 import type { BoardTask, ChainAggregate, ChainAggregateState } from "../lib/types";
 import { navigate } from "../lib/router";
 import { BoardCardShell, CardPullRequest } from "./board-card-shell";
 import { IconLock } from "./icons";
 import { RunLine } from "./run-line";
+import { CardBadgeRow } from "./task-card";
 import { Pill, type RowMenuEntry } from "./ui";
 import { Button } from "./ui/button";
 import { useT, type Translate } from "../lib/i18n";
@@ -77,6 +79,12 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
   const predecessor = aggregate.activation.predecessor;
   const hold = aggregate.activation.hold;
   const activeRepair = aggregate.activeRepair;
+  // The aggregate shows the frontier Run first and an active repair second.
+  // Surface the first visible Run's refusal in the shared anomaly row; a
+  // repair-only aggregate still gets the signal, while two simultaneous
+  // refusals do not duplicate one badge kind on the collapsed card.
+  const claimRefusal = claimRefusalBadge(aggregate.frontier.latestRun)
+    ?? claimRefusalBadge(activeRepair?.latestRun);
   // Chain members are collapsed into one visible board card. Preserve the
   // salvage signal by counting the member-level projection entries rather than
   // making the aggregate contract duplicate per-task evidence.
@@ -143,6 +151,7 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
           <RunLine run={activeRepair.latestRun} elapsed="line" showModel />
         </span>,
       ]),
+      ...(claimRefusal === null ? [] : [<CardBadgeRow badges={[claimRefusal]} />]),
       ...(leadTime === null && repairRounds === null ? [] : [
         <span data-chain-figures="" className="contents">
           {leadTime}

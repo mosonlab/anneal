@@ -10,7 +10,7 @@ import { MobileTaskList } from "../components/mobile-task-list";
 import { COLUMNS, type BoardEntry, boardEntries, boardEntriesByStatus, countByStatus } from "../lib/board";
 import { LocaleProvider } from "../lib/i18n";
 import { translate } from "../lib/i18n-core";
-import type { BoardTask, ChainAggregate, TaskStatus } from "../lib/types";
+import type { BoardClaimRefusal, BoardTask, ChainAggregate, TaskStatus } from "../lib/types";
 import { useTaskStartConfirmation } from "../pages/Tasks";
 import { boardRun } from "./board-run";
 import { installDom, mountPage, reactDom } from "./dom-harness";
@@ -42,6 +42,18 @@ type AggregateWithRepair = ChainAggregate & {
 const runWithTier = (overrides: Partial<RunWithTier> = {}): RunWithTier => ({
   ...boardRun({ id: "run-1", model: "gpt-5.6-sol:high", ...overrides }),
   codexServiceTier: overrides.codexServiceTier ?? "DEFAULT",
+});
+
+const AGGREGATE_REFUSAL: BoardClaimRefusal = {
+  code: "mechanical_contract_mismatch",
+  executorVersion: 1,
+  apiVersion: 2,
+  since: "2026-08-28T00:00:10.000Z",
+};
+
+const aggregateClaimRefusalRun = (executorVersion: number | null = AGGREGATE_REFUSAL.executorVersion): RunWithTier => ({
+  ...runWithTier({ status: "QUEUED" }),
+  claimRefusal: { ...AGGREGATE_REFUSAL, executorVersion },
 });
 
 const activeRepairAggregate = (overrides: Partial<ChainAggregate> = {}): AggregateWithRepair => ({
@@ -341,6 +353,29 @@ test("active elapsed preserves non-running statuses and merge-outcome badges", (
     <LocaleProvider initialLocale="en"><ChainAggregateCard aggregate={stopped} /></LocaleProvider>,
   ));
   assert.match(stoppedText, /Stopped · \d+m/u);
+});
+
+test("an aggregate card carries the visible Run's claim refusal in the red badge row", () => {
+  const latestRun = aggregateClaimRefusalRun();
+  const projection = aggregate({
+    frontier: {
+      taskId: "step-3", title: "Implement release", status: "TODO", latestRun,
+      mergeOutcome: null, failureReason: null, position: 3,
+    },
+  });
+  const markup = renderToStaticMarkup(<ChainAggregateCard aggregate={projection} />);
+  const refusal = element(markup, "[data-card-badge='claim-refusal']");
+  assert.equal(refusal.textContent, "executor v1 ≠ API v2");
+  assert.match(refusal.querySelector("[data-slot='badge']")?.getAttribute("class") ?? "", /destructive-bg/u);
+
+  const unversioned = renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate({
+    frontier: {
+      taskId: "step-3", title: "Implement release", status: "TODO", latestRun: aggregateClaimRefusalRun(null),
+      mergeOutcome: null, failureReason: null, position: 3,
+    },
+  })} />);
+  assert.match(unversioned, />executor unversioned ≠ API v2</u);
+  assert.doesNotMatch(renderToStaticMarkup(<ChainAggregateCard aggregate={aggregate()} />), /claim-refusal|executor v/u);
 });
 
 test("the shared card shell does not navigate a Chain card while text is selected", async () => {

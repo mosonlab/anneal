@@ -1791,6 +1791,14 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
     provider peak rate — and is `null` when `output` is unknown or
     `modelActiveMs` is unknown or `0`. When `modelActiveIsUpperBound` is true,
     the duration is an upper bound (≤) and this rate is a lower bound (≥).
+  - `metrics.ttft` reports provider-boundary time-to-first-token over the
+    session's persisted model-completion events as `{p50Ms, p90Ms, samples}`.
+    Percentiles use the continuous sample distribution and `samples` counts
+    completion events carrying a numeric `anneal.ttftMs` value. It is `null`
+    when no completion event has a measurement, including every run recorded
+    before TTFT persistence was deployed. A CLI transcript exposing only a
+    completed message (as in the captured Codex output) has no first-chunk
+    measurement; its completion time is not substituted for TTFT.
   - `metrics.termination` carries the Session's own account of how the run
     ended: `reason`, `exitCode` and `signal`.
   - `metrics.vsBaseline` measures the run against the task-level `baseline`

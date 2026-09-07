@@ -129,20 +129,28 @@ const badgeCopy = (badge: CardBadge, t: Translate): { tone: PillTone; label: str
         label: t("tasks.badge.retries", { n: badge.n, max: badge.max }),
         title: t("tasks.badge.retries.title", { n: badge.n, max: badge.max }),
       };
+    case "claim-refusal": {
+      const label = badge.executorVersion === null
+        ? t("tasks.badge.claimRefusal.unversioned", { apiVersion: badge.apiVersion })
+        : t("tasks.badge.claimRefusal", {
+            executorVersion: badge.executorVersion,
+            apiVersion: badge.apiVersion,
+          });
+      return {
+        tone: "red",
+        label,
+        title: t("tasks.badge.claimRefusal.title"),
+      };
+    }
   }
 };
 
-const CardTime = memo(({ task }: { task: BoardTask }): ReactNode => {
-  // Locale changes must also reach this memoized leaf.
-  useT();
-  const now = useLiveNow(task.latestRun);
-  return cardTime(task, now);
-});
-
-const CardBadges = memo(({ task }: { task: BoardTask }): ReactNode => {
+/** Render one anomaly row for any board card. Task cards pass the complete
+ *  derived list; aggregate cards pass the refusal attached to their visible
+ *  Run. Keeping this renderer shared keeps the red refusal badge identical on
+ *  both card kinds and on the mobile list that reuses them. */
+export const CardBadgeRow = memo(({ badges }: { badges: readonly CardBadge[] }): ReactNode => {
   const t = useT();
-  const now = useLiveNow(task.latestRun);
-  const badges = cardBadges(task, now);
   if (badges.length === 0) return null;
   return <span data-card-badges="" className="contents">
     {badges.map((badge) => {
@@ -152,6 +160,19 @@ const CardBadges = memo(({ task }: { task: BoardTask }): ReactNode => {
       </span>;
     })}
   </span>;
+});
+
+const CardTime = memo(({ task }: { task: BoardTask }): ReactNode => {
+  // Locale changes must also reach this memoized leaf.
+  useT();
+  const now = useLiveNow(task.latestRun);
+  return cardTime(task, now);
+});
+
+const CardBadges = memo(({ task }: { task: BoardTask }): ReactNode => {
+  const now = useLiveNow(task.latestRun);
+  const badges = cardBadges(task, now);
+  return <CardBadgeRow badges={badges} />;
 });
 
 const menu = (task: BoardTask, actions: CardActions, t: Translate): RowMenuEntry[] => {
