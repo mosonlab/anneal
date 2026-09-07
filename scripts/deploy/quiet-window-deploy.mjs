@@ -69,6 +69,18 @@ import {
 } from "./quiet-window-deadlines.mjs";
 import { createDeploymentLedger } from "./deployment-ledger.mjs";
 import {
+  autoDeployMinIntervalMs,
+  automaticCadenceDecision,
+  readLastSuccessfulAutomaticDeploy,
+  recordSuccessfulAutomaticDeploy,
+} from "./auto-deploy-cadence.mjs";
+export {
+  autoDeployMinIntervalMs,
+  automaticCadenceDecision,
+  readLastSuccessfulAutomaticDeploy,
+  recordSuccessfulAutomaticDeploy,
+};
+import {
   pruneReleaseDirectories,
 } from "./release-directory.mjs";
 import { findReleaseArtifact, verifyReleaseArtifact } from "./release-artifact.mjs";
@@ -266,7 +278,9 @@ export const canonicalSyncNoticeRecord = (record, refusedLines) => ({
 });
 
 export const autoDeployNoticeBody = ({ outcome, reason, detail = "", from, to }) =>
-  `[auto-deploy] ${outcome}: ${from} -> ${to}; reason=${reason}${detail ? `; detail=${detail}` : ""}`;
+  outcome === "info" && reason === QUIET_WINDOW_WAIT_EXCEEDED_REASON
+    ? "自动部署等待超时，已开始排空派发"
+    : `[auto-deploy] ${outcome}: ${from} -> ${to}; reason=${reason}${detail ? `; detail=${detail}` : ""}`;
 
 const parseJson = (contents, reason) => {
   try {
@@ -496,6 +510,73 @@ const blockingRuns = async (runnerIds = null) => {
   }
 };
 
+/** Decide whether a moved target is admitted by the automatic-deploy floor.
+ * This runs after the process lock and before an attempt or artifact exists,
+ * so a coalesced tick cannot enter the quiet-window wait or open a drain. */
+export const automaticCadenceForTick = async ({
+  targetCommit,
+  deployRole = resolveDeployRoleOrFail(),
+  environment = process.env,
+  stateDir = STATE_DIR,
+  now = () => new Date(),
+  readDeployed = readDeployedRevision,
+  readBlockingRuns = null,
+  readLastSuccessful = readLastSuccessfulAutomaticDeploy,
+  minIntervalMs = autoDeployMinIntervalMs(environment),
+} = {}) => {
+  const deployedCommit = readDeployed();
+  if (targetCommit === deployedCommit) {
+    return automaticCadenceDecision({
+      deployedCommit,
+      targetCommit,
+      blockingRuns: [],
+      lastSuccessfulAt: null,
+      now,
+      minIntervalMs,
+    });
+  }
+  const runnerIds = deployRole === "runner"
+    ? runnerIdsFromInventory(resolveServiceInventory(environment, deployRole).entries)
+    : null;
+  const runs = await (readBlockingRuns ?? (() => blockingRuns(runnerIds)))();
+  const lastSuccessfulAt = readLastSuccessful({ stateDir });
+  const decision = automaticCadenceDecision({
+    deployedCommit,
+    targetCommit,
+    blockingRuns: runs,
+    lastSuccessfulAt,
+    now,
+    minIntervalMs,
+  });
+  // A quiet window can be admitted early, but a blocker that races the first
+  // all-green sample must not enter the wait/drain path until the floor has
+  // elapsed. Re-evaluate against wall time when the barrier acquisition race
+  // actually occurs; a long barrier contention can naturally reach eligibility.
+  const nextEligibleMs = decision.nextEligibleAt === undefined
+    ? null
+    : Date.parse(decision.nextEligibleAt);
+  return {
+    ...decision,
+    allowWaiting: () => decision.allowWait
+      || nextEligibleMs === null
+      || now().getTime() >= nextEligibleMs,
+  };
+};
+
+/** The startup callback receives a bare target from decideInvocation. Keep the
+ * object-shaped evaluator behind this adapter so the production path cannot
+ * accidentally pass a commit string as its options object. Runner hosts read
+ * and validate the shared setting while retaining their existing target flow;
+ * only the control-plane automatic tick consults the cadence state. */
+const evaluateAutomaticCadence = async (targetCommit) => {
+  const deployRole = resolveDeployRoleOrFail();
+  if (deployRole === "runner") {
+    autoDeployMinIntervalMs(process.env);
+    return Object.freeze({ moved: true, intervalElapsed: true, allowWait: true, allowWaiting: () => true });
+  }
+  return automaticCadenceForTick({ targetCommit, deployRole });
+};
+
 /** The platform-wide dispatch drain writer this deploy uses. Both statements
  * run on the same connection as the quiet-window query, so a drain is only
  * ever attempted by a deploy that has already proved it can read Runs. */
@@ -715,6 +796,7 @@ const waitForQuiet = ({
   waitBudgetMs = DEFAULT_QUIET_WINDOW_WAIT_BUDGET_MS,
   acquireBarrier = acquireDeployBarrier,
   wait = () => sleep(POLL_MS),
+  allowWaiting = () => true,
 }) => waitForQuietWithWatchdog({
   blockingRuns: blockingRunsForHost,
   acquireBarrier,
@@ -722,6 +804,7 @@ const waitForQuiet = ({
   wait,
   waitBudgetMs,
   onWaitBudgetExceeded,
+  allowWaiting,
   onBlockingRuns: (runs, progress) => log(quietWindowHoldLine(progress, `statuses=${[...new Set(runs.map((run) => run.status))].join(",")}`)),
   onBarrierContended: (progress) => log(quietWindowHoldLine(progress, "deploy-barrier-contended")),
   onRacedBlockingRuns: (runs, progress) => log(quietWindowHoldLine(progress, "acquisition-raced")),
@@ -770,7 +853,7 @@ export const createQuietWindowWaitReporter = ({
     }
     try {
       await notifyImpl({
-        outcome: "failure",
+        outcome: "info",
         reason: QUIET_WINDOW_WAIT_EXCEEDED_REASON,
         detail,
         from: revisions.from,
@@ -834,6 +917,11 @@ const persistAndNotifyFailure = async (failure, from, to) => {
 export const createDeployStartup = ({
   escalationPath = ESCALATION_PATH,
   retryNotification = retryEscalationNotification,
+  evaluateCadence = evaluateAutomaticCadence,
+  recordAutomaticSuccess = ({ targetCommit }) => recordSuccessfulAutomaticDeploy({
+    stateDir: STATE_DIR,
+    targetCommit,
+  }),
 } = {}) => ({
   pollIntervalMs: POLL_MS,
   log,
@@ -850,6 +938,8 @@ export const createDeployStartup = ({
     retryCap: ESCALATION_RETRY_CAP,
   }),
   readRemoteMain: targetRevision,
+  evaluateCadence,
+  recordAutomaticSuccess,
   persistFailure: (failure) => persistAndNotifyFailure(failure, "unknown", "unknown"),
 });
 
@@ -1002,6 +1092,8 @@ export const createDeployHost = ({
   runCommand = runDeployCommand,
   readMigrationTail = migrationTail,
   verifyRecoveredServices = verifyStableServicePaths,
+  readTargetRevision = null,
+  log: logImpl = log,
   environment = process.env,
   deployRole = resolveDeployRoleOrFail(environment),
   fetchImpl = fetch,
@@ -1023,6 +1115,7 @@ export const createDeployHost = ({
   drainWriter = dispatchDrainWriter,
   drainDeadlineMs = dispatchDrainDeadlineMs(environment),
   deployHostname = hostname(),
+  allowWait = () => true,
   // The pre-window allowance to reach the first all-green sample is unchanged;
   // the window is added on top of it rather than taken out of it.
   serviceVerificationTimeoutMs = observationWindowMs + 30_000,
@@ -1084,6 +1177,43 @@ export const createDeployHost = ({
   };
   let canonicalSyncRefusals = [];
   const notifyDeployOutcome = async (record) => notifyImpl(canonicalSyncNoticeRecord(record, canonicalSyncRefusals));
+  const prepareReleaseArtifact = async (attempt) => {
+    const built = await hostChecked(
+      "release-artifact-build-failed",
+      loadBinaries().node,
+      [join(SCRIPT_DIR, "build-release-artifact.mjs"), attempt.targetCommit],
+      {
+        capture: true,
+        env: prismaChildEnvironment(environment),
+        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.releaseArtifactBuild,
+        timeoutReason: "release-artifact-build-timeout",
+      },
+    );
+    const hasReceipt = built.stdout.trim().split("\n").some((line) => line.startsWith("RELEASE-ARTIFACT "));
+    const receipt = parseReleaseArtifactReceipt(built.stdout);
+    if (!receipt) fail("release-artifact-build-failed", hasReceipt ? "builder-receipt-invalid" : "builder-receipt-missing");
+    return {
+      preparedRelease: verifyReleaseArtifact({
+        deployRoot: attempt.deployRoot,
+        revision: attempt.targetCommit,
+        releaseName: receipt.releaseName,
+      }),
+    };
+  };
+  const prepareRefreshedArtifact = async (attempt) => {
+    const { preparedRelease } = await prepareReleaseArtifact(attempt);
+    const verifiedRelease = verifyReleaseArtifact({
+      deployRoot: attempt.deployRoot,
+      revision: attempt.targetCommit,
+      releaseName: preparedRelease.releaseName,
+    });
+    attempt.establish({ preparedRelease, verifiedRelease });
+    const ledger = attempt.fact("ledger");
+    if (ledger) {
+      await ledger.record("ARTIFACT_PREPARED", attempt.ledgerMetadata());
+      await ledger.record("ARTIFACT_VERIFIED", attempt.ledgerMetadata());
+    }
+  };
   return createProductionHost({
     selfClearEscalation: async (attempt) => {
       const pending = attempt.fact("retryEscalation");
@@ -1139,28 +1269,7 @@ export const createDeployHost = ({
         targetCommit: attempt.targetCommit,
       }),
     }),
-    prepareReleaseArtifact: async (attempt) => {
-      const built = await hostChecked(
-        "release-artifact-build-failed",
-        loadBinaries().node,
-        [join(SCRIPT_DIR, "build-release-artifact.mjs"), attempt.targetCommit],
-        {
-          capture: true,
-          env: prismaChildEnvironment(environment),
-          timeoutMs: DEPLOY_STEP_TIMEOUT_MS.releaseArtifactBuild,
-          timeoutReason: "release-artifact-build-timeout",
-        },
-      );
-      const hasReceipt = built.stdout.trim().split("\n").some((line) => line.startsWith("RELEASE-ARTIFACT "));
-      const receipt = parseReleaseArtifactReceipt(built.stdout);
-      if (!receipt) fail("release-artifact-build-failed", hasReceipt ? "builder-receipt-invalid" : "builder-receipt-missing");
-      const preparedRelease = verifyReleaseArtifact({
-        deployRoot: attempt.deployRoot,
-        revision: attempt.targetCommit,
-        releaseName: receipt.releaseName,
-      });
-      return { preparedRelease };
-    },
+    prepareReleaseArtifact,
     verifyArtifact: async (attempt) => {
       const preparedRelease = attempt.requireFact("preparedRelease");
       return {
@@ -1215,6 +1324,9 @@ export const createDeployHost = ({
         waitBudgetMs,
         acquireBarrier,
         wait: pollWait,
+        allowWaiting: (context) => typeof allowWait === "function"
+          ? allowWait(context)
+          : allowWait,
         startWatchdog: () => createWatchdog({
           timeoutMs: barrierTimeoutMs,
           escalationPath: ESCALATION_PATH,
@@ -1242,9 +1354,28 @@ export const createDeployHost = ({
           },
         }),
       }).finally(() => { waiting = false; });
+      if (held.skip) {
+        logImpl(`NOOP coalescing quiet-window-${held.skip}`);
+        return held;
+      }
       const { barrier, watchdog, quietWindowWait } = held;
+      // Register both held resources before rebuilding a target that advanced
+      // during the quiet-window race. A build or verification error therefore
+      // follows the ordinary attempt release path and cannot strand the
+      // advisory lock or its watchdog.
+      attempt.establish({ resources: [barrier, watchdog] });
+      if (deployRole === "control-plane" && readTargetRevision !== null) {
+        const refreshedTarget = await readTargetRevision();
+        if (refreshedTarget !== attempt.targetCommit) {
+          const previousTarget = attempt.targetCommit;
+          attempt.retarget(refreshedTarget);
+          attempt.establish({ revisions: { ...revisions, to: refreshedTarget }, preparedRelease: undefined, verifiedRelease: undefined });
+          logImpl(`target-advanced from=${previousTarget} to=${refreshedTarget}`);
+          await prepareRefreshedArtifact(attempt);
+        }
+      }
       log(`PASS quiet-window deploy-barrier-held blockers=0 elapsed=${quietWindowWait.waitSeconds}s polls=${quietWindowWait.polls}`);
-      return { barrier, quietWindowWait, resources: [barrier, watchdog] };
+      return { barrier, quietWindowWait };
     },
     prepareWorkspace: async (attempt) => {
       const release = attempt.requireFact("verifiedRelease");
@@ -1513,7 +1644,8 @@ let deployMode = null;
 
 const main = async () => {
   deployMode = parseDeployArguments(process.argv.slice(2));
-  const invocation = await decideInvocation(createDeployStartup(), deployMode);
+  const startup = createDeployStartup();
+  const invocation = await decideInvocation(startup, deployMode);
   if (invocation.exitCode !== undefined) return invocation.exitCode;
   if (invocation.mode === "prune-history") {
     try {
@@ -1523,26 +1655,44 @@ const main = async () => {
     }
     return 0;
   }
-  const deployRole = resolveDeployRoleOrFail();
-  const attempt = openDeploymentAttempt({
-    deployRoot: REPOSITORY_ROOT,
-    targetCommit: invocation.targetCommit,
-    transactionId: randomUUID(),
-  });
-  attempt.establish({
-    retryEscalation: invocation.retryEscalation,
-    supersededEscalation: invocation.supersededEscalation ?? null,
-    ...(invocation.lock === null ? {} : { resources: [invocation.lock] }),
-  });
-  const host = createDeployHost({ deployRole });
-  if (invocation.mode === "dry-run") {
-    const decision = await dryRunDecision(host, attempt, deployRole);
-    for (const line of decision.lines) log(line);
-    return !decision.artifact.ok || !decision.services.ok || !decision.backup.ok ? 1 : 0;
+  try {
+    const deployRole = resolveDeployRoleOrFail();
+    const attempt = openDeploymentAttempt({
+      deployRoot: REPOSITORY_ROOT,
+      targetCommit: invocation.targetCommit,
+      transactionId: randomUUID(),
+    });
+    attempt.establish({
+      retryEscalation: invocation.retryEscalation,
+      supersededEscalation: invocation.supersededEscalation ?? null,
+    });
+    const host = createDeployHost({
+      deployRole,
+      // Runner-role target resolution remains its existing API/source-remote
+      // path. Only a control-plane attempt rereads origin/main under the held
+      // deploy barrier.
+      readTargetRevision: deployRole === "control-plane" ? startup.readRemoteMain : null,
+      allowWait: invocation.cadence?.allowWaiting ?? invocation.cadence?.allowWait ?? true,
+    });
+    if (invocation.mode === "dry-run") {
+      const decision = await dryRunDecision(host, attempt, deployRole);
+      for (const line of decision.lines) log(line);
+      return !decision.artifact.ok || !decision.services.ok || !decision.backup.ok ? 1 : 0;
+    }
+    const result = await executeUpgrade(host, attempt, deployRole);
+    if (result.ok && !result.skipped) {
+      // The marker is deliberately after executeUpgrade, whose success includes
+      // notification and resource release. A ledger SUCCEEDED event alone is
+      // not enough to earn the next automatic interval.
+      if (deployRole === "control-plane") {
+        await startup.recordAutomaticSuccess({ targetCommit: attempt.targetCommit });
+      }
+      pruneHistory();
+    }
+    return result.ok ? 0 : 1;
+  } finally {
+    await invocation.lock?.release();
   }
-  const result = await executeUpgrade(host, attempt, deployRole);
-  if (result.ok && !result.skipped) pruneHistory();
-  return result.ok ? 0 : 1;
 };
 
 const entrypoint = (() => {

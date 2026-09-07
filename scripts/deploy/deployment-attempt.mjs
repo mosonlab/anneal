@@ -4,15 +4,33 @@ export class DeploymentAttempt {
   #facts = new Map();
   #resources = [];
   #released = false;
+  #targetCommit;
 
   constructor({ deployRoot, targetCommit, transactionId }) {
     if (typeof deployRoot !== "string" || deployRoot === "") throw new TypeError("deployment-attempt-deploy-root-required");
     if (typeof targetCommit !== "string" || targetCommit === "") throw new TypeError("deployment-attempt-target-commit-required");
     if (typeof transactionId !== "string" || transactionId === "") throw new TypeError("deployment-attempt-transaction-id-required");
     this.deployRoot = deployRoot;
-    this.targetCommit = targetCommit;
+    this.#targetCommit = targetCommit;
     this.transactionId = transactionId;
     Object.freeze(this);
+  }
+
+  get targetCommit() {
+    return this.#targetCommit;
+  }
+
+  /** Change the release target while the deploy barrier is held. The target is
+   * private state rather than a writable public property so every phase sees
+   * the same refreshed commit and callers cannot accidentally retarget after
+   * the attempt has been released. */
+  retarget(targetCommit) {
+    if (this.#released) throw new TypeError("deployment-attempt-already-released");
+    if (typeof targetCommit !== "string" || targetCommit === "") {
+      throw new TypeError("deployment-attempt-target-commit-required");
+    }
+    this.#targetCommit = targetCommit;
+    return this.#targetCommit;
   }
 
   fact(name) {
