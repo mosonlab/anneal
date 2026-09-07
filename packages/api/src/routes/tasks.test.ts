@@ -296,11 +296,23 @@ const taskDetailDatabase = (
     assert.match(query.sql, /jsonb_build_object/u);
     assert.doesNotMatch(query.sql, /SELECT[\s\S]*?,\s*"payload"\s*(?:,|FROM)/u);
     const keys = [...query.sql.matchAll(/'([^']+)',/gu)].map((match) => match[1]!);
-    assert.deepEqual(keys, ["type", "name", "toolName", "is_error", "isError", "exit_code", "error"]);
-    return (events.rows ?? []).map((row) => ({
-      ...row,
-      payload: Object.fromEntries(Object.entries(row.payload as Record<string, unknown>).filter(([key]) => keys.includes(key))),
-    }));
+    assert.deepEqual(keys, ["type", "name", "toolName", "is_error", "isError", "exit_code", "error", "anneal", "ttftMs", "completion"]);
+    return (events.rows ?? []).map((row) => {
+      const payload = row.payload as Record<string, unknown>;
+      const item = payload.item as Record<string, unknown> | undefined;
+      const message = payload.message as Record<string, unknown> | undefined;
+      const completion = row.type === "MODEL_DELTA" && (
+        payload.type === "assistant"
+        || (payload.type === "item.completed" && item?.type === "agent_message")
+      ) || row.type === "MODEL_COMPLETED" && payload.type === "message_end" && message?.role === "assistant";
+      return {
+        ...row,
+        payload: {
+          ...Object.fromEntries(Object.entries(payload).filter(([key]) => keys.includes(key))),
+          completion,
+        },
+      };
+    });
   },
   sessionEvent: {
     findMany: async (args: SessionEventQuery) => {
@@ -1302,6 +1314,18 @@ const DIAGNOSTICS_TOOL_EVENTS = [
   toolEventRow("session-1", 5, "TOOL_COMPLETED", "toolu_9", { type: "tool_result", tool_use_id: "toolu_9", is_error: true }),
 ];
 
+const TTFT_EVENTS = [
+  toolEventRow("session-2", 10, "MODEL_DELTA", "", { type: "assistant", anneal: { ttftMs: 10 } }),
+  // A first item event can be an observed chunk, but only the completed agent
+  // message carries the turn's persisted measurement.
+  toolEventRow("session-2", 11, "MODEL_DELTA", "", { type: "item.started", item: { type: "agent_message" }, anneal: { ttftMs: 999 } }),
+  toolEventRow("session-2", 12, "MODEL_DELTA", "", { type: "item.completed", item: { type: "agent_message" }, anneal: { ttftMs: 20 } }),
+  // PI repeats assistant messages on turn_end; it is not the completion row
+  // that owns the persisted measurement.
+  toolEventRow("session-2", 13, "MODEL_COMPLETED", "", { type: "turn_end", message: { role: "assistant" }, anneal: { ttftMs: 888 } }),
+  toolEventRow("session-2", 14, "MODEL_COMPLETED", "", { type: "message_end", message: { role: "assistant" }, anneal: { ttftMs: 30 } }),
+];
+
 const diagnosticsTask = (): Record<string, unknown> => taskRow({
   id: "task-1",
   projectId: "project-1",
@@ -1490,7 +1514,7 @@ test("a full list with no template step anywhere asks for no baseline at all", a
   });
 });
 
-test("task detail attaches read-time diagnostics to every run from one tool-event query", async () => {
+test("task detail attaches read-time diagnostics to every run from one metric-event query", async () => {
   await withTokens(async () => {
     const queries: SessionEventQuery[] = [];
     const database = taskDetailDatabase(diagnosticsTask(), { rows: DIAGNOSTICS_TOOL_EVENTS, queries });
@@ -1505,7 +1529,7 @@ test("task detail attaches read-time diagnostics to every run from one tool-even
     const toolQueries = queries.filter((query) => query.sql !== undefined);
     assert.equal(toolQueries.length, 1);
     assert.match(toolQueries[0]!.sql!, /FROM "SessionEvent"/u);
-    assert.deepEqual(toolQueries[0]!.values, ["session-2", "session-1", "TOOL_STARTED", "TOOL_COMPLETED"]);
+    assert.deepEqual(toolQueries[0]!.values, ["session-2", "session-1", "TOOL_STARTED", "TOOL_COMPLETED", "MODEL_DELTA", "MODEL_COMPLETED"]);
     assert.doesNotMatch(JSON.stringify(body), /large-tool-output/u);
 
     assert.equal(body.runs.length, 2);
@@ -1526,5 +1550,28 @@ test("task detail attaches read-time diagnostics to every run from one tool-even
     const oldest = body.runs.find((run) => run.runNumber === 1)!;
     assert.equal(oldest.metrics.tools.calls, 1);
     assert.equal(oldest.metrics.tools.failed, 1);
+    assert.equal(newest.metrics.ttft, null);
+  });
+});
+
+test("task detail computes TTFT from completion rows and excludes non-completions", async () => {
+  await withTokens(async () => {
+    const queries: SessionEventQuery[] = [];
+    const database = taskDetailDatabase(diagnosticsTask(), { rows: TTFT_EVENTS, queries });
+    const response = await createApp(database).request("/tasks/task-1", {
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { runs: Array<{ runNumber: number; metrics: { ttft: unknown } }> };
+    const newest = body.runs.find((run) => run.runNumber === 2)!;
+    assert.deepEqual(newest.metrics.ttft, { p50Ms: 20, p90Ms: 28, samples: 3 });
+    assert.equal(body.runs.find((run) => run.runNumber === 1)!.metrics.ttft, null);
+
+    const metricQuery = queries.find((query) => query.sql !== undefined && /FROM "SessionEvent"/u.test(query.sql));
+    assert.ok(metricQuery);
+    assert.deepEqual(metricQuery.values, ["session-2", "session-1", "TOOL_STARTED", "TOOL_COMPLETED", "MODEL_DELTA", "MODEL_COMPLETED"]);
+    assert.match(metricQuery.sql!, /'anneal'/u);
+    assert.match(metricQuery.sql!, /'completion'/u);
+    assert.doesNotMatch(metricQuery.sql!, /PROVIDER_RAW/u);
   });
 });

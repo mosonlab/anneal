@@ -4,7 +4,13 @@ import test from "node:test";
 import type { RunnerKind, RunStatus } from "@anneal/db";
 import type { RunBaseline } from "@anneal/db/board-contract";
 
-import { runMetrics, runPhase, type RunMetricsSession, type RunMetricsToolEvent } from "./run-metrics.js";
+import {
+  runMetrics,
+  runPhase,
+  type RunMetricsSession,
+  type RunMetricsToolEvent,
+  type RunMetricsTtftEvent,
+} from "./run-metrics.js";
 
 const READY = new Date("2026-09-01T10:00:00.000Z");
 const PROVISIONED = new Date("2026-09-01T10:00:05.000Z");
@@ -41,9 +47,15 @@ const started = (toolCallId: string | null, offsetMs: number, payload: unknown):
 const completed = (toolCallId: string | null, offsetMs: number, payload: unknown): RunMetricsToolEvent =>
   ({ type: "TOOL_COMPLETED", at: at(offsetMs), toolCallId, payload });
 
+const ttftEvent = (ttftMs: unknown): RunMetricsTtftEvent => ({
+  type: "MODEL_COMPLETED",
+  payload: { anneal: { ttftMs } },
+});
+
 const metricsOf = (input: {
   session?: RunMetricsSession | null;
   toolEvents?: readonly RunMetricsToolEvent[];
+  ttftEvents?: readonly RunMetricsTtftEvent[];
   readyAt?: Date;
   runStatus?: RunStatus;
   runEndedAt?: Date | null;
@@ -60,6 +72,7 @@ const metricsOf = (input: {
   },
   session: input.session === undefined ? session() : input.session,
   toolEvents: input.toolEvents ?? [],
+  ttftEvents: input.ttftEvents ?? [],
   now: input.now ?? new Date(ENDED.getTime() + 60_000),
   baseline: input.baseline ?? null,
 });
@@ -410,6 +423,20 @@ test("overlapping tool calls consume their union of wall time", () => {
 
 test("the public tools shape contains only the specified counters and breakdown", () => {
   assert.deepEqual(Object.keys(metricsOf().tools).sort(), ["byName", "calls", "failed", "totalToolMs", "unclassified"]);
+});
+
+/* --------------------------------------------------------------- TTFT */
+
+test("TTFT reports continuous p50 and p90 over persisted completion measurements", () => {
+  const metrics = metricsOf({ ttftEvents: [ttftEvent(10), ttftEvent(20), ttftEvent(30), ttftEvent(40)] });
+  assert.deepEqual(metrics.ttft, { p50Ms: 25, p90Ms: 37, samples: 4 });
+});
+
+test("TTFT ignores malformed values and is null when no completion was measured", () => {
+  assert.deepEqual(metricsOf({ ttftEvents: [ttftEvent(10), ttftEvent("20"), ttftEvent(-1), ttftEvent(Number.NaN)] }).ttft, {
+    p50Ms: 10, p90Ms: 10, samples: 1,
+  });
+  assert.equal(metricsOf().ttft, null);
 });
 
 /* ----------------------------------------------------------- baseline */
