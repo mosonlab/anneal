@@ -1799,6 +1799,14 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
     provider peak rate — and is `null` when `output` is unknown or
     `modelActiveMs` is unknown or `0`. When `modelActiveIsUpperBound` is true,
     the duration is an upper bound (≤) and this rate is a lower bound (≥).
+  - `metrics.ttft` reports provider-boundary time-to-first-token over the
+    session's persisted model-completion events as `{p50Ms, p90Ms, samples}`.
+    Percentiles use the continuous sample distribution and `samples` counts
+    completion events carrying a numeric `anneal.ttftMs` value. It is `null`
+    when no completion event has a measurement, including every run recorded
+    before TTFT persistence was deployed. A CLI transcript exposing only a
+    completed message (as in the captured Codex output) has no first-chunk
+    measurement; its completion time is not substituted for TTFT.
   - `metrics.termination` carries the Session's own account of how the run
     ended: `reason`, `exitCode` and `signal`.
   - `metrics.vsBaseline` measures the run against the task-level `baseline`
@@ -2796,6 +2804,36 @@ unset no executor is named, the check is skipped, and readiness authorizes as
 before. An executor that is offline stops new authorizations by itself; drain
 by holding chains, not by stopping the executor.
 
+### Readiness base-drift requeues
+
+When a Regression PASS was valid for its exact `(headSha, baseHeadSha)` and the
+control plane's remote read finds that the default branch moved before
+authorization, readiness returns the candidate to Regression and grants the
+replacement Run. This readiness base-drift requeue does not increment
+`leaseLossRefunds`: the agent did not lose its Run lease, and the requeue is
+bounded independently. This exemption applies only to `base-advanced` and
+`train-base-stale`. Readiness requeues for `stale-head` or `ancestry-refused`
+still spend the shared three-refund cap, as do lease-loss, late-salvage, and
+other ordinary merge-tail replacement births; completed-repair grants remain
+the existing separate exemption. Provider-transport and Regression target-fetch
+failures remain on `EXTERNAL_FAILURE_REFUND_CAP`.
+
+Outside a base-drift recovery, the readiness task has a fixed ceiling of three
+requeues, `READINESS_BASE_DRIFT_REQUEUE_LIMIT`. This is a platform constant,
+not an environment setting. When the ceiling is reached, readiness makes no
+further Run birth, parks the Regression and readiness tasks in `REVIEW`, and
+records the named stop reason
+`readiness-base-drift-requeue-limit: <count> requeues reached ceiling <limit>`.
+Only base-drift requeues outside a recovery spend this standalone ceiling;
+other requeue classes and requeues belonging to past recovery attempts do not.
+
+Inside a base-drift recovery, the requeues use the recovery aggregate's
+existing `MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES` ceiling of two instead of the
+per-readiness-task ceiling. Once it is reached, readiness parks the recovery
+tail (including its integrator) and records
+`base-drift-recovery-requeue-limit: <count> requeues reached ceiling <limit>`;
+the aggregate is `BLOCKED_DOWNSTREAM` and the tail tasks are in `REVIEW`.
+
 ## Inbox
 
 ### GET `/inbox/messages`
@@ -3234,15 +3272,24 @@ by calling `POST /tasks/:taskId/retry`; the new Run does not require increasing
 `maxSessionsPerTask`. Mechanical Runs without that rejection record and agent
 Runs continue through the normal lost-Run retry path.
 
+#### Lease-loss retry refused
+
 That retry path is bounded and spaced. Each lost lease refunds the attempt it
 cost, and each refund raises the ceiling it is measured against, so the run
 budget alone can never end a pure lease-loss sequence. A task may therefore have
 at most three attempts refunded this way — counted on the Run as
 `leaseLossRefunds`, projected on the board card of the same name, and shared
-with the other platform-caused refunds (late-salvage claim invalidation, and the
-merge-tail requeue). Each replacement is queued with the completion path's
-exponential delay derived from that count (30s, then 60s, then 120s) rather than
-immediately, so a runner host that is down is given time to come back.
+with the other platform-caused refunds: a late-salvage claim invalidation and
+ordinary merge-tail replacement births, excluding `repairCompleted` completed-
+repair grants. A readiness base-drift requeue is exempt only for the
+`base-advanced` and `train-base-stale` conditions, when a Regression PASS was
+valid at its exact base; see [Readiness base-drift requeues](#readiness-base-drift-requeues).
+Provider-transport and Regression target-fetch failures use the separate
+`EXTERNAL_FAILURE_REFUND_CAP` and do not spend `leaseLossRefunds`. Each
+replacement created by this lease-loss path is queued with the completion
+path's exponential delay derived from that count (30s, then 60s, then 120s)
+rather than immediately, so a runner host that is down is given time to come
+back.
 
 At the bound nothing is requeued: the Task moves to `REVIEW` with
 `failureReason` beginning `Lease-loss retry refused: Lease-loss refunds
@@ -3250,14 +3297,19 @@ exhausted`, an Inbox message, and a TaskActivity carrying
 `metadata.refusal = "lease-loss-refunds-exhausted"`. The refused refund is not
 granted, so the Task's recorded budget is what it was before the loss. Recover
 by raising `maxSessionsPerTask` through `PATCH /tasks/:taskId` and calling
-`POST /tasks/:taskId/retry`; an operator retry is not a platform refund, so it
-neither spends one nor resets the count, and a later lease loss on the retried
-Run is refused the same way. A late-salvage claim invalidation at the bound
-behaves the same: the stale claim is still revoked, because its clone base is
-wrong, but nothing replaces it and the Task is parked with the same reason.
+`POST /tasks/:taskId/retry`. When the refused task is a Chain Regression task,
+that operator retry resets its `leaseLossRefunds` to `0` and records a
+TaskActivity naming the reset in the same retry transaction; this is the
+recovery for the documented lease-loss refusal. The retry is not itself a
+platform refund, and a later lease loss on the retried Run is measured against
+the fresh cap. A late-salvage claim invalidation at the bound behaves the same:
+the stale claim is still revoked, because its clone base is wrong, but nothing
+replaces it and the Task is parked with the same reason.
 
-Readiness requeues that exhaust this shared bound also park the Regression and
-readiness Tasks in `REVIEW`, with a TaskActivity on Regression carrying
-`metadata.refusal = "lease-loss-refunds-exhausted"`. A recovery readiness requeue
-also parks its integrator and marks the recovery `BLOCKED_DOWNSTREAM`. The
-refund reason is preserved even when the ordinary run budget is also exhausted.
+Readiness base-drift requeues have their own ceilings and stop reasons; they do
+not park by exhausting this shared lease-loss bound. Ordinary merge-tail births
+still spend `leaseLossRefunds`, except for `repairCompleted` grants and the two
+readiness base-drift conditions in
+[Readiness base-drift requeues](#readiness-base-drift-requeues).
+The refund reason is preserved even when the ordinary run budget is also
+exhausted.

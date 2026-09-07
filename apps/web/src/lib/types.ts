@@ -8,6 +8,7 @@
 
 export type {
   AssigneeType,
+  BoardClaimRefusal,
   BoardCard,
   BoardChainActivationState,
   BoardLatestRun,
@@ -34,6 +35,7 @@ export type {
   RunPhaseMetrics,
   RunStatus,
   RunTerminationMetrics,
+  RunTtftMetrics,
   RunTokenMetrics,
   RunToolMetrics,
   RunToolNameMetrics,
