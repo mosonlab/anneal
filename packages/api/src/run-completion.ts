@@ -714,9 +714,9 @@ export const completeRun = async (
       || (missingOutputReason ? false : failureClass !== null && reported.externalFailure);
     const cappedExternalFailure = outputFailurePolicy.cappedExternalFailure
       || (body.outcome.case === "provider-failure"
-        && body.outcome.envelope.phase === "EXECUTE"
-        && failureClass !== null
-        && isTextMatchedTransientProviderFailure(body.outcome.envelope, failureClass));
+        && failureClass === FailureClass.TRANSIENT_PROVIDER
+        && (body.outcome.envelope.phase !== "EXECUTE"
+          || isTextMatchedTransientProviderFailure(body.outcome.envelope, failureClass)));
     const retryAt = failureClass && retryable ? new Date(now.getTime() + retryDelayMs(run.runNumber, failureClass)) : null;
     // A negative Regression verdict survives a later external failure, including
     // delivery or salvage failure before completion can report a head. Keep the

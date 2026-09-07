@@ -1864,7 +1864,7 @@ const v2Verdict = (outcome: ExternalRegressionOutcome) => JSON.stringify(
 );
 
 /** Complete a Regression Run after its v2 verdict is already durable, while
- * the runner reports a non-retryable git delivery failure without a head. */
+ * the runner reports a plumbing-phase git delivery failure without a head. */
 const completeRegressionAfterExternalGitFailure = async (
   seeded: Awaited<ReturnType<typeof seedRegression>>,
   outcome: ExternalRegressionOutcome,
@@ -1950,12 +1950,12 @@ const completeRegressionAfterExternalGitFailure = async (
   };
 };
 
-test("a task-failed git delivery preserves review-fail and queues repair at the persisted head", async () => {
+test("a transient git delivery failure preserves review-fail and queues repair at the persisted head", async () => {
   const seeded = await seedRegression();
   const settled = await completeRegressionAfterExternalGitFailure(seeded, "review-fail");
 
   assert.equal(settled.run.status, "FAILED");
-  assert.equal(settled.run.failureClass, "TASK_FAILED");
+  assert.equal(settled.run.failureClass, "TRANSIENT_PROVIDER");
   assert.equal(settled.run.failureReason, "git delivery failed");
   assert.equal(settled.run.headSha, HEAD);
   assert.equal(settled.task.status, TaskStatus.REVIEW);
@@ -1982,12 +1982,12 @@ test("a task-failed git delivery preserves review-fail and queues repair at the 
   assert.equal((await db.run.findFirstOrThrow({ where: { taskId: repair.id, runNumber: 1 } })).status, "QUEUED");
 });
 
-test("a task-failed git delivery preserves refresh-conflict and queues its resolver at the persisted head", async () => {
+test("a transient git delivery failure preserves refresh-conflict and queues its resolver at the persisted head", async () => {
   const seeded = await seedRegression();
   const settled = await completeRegressionAfterExternalGitFailure(seeded, "refresh-conflict");
 
   assert.equal(settled.run.status, "FAILED");
-  assert.equal(settled.run.failureClass, "TASK_FAILED");
+  assert.equal(settled.run.failureClass, "TRANSIENT_PROVIDER");
   assert.equal(settled.run.headSha, HEAD);
   assert.equal(settled.task.status, TaskStatus.REVIEW);
   assert.equal(settled.completion.retryCreated, false);
@@ -2045,11 +2045,11 @@ test("a persisted PASS does not advance after an external git failure", async ()
   const settled = await completeRegressionAfterExternalGitFailure(seeded, "pass", { completionHead: HEAD });
 
   assert.equal(settled.run.status, "FAILED");
-  assert.equal(settled.run.failureClass, "TASK_FAILED");
+  assert.equal(settled.run.failureClass, "TRANSIENT_PROVIDER");
   assert.equal(settled.run.headSha, HEAD);
-  assert.equal(settled.task.status, TaskStatus.REVIEW);
-  assert.equal(settled.completion.retryCreated, false);
-  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1);
+  assert.equal(settled.completion.retryCreated, true);
+  assert.equal(settled.task.status, TaskStatus.DOING);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
   assert.equal(await db.task.count({ where: {
     projectId: seeded.project.id,
     name: { startsWith: "Autonomous merge tail:" },
@@ -2063,9 +2063,11 @@ test("a persisted gate-fail keeps ordinary external git failure settlement", asy
   const settled = await completeRegressionAfterExternalGitFailure(seeded, "gate-fail");
 
   assert.equal(settled.run.status, "FAILED");
-  assert.equal(settled.run.failureClass, "TASK_FAILED");
+  assert.equal(settled.run.failureClass, "TRANSIENT_PROVIDER");
   assert.equal(settled.run.headSha, null);
-  assert.equal(settled.task.status, TaskStatus.REVIEW);
+  assert.equal(settled.task.status, TaskStatus.DOING);
+  assert.equal(settled.completion.retryCreated, true);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 2);
   assert.equal(await db.task.count({ where: {
     projectId: seeded.project.id,
     name: { startsWith: "Autonomous merge tail:" },

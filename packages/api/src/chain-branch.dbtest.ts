@@ -529,12 +529,11 @@ test("T15: two repos in one chain each need their own published branch", async (
 
 test("T16: a pull-request failure after a successful push still counts as publication", async () => {
   // delivery.ts pushes first; any later `gh` error is reported as
-  // pushStatus FAILED with the ref already on the remote, and the runner then
-  // marks the whole run FAILED and non-retryable. Adding `status` or
-  // `pushStatus` back into the evidence predicate re-breaks this: step ② would
-  // base on the default branch, recreate the already-published shared name
-  // locally, and have its push rejected non-fast-forward — wedged for good,
-  // because no retry clears it.
+  // pushStatus FAILED with the ref already on the remote. The API may queue a
+  // plumbing retry, but that retry still targets the same published branch.
+  // Adding `status` or `pushStatus` back into the evidence predicate re-breaks
+  // this: step ② would base on the default branch, recreate the already-
+  // published shared name locally, and have its push rejected non-fast-forward.
   const seed = await seedProject("t16");
   const chainId = `chain-${Date.now()}`;
   const shared = expectedBranch(seed.project.id, chainId);
