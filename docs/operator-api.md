@@ -240,6 +240,14 @@ curl -X DELETE "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERA
   metadata cannot classify priced spend. Unknown cache splits are counted and
   excluded from cache metrics; unpriced chain runs never receive a fabricated
   cost.
+- For Claude, `FINAL_OUTPUT` events with the same provider `session_id` are
+  session-cumulative: `total_cost_usd` and `modelUsage` are the running totals,
+  so the latest event supplies that provider session's cost and model tokens.
+  Events with different `session_id` values are separate sessions and their
+  latest totals are added. The top-level `usage` block remains per invocation.
+  Session usage recomputation from stored events applies the same rule and is
+  idempotent: repeating it without new events leaves the derived totals
+  unchanged.
 
 ```sh
 curl "$BASE_URL/projects/$PROJECT_ID/costs?days=1&tz=America%2FLos_Angeles" \
