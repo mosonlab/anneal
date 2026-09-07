@@ -894,7 +894,7 @@ test("a run that authored nothing is re-queued even when a prior run's output is
 test("an immutable prior Run output disables remediation and explicitly satisfies the task", async () => {
   const seeded = await seedTask({
     chained: true,
-    outputKind: "sol-findings",
+    outputKind: "review-findings",
     templateName: DIRECT_TEMPLATE_NAME,
     stepIndex: 2,
   });
@@ -904,7 +904,7 @@ test("an immutable prior Run output disables remediation and explicitly satisfie
   const first = await claimRun(firstRunId, "immutable-output-runner-1");
   const written = await call("PUT", `/session/runs/${firstRunId}/output`, first.sessionToken, {
     fencingToken: first.fencingToken,
-    kind: "sol-findings",
+    kind: "review-findings",
     body: solFindingsOutput(),
     commitSha: SHA,
   });
@@ -923,7 +923,7 @@ test("an immutable prior Run output disables remediation and explicitly satisfie
   assert.equal(status.status, 200, JSON.stringify(status.body));
   assert.deepEqual(status.body.task.outputEvidence.satisfaction, {
     case: "satisfied-by-prior-run",
-    outputKind: "sol-findings",
+    outputKind: "review-findings",
   });
 
   const completed = await call(
@@ -957,7 +957,7 @@ test("an immutable prior Run output disables remediation and explicitly satisfie
 test("an immutable prior Run output bound to another head remains refused", async () => {
   const seeded = await seedTask({
     chained: true,
-    outputKind: "sol-findings",
+    outputKind: "review-findings",
     templateName: DIRECT_TEMPLATE_NAME,
     stepIndex: 2,
   });
@@ -968,7 +968,7 @@ test("an immutable prior Run output bound to another head remains refused", asyn
   const first = await claimRun(firstRunId, "immutable-bound-head-runner-1");
   const written = await call("PUT", `/session/runs/${firstRunId}/output`, first.sessionToken, {
     fencingToken: first.fencingToken,
-    kind: "sol-findings",
+    kind: "review-findings",
     body: solFindingsOutput(authoredHead),
     commitSha: authoredHead,
   });
@@ -1235,7 +1235,7 @@ for (const cancelledIntermediary of [false, true]) {
 test("a retry handoff includes valid immutable findings refused under the prior ownership rule", async () => {
   const { task } = await seedTask({
     chained: true,
-    outputKind: "sol-findings",
+    outputKind: "review-findings",
     templateName: DIRECT_TEMPLATE_NAME,
     stepIndex: 2,
   });
@@ -1244,7 +1244,7 @@ test("a retry handoff includes valid immutable findings refused under the prior 
   const body = solFindingsOutput();
   const written = await call("PUT", `/session/runs/${firstRunId}/output`, first.sessionToken, {
     fencingToken: first.fencingToken,
-    kind: "sol-findings",
+    kind: "review-findings",
     body,
     commitSha: SHA,
   });
@@ -1257,7 +1257,7 @@ test("a retry handoff includes valid immutable findings refused under the prior 
   const retried = await call("POST", `/tasks/${task.id}/retry`, OPERATOR);
   assert.equal(retried.status, 201, JSON.stringify(retried.body));
   const second = await claimRun(retried.body.id as string, "immutable-handoff-runner-2");
-  const legacyRefusal = `sol-findings task output belongs to prior Run ${firstRunId}, not current Run ${second.run.id}`;
+  const legacyRefusal = `review-findings task output belongs to prior Run ${firstRunId}, not current Run ${second.run.id}`;
   const endedAt = new Date();
   await db.$transaction([
     db.run.update({ where: { id: second.run.id }, data: {
@@ -1297,7 +1297,7 @@ test("a retry handoff includes valid immutable findings refused under the prior 
   }));
   assert.deepEqual(handoff?.output, {
     runId: firstRunId,
-    kind: "sol-findings",
+    kind: "review-findings",
     body,
     commitSha: SHA,
   });

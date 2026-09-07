@@ -8,7 +8,7 @@ import { chainStepPresence, templateStepInstantiation } from "./chain-step-omiss
 const directSteps = [
   { outputKind: "revalidation", optional: false },
   { outputKind: "implementation", optional: false },
-  { outputKind: "sol-findings", optional: false },
+  { outputKind: "review-findings", optional: false },
   { outputKind: "blind-findings", optional: true },
   { outputKind: "fixed-implementation", optional: false },
   { outputKind: "regression-verification-v2", optional: false },
@@ -33,7 +33,7 @@ test("instantiation omits the conditional revalidation step only when the chain 
   assert.equal(unbound.omittedConditionalRevalidation, true);
   assert.deepEqual(kinds(unbound.instantiated), [
     "implementation",
-    "sol-findings",
+    "review-findings",
     "blind-findings",
     "fixed-implementation",
     "regression-verification-v2",
@@ -84,7 +84,7 @@ test("instantiation omits optional steps independently of the conditional rule",
   assert.equal(both.omittedConditionalRevalidation, true);
   assert.deepEqual(kinds(both.instantiated), [
     "implementation",
-    "sol-findings",
+    "review-findings",
     "fixed-implementation",
     "regression-verification-v2",
   ]);
@@ -98,7 +98,7 @@ test("instantiation omits optional steps independently of the conditional rule",
   assert.deepEqual(kinds(optionalOnly.instantiated), [
     "revalidation",
     "implementation",
-    "sol-findings",
+    "review-findings",
     "fixed-implementation",
     "regression-verification-v2",
   ]);
@@ -120,7 +120,7 @@ test("inclusion is asked about optional steps only, and a refusing answer never 
   assert.deepEqual(kinds(instantiation.instantiated), [
     "revalidation",
     "implementation",
-    "sol-findings",
+    "review-findings",
     "fixed-implementation",
     "regression-verification-v2",
   ]);
@@ -150,14 +150,14 @@ const presenceFor = async (steps: Array<{ outputKind: string; instantiated: bool
 test("chain presence separates an omitted producer from an undeclared one", async () => {
   const { presence, queries } = await presenceFor([
     { outputKind: "implementation", instantiated: true },
-    { outputKind: "sol-findings", instantiated: true },
+    { outputKind: "review-findings", instantiated: true },
     { outputKind: "blind-findings", instantiated: false },
   ]);
   assert.equal(presence.ofKind("implementation"), "instantiated");
   assert.equal(presence.ofKind("blind-findings"), "omitted");
   assert.equal(presence.ofKind("documentation"), "undeclared");
   assert.equal(presence.ofRole("blind-findings"), "omitted");
-  assert.equal(presence.ofRole("sol-findings"), "instantiated");
+  assert.equal(presence.ofRole("review-findings"), "instantiated");
   assert.equal(presence.ofRole("documentation"), "undeclared");
   // One read answers every kind and every role the callers ask about.
   assert.equal(queries.length, 1);
@@ -177,14 +177,14 @@ test("chain presence answers a versioned output kind through its role", async ()
 
 test("a kind produced by two steps is omitted only when neither has a task", async () => {
   const partial = await presenceFor([
-    { outputKind: "sol-findings", instantiated: false },
-    { outputKind: "sol-findings", instantiated: true },
+    { outputKind: "review-findings", instantiated: false },
+    { outputKind: "review-findings", instantiated: true },
   ]);
-  assert.equal(partial.presence.ofKind("sol-findings"), "instantiated");
+  assert.equal(partial.presence.ofKind("review-findings"), "instantiated");
 
   const neither = await presenceFor([
-    { outputKind: "sol-findings", instantiated: false },
-    { outputKind: "sol-findings", instantiated: false },
+    { outputKind: "review-findings", instantiated: false },
+    { outputKind: "review-findings", instantiated: false },
   ]);
-  assert.equal(neither.presence.ofKind("sol-findings"), "omitted");
+  assert.equal(neither.presence.ofKind("review-findings"), "omitted");
 });

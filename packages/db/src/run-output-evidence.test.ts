@@ -165,3 +165,25 @@ for (const malformed of [
     assert.throws(() => parseRunOutputEvidence(malformed));
   });
 }
+
+for (const kind of ["review-findings", "sol-findings"] as const) {
+  test(`PR handoff preserves the ${kind} contract through the wire`, () => {
+    const rows = finalCandidates();
+    rows[1]!.kind = kind;
+    const evidence = {
+      satisfaction: decideRunOutputSatisfaction("run-1", required, persisted("run-1")),
+      prHandoff: decidePrHandoff(finalDelivery, rows),
+    };
+    assert.equal(evidence.prHandoff.case, "complete");
+    if (evidence.prHandoff.case === "complete") assert.equal(evidence.prHandoff.outputs[1]!.kind, kind);
+    assert.deepEqual(parseRunOutputEvidence(JSON.parse(JSON.stringify(evidence))), evidence);
+  });
+}
+
+test("PR handoff refuses two aliases in place of independent and blind review", () => {
+  const rows = finalCandidates();
+  rows[2]!.kind = "review-findings";
+  assert.deepEqual(decidePrHandoff(finalDelivery, rows), {
+    case: "incomplete", reason: "canonical PR handoff evidence is missing or out of order at blind-findings",
+  });
+});

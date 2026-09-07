@@ -2682,7 +2682,7 @@ publish: `not-a-pr-delivery`, `complete` with the ordered `outputs`, or
 chain index, output kind, body, and commit SHA, and is accepted only when its
 `projectId` and `chainId` match the claimed Run. The implementation delivery
 receives only its current `implementation` entry; the final delivery receives
-exactly `implementation`, `sol-findings`, `blind-findings`, and
+exactly `implementation`, `review-findings`, `blind-findings`, and
 `fixed-implementation`, in chain order. Malformed, foreign-chain, out-of-order
 or missing evidence makes the handoff `incomplete` rather than being silently
 omitted or guessed, and delivery fails instead of publishing. This projection
@@ -2690,6 +2690,12 @@ does not widen prompt `priorOutputs`, expose sibling evidence to a blind
 review, or derive text from provider output, activity prose, or repository
 contents. Its source is persisted task output and its authentication is the
 claimed session/run identity.
+
+Output kinds name Step deliverables, not execution models. Existing Chains keep
+their original `sol-findings` review contract; the handoff accepts that legacy
+kind in the same review position and preserves it on the wire. New Chains use
+`review-findings`. Changing the assigned Agent or its model never renames a
+Step output or rewrites an immutable report.
 
 The machine-only `POST /runner/runs/:runId/events` append is bounded on both
 sides, and the two bounds are designed against each other. The API reads at most

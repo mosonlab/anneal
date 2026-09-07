@@ -1,5 +1,12 @@
 import { confirmedWrite, isDeterministicRefusal, isLostResponse } from "@anneal/github-client";
-import { canonicalOutputSchema, PR_TEMPLATE_NAME, type PrHandoffKind, type PrHandoffOutput, runOwnedHead } from "@anneal/db";
+import {
+  canonicalOutputSchema,
+  canonicalTemplateIdentity,
+  PR_TEMPLATE_NAME,
+  type PrHandoffKind,
+  type PrHandoffOutput,
+  runOwnedHead,
+} from "@anneal/db";
 
 import type { ClaimedTask, FailureClass } from "./api.js";
 import type { RunnerConfig } from "./config.js";
@@ -189,7 +196,8 @@ const pullRequestFromUrl = (stdout: string): { url: string; number: number } | n
 };
 
 const PR_IMPLEMENTATION_KIND = "implementation";
-const PR_SOL_FINDINGS_KIND = "sol-findings";
+const PR_REVIEW_FINDINGS_KIND = "review-findings";
+const PR_LEGACY_REVIEW_FINDINGS_KIND = "sol-findings";
 const PR_BLIND_FINDINGS_KIND = "blind-findings";
 const PR_FIXED_IMPLEMENTATION_KIND = "fixed-implementation";
 
@@ -222,8 +230,12 @@ type PrFixedArtifact = {
   residualRisks: string[];
 };
 
+const canonicalPrTemplateIdentity = (claim: DeliveryClaim) => (
+  canonicalTemplateIdentity(claim.task.templateStep?.taskTemplate.name ?? "")
+);
+
 const canonicalPrTemplateName = (claim: DeliveryClaim): boolean => (
-  claim.task.templateStep?.taskTemplate.name === PR_TEMPLATE_NAME
+  canonicalPrTemplateIdentity(claim)?.canonicalName === PR_TEMPLATE_NAME
 );
 
 const canonicalPrOutputKind = (claim: DeliveryClaim): string | null => (
@@ -237,6 +249,16 @@ const isCanonicalPrImplementation = (claim: DeliveryClaim): boolean => (
 const isCanonicalPrFinal = (claim: DeliveryClaim): boolean => (
   canonicalPrOutputKind(claim) === PR_FIXED_IMPLEMENTATION_KIND
 );
+
+/** The handoff entry is already selected by the control plane. Preserve its
+ * exact review output kind so both current and immutable legacy Chains remain
+ * readable, while rejecting unrelated kinds at this seam. */
+const canonicalPrReviewKind = (output: PrHandoffOutput | undefined): PrHandoffKind | null => {
+  if (!output) return null;
+  return output.kind === PR_REVIEW_FINDINGS_KIND || output.kind === PR_LEGACY_REVIEW_FINDINGS_KIND
+    ? output.kind
+    : null;
+};
 
 const BRIEF_HEADER_PREFIX = "\n<!-- agentos:task-brief:v1 length=";
 const BRIEF_HEADER_SUFFIX = " -->\n";
@@ -291,29 +313,29 @@ const parsePrOutput = <T>(
 const validatePrReviewHandoff = (
   implementation: PrImplementationArtifact,
   implementationOutput: PrHandoffOutput,
-  sol: PrReviewArtifact,
-  solOutput: PrHandoffOutput,
+  review: PrReviewArtifact,
+  reviewOutput: PrHandoffOutput,
   blind: PrReviewArtifact,
   blindOutput: PrHandoffOutput,
   fixed: PrFixedArtifact,
   fixedOutput: PrHandoffOutput,
 ): void => {
   if (implementationOutput.commitSha !== implementation.headSha
-    || solOutput.commitSha !== sol.headSha
+    || reviewOutput.commitSha !== review.headSha
     || blindOutput.commitSha !== blind.headSha
     || fixedOutput.commitSha !== fixed.headSha) {
     throw new Error("canonical PR output commit SHA does not match its body headSha");
   }
   // Review bases come from platform Run records; the implementation body base is informational.
-  if (sol.headSha !== blind.headSha
-    || implementation.headSha !== sol.headSha
-    || sol.reviewedHead !== sol.headSha
+  if (review.headSha !== blind.headSha
+    || implementation.headSha !== review.headSha
+    || review.reviewedHead !== review.headSha
     || blind.reviewedHead !== blind.headSha
-    || fixed.sourceHead !== sol.headSha
-    || sol.reviewedBase !== blind.reviewedBase) {
+    || fixed.sourceHead !== review.headSha
+    || review.reviewedBase !== blind.reviewedBase) {
     throw new Error("canonical PR review outputs do not describe one reviewed head and base");
   }
-  const findings = [...sol.findings, ...blind.findings];
+  const findings = [...review.findings, ...blind.findings];
   const findingIds = findings.map(({ id }) => id);
   if (new Set(findingIds).size !== findingIds.length) {
     throw new Error("canonical PR review outputs contain duplicate finding ids");
@@ -361,7 +383,7 @@ const initialPullRequestBody = (
 const finalPullRequestBody = (
   claim: DeliveryClaim,
   implementation: PrImplementationArtifact,
-  sol: PrReviewArtifact,
+  review: PrReviewArtifact,
   blind: PrReviewArtifact,
   fixed: PrFixedArtifact,
 ): string => {
@@ -408,7 +430,7 @@ const finalPullRequestBody = (
     "## Verification",
     `Implementation:\n${markdownTests(implementation.testsRun)}\n\nFixed implementation:\n${markdownTests(fixed.testsRun)}`,
     "## Review outcomes",
-    `${renderReview("Sol findings", sol)}\n\n${renderReview("Blind findings", blind)}\n\nResidual risks:\n${residualRisks}`,
+    `${renderReview("Code review findings", review)}\n\n${renderReview("Blind findings", blind)}\n\nResidual risks:\n${residualRisks}`,
     "## Anneal",
     `Task: ${claim.task.id}`,
     `Chain: ${claim.task.chainId}`,
@@ -456,7 +478,7 @@ export const deliverWorkspace = async (
   let canonicalBody: string | undefined;
   const canonicalOutputs = dependencies.prWorkflowOutputs;
   let implementationArtifact: PrImplementationArtifact | undefined;
-  let solArtifact: PrReviewArtifact | undefined;
+  let reviewArtifact: PrReviewArtifact | undefined;
   let blindArtifact: PrReviewArtifact | undefined;
   let fixedArtifact: PrFixedArtifact | undefined;
 
@@ -467,20 +489,23 @@ export const deliverWorkspace = async (
     try {
       implementationArtifact = parsePrOutput<PrImplementationArtifact>(canonicalOutputs?.[0], PR_IMPLEMENTATION_KIND);
       if (canonicalFinal) {
-        solArtifact = parsePrOutput<PrReviewArtifact>(canonicalOutputs?.[1], PR_SOL_FINDINGS_KIND);
+        const reviewOutput = canonicalOutputs?.[1];
+        const reviewKind = canonicalPrReviewKind(reviewOutput);
+        if (!reviewKind) throw new Error("missing required review-findings canonical output evidence");
+        reviewArtifact = parsePrOutput<PrReviewArtifact>(reviewOutput, reviewKind);
         blindArtifact = parsePrOutput<PrReviewArtifact>(canonicalOutputs?.[2], PR_BLIND_FINDINGS_KIND);
         fixedArtifact = parsePrOutput<PrFixedArtifact>(canonicalOutputs?.[3], PR_FIXED_IMPLEMENTATION_KIND);
         validatePrReviewHandoff(
           implementationArtifact,
           canonicalOutputs![0]!,
-          solArtifact,
+          reviewArtifact,
           canonicalOutputs![1]!,
           blindArtifact,
           canonicalOutputs![2]!,
           fixedArtifact,
           canonicalOutputs![3]!,
         );
-        canonicalBody = finalPullRequestBody(claim, implementationArtifact, solArtifact, blindArtifact, fixedArtifact);
+        canonicalBody = finalPullRequestBody(claim, implementationArtifact, reviewArtifact, blindArtifact, fixedArtifact);
       } else {
         canonicalBody = initialPullRequestBody(claim, implementationArtifact);
       }

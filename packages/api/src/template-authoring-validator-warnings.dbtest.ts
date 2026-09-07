@@ -52,7 +52,7 @@ test("a graph without a review warns, and every recognized review role removes o
       implementation,
       stepPayload(seed, 2, {
         layer: 2,
-        outputKind: "sol-findings-v7",
+        outputKind: "review-findings-v7",
         assigneeAgentId: seed.agents[1]!.id,
         priorOutputKinds: ["implementation-v2"],
       }),
@@ -114,7 +114,7 @@ test("a pull request without regression names the lowest opening Step", async ()
       stepPayload(seed, 1, { layer: 1, outputKind: "implementation-v5", opensPullRequest: true }),
       stepPayload(seed, 2, {
         layer: 2,
-        outputKind: "sol-findings-v2",
+        outputKind: "review-findings-v2",
         assigneeAgentId: seed.agents[1]!.id,
         priorOutputKinds: ["implementation-v5"],
       }),
@@ -134,7 +134,7 @@ test("a pull request without regression names the lowest opening Step", async ()
       stepPayload(seed, 1, { layer: 1, outputKind: "implementation-v5", opensPullRequest: true }),
       stepPayload(seed, 2, {
         layer: 2,
-        outputKind: "sol-findings-v2",
+        outputKind: "review-findings-v2",
         assigneeAgentId: seed.agents[1]!.id,
         priorOutputKinds: ["implementation-v5"],
       }),

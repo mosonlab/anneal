@@ -69,7 +69,7 @@ import { lockDoneTasks, partitionArchivable } from "../task-archive.js";
 import { editableBrief } from "../task-brief.js";
 import {
   isCanonicalBlindFindingsStep,
-  isCanonicalSolFindingsStep,
+  isCanonicalReviewFindingsStep,
 } from "../canonical-task-output.js";
 import {
   chainProgress,
@@ -1010,7 +1010,7 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         } } },
       });
       const existing = await tx.taskStepOutput.findUnique({ where: { taskId } });
-      const immutableReview = isCanonicalSolFindingsStep(task.templateStep)
+      const immutableReview = isCanonicalReviewFindingsStep(task.templateStep)
       || isCanonicalBlindFindingsStep(task.templateStep);
       if (immutableReview && existing) {
         return refusal("conflict", `${task.templateStep?.outputKind ?? body.kind} task output is immutable once persisted`);

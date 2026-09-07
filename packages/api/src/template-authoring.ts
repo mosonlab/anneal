@@ -366,7 +366,7 @@ const validateTemplateGraph = (
   // complete order; the replace transaction never writes them anywhere.
   const reviewSteps = steps.filter((step) => {
     const role = stepRole({ outputKind: step.outputKind });
-    return role === "plan-review" || role === "sol-findings" || role === "blind-findings";
+    return role === "plan-review" || role === "review-findings" || role === "blind-findings";
   });
   const warnings: TemplateAuthoringWarning[] = [];
   if (reviewSteps.length === 0) {

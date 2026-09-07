@@ -61,8 +61,8 @@ the chain branch keeps it.
 
 **Blind review**:
 The **Blind code review** step (optional in Direct and Full Assurance,
-required in the PR workflow: `04-code-review-opus-blind.md`,
-`07-code-review-opus-blind.md`, and `03-code-review-opus-blind.md`, respectively),
+required in the PR workflow: `04-code-review-blind.md`,
+`07-code-review-blind.md`, and `03-code-review-blind.md`, respectively),
 run by a separate model over the complete integrated implementation diff using immutable
 `implementationBaseSha` and `implementationHeadSha` in the platform-pinned
 claim metadata. It is fully isolated from predecessor and sibling review
