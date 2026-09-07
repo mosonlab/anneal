@@ -1338,6 +1338,21 @@ test("the refund bound is a property of the task, not of the intent kind that re
   assert.equal(creates[0]?.maxRunsPerTask, 12);
 });
 
+test("readiness base drift grants a fresh attempt without spending exhausted lease-loss refunds", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const task = taskRow({ repoId: repo.id, repo, runs: [priorRun({
+    repoId: repo.id, leaseLossRefunds: LEASE_LOSS_REFUND_CAP, budgetGrants: 3,
+  })] });
+  const { tx, creates } = fakeTx(task);
+  const opened = await openRun(tx, task.id, {
+    kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1, readinessBaseDrift: true,
+  });
+  assert.equal(opened.ok, true);
+  assert.equal(creates[0]?.leaseLossRefunds, LEASE_LOSS_REFUND_CAP);
+  assert.equal(creates[0]?.budgetGrants, 4);
+  assert.equal(creates[0]?.maxRunsPerTask, task.maxSessionsPerTask + 4);
+});
+
 test("an ordinary birth carries the task's refund count forward without spending one", async () => {
   const repo = { id: "repo-1", defaultBranch: "main" };
   const task = taskRow({

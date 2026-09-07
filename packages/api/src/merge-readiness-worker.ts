@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 
 import {
   AUTHORIZED_MERGE_METHOD,
+  asJsonObject,
+  MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
+  readinessRequeueActivityWhere,
+  readinessRequeueTotals,
   MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
   Prisma,
@@ -80,6 +84,9 @@ export const readinessPollIntervalMs = (): number => {
   return Number.isFinite(raw) && raw >= 250 ? Math.floor(raw) : 2_000;
 };
 
+// Separate from lease-loss compensation: a valid exact-base PASS earns a
+// replacement, but a task continually outrun by main must still stop.
+export const READINESS_BASE_DRIFT_REQUEUE_LIMIT = 3;
 export const READINESS_EXCEPTION_REQUEUE_LIMIT = 3;
 
 /**
@@ -390,6 +397,7 @@ export const requeueRegressionSettlement = (
     regressionTaskId: string;
     staleBaseSha: string;
     currentBaseSha: string;
+    condition: Extract<ReadinessDecision, { kind: "requeue-regression" }>["condition"];
     reason: string;
     now: Date;
     recovery: RecoveryContext | null;
@@ -398,6 +406,30 @@ export const requeueRegressionSettlement = (
   taskId: input.regressionTaskId,
   at: input.now,
   apply: async (tx) => {
+    const baseDrift = input.condition === "base-advanced" || input.condition === "train-base-stale";
+    // The readiness claim serializes this count with the Run grant and its
+    // durable activity. Never use the bounded marker-history window here.
+    const rows = await tx.taskActivity.findMany({
+      where: readinessRequeueActivityWhere(input.readinessTaskId),
+      select: { metadata: true },
+    });
+    const aggregateId = input.recovery?.aggregateId;
+    const spent = readinessRequeueTotals(aggregateId
+      ? rows.filter((row) => asJsonObject(row.metadata)?.recoveryAggregateId === aggregateId)
+      : rows).readinessRequeues;
+    const ceiling = input.recovery ? MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES : READINESS_BASE_DRIFT_REQUEUE_LIMIT;
+    if (baseDrift && spent >= ceiling) {
+      const name = input.recovery ? "base-drift-recovery-requeue-limit" : "readiness-base-drift-requeue-limit";
+      const stopped = await stopMergeTail(tx, {
+        phase: "readiness",
+        readinessTaskId: input.readinessTaskId,
+        regressionTaskId: input.regressionTaskId,
+        recovery: input.recovery,
+        reason: `${name}: ${spent} requeues reached ceiling ${ceiling}`,
+        at: input.now,
+      });
+      return { ownership: "released", leaseOutcome: stopped.leaseOutcome };
+    }
     // The prior Regression run succeeded; the control plane invalidated its
     // exact-base evidence after a remote read. This retry is therefore external
     // compensation, not another attempt charged to the agent. Without the
@@ -409,7 +441,7 @@ export const requeueRegressionSettlement = (
         aggregateId: input.recovery.aggregateId,
         currentBaseSha: input.currentBaseSha,
         now: input.now,
-        readinessRequeue: { staleBaseSha: input.staleBaseSha, reason: input.reason },
+        readinessRequeue: { staleBaseSha: input.staleBaseSha, reason: input.reason, baseDrift },
       });
     } else {
       await tx.task.update({
@@ -420,7 +452,7 @@ export const requeueRegressionSettlement = (
         where: { id: input.regressionTaskId },
         data: { status: TaskStatus.TODO, failureReason: null },
       });
-      const attempt = await requeueMergeTailRun(tx, input.regressionTaskId, input.now);
+      const attempt = await requeueMergeTailRun(tx, input.regressionTaskId, input.now, baseDrift);
       if (attempt.outcome !== "opened") {
         if (attempt.outcome === "refused" && attempt.refusal.disposition !== "held") {
           await tx.task.update({ where: { id: input.readinessTaskId }, data: {

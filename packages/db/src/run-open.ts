@@ -855,7 +855,7 @@ export type IntegratorStopBypass = { integratorTaskId: string; sourceStopId: str
 
 export type OpenRunIntent =
   | { kind: "enqueue"; readyAt: Date; stopBypass?: IntegratorStopBypass | null }
-  | { kind: "merge-tail-requeue"; readyAt: Date; budgetGrant: 1; repairCompleted?: true }
+  | { kind: "merge-tail-requeue"; readyAt: Date; budgetGrant: 1; repairCompleted?: true; readinessBaseDrift?: true }
   /** The replacement for a claim a late salvage invalidated before it started.
    *  Its budget arithmetic is an ordinary enqueue's — the revoked claim already
    *  carries the refund — but it is a platform-caused refund, so it is named
@@ -997,13 +997,14 @@ const sourceRetryIntent = (
  * measured against `runBudgetCeiling` and refused as `run-budget-exhausted`,
  * which is the path this bound deliberately leaves as the way out.
  * Completed merge-tail repairs are bounded by the repair-attempt limits and
- * grant fresh verification without spending a platform-loss refund.
+ * grant fresh verification without spending a platform-loss refund. Readiness
+ * base-drift requeues likewise have a separate bound at their settlement.
  * `retry-after-completion` is not one either — a refunded external failure is
  * the separate class `EXTERNAL_FAILURE_REFUND_CAP` already bounds.
  */
 const platformRefundIntent = (intent: OpenRunIntent): boolean =>
   intent.kind === "retry-after-lease-loss"
-  || (intent.kind === "merge-tail-requeue" && !intent.repairCompleted)
+  || (intent.kind === "merge-tail-requeue" && !intent.repairCompleted && !intent.readinessBaseDrift)
   || intent.kind === "claim-invalidated";
 
 /**
