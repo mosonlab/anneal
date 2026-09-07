@@ -126,7 +126,7 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
   assert.equal(full.some(({ agentName }) => agentName === "review-adjudicator-opus"), false);
   for (const steps of [direct, full]) {
     assert.deepEqual(
-      steps.find(({ outputKind }) => outputKind === "sol-findings")!.priorOutputKinds,
+      steps.find(({ outputKind }) => outputKind === "review-findings")!.priorOutputKinds,
       ["implementation"],
     );
     assert.deepEqual(
@@ -137,7 +137,7 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
     if (librarian) assert.deepEqual(librarian.priorOutputKinds, ["implementation", "fixed-implementation"]);
     // The contract the removed adjudication node used to carry, now on the step that replaced it.
     const fix = steps.find(({ outputKind }) => outputKind === "fixed-implementation")!;
-    assert.match(fix.prompt, /`sol-findings`/u);
+    assert.match(fix.prompt, /`review-findings`/u);
     assert.match(fix.prompt, /`blind-findings`/u);
     assert.match(fix.prompt, /blind review may be absent/u);
     assert.match(fix.prompt, /every present report/u);
@@ -239,7 +239,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
         agent: "code-reviewer-sol-high",
         approvalGate: false,
         optional: false,
-        outputKind: "sol-findings",
+        outputKind: "review-findings",
         priorOutputKinds: ["implementation"],
         attachmentsFromPrevious: true,
         opensPullRequest: false,
@@ -272,7 +272,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
         approvalGate: false,
         optional: false,
         outputKind: "fixed-implementation",
-        priorOutputKinds: ["sol-findings", "blind-findings"],
+        priorOutputKinds: ["review-findings", "blind-findings"],
         attachmentsFromPrevious: true,
         opensPullRequest: false,
         requiresCommit: false,
@@ -375,7 +375,7 @@ test("nine authored Full Assurance output contracts match their canonical schema
 test("missing layer frontmatter is refused by the source loader", async () => {
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review-sol.md", (source) => source.replace("layer: 3\n", "")),
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review.md", (source) => source.replace("layer: 3\n", "")),
     (root) => assert.rejects(
       loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
       /frontmatter must contain exactly .*layer/u,
@@ -404,7 +404,7 @@ test("optional is a required boolean frontmatter field in every canonical templa
 test("optional frontmatter must contain a strict boolean", async () => {
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "04-code-review-opus-blind.md", (source) => source.replace("optional: true\n", "optional: yes\n")),
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "04-code-review-blind.md", (source) => source.replace("optional: true\n", "optional: yes\n")),
     (root) => assert.rejects(loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root), /optional must be true or false/u),
   );
 });
@@ -412,7 +412,7 @@ test("optional frontmatter must contain a strict boolean", async () => {
 test("missing prior output declaration frontmatter is refused by the source loader", async () => {
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review-sol.md", (source) => source.replace(/^priorOutputKinds: .*\n/mu, "")),
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review.md", (source) => source.replace(/^priorOutputKinds: .*\n/mu, "")),
     (root) => assert.rejects(
       loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
       /frontmatter must contain exactly .*priorOutputKinds/u,
@@ -423,7 +423,7 @@ test("missing prior output declaration frontmatter is refused by the source load
 test("missing or malformed dependency provisioning frontmatter is refused by the source loader", async () => {
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review-sol.md", (source) => source.replace(/^provisionDependencies: .*\n/mu, "")),
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review.md", (source) => source.replace(/^provisionDependencies: .*\n/mu, "")),
     (root) => assert.rejects(
       loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
       /frontmatter must contain exactly .*provisionDependencies/u,
@@ -431,7 +431,7 @@ test("missing or malformed dependency provisioning frontmatter is refused by the
   );
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review-sol.md", (source) => source.replace("provisionDependencies: false\n", "provisionDependencies: no\n")),
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review.md", (source) => source.replace("provisionDependencies: false\n", "provisionDependencies: no\n")),
     (root) => assert.rejects(
       loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root),
       /provisionDependencies must be true or false/u,
@@ -459,25 +459,25 @@ test("prior output declarations are unique and reference only earlier steps", as
   await withTemplateCopy(
     INTEGRATOR_TEMPLATE_NAME,
     (root) => updateFrontmatter(root, INTEGRATOR_TEMPLATE_NAME, "08-apply-review-fixes.md", (source) => source.replace(
-      "priorOutputKinds: [sol-findings, blind-findings]",
-      "priorOutputKinds: [sol-findings, sol-findings]",
+      "priorOutputKinds: [review-findings, blind-findings]",
+      "priorOutputKinds: [review-findings, review-findings]",
     )),
-    (root) => assert.rejects(loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME, root), /duplicate priorOutputKinds sol-findings/u),
+    (root) => assert.rejects(loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME, root), /duplicate priorOutputKinds review-findings/u),
   );
   await withTemplateCopy(
     INTEGRATOR_TEMPLATE_NAME,
     (root) => updateFrontmatter(root, INTEGRATOR_TEMPLATE_NAME, "05-implementation.md", (source) => source.replace(
       "priorOutputKinds: [revised-plan]",
-      "priorOutputKinds: [sol-findings]",
+      "priorOutputKinds: [review-findings]",
     )),
-    (root) => assert.rejects(loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME, root), /priorOutputKinds sol-findings does not reference an earlier step/u),
+    (root) => assert.rejects(loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME, root), /priorOutputKinds review-findings does not reference an earlier step/u),
   );
 });
 
 test("blind review steps cannot declare prior outputs", async () => {
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "04-code-review-opus-blind.md", (source) => source.replace(
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "04-code-review-blind.md", (source) => source.replace(
       "priorOutputKinds: []",
       "priorOutputKinds: [implementation]",
     )),
@@ -507,13 +507,13 @@ test("inserting a duplicate outputKind into a canonical template is refused", as
 test("source layers must be non-decreasing and bases must cross to a lower layer", async () => {
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "04-code-review-opus-blind.md", (source) => source.replace("layer: 3\n", "layer: 1\n")),
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "04-code-review-blind.md", (source) => source.replace("layer: 3\n", "layer: 1\n")),
     (root) => assert.rejects(loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root), /layer values must be non-decreasing/u),
   );
 
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "04-code-review-opus-blind.md", (source) => source.replace("baseFromStepIndex: 2\n", "baseFromStepIndex: 3\n")),
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "04-code-review-blind.md", (source) => source.replace("baseFromStepIndex: 2\n", "baseFromStepIndex: 3\n")),
     (root) => assert.rejects(loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root), /must reference a strictly lower layer/u),
   );
 });
@@ -552,19 +552,19 @@ test("only the exact canonical graphs may contain a multi-node layer", async () 
 test("parallel nodes share one non-null base and never open a pull request", async () => {
   await withTemplateCopy(
     INTEGRATOR_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, INTEGRATOR_TEMPLATE_NAME, "06-code-review-sol.md", (source) => source.replace("baseFromStepIndex: 5\n", "baseFromStepIndex: 4\n")),
+    (root) => updateFrontmatter(root, INTEGRATOR_TEMPLATE_NAME, "06-code-review.md", (source) => source.replace("baseFromStepIndex: 5\n", "baseFromStepIndex: 4\n")),
     (root) => assert.rejects(loadTemplateStepSources(INTEGRATOR_TEMPLATE_NAME, root), /must use the same baseFromStepIndex/u),
   );
 
   await withTemplateCopy(
     DIRECT_TEMPLATE_NAME,
-    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review-sol.md", (source) => source.replace("opensPullRequest: false\n", "opensPullRequest: true\n")),
+    (root) => updateFrontmatter(root, DIRECT_TEMPLATE_NAME, "03-code-review.md", (source) => source.replace("opensPullRequest: false\n", "opensPullRequest: true\n")),
     (root) => assert.rejects(loadTemplateStepSources(DIRECT_TEMPLATE_NAME, root), /cannot contain a step with opensPullRequest/u),
   );
 
   for (const [templateName, filename] of [
-    [DIRECT_TEMPLATE_NAME, "03-code-review-sol.md"],
-    [INTEGRATOR_TEMPLATE_NAME, "06-code-review-sol.md"],
+    [DIRECT_TEMPLATE_NAME, "03-code-review.md"],
+    [INTEGRATOR_TEMPLATE_NAME, "06-code-review.md"],
   ] as const) {
     await withTemplateCopy(
       templateName,

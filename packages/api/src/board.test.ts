@@ -47,6 +47,7 @@ const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   chainId: null,
   chainIndex: null,
   chainLayer: null,
+  templateStepId: null,
   dispatchAfterTaskId: null,
   createdAt: new Date("2026-08-15T00:00:00.000Z"),
   updatedAt: new Date("2026-08-16T00:00:00.000Z"),
@@ -212,8 +213,8 @@ test("the board projection carries every field the board consumes and nothing el
   // Spelled out rather than derived: a field added to the projection is a
   // deliberate act with a payload cost, so it has to be added here too.
   assert.deepEqual(Object.keys(boardCard(row(), null, moveContext)).sort(), [
-    "approvalGate", "assigneeAgent", "assigneeType", "blockedOn", "budgetRemaining", "chainAggregate", "chainId", "chainIndex", "chainName", "chainProgress", "createdAt", "cron",
-    "displayName", "failureReason", "id", "latestRun", "leaseLossRefunds", "mergeOutcome", "moveTargets", "name", "repairOf", "runAt", "scheduleKind", "source", "status",
+    "approvalGate", "assigneeAgent", "assigneeType", "baseline", "blockedOn", "budgetRemaining", "chainAggregate", "chainId", "chainIndex", "chainName", "chainProgress", "createdAt", "cron",
+    "displayName", "failureReason", "id", "latestRun", "leaseLossRefunds", "mergeOutcome", "moveTargets", "name", "readinessGrants", "readinessRequeues", "repairOf", "runAt", "scheduleKind", "source", "status",
     "strandedSalvageBranches", "taskCost", "templateId", "timezone", "updatedAt",
   ]);
 });
@@ -633,6 +634,9 @@ test("blockedOn is projected from the resolved predecessor without storing its s
     budgetRemaining: true,
     leaseLossRefunds: 0,
     chainAggregate: null,
+    baseline: null,
+    readinessRequeues: 0,
+    readinessGrants: 0,
   });
 });
 
@@ -1011,9 +1015,10 @@ test("a board card is an order of magnitude smaller than the row it projects", (
   }), null, moveContext);
   // The card carries both cost surfaces — the latest run's own cost and the
   // cross-run task total, ownership and the creation timestamp used for queue
-  // order — so the clean-card bound remains under half the ~2.2KB acceptance
-  // budget even with executable move targets.
-  assert.ok(Buffer.byteLength(JSON.stringify(card)) < 1_100, "a clean card must stay well inside its budget");
+  // order — plus the three merge-tail counters (lease-loss refunds, readiness
+  // requeues and the grants they funded), so the clean-card bound remains at
+  // roughly half the ~2.2KB acceptance budget even with executable move targets.
+  assert.ok(Buffer.byteLength(JSON.stringify(card)) < 1_150, "a clean card must stay well inside its budget");
 });
 
 /* --------------------------------------------------------------- the ETag */

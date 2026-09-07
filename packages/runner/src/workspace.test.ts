@@ -981,7 +981,7 @@ for (const runAsPrefix of [[], ["/usr/bin/env", "--"]]) {
       assert.equal(scratch.toolsDir.startsWith(`${checkout}${sep}`), false);
       assert.deepEqual(
         (await readdir(scratch.toolsDir)).sort(),
-        ["gate-worker", "git-credential-runner.sh", "regression-verification.sh"],
+        ["gate-worker", "git-credential-runner.sh", "merge-train.mjs", "merge-train.sh", "regression-verification.sh"],
       );
       assert.deepEqual(
         (await readdir(join(scratch.toolsDir, "gate-worker"))).sort(),
@@ -1140,7 +1140,7 @@ test("runtime-tool materialization ignores unrelated release-source entries", as
   try {
     await writeFile(join(sourceRoot, ".incidental"), "not part of the bundle\n");
     await materializeRuntimeTools(config, scratch, { sourceRoot });
-    assert.deepEqual((await readdir(scratch.toolsDir)).sort(), ["gate-worker", "git-credential-runner.sh", "regression-verification.sh"]);
+    assert.deepEqual((await readdir(scratch.toolsDir)).sort(), ["gate-worker", "git-credential-runner.sh", "merge-train.mjs", "merge-train.sh", "regression-verification.sh"]);
   } finally {
     await cleanupAgentScratch(config, scratch);
     await rm(sourceRoot, { recursive: true, force: true });

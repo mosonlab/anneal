@@ -6,11 +6,13 @@ import {
   AssigneeType,
   AUTHORIZED_MERGE_METHOD,
   activateRecoveryIntegratorSuccessor,
+  applyInboxDecisionTx,
   authorizationMetadata,
   MERGE_INTEGRATOR_KIND,
   MergeRecoveryRefusalCode,
   Prisma,
   PrismaClient,
+  readMarkerHistory,
   readMarkers,
   latestMarker,
   recordIntegratorStop,
@@ -18,7 +20,11 @@ import {
 } from "@anneal/db";
 
 import { classifyCandidate } from "./base-drift-recovery-decision.js";
-import { baseDriftRecoveryTick, readCandidateFacts } from "./merge-base-drift-worker.js";
+import {
+  baseDriftRecoveryTick,
+  readCandidateFacts,
+  recordRecoveryClassificationRetry,
+} from "./merge-base-drift-worker.js";
 import { handleRegressionCompletion } from "./merge-tail-actions.js";
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import {
@@ -28,6 +34,7 @@ import {
   type ReleaseMergeLease,
   type WithMergeLease,
 } from "./merge-lease.js";
+import { executorsOnline } from "./merge-executor-daemon-fixture.js";
 import { readinessTick, reopenRecoveryHeadAdoptionFailures } from "./merge-readiness-worker.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
@@ -303,16 +310,17 @@ const addRepairTailFixtures = async (
   } });
 };
 
-const prepareBlockedRecovery = async (
-  shape: "canonical-direct" | "canonical-compound-readiness",
-  label: string,
+/**
+ * Stops the recovery Run that the named attempt is bound to, with the verdict
+ * the tail would have recorded for it. The tail parks every recovery FAIL in
+ * `BLOCKED_DOWNSTREAM`, so this is the state both operator reentry routes read.
+ */
+const failRecoveryRegression = async (
+  seeded: Awaited<ReturnType<typeof seedStopped>>,
+  aggregateId: string,
+  outcome: "review-fail" | "gate-fail",
 ) => {
-  const seeded = await seedStopped(shape, label);
-  const documentation = await addRepairTailFixtures(seeded, shape === "canonical-compound-readiness");
-  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
-  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
-    where: { integratorTaskId: seeded.integratorTask!.id },
-  });
+  const aggregate = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregateId } });
   const recoveryRun = await db.run.findUniqueOrThrow({ where: { id: aggregate.recoveryRunId! } });
   await db.run.update({ where: { id: recoveryRun.id }, data: {
     status: "SUCCEEDED",
@@ -321,31 +329,36 @@ const prepareBlockedRecovery = async (
     targetBranch: "master",
     headSha: HEAD,
   } });
+  const body = JSON.stringify(outcome === "review-fail"
+    ? {
+      schemaVersion: 1,
+      outcome,
+      headSha: HEAD,
+      baseHeadSha: BASE_2,
+      summary: "recovery exposed a semantic defect",
+    }
+    : {
+      schemaVersion: 1,
+      outcome,
+      headSha: HEAD,
+      baseHeadSha: BASE_2,
+      gateVerdict: "FAIL",
+      summary: "unit tests (all workspaces)",
+      gateFailureExcerpt: "a mismatched daemon process stays alive and still exits 0 on SIGTERM",
+    });
   await db.taskStepOutput.upsert({
     where: { taskId: seeded.gateTask.id },
     create: {
       taskId: seeded.gateTask.id,
       runId: recoveryRun.id,
       kind: "regression-verification",
-      body: JSON.stringify({
-        schemaVersion: 1,
-        outcome: "review-fail",
-        headSha: HEAD,
-        baseHeadSha: BASE_2,
-        summary: "recovery exposed a semantic defect",
-      }),
+      body,
       commitSha: HEAD,
     },
     update: {
       runId: recoveryRun.id,
       kind: "regression-verification",
-      body: JSON.stringify({
-        schemaVersion: 1,
-        outcome: "review-fail",
-        headSha: HEAD,
-        baseHeadSha: BASE_2,
-        summary: "recovery exposed a semantic defect",
-      }),
+      body,
       commitSha: HEAD,
     },
   });
@@ -360,6 +373,21 @@ const prepareBlockedRecovery = async (
     },
     now: new Date(),
   })), "handled");
+  return recoveryRun;
+};
+
+const prepareBlockedRecovery = async (
+  shape: "canonical-direct" | "canonical-compound-readiness",
+  label: string,
+  outcome: "review-fail" | "gate-fail" = "review-fail",
+) => {
+  const seeded = await seedStopped(shape, label);
+  const documentation = await addRepairTailFixtures(seeded, shape === "canonical-compound-readiness");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  });
+  const recoveryRun = await failRecoveryRegression(seeded, aggregate.id, outcome);
   return { ...seeded, documentation, aggregateId: aggregate.id, recoveryRun };
 };
 
@@ -377,6 +405,51 @@ const requestRecoveryRepair = async (taskId: string, requestId: string) => {
     else process.env.OPERATOR_TOKEN = prior;
   }
 };
+
+const requestRecoveryRerun = async (taskId: string, requestId: string) => {
+  const prior = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = OPERATOR;
+  try {
+    return await createApp(db).request(`/tasks/${taskId}/merge-tail/rerun`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId, reason: "the failing test is not in this branch's change set" }),
+    });
+  } finally {
+    if (prior === undefined) delete process.env.OPERATOR_TOKEN;
+    else process.env.OPERATOR_TOKEN = prior;
+  }
+};
+
+type RerunResult = {
+  aggregateId: string;
+  attempt: number;
+  recoveryRunId: string;
+  headSha: string;
+  baseHeadSha: string;
+};
+
+const acceptedRerun = async (taskId: string, requestId: string): Promise<RerunResult> => {
+  const response = await requestRecoveryRerun(taskId, requestId);
+  const result = await response.json() as RerunResult;
+  assert.equal(response.status, 200, JSON.stringify(result));
+  return result;
+};
+
+const refusedRerun = async (taskId: string, requestId: string, code: string) => {
+  const response = await requestRecoveryRerun(taskId, requestId);
+  const body = await response.json() as { error: string; code: string };
+  assert.equal(response.status, 409, JSON.stringify(body));
+  assert.equal(body.code, code, body.error);
+};
+
+const repairSpend = async (seeded: Awaited<ReturnType<typeof prepareBlockedRecovery>>) => ({
+  repairTasks: await db.task.count({
+    where: { projectId: seeded.project.id, name: { startsWith: "Autonomous merge tail:" } },
+  }),
+  repairAttempts: (await readMarkerHistory(db, seeded.gateTask.id))
+    .filter((marker) => marker.kind === "repairAttempt").length,
+});
 
 const completeQueuedTask = async (taskId: string, headSha: string, output?: { kind: string; body: string }) => {
   const task = await db.task.findUniqueOrThrow({ where: { id: taskId } });
@@ -577,6 +650,120 @@ test("operator recovery repair reentry carries the Documentation hop and surface
   assert.match(notices[1]!.dedupeKey ?? "", new RegExp(`${rerun.id}$`, "u"));
 });
 
+test("an operator rerun requeues a host-caused gate FAIL without opening a repair", async () => {
+  const seeded = await prepareBlockedRecovery("canonical-direct", "operator-rerun-gate-fail", "gate-fail");
+  const stopped = await db.task.findUniqueOrThrow({ where: { id: seeded.gateTask.id } });
+  assert.equal(stopped.status, TaskStatus.REVIEW);
+  assert.match(stopped.failureReason ?? "", /merge gate FAIL/u);
+  const blocked = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: seeded.aggregateId } });
+
+  const result = await acceptedRerun(seeded.gateTask.id, "recovery-rerun-1");
+  assert.notEqual(result.aggregateId, seeded.aggregateId);
+  assert.deepEqual(
+    { attempt: result.attempt, headSha: result.headSha, baseHeadSha: result.baseHeadSha },
+    { attempt: blocked.attempt + 1, headSha: HEAD, baseHeadSha: BASE_2 },
+  );
+
+  const reran = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: result.aggregateId } });
+  assert.equal(reran.status, "REPAIRING");
+  assert.equal(reran.failureReason, null);
+  assert.equal(reran.sourceStopId, blocked.sourceStopId);
+  assert.equal(reran.authorizedHeadSha, blocked.authorizedHeadSha);
+  assert.equal(reran.currentBaseSha, blocked.currentBaseSha);
+  assert.equal(reran.recoveryRunId, result.recoveryRunId);
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({
+    where: { id: seeded.aggregateId },
+  })).status, "BLOCKED_DOWNSTREAM");
+
+  const queued = await db.run.findUniqueOrThrow({ where: { id: result.recoveryRunId } });
+  assert.equal(queued.status, "QUEUED");
+  assert.equal(queued.taskId, seeded.gateTask.id);
+  // The rerun answers a host failure, not an agent attempt, so it carries its
+  // own budget grant: a Run born past the ceiling is killed at claim as
+  // `budget-exhausted` long after this route answered 200.
+  const priorRun = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.gateTask.id, id: { not: queued.id } },
+    orderBy: { runNumber: "desc" },
+  });
+  assert.equal(queued.budgetGrants, priorRun.budgetGrants + 1);
+  assert.ok(
+    queued.runNumber <= queued.maxRunsPerTask,
+    `rerun Run ${String(queued.runNumber)} exceeds ceiling ${String(queued.maxRunsPerTask)}`,
+  );
+  const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.gateTask.id } });
+  assert.equal(regression.status, TaskStatus.TODO);
+  assert.equal(regression.failureReason, null);
+  assert.equal((await db.task.findUniqueOrThrow({
+    where: { id: seeded.readinessTask!.id },
+  })).failureReason, null);
+  assert.deepEqual(await repairSpend(seeded), { repairTasks: 0, repairAttempts: 0 });
+
+  const activity = await db.taskActivity.findFirstOrThrow({
+    where: { taskId: seeded.gateTask.id, actorType: "operator" },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  });
+  const metadata = activity.metadata as Record<string, unknown>;
+  assert.match(activity.body, /Operator re-ran recovery attempt 2/u);
+  assert.deepEqual(
+    {
+      action: metadata.action,
+      requestId: metadata.requestId,
+      reason: metadata.reason,
+      attempt: metadata.attempt,
+      aggregateId: metadata.aggregateId,
+    },
+    {
+      action: "merge-tail-rerun-request",
+      requestId: "recovery-rerun-1",
+      reason: "the failing test is not in this branch's change set",
+      attempt: result.attempt,
+      aggregateId: result.aggregateId,
+    },
+  );
+
+  assert.deepEqual(await acceptedRerun(seeded.gateTask.id, "recovery-rerun-1"), result);
+  assert.equal(await db.mergeRecoveryAttempt.count({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  }), 2);
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 1);
+});
+
+test("an operator rerun refuses a semantic recovery FAIL", async () => {
+  const seeded = await prepareBlockedRecovery("canonical-direct", "operator-rerun-review-fail");
+  await refusedRerun(seeded.gateTask.id, "recovery-rerun-1", "merge_tail_rerun_verdict_not_gate_fail");
+  assert.equal(await db.mergeRecoveryAttempt.count({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  }), 1);
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 0);
+});
+
+test("an operator rerun refuses a tail that still has an active Run", async () => {
+  const seeded = await prepareBlockedRecovery("canonical-direct", "operator-rerun-active-run", "gate-fail");
+  await db.run.update({ where: { id: seeded.recoveryRun.id }, data: { status: "RUNNING" } });
+  await refusedRerun(seeded.gateTask.id, "recovery-rerun-1", "merge_tail_rerun_active_run");
+  assert.equal(await db.mergeRecoveryAttempt.count({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  }), 1);
+});
+
+test("a third operator rerun of one recovery stop is refused as budget exhausted", async () => {
+  const seeded = await prepareBlockedRecovery("canonical-direct", "operator-rerun-budget", "gate-fail");
+  const first = await acceptedRerun(seeded.gateTask.id, "recovery-rerun-1");
+  await failRecoveryRegression(seeded, first.aggregateId, "gate-fail");
+  const second = await acceptedRerun(seeded.gateTask.id, "recovery-rerun-2");
+  assert.equal(second.attempt, first.attempt + 1);
+  await failRecoveryRegression(seeded, second.aggregateId, "gate-fail");
+
+  await refusedRerun(seeded.gateTask.id, "recovery-rerun-3", "merge_tail_rerun_budget_exhausted");
+  assert.equal(await db.mergeRecoveryAttempt.count({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  }), 3);
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({
+    where: { id: second.aggregateId },
+  })).status, "BLOCKED_DOWNSTREAM");
+  assert.deepEqual(await repairSpend(seeded), { repairTasks: 0, repairAttempts: 0 });
+});
+
 test("the durable reader selects the direct and compound recovery facts", async () => {
   for (const shape of ["canonical-direct", "canonical-compound-readiness"] as const) {
     const seeded = await seedStopped(shape, `reader-${shape}`);
@@ -720,10 +907,17 @@ test("readiness records and reopens a head-adoption refusal by code, independent
     5,
     releaseChainLease,
     mutateBeforeLeaseCallback,
+    executorsOnline,
   ), { claimed: 1, authorized: 0, requeued: 0, stopped: 1 });
   const stopped = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } });
   assert.equal(stopped.status, "BLOCKED_DOWNSTREAM");
   assert.equal(stopped.refusalCode, MergeRecoveryRefusalCode.HEAD_ADOPTION_CONFLICT);
+  // A refusal carries a code and is a decision, so it stops on its first
+  // occurrence rather than spending an exception requeue.
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: seeded.gateTask.id,
+    metadata: { path: ["state"], equals: "requeued-exception" },
+  } }), 0);
   assert.equal(
     stopped.failureReason,
     "readiness evaluation failed: Recovery authorization could not adopt the verified regression head",
@@ -843,5 +1037,338 @@ test("the aggregate rejects a duplicate source-stop attempt identity", async () 
       attempt: 1,
     } }),
     (error: unknown) => error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Retry classes: waiting, transport and validation are accounted separately,
+// and only validation spends the counted budget.
+// ---------------------------------------------------------------------------
+
+const T0 = new Date("2026-09-01T00:00:00.000Z");
+const at = (milliseconds: number): Date => new Date(T0.getTime() + milliseconds);
+
+const failingReader = (): PullRequestReader => ({
+  readPullRequest: async () => { throw new Error("upstream unavailable"); },
+  compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+});
+
+const attemptFor = async (integratorTaskId: string) => db.mergeRecoveryAttempt.findFirstOrThrow({
+  where: { integratorTaskId },
+});
+
+const recoveryMarkers = async (integratorTaskId: string, state: string) => (
+  (await readMarkers(db, integratorTaskId)).filter((marker) => (
+    marker.kind === "baseDriftRecovery" && marker.state === state
+  ))
+);
+
+const stopIdOf = async (integratorTaskId: string): Promise<string> => (
+  await db.taskActivity.findFirstOrThrow({
+    where: { taskId: integratorTaskId, metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.result } },
+    orderBy: { createdAt: "desc" },
+  })
+).id;
+
+const stopCard = async (integratorTaskId: string) => db.inboxMessage.findFirstOrThrow({
+  where: { taskId: integratorTaskId, kind: "MULTIPLE_CHOICE" },
+  orderBy: { createdAt: "desc" },
+});
+
+test("a chain that stays active is waited on, never counted against the validation budget", async () => {
+  const seeded = await seedStopped("canonical-direct", "retry-class-waiting");
+  // A sibling Run of the same chain is exactly the `chain-active` input: the
+  // recovery is not refused, it is simply not classified yet.
+  await db.run.create({ data: {
+    projectId: seeded.project.id,
+    taskId: seeded.gateTask.id,
+    agentId: seeded.agent.id,
+    repoId: seeded.repo.id,
+    runNumber: 99,
+    dedupeKey: `task:${seeded.gateTask.id}:run:99`,
+    runner: "CLAUDE",
+    model: "claude",
+    promptHash: "sibling",
+    status: "RUNNING",
+    opensPullRequest: false,
+    maxRunsPerTask: 5,
+    targetBranch: "master",
+  } });
+  const integratorTaskId = seeded.integratorTask!.id;
+
+  const holds: number[] = [];
+  for (let tick = 0; tick < 40; tick += 1) {
+    // Each tick lands well past the previous hold, so all forty are recorded.
+    const now = at(tick * 61_000);
+    await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)), now);
+    const attempt = await attemptFor(integratorTaskId);
+    holds.push(attempt.nextEligibleAt!.getTime() - now.getTime());
+  }
+
+  const attempt = await attemptFor(integratorTaskId);
+  assert.equal(attempt.status, "VALIDATING", "forty waits never exhaust the recovery");
+  assert.equal(attempt.waitingAttempts, 40);
+  assert.equal(attempt.validationAttempts, 0, "waiting spends no validation budget");
+  assert.equal(attempt.transportAttempts, 0);
+  assert.equal(attempt.lastRetryClass, "WAITING");
+  assert.equal(attempt.refusalCode, null);
+  // The hold doubles from one worker tick and stops at the minute cap.
+  assert.deepEqual(holds.slice(0, 6), [2_000, 4_000, 8_000, 16_000, 32_000, 60_000]);
+  assert.ok(holds.slice(5).every((hold) => hold === 60_000), "the backoff grows to the cap and stays there");
+  assert.equal(await db.inboxMessage.count({ where: { taskId: integratorTaskId, kind: "MULTIPLE_CHOICE" } }), 0);
+
+  // Within one hold the recovery is not classified again at all.
+  const before = await attemptFor(integratorTaskId);
+  await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)), at(39 * 61_000 + 1_000));
+  const held = await attemptFor(integratorTaskId);
+  assert.equal(held.waitingAttempts, before.waitingAttempts, "a held backoff records nothing");
+  assert.equal(held.updatedAt.getTime(), before.updatedAt.getTime());
+
+  const retries = await recoveryMarkers(integratorTaskId, "classification-retry");
+  assert.ok(retries.length > 0);
+  assert.equal(retries[0]!.raw.retryClass, "waiting");
+  assert.equal(retries[0]!.raw.validationAttempts, 0);
+  assert.ok(typeof retries[0]!.raw.nextEligibleAt === "string");
+  assert.match(retries[0]!.raw.reason as string, /active foreign run/u);
+});
+
+test("a waiting ceiling settles under its own refusal, names its class, and re-validate reopens it", async () => {
+  const seeded = await seedStopped("canonical-direct", "retry-class-waiting-ceiling");
+  const integratorTaskId = seeded.integratorTask!.id;
+  await db.run.create({ data: {
+    projectId: seeded.project.id,
+    taskId: seeded.gateTask.id,
+    agentId: seeded.agent.id,
+    repoId: seeded.repo.id,
+    runNumber: 99,
+    dedupeKey: `task:${seeded.gateTask.id}:run:99`,
+    runner: "CLAUDE",
+    model: "claude",
+    promptHash: "sibling",
+    status: "RUNNING",
+    opensPullRequest: false,
+    maxRunsPerTask: 5,
+    targetBranch: "master",
+  } });
+
+  // The first wait starts the class clock; six hours later the same wait is
+  // all the recovery has ever seen, and that is this class's whole budget.
+  await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)), T0);
+  const waiting = await attemptFor(integratorTaskId);
+  assert.equal(waiting.waitingFirstAt!.getTime(), T0.getTime());
+  await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)), at(6 * 60 * 60_000));
+
+  const settled = await attemptFor(integratorTaskId);
+  assert.equal(settled.status, "FAILED");
+  assert.equal(settled.refusalCode, MergeRecoveryRefusalCode.WAITING_CEILING);
+  assert.match(
+    settled.failureReason!,
+    /^waiting-ceiling reached: the chain stayed active for 6h00m \(limit 6h00m\)/u,
+  );
+  // The failure that crossed the ceiling is accounted, not lost to the settle.
+  assert.equal(settled.waitingAttempts, 2);
+  assert.equal(settled.validationAttempts, 0, "waiting never spends the counted budget");
+  assert.equal(settled.nextEligibleAt, null, "a settled attempt holds no next tick");
+
+  const ceilingMarker = (await recoveryMarkers(integratorTaskId, "waiting-ceiling"))[0];
+  assert.ok(ceilingMarker, "the settle names its class in the recovery activity");
+  assert.equal(ceilingMarker.raw.retryClass, "waiting");
+  assert.equal(ceilingMarker.raw.waitingAttempts, 2, "the activity states the counters the attempt carries");
+  assert.equal(ceilingMarker.raw.validationAttempts, 0);
+  assert.equal(ceilingMarker.raw.nextEligibleAt, null);
+  assert.match(ceilingMarker.raw.reason as string, /waiting-ceiling reached/u);
+  const task = await db.task.findUniqueOrThrow({ where: { id: integratorTaskId } });
+  assert.equal(task.status, "REVIEW");
+  assert.match(task.failureReason!, /^waiting-ceiling reached/u);
+
+  const card = await stopCard(integratorTaskId);
+  assert.equal(card.status, "OPEN");
+  assert.deepEqual(
+    (card.choices as Array<{ id: string }>).map((choice) => choice.id),
+    ["re-validate", "abandon"],
+  );
+
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: card.id, externalEventId: "evt-waiting-re-validate", decision: "re-validate",
+  }));
+  const reopened = await attemptFor(integratorTaskId);
+  assert.equal(reopened.status, "VALIDATING");
+  assert.equal(reopened.waitingAttempts, 0, "re-validate resets the class it settled on");
+  assert.equal(reopened.waitingFirstAt, null);
+  assert.equal(reopened.refusalCode, null);
+  assert.equal(reopened.revalidations, 1);
+  const revalidated = (await recoveryMarkers(integratorTaskId, "class-revalidated"))[0];
+  assert.ok(revalidated);
+  assert.equal(revalidated.raw.retryClass, "waiting", "the activity spells the class as every other one does");
+  assert.match(
+    (await db.task.findUniqueOrThrow({ where: { id: integratorTaskId } })).failureReason!,
+    /after its waiting ceiling was reset$/u,
+  );
+});
+
+test("a transport ceiling settles under its own refusal, and re-validate resumes the same recovery", async () => {
+  const seeded = await seedStopped("canonical-direct", "retry-class-transport");
+  const integratorTaskId = seeded.integratorTask!.id;
+
+  await baseDriftRecoveryTick(db, failingReader(), T0);
+  const held = await attemptFor(integratorTaskId);
+  assert.equal(held.status, "VALIDATING");
+  assert.equal(held.transportAttempts, 1);
+  assert.equal(held.validationAttempts, 0, "an unreadable repository is not a failed validation");
+  assert.equal(held.lastRetryClass, "TRANSPORT");
+  assert.equal(held.transportFirstAt!.getTime(), T0.getTime());
+
+  // Half an hour of failed reads is this class's whole budget.
+  const settledAt = at(30 * 60_000);
+  await baseDriftRecoveryTick(db, failingReader(), settledAt);
+  const settled = await attemptFor(integratorTaskId);
+  assert.equal(settled.status, "FAILED");
+  assert.equal(settled.refusalCode, MergeRecoveryRefusalCode.TRANSPORT_CEILING);
+  assert.match(settled.failureReason!, /^transport-ceiling reached: repository reads failed for 30m/u);
+  // The read failure that crossed the ceiling is accounted, not lost to the settle.
+  assert.equal(settled.transportAttempts, 2);
+  assert.equal(settled.validationAttempts, 0);
+  assert.equal(settled.nextEligibleAt, null, "a settled attempt holds no next tick");
+
+  const ceilingMarker = (await recoveryMarkers(integratorTaskId, "transport-ceiling"))[0];
+  assert.ok(ceilingMarker, "the settle names its class in the recovery activity");
+  assert.equal(ceilingMarker.raw.retryClass, "transport");
+  assert.equal(ceilingMarker.raw.transportAttempts, 2, "the activity states the counters the attempt carries");
+  assert.equal(ceilingMarker.raw.validationAttempts, 0);
+  assert.equal(ceilingMarker.raw.nextEligibleAt, null);
+  assert.match(ceilingMarker.raw.reason as string, /transport-ceiling reached/u);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: integratorTaskId } })).status, "REVIEW");
+
+  const card = await stopCard(integratorTaskId);
+  assert.deepEqual(
+    (card.choices as Array<{ id: string }>).map((choice) => choice.id),
+    ["re-validate", "abandon"],
+    "a class ceiling offers the resume as well as abandoning",
+  );
+
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: card.id, externalEventId: "evt-re-validate", decision: "re-validate",
+  }));
+  const reopened = await attemptFor(integratorTaskId);
+  assert.equal(reopened.status, "VALIDATING");
+  assert.equal(reopened.transportAttempts, 0, "re-validate resets the class it settled on");
+  assert.equal(reopened.transportFirstAt, null);
+  assert.equal(reopened.nextEligibleAt, null);
+  assert.equal(reopened.refusalCode, null);
+  assert.equal(reopened.failureReason, null);
+  assert.equal(reopened.revalidations, 1);
+  assert.equal(reopened.attempt, held.attempt, "the same recovery resumes; no chain is re-instantiated");
+  const revalidated = (await recoveryMarkers(integratorTaskId, "class-revalidated"))[0];
+  assert.ok(revalidated);
+  assert.equal(revalidated.raw.retryClass, "transport", "the activity spells the class as every other one does");
+  assert.match(
+    (await db.task.findUniqueOrThrow({ where: { id: integratorTaskId } })).failureReason!,
+    /after its transport ceiling was reset$/u,
+  );
+
+  // The resumed recovery classifies normally against a healthy reader.
+  const tick = await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)), at(31 * 60_000));
+  assert.equal(tick.recovered, 1);
+  assert.equal((await attemptFor(integratorTaskId)).status, "REPAIRING");
+});
+
+test("validation failures exhaust on count and elapsed time together, and settle under their own refusal", async () => {
+  const burst = await seedStopped("canonical-direct", "retry-class-validation-burst");
+  const burstTaskId = burst.integratorTask!.id;
+  const burstStopId = await stopIdOf(burstTaskId);
+  const failure = {
+    kind: "retry" as const,
+    retryClass: "validation" as const,
+    reason: "authorized-base ancestry facts are incomplete",
+  };
+  for (let index = 0; index < 30; index += 1) {
+    const outcome = await recordRecoveryClassificationRetry(
+      db, burstTaskId, burstStopId, failure, at(index * 10_000),
+    );
+    assert.equal(outcome, "retryable", `failure ${String(index + 1)} inside one incident holds the recovery`);
+  }
+  const burstAttempt = await attemptFor(burstTaskId);
+  assert.equal(burstAttempt.status, "VALIDATING", "thirty failures inside five minutes are one incident");
+  assert.equal(burstAttempt.validationAttempts, 30);
+  assert.equal(burstAttempt.refusalCode, null);
+  assert.equal(burstAttempt.nextEligibleAt, null, "a validation failure takes no backoff");
+
+  const spread = await seedStopped("canonical-direct", "retry-class-validation-spread");
+  const spreadTaskId = spread.integratorTask!.id;
+  const spreadStopId = await stopIdOf(spreadTaskId);
+  const outcomes: string[] = [];
+  for (let index = 0; index < 30; index += 1) {
+    outcomes.push(await recordRecoveryClassificationRetry(
+      db, spreadTaskId, spreadStopId, failure, at(index * 65_000),
+    ));
+  }
+  assert.deepEqual(outcomes.slice(0, 29), Array.from({ length: 29 }, () => "retryable"));
+  assert.equal(outcomes[29], "ineligible", "the same thirty failures over half an hour do exhaust");
+
+  const spreadAttempt = await attemptFor(spreadTaskId);
+  assert.equal(spreadAttempt.status, "FAILED");
+  assert.equal(spreadAttempt.refusalCode, MergeRecoveryRefusalCode.VALIDATION_BUDGET);
+  assert.match(spreadAttempt.failureReason!, /^validation-budget exhausted: 30 classification failures over 31m/u);
+  // The thirtieth failure — the one that exhausted the budget — is accounted,
+  // so the stored counter and the refusal text state the same number.
+  assert.equal(spreadAttempt.validationAttempts, 30);
+  assert.equal(spreadAttempt.nextEligibleAt, null);
+  const budgetMarker = (await recoveryMarkers(spreadTaskId, "validation-budget"))[0];
+  assert.ok(budgetMarker, "the settle names its class in the recovery activity");
+  assert.equal(budgetMarker.raw.retryClass, "validation");
+  assert.equal(budgetMarker.raw.validationAttempts, 30, "the activity states the counters the attempt carries");
+  assert.equal(budgetMarker.raw.nextEligibleAt, null);
+  assert.deepEqual(
+    ((await stopCard(spreadTaskId)).choices as Array<{ id: string }>).map((choice) => choice.id),
+    ["re-validate", "abandon"],
+  );
+});
+
+test("a settle after a re-validate opens a fresh answerable card instead of deduplicating into silence", async () => {
+  const seeded = await seedStopped("canonical-direct", "retry-class-settle-after-revalidate");
+  const integratorTaskId = seeded.integratorTask!.id;
+  const stopId = await stopIdOf(integratorTaskId);
+
+  await baseDriftRecoveryTick(db, failingReader(), T0);
+  await baseDriftRecoveryTick(db, failingReader(), at(30 * 60_000));
+  const ceilingCard = await stopCard(integratorTaskId);
+  assert.equal(ceilingCard.dedupeKey, `merge-stop:${stopId}`, "the first settle keeps the historical key");
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: ceilingCard.id, externalEventId: "evt-settle-again", decision: "re-validate",
+  }));
+  assert.equal(
+    (await db.inboxMessage.findUniqueOrThrow({ where: { id: ceilingCard.id } })).status,
+    "ANSWERED",
+  );
+
+  // The resumed recovery meets a pull request that closed underneath it: an
+  // ordinary ineligibility, not a class ceiling.
+  await baseDriftRecoveryTick(db, reader(snapshot(BASE_2, { state: "CLOSED" })), at(31 * 60_000));
+  const resettled = await attemptFor(integratorTaskId);
+  assert.equal(resettled.status, "FAILED");
+  assert.equal(resettled.refusalCode, null, "an ordinary ineligibility is not a class ceiling");
+  assert.match(resettled.failureReason!, /no longer an unmerged OPEN pull request/u);
+
+  const reopenedCard = await stopCard(integratorTaskId);
+  assert.notEqual(reopenedCard.id, ceilingCard.id, "the answered ceiling card does not absorb the second settle");
+  assert.equal(reopenedCard.dedupeKey, `merge-stop:${stopId}:r1`);
+  assert.equal(reopenedCard.status, "OPEN");
+  assert.deepEqual(
+    (reopenedCard.choices as Array<{ id: string }>).map((choice) => choice.id),
+    ["abandon"],
+    "an ordinary refusal keeps the abandon exit the operator needs",
+  );
+  // The stop notice generations with it, so the second settle is not silent.
+  assert.ok(await db.inboxMessage.findFirst({
+    where: { dedupeKey: `merge-base-drift-recovery:ineligible:${stopId}:r1` },
+  }));
+
+  // And the abandon exit actually answers.
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: reopenedCard.id, externalEventId: "evt-abandon", decision: "abandon",
+  }));
+  assert.equal(
+    (await db.inboxMessage.findUniqueOrThrow({ where: { id: reopenedCard.id } })).status,
+    "ANSWERED",
   );
 });

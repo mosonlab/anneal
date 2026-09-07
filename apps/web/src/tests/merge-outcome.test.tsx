@@ -46,7 +46,7 @@ const boardTask = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   approvalGate: false, templateId: null, source: "MANUAL", chainId: "c1", chainIndex: 10,
   chainName: null, updatedAt: "2026-08-18T00:00:00.000Z", assigneeAgent: null, chainProgress: null,
   latestRun: { id: "run-1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5:medium", codexServiceTier: "DEFAULT", costUsd: null, startedAt: null, endedAt: null, pullRequestUrl: null }, strandedSalvageBranches: [], taskCost: null, budgetRemaining: true, leaseLossRefunds: 0,
-  blockedOn: null, mergeOutcome: null, repairOf: null, chainAggregate: null,
+  blockedOn: null, mergeOutcome: null, repairOf: null, chainAggregate: null, baseline: null, readinessRequeues: 0, readinessGrants: 0,
   ...overrides,
 });
 
@@ -152,4 +152,33 @@ test("a failed run is untouched by the merge projection", () => {
   assert.ok(row.includes(RED), row);
   assert.deepEqual(sessionPill("FAILED"), { tone: "red", label: en("status.session.FAILED") });
   assert.deepEqual(lifecycleStat("FAILED"), { tone: "red", label: en("sessions.lifecycle.failed") });
+});
+
+/* ------------------------------------------------- pre-authorization requeues */
+
+/**
+ * The requeue counters share the merge-tail line, and share this file's claim:
+ * a readiness Step whose base kept moving must not read like an ordinary rerun.
+ */
+
+test("a requeued readiness Step names its requeues and the attempts they granted", () => {
+  const markup = card({ readinessRequeues: 2, readinessGrants: 3 });
+
+  assert.ok(markup.includes("data-card-readiness-requeues"), markup);
+  assert.ok(markup.includes(translate("en", "tasks.pill.readinessRequeue", { n: 2, grants: 3 })), markup);
+});
+
+test("the counters survive a readiness Step that has no Run of its own", () => {
+  // The control plane settles readiness without launching a Run, so the card
+  // that owns these counters is usually the one with no run line at all.
+  const markup = card({ latestRun: null, readinessRequeues: 2, readinessGrants: 2 });
+
+  assert.ok(markup.includes("data-card-readiness-requeues"), markup);
+  assert.ok(markup.includes(translate("en", "tasks.pill.readinessRequeue", { n: 2, grants: 2 })), markup);
+});
+
+test("the overwhelming zero case renders no requeue pill at all", () => {
+  const markup = card({ readinessRequeues: 0, readinessGrants: 0 });
+
+  assert.ok(!markup.includes("data-card-readiness-requeues"), markup);
 });

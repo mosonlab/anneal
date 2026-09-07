@@ -63,12 +63,13 @@ import {
   projectLatestAgentMessage,
   type LatestAgentMessageEvent,
 } from "../latest-agent-message.js";
+import { baselineKey, readRunBaselines } from "../run-baseline.js";
 import { runMetrics, TOOL_METRIC_EVENT_TYPES, type RunMetricsToolEvent } from "../run-metrics.js";
 import { lockDoneTasks, partitionArchivable } from "../task-archive.js";
 import { editableBrief } from "../task-brief.js";
 import {
   isCanonicalBlindFindingsStep,
-  isCanonicalSolFindingsStep,
+  isCanonicalReviewFindingsStep,
 } from "../canonical-task-output.js";
 import {
   chainProgress,
@@ -84,6 +85,7 @@ import { refusalFor, type Refusal } from "../refusal.js";
 import { activityInput } from "../run-lifecycle.js";
 import { OPERATOR_NOTE_METADATA_FIELD } from "../run-claim.js";
 import { requestMergeTailRepair } from "../merge-tail-repair-reentry.js";
+import { requestMergeTailRerun } from "../merge-tail-rerun-reentry.js";
 import { computeNextOccurrence, validateSchedule } from "../scheduler.js";
 import { patchTask, taskInput, taskPatch } from "../task-patch.js";
 import { isLiveStatus, lockTask, lockTaskMutationRows, reactivationBlocked } from "../task-write.js";
@@ -174,7 +176,7 @@ const chainHoldInput = z.object({
 const chainResumeInput = z.object({
   requestId: z.string().trim().min(1).max(200),
 }).strict();
-const mergeTailRepairInput = z.object({
+const mergeTailReentryInput = z.object({
   requestId: z.string().trim().min(1).max(200),
   reason: z.string().trim().min(1).max(4_000).optional(),
 }).strict();
@@ -366,6 +368,13 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
       const events = toolEventsBySession.get(event.sessionId);
       if (events) events.push(event); else toolEventsBySession.set(event.sessionId, [event]);
     }
+    // One statement for the task's step, or none at all for a standalone task:
+    // there is no population to compare a task without a template step against.
+    const stepKey = task.templateStepId === null
+      ? null
+      : { projectId: task.projectId, templateStepId: task.templateStepId };
+    const baselines = await readRunBaselines(db, stepKey === null ? [] : [stepKey]);
+    const baseline = stepKey === null ? null : baselines.get(baselineKey(stepKey)) ?? null;
     const admission = await readStepAdmission(db, task.id, { locked: false });
     if (!admission.task || !admission.verdict) {
       throw new Error(`Task ${task.id} disappeared while projecting operator move targets`);
@@ -400,6 +409,7 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         run,
         session: run.session,
         toolEvents: run.session === null ? [] : toolEventsBySession.get(run.session.id) ?? [],
+        baseline,
       }),
       mergeOutcome: runOwnsMergeOutcome(task.stepOutput, run.id, latestRunId) ? mergeOutcome : null,
       mergeRecovery: recoveryRow
@@ -417,6 +427,7 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
       mergeOutcome,
       mergeRecovery,
       budgetRemaining: admission.verdict.checklist.budgetRemaining,
+      baseline,
       editableBrief: editableBrief(task, templateStep),
       // Re-stated rather than spread: the row carries `priorOutputKinds` for
       // the brief read above, and the projection does not publish it.
@@ -517,8 +528,20 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
   });
   app.post("/tasks/:taskId/merge-tail/repair", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    const body = await readJson(context.req.raw, mergeTailRepairInput);
+    const body = await readJson(context.req.raw, mergeTailReentryInput);
     const result = await serializable(db, (tx) => requestMergeTailRepair(tx, {
+      taskId,
+      requestId: body.requestId,
+      ...(body.reason === undefined ? {} : { reason: body.reason }),
+      now: new Date(),
+    }));
+    if ("message" in result) return refusalJson(context, result);
+    return context.json(result);
+  });
+  app.post("/tasks/:taskId/merge-tail/rerun", async (context) => {
+    const taskId = id.parse(context.req.param("taskId"));
+    const body = await readJson(context.req.raw, mergeTailReentryInput);
+    const result = await serializable(db, (tx) => requestMergeTailRerun(tx, {
       taskId,
       requestId: body.requestId,
       ...(body.reason === undefined ? {} : { reason: body.reason }),
@@ -987,7 +1010,7 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         } } },
       });
       const existing = await tx.taskStepOutput.findUnique({ where: { taskId } });
-      const immutableReview = isCanonicalSolFindingsStep(task.templateStep)
+      const immutableReview = isCanonicalReviewFindingsStep(task.templateStep)
       || isCanonicalBlindFindingsStep(task.templateStep);
       if (immutableReview && existing) {
         return refusal("conflict", `${task.templateStep?.outputKind ?? body.kind} task output is immutable once persisted`);

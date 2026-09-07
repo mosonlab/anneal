@@ -12,7 +12,7 @@ const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null,
   approvalGate: false, templateId: null, source: "MANUAL", chainId: null, chainIndex: null,
   chainName: null, updatedAt: "2026-08-16T00:00:00.000Z", assigneeAgent: null, chainProgress: null, blockedOn: null, latestRun: null, taskCost: null,
-  mergeOutcome: null, repairOf: null, budgetRemaining: true, leaseLossRefunds: 0, chainAggregate: null, strandedSalvageBranches: [],
+  mergeOutcome: null, repairOf: null, budgetRemaining: true, leaseLossRefunds: 0, chainAggregate: null, baseline: null, readinessRequeues: 0, readinessGrants: 0, strandedSalvageBranches: [],
   ...overrides,
 });
 

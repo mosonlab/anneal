@@ -275,11 +275,21 @@ type SessionEventQuery = { where?: Record<string, any>; select?: Record<string, 
  *  issues, which is what proves the diagnostics read does not grow per run. */
 const taskDetailDatabase = (
   task: Record<string, unknown>,
-  events: { rows?: Array<Record<string, unknown>>; queries?: SessionEventQuery[] } = {},
+  events: {
+    rows?: Array<Record<string, unknown>>;
+    queries?: SessionEventQuery[];
+    baselines?: Array<Record<string, unknown>>;
+  } = {},
 ): PrismaClient => ({
   task: { findUnique: async () => task, findMany: async () => [task] },
   run: { groupBy: async () => [] },
   $queryRaw: async (query: { sql: string; values: unknown[] }) => {
+    // The detail route issues two raw reads. Only the tool-event one carries
+    // the projection this double models.
+    if (/percentile_cont/u.test(query.sql)) {
+      events.queries?.push(query);
+      return events.baselines ?? [];
+    }
     events.queries?.push(query);
     // Model the SQL projection, including a large provider output that must
     // never be selected into the metrics input.
@@ -415,6 +425,22 @@ test("POST merge-tail repair is operator-authenticated and returns the action's 
       method: "POST",
       headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
       body: JSON.stringify({ requestId: "repair-request-1" }),
+    });
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: "Task not found" });
+  });
+});
+
+test("POST merge-tail rerun is operator-authenticated and returns the action's typed result", async () => {
+  await withTokens(async () => {
+    const tx = { task: { findUnique: async () => null } };
+    const database = {
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/tasks/missing/merge-tail/rerun", {
+      method: "POST",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId: "rerun-request-1" }),
     });
     assert.equal(response.status, 404);
     assert.deepEqual(await response.json(), { error: "Task not found" });
@@ -1283,6 +1309,179 @@ const diagnosticsTask = (): Record<string, unknown> => taskRow({
     diagnosticsRun(2, { sessionId: "session-2" }),
     diagnosticsRun(1, { sessionId: "session-1" }),
   ],
+});
+
+/* ------------------------------------------- GET /tasks/:taskId run baseline */
+
+/** One grouped row exactly as `readRunBaselines` reads it out of PostgreSQL. */
+const baselineRow = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+  projectId: "project-1",
+  templateStepId: "step-1",
+  sampleSize: 8,
+  costSampleSize: 8,
+  costP50: 3,
+  costP90: 5,
+  durationSampleSize: 8,
+  durationP50: 50_000,
+  durationP90: 80_000,
+  ...overrides,
+});
+
+/** The diagnostics fixture bound to a template step, with a costed newest run
+ *  and an older one whose session reported no cost at all. */
+const baselineTask = (): Record<string, unknown> => {
+  const task = diagnosticsTask();
+  const runs = (task.runs as Array<Record<string, unknown>>).map((run) => (
+    run.runNumber === 2
+      ? { ...run, session: { ...(run.session as Record<string, unknown>), costUsd: "6.0000" } }
+      : run
+  ));
+  return { ...task, templateStepId: "step-1", runs };
+};
+
+test("task detail carries its step baseline and measures every run against it", async () => {
+  await withTokens(async () => {
+    const queries: SessionEventQuery[] = [];
+    const database = taskDetailDatabase(baselineTask(), {
+      rows: DIAGNOSTICS_TOOL_EVENTS,
+      queries,
+      baselines: [baselineRow()],
+    });
+    const response = await createApp(database).request("/tasks/task-1", {
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as {
+      baseline: unknown;
+      runs: Array<{ runNumber: number; metrics: { vsBaseline: unknown } }>;
+    };
+    assert.deepEqual(body.baseline, {
+      sampleSize: 8,
+      costUsd: { sampleSize: 8, p50: 3, p90: 5 },
+      durationMs: { sampleSize: 8, p50: 50_000, p90: 80_000 },
+    });
+    // One baseline statement for the whole task, whatever its run count.
+    const baselineQueries = queries.filter((query) => /percentile_cont/u.test(query.sql ?? ""));
+    assert.equal(baselineQueries.length, 1);
+    assert.deepEqual(baselineQueries[0]!.values, ["succeeded", "project-1", "step-1"]);
+
+    // $6.00 against a $3.00 median, and 100s of executing against 50s.
+    assert.deepEqual(body.runs.find((run) => run.runNumber === 2)!.metrics.vsBaseline, {
+      costRatio: 2, durationRatio: 2,
+    });
+    // A run that reported no cost has no cost ratio — that is unknown, not 0.
+    assert.deepEqual(body.runs.find((run) => run.runNumber === 1)!.metrics.vsBaseline, {
+      costRatio: null, durationRatio: 2,
+    });
+  });
+});
+
+test("too little history is a null baseline and null ratios, never a zero one", async () => {
+  await withTokens(async () => {
+    const database = taskDetailDatabase(baselineTask(), {
+      rows: DIAGNOSTICS_TOOL_EVENTS,
+      // Four completed runs: history, not a baseline.
+      baselines: [baselineRow({ sampleSize: 4, costSampleSize: 4, durationSampleSize: 4 })],
+    });
+    const response = await createApp(database).request("/tasks/task-1", {
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as {
+      baseline: unknown;
+      runs: Array<{ metrics: { vsBaseline: unknown } }>;
+    };
+    assert.equal(body.baseline, null);
+    for (const run of body.runs) {
+      assert.deepEqual(run.metrics.vsBaseline, { costRatio: null, durationRatio: null });
+    }
+  });
+});
+
+test("a task with no template step has no population to compare against and asks for none", async () => {
+  await withTokens(async () => {
+    const queries: SessionEventQuery[] = [];
+    const database = taskDetailDatabase(diagnosticsTask(), { rows: DIAGNOSTICS_TOOL_EVENTS, queries });
+    const response = await createApp(database).request("/tasks/task-1", {
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { baseline: unknown; runs: Array<{ metrics: { vsBaseline: unknown } }> };
+    assert.equal(body.baseline, null);
+    assert.deepEqual(body.runs[0]!.metrics.vsBaseline, { costRatio: null, durationRatio: null });
+    assert.equal(queries.filter((query) => /percentile_cont/u.test(query.sql ?? "")).length, 0);
+  });
+});
+
+test("the board reads one baseline statement however many cards the page carries", async () => {
+  await withTokens(async () => {
+    const page = (size: number): Array<Record<string, unknown>> => Array.from({ length: size }, (_unused, index) => taskRow({
+      id: `task-${index}`,
+      projectId: "p1",
+      templateStepId: index % 2 === 0 ? "step-1" : "step-2",
+      createdAt: new Date(`2026-08-${String(10 + index).padStart(2, "0")}T00:00:00.000Z`),
+    }));
+    const baselines = [
+      baselineRow({ projectId: "p1", templateStepId: "step-1" }),
+      // Two runs of the other step: no baseline, so its cards carry null.
+      baselineRow({ projectId: "p1", templateStepId: "step-2", sampleSize: 2, costSampleSize: 2, durationSampleSize: 2 }),
+    ];
+    for (const size of [1, 12]) {
+      const baselineQueries: Array<{ sql: string; values: unknown[] }> = [];
+      const response = await getTasks(boardDatabase(page(size), { baselines, baselineQueries }), "?view=board");
+      assert.equal(response.status, 200);
+      const body = await response.json() as Array<{ id: string; baseline: unknown }>;
+      assert.equal(body.length, size);
+      assert.equal(baselineQueries.length, 1, "the board's baseline read must not grow with the page");
+      for (const card of body) {
+        const step1 = Number(card.id.slice("task-".length)) % 2 === 0;
+        assert.deepEqual(card.baseline, step1
+          ? { sampleSize: 8, costUsd: { sampleSize: 8, p50: 3, p90: 5 }, durationMs: { sampleSize: 8, p50: 50_000, p90: 80_000 } }
+          : null);
+      }
+    }
+  });
+});
+
+test("the full list carries the same baseline from one statement, whatever the page", async () => {
+  await withTokens(async () => {
+    const page = (size: number): Array<Record<string, unknown>> => Array.from({ length: size }, (_unused, index) => taskRow({
+      id: `task-${index}`,
+      projectId: "p1",
+      templateStepId: index % 2 === 0 ? "step-1" : "step-2",
+      createdAt: new Date(`2026-08-${String(10 + index).padStart(2, "0")}T00:00:00.000Z`),
+    }));
+    const baselines = [
+      baselineRow({ projectId: "p1", templateStepId: "step-1" }),
+      // Two runs of the other step: no baseline, so its rows carry null.
+      baselineRow({ projectId: "p1", templateStepId: "step-2", sampleSize: 2, costSampleSize: 2, durationSampleSize: 2 }),
+    ];
+    for (const size of [1, 12]) {
+      const baselineQueries: Array<{ sql: string; values: unknown[] }> = [];
+      const response = await getTasks(boardDatabase(page(size), { baselines, baselineQueries }), "?view=full");
+      assert.equal(response.status, 200);
+      const body = await response.json() as Array<{ id: string; baseline: unknown }>;
+      assert.equal(body.length, size);
+      assert.equal(baselineQueries.length, 1, "the list's baseline read must not grow with the page");
+      for (const row of body) {
+        const step1 = Number(row.id.slice("task-".length)) % 2 === 0;
+        assert.deepEqual(row.baseline, step1
+          ? { sampleSize: 8, costUsd: { sampleSize: 8, p50: 3, p90: 5 }, durationMs: { sampleSize: 8, p50: 50_000, p90: 80_000 } }
+          : null);
+      }
+    }
+  });
+});
+
+test("a full list with no template step anywhere asks for no baseline at all", async () => {
+  await withTokens(async () => {
+    const baselineQueries: Array<{ sql: string; values: unknown[] }> = [];
+    const response = await getTasks(boardDatabase([taskRow()], { baselineQueries }), "?view=full");
+    assert.equal(response.status, 200);
+    const body = await response.json() as Array<{ baseline: unknown }>;
+    assert.equal(body[0]!.baseline, null);
+    assert.equal(baselineQueries.length, 0);
+  });
 });
 
 test("task detail attaches read-time diagnostics to every run from one tool-event query", async () => {

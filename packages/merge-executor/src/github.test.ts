@@ -244,6 +244,117 @@ test("a repository identifier is split strictly", () => {
   assert.equal(splitRepository("owner"), null);
 });
 
+const repositoryReference = { owner: "owner", name: "name" };
+const trainHead = "c".repeat(40);
+const trainBase = "b".repeat(40);
+
+test("train reads the repository's default branch and its exact ref oid", async () => {
+  const { client, requests } = clientWith([
+    { status: 200, body: JSON.stringify({ default_branch: "main" }) },
+    { status: 200, body: JSON.stringify({ ref: "refs/heads/main", object: { type: "commit", sha: trainBase } }) },
+  ]);
+  assert.deepEqual(await client.readDefaultBranch(repositoryReference), { status: "ok", name: "main", oid: trainBase });
+  assert.deepEqual(requests.map(({ method, url }) => ({ method, url })), [
+    { method: "GET", url: "https://api.github.test/repos/owner/name" },
+    { method: "GET", url: "https://api.github.test/repos/owner/name/git/ref/heads/main" },
+  ]);
+});
+
+test("train ref reads distinguish a missing ref from an API failure", async () => {
+  const missing = clientWith([{ status: 404, body: "missing" }]);
+  assert.deepEqual(await missing.client.readRef(repositoryReference, "refs/anneal/train/" + trainHead), { status: "ok", oid: null });
+
+  const malformed = clientWith([{ status: 200, body: JSON.stringify({ object: { sha: 7 } }) }]);
+  const malformedResult = await malformed.client.readRef(repositoryReference, "refs/anneal/train/" + trainHead);
+  assert.equal(malformedResult.status, "api-error");
+
+  const failed = clientWith([{ status: 500, body: "upstream" }]);
+  const failedResult = await failed.client.readRef(repositoryReference, "refs/anneal/train/" + trainHead);
+  assert.equal(failedResult.status, "api-error");
+});
+
+test("train ancestry compares GitHub's strict compare statuses", async () => {
+  for (const [status, expected] of [["ahead", true], ["identical", true], ["behind", false], ["diverged", false]] as const) {
+    const { client, requests } = clientWith([{ status: 200, body: JSON.stringify({ status }) }]);
+    assert.deepEqual(await client.isAncestor(repositoryReference, trainBase, trainHead), { status: "ok", ancestor: expected });
+    assert.equal(requests[0]!.url, `https://api.github.test/repos/owner/name/compare/${trainBase}...${trainHead}`);
+  }
+  const unknown = clientWith([{ status: 200, body: JSON.stringify({ status: "unknown" }) }]);
+  const result = await unknown.client.isAncestor(repositoryReference, trainBase, trainHead);
+  assert.equal(result.status, "api-error");
+});
+
+test("train commit reads require an exact sha and strictly shaped parent shas", async () => {
+  const predecessor = "a".repeat(40);
+  const { client, requests } = clientWith([{
+    status: 200,
+    body: JSON.stringify({ sha: trainHead, parents: [{ sha: predecessor }, { sha: trainBase }] }),
+  }]);
+  assert.deepEqual(await client.readCommit(repositoryReference, trainHead), {
+    status: "ok",
+    commit: { oid: trainHead, parents: [predecessor, trainBase] },
+  });
+  assert.equal(requests[0]!.url, `https://api.github.test/repos/owner/name/git/commits/${trainHead}`);
+
+  for (const body of [
+    { sha: "d".repeat(40), parents: [] },
+    { sha: trainHead, parents: [{ sha: "short" }] },
+    { sha: trainHead, parents: [{ sha: 7 }] },
+    { sha: trainHead },
+  ]) {
+    const malformed = clientWith([{ status: 200, body: JSON.stringify(body) }]);
+    assert.equal((await malformed.client.readCommit(repositoryReference, trainHead)).status, "api-error");
+  }
+});
+
+test("train publication is a non-forced PATCH and only 409/422 are deterministic rejections", async () => {
+  const { client, requests } = clientWith([{ status: 200, body: JSON.stringify({ ref: "refs/heads/main", object: { sha: trainHead } }) }]);
+  assert.deepEqual(await client.publishTrain(repositoryReference, "main", trainHead), { status: "published" });
+  assert.equal(requests[0]!.method, "PATCH");
+  assert.equal(requests[0]!.url, "https://api.github.test/repos/owner/name/git/refs/heads/main");
+  assert.deepEqual(JSON.parse(requests[0]!.body!), { sha: trainHead, force: false });
+
+  for (const status of [409, 422]) {
+    const rejected = clientWith([{ status, body: "ref refused" }]);
+    const result = await rejected.client.publishTrain(repositoryReference, "main", trainHead);
+    assert.equal(result.status, "rejected");
+    assert.match(result.status === "rejected" ? result.reason : "", new RegExp(`HTTP ${status}`, "u"));
+  }
+  // An access or addressing failure is not evidence of a non-fast-forward.
+  for (const status of [401, 403, 404]) {
+    const denied = clientWith([{ status, body: "ref refused" }]);
+    assert.equal((await denied.client.publishTrain(repositoryReference, "main", trainHead)).status, "unknown");
+  }
+
+  const ambiguous = clientWith([{ status: 503, body: "upstream" }]);
+  const result = await ambiguous.client.publishTrain(repositoryReference, "main", trainHead);
+  assert.equal(result.status, "unknown");
+
+  for (const body of [
+    "",
+    JSON.stringify({ ref: "refs/heads/main", object: { sha: "d".repeat(40) } }),
+    JSON.stringify({ ref: "refs/heads/other", object: { sha: trainHead } }),
+  ]) {
+    const malformed = clientWith([{ status: 200, body }]);
+    assert.equal((await malformed.client.publishTrain(repositoryReference, "main", trainHead)).status, "unknown");
+  }
+});
+
+test("train ref deletion uses the GitHub git-refs API and reports failures as disarm failures", async () => {
+  const ref = "refs/anneal/train/" + trainHead;
+  const { client, requests } = clientWith([{ status: 204, body: "" }]);
+  assert.deepEqual(await client.deleteTrainRef(repositoryReference, ref), { ok: true });
+  assert.equal(requests[0]!.method, "DELETE");
+  assert.equal(requests[0]!.url, "https://api.github.test/repos/owner/name/git/refs/anneal/train/" + trainHead);
+
+  const missing = clientWith([{ status: 404, body: "missing" }]);
+  assert.deepEqual(await missing.client.deleteTrainRef(repositoryReference, ref), { ok: true });
+
+  const failed = clientWith([{ status: 500, body: "upstream" }]);
+  const result = await failed.client.deleteTrainRef(repositoryReference, ref);
+  assert.equal(result.ok, false);
+});
+
 /* ------------------------------------------------- fail-closed field parsing */
 
 /**
@@ -456,4 +567,51 @@ test("a null updateRefs payload retains the uncertain merge identity", async () 
     reason: "updateRefs response did not prove the atomic ref update",
     mergeCommitSha: mergeCommit,
   });
+});
+
+const MERGE_SHA = "c".repeat(40);
+
+const comparison = (overrides: Record<string, unknown> = {}): string => JSON.stringify({
+  status: "behind",
+  base_commit: { sha: MERGE_SHA, parents: [{ sha: "b".repeat(40) }, { sha: "a".repeat(40) }] },
+  merge_base_commit: { sha: MERGE_SHA },
+  ...overrides,
+});
+
+test("the landed commit read reports the commit's parents and its reachability from the base ref", async () => {
+  const { client, requests } = clientWith([{ status: 200, body: comparison() }]);
+  assert.deepEqual(await client.readLandedCommit(reference, MERGE_SHA), {
+    status: "ok",
+    parents: ["b".repeat(40), "a".repeat(40)],
+    reachableFromMain: true,
+  });
+  assert.equal(requests[0]!.method, "GET");
+  assert.equal(requests[0]!.url, `https://api.github.test/repos/owner/name/compare/${MERGE_SHA}...master`);
+  assert.equal(requests[0]!.url.includes(TOKEN), false);
+});
+
+test("a commit the base ref does not contain is read as unreachable, not as an error", async () => {
+  const { client } = clientWith([{ status: 200, body: comparison({ merge_base_commit: { sha: "9".repeat(40) } }) }]);
+  assert.deepEqual(await client.readLandedCommit(reference, MERGE_SHA), {
+    status: "ok",
+    parents: ["b".repeat(40), "a".repeat(40)],
+    reachableFromMain: false,
+  });
+});
+
+test("an unreadable comparison is an error, never a confirmation", async () => {
+  const cases: Array<[string, { status: number; body: string }]> = [
+    ["a lost response", { status: 500, body: "boom" }],
+    ["a refused response", { status: 404, body: "Not Found" }],
+    ["a body that is not JSON", { status: 200, body: "<html>" }],
+    ["a comparison about another commit", { status: 200, body: comparison({ base_commit: { sha: "9".repeat(40), parents: [] } }) }],
+    ["a base commit without parents", { status: 200, body: comparison({ base_commit: { sha: MERGE_SHA } }) }],
+    ["a parent without a sha", { status: 200, body: comparison({ base_commit: { sha: MERGE_SHA, parents: [{ url: "x" }] } }) }],
+    ["no merge base", { status: 200, body: comparison({ merge_base_commit: null }) }],
+  ];
+  for (const [label, response] of cases) {
+    const { client } = clientWith([response]);
+    const result = await client.readLandedCommit(reference, MERGE_SHA);
+    assert.equal(result.status, "error", label);
+  }
 });

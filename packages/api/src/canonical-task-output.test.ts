@@ -7,7 +7,7 @@ import {
   isCanonicalAgentStep,
   isCanonicalBlindFindingsStep,
   isLegacyCombinedBlindReviewStep,
-  isCanonicalSolFindingsStep,
+  isCanonicalReviewFindingsStep,
   isCanonicalFixStep,
   canonicalOutputRefusal,
   persistSessionTaskOutput,
@@ -22,7 +22,7 @@ const step = (template: string, stepIndex: number, outputKind: string) => ({
   outputKind,
 });
 
-type ReviewKind = "sol-findings" | "blind-findings";
+type ReviewKind = "review-findings" | "sol-findings" | "blind-findings";
 
 type ReviewTask = {
   id: string;
@@ -53,7 +53,7 @@ const reviewBody = (kind: ReviewKind, reviewedBase = REVIEW_BASE): string => JSO
   reviewedBase,
   reviewedHead: REVIEW_HEAD,
   findings: [],
-  ...(kind === "sol-findings" ? { commandsRun: ["git diff --check"] } : {}),
+  ...(kind !== "blind-findings" ? { commandsRun: ["git diff --check"] } : {}),
 });
 
 const fixedBody = (): string => JSON.stringify({
@@ -79,7 +79,7 @@ const reviewTask = (
 ): ReviewTask => ({
   id,
   templateStep: {
-    stepIndex: kind === "sol-findings" ? 3 : 4,
+    stepIndex: kind !== "blind-findings" ? 3 : 4,
     outputKind: kind,
     taskTemplate: { name: "direct-engineer-workflow" },
   },
@@ -247,7 +247,7 @@ test("blind-findings is a versioned immutable review output and cannot be author
     reviewedHead: headSha,
     findings: [],
   });
-  assert.equal(isCanonicalSolFindingsStep(step("direct-engineer-workflow", 2, "sol-findings")), true);
+  assert.equal(isCanonicalReviewFindingsStep(step("direct-engineer-workflow", 2, "sol-findings")), true);
   assert.equal(canonicalOutputRefusal(blindStep, {
     runId: "run-1",
     kind: "blind-findings",
@@ -267,18 +267,18 @@ test("blind-findings is a versioned immutable review output and cannot be author
 test("immutable findings from a prior Run are accepted only after canonical validation", () => {
   const headSha = "a".repeat(40);
   const baseSha = "b".repeat(40);
-  const reviewBody = (kind: "sol-findings" | "blind-findings", overrides: Record<string, unknown> = {}) => JSON.stringify({
+  const reviewBody = (kind: ReviewKind, overrides: Record<string, unknown> = {}) => JSON.stringify({
     schemaVersion: 1,
     headSha,
     reviewedBase: baseSha,
     reviewedHead: headSha,
     findings: [],
-    ...(kind === "sol-findings" ? { commandsRun: ["git diff --check"] } : {}),
+    ...(kind !== "blind-findings" ? { commandsRun: ["git diff --check"] } : {}),
     ...overrides,
   });
 
-  for (const kind of ["sol-findings", "blind-findings"] as const) {
-    const reviewStep = step("direct-engineer-workflow", kind === "sol-findings" ? 2 : 3, kind);
+  for (const kind of ["review-findings", "sol-findings", "blind-findings"] as const) {
+    const reviewStep = step("direct-engineer-workflow", kind !== "blind-findings" ? 2 : 3, kind);
     const output = (overrides: Partial<{
       runId: string | null;
       kind: string;
@@ -368,12 +368,25 @@ const persistenceRefusal = (
   result: Awaited<ReturnType<typeof persistFixedOutput>>,
 ): string | null => "ok" in result ? (result.ok ? null : result.reason) : result.reason;
 
-test("a fixed-implementation output accepts a sole Sol review sibling", async () => {
-  const result = await persistFixedOutput({
-    reviewTasks: [reviewTask("sol-task", "sol-findings")],
+for (const kind of ["review-findings", "sol-findings"] as const) {
+  test(`a fixed-implementation output accepts the ${kind} review contract`, async () => {
+    const result = await persistFixedOutput({ reviewTasks: [reviewTask("review-task", kind)] });
+    assert.equal(persistenceRefusal(result), null);
   });
 
-  assert.equal(persistenceRefusal(result), null);
+  test(`a ${kind} Step refuses the other review kind even though its role matches`, async () => {
+    const task = reviewTask("review-task", kind);
+    task.stepOutput!.kind = kind === "review-findings" ? "sol-findings" : "review-findings";
+    const result = await persistFixedOutput({ reviewTasks: [task] });
+    assert.match(persistenceRefusal(result) ?? "", /requires exactly one immutable review-findings sibling output/u);
+  });
+}
+
+test("two review kind aliases cannot supply two reports for one review role", async () => {
+  const result = await persistFixedOutput({
+    reviewTasks: [reviewTask("old-review", "sol-findings"), reviewTask("new-review", "review-findings")],
+  });
+  assert.match(persistenceRefusal(result) ?? "", /requires exactly one immutable review-findings sibling output/u);
 });
 
 test("a present blind review sibling without output keeps its exact refusal", async () => {
@@ -488,7 +501,7 @@ for (const matchesBase of [true, false]) {
 const persistImplementationOutput = async (input: {
   bodyBaseSha: string;
   continuation?: boolean;
-  runs: Array<{ runNumber: number; baseSha: string | null }>;
+  runs: Array<{ id?: string; runNumber: number; baseSha: string | null }>;
 }) => {
   const implementationTask = {
     id: "implementation-task",
@@ -510,9 +523,9 @@ const persistImplementationOutput = async (input: {
     run: {
       findFirst: async (query: Record<string, any>) => {
         if (query.select && "baseSha" in query.select) {
-          const rows = input.runs
-            .filter((run) => (query.where?.baseSha?.not === null ? run.baseSha !== null : true))
-            .sort((left, right) => left.runNumber - right.runNumber);
+          // The advisory asks for one Run by id — the fenced one — so the fake
+          // answers by id and never by recency.
+          const rows = input.runs.filter((run) => (run.id ?? "implementation-run") === query.where?.id);
           return rows[0] ?? null;
         }
         return query.select && "taskId" in query.select
@@ -555,10 +568,10 @@ const persistImplementationOutput = async (input: {
   return { result, activities };
 };
 
-test("an implementation body base that disagrees with the platform base is persisted and recorded", async () => {
+test("an implementation body base that disagrees with this Run's own base is persisted and recorded", async () => {
   const { result, activities } = await persistImplementationOutput({
     bodyBaseSha: TYPED_BASE,
-    runs: [{ runNumber: 1, baseSha: RECORDED_BASE }, { runNumber: 2, baseSha: IMPLEMENTATION_HEAD }],
+    runs: [{ id: "implementation-run", runNumber: 1, baseSha: RECORDED_BASE }],
   });
   assert.equal("ok" in result && result.ok, true, "the field no longer decides anything, so it cannot refuse");
   assert.equal(activities.length, 1);
@@ -572,11 +585,36 @@ test("an implementation body base that disagrees with the platform base is persi
     runId: "implementation-run",
     outputKind: "implementation",
     bodyBaseSha: TYPED_BASE,
-    platformBaseSha: RECORDED_BASE,
+    runBaseSha: RECORDED_BASE,
   });
 });
 
-test("an implementation body base that matches the platform base records nothing", async () => {
+test("a recovery Run's body is checked against its own base, not the dead Run's", async () => {
+  // The 2026-09-06 shape: Run 1 died holding an unpublished base, and the pin
+  // skips it — so a Run 2 body naming Run 2's base is correct and silent…
+  const correct = await persistImplementationOutput({
+    bodyBaseSha: RECORDED_BASE,
+    runs: [
+      { id: "dead-run", runNumber: 1, baseSha: TYPED_BASE },
+      { id: "implementation-run", runNumber: 2, baseSha: RECORDED_BASE },
+    ],
+  });
+  assert.deepEqual(correct.activities, []);
+
+  // …while a body still naming the dead Run's base is the typo to report.
+  const stale = await persistImplementationOutput({
+    bodyBaseSha: TYPED_BASE,
+    runs: [
+      { id: "dead-run", runNumber: 1, baseSha: TYPED_BASE },
+      { id: "implementation-run", runNumber: 2, baseSha: RECORDED_BASE },
+    ],
+  });
+  assert.equal(stale.activities.length, 1);
+  assert.equal(stale.activities[0]?.metadata.kind, "canonicalTaskOutput.implementationBaseShaMismatch");
+  assert.equal(stale.activities[0]?.metadata.runBaseSha, RECORDED_BASE);
+});
+
+test("an implementation body base that matches this Run's base records nothing", async () => {
   const { result, activities } = await persistImplementationOutput({
     bodyBaseSha: RECORDED_BASE,
     runs: [{ runNumber: 1, baseSha: RECORDED_BASE }],
@@ -585,7 +623,7 @@ test("an implementation body base that matches the platform base records nothing
   assert.deepEqual(activities, []);
 });
 
-test("an implementation Task with no recorded Run base records the missing authority", async () => {
+test("an implementation Run with no recorded base records the missing authority", async () => {
   const { result, activities } = await persistImplementationOutput({
     bodyBaseSha: TYPED_BASE,
     runs: [{ runNumber: 1, baseSha: null }],

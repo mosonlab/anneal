@@ -30,7 +30,7 @@ test("rewriting a fenced task brief preserves platform-authored context", () => 
     prompt: "Review the implementation.",
     brief: "Original brief",
     attachmentsFromPrevious: true,
-    outputKind: "sol-findings",
+    outputKind: "review-findings",
   });
   const rewritten = rewriteBrief(description, "Operator-edited brief");
 
@@ -40,7 +40,7 @@ test("rewriting a fenced task brief preserves platform-authored context", () => 
     brief: "Operator-edited brief",
     hadReminder: true,
   });
-  assert.match(rewritten as string, /Persist the final sol-findings output/u);
+  assert.match(rewritten as string, /Persist the final review-findings output/u);
 });
 
 test("rewriting a legacy task brief upgrades it to the self-describing format", () => {

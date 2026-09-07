@@ -335,7 +335,7 @@ test("operator recovery repair maps a gate verdict onto the gate-fix budget", as
 
   const exhausted = scenario({
     verdict: "gate-fail",
-    markers: [marker("gate-fix", "older-run-1"), marker("gate-fix", "older-run-2")],
+    markers: [marker("gate-fix", "older-run-1"), marker("gate-fix", "older-run-2"), marker("gate-fix", "older-run-3")],
   });
   const result = await request(exhausted);
   assert.equal("detail" in result && result.detail?.code, "merge_tail_repair_budget_exhausted");
@@ -365,6 +365,7 @@ test("operator recovery repair counts the existing per-kind budget", async () =>
   const observed = scenario({ markers: [
     marker("review-fix", "older-run-1"),
     marker("review-fix", "older-run-2"),
+    marker("review-fix", "older-run-3"),
   ] });
 
   const result = await request(observed);

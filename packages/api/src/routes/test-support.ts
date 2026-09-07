@@ -38,9 +38,17 @@ export const lockedAgent = <T extends Record<string, unknown>>(agent: T | null):
 /** `related` answers the by-id lookups the board makes for rows that are not on
  *  the page — a bound task's predecessor and a repair task's regression task —
  *  and `activity` the merge-tail markers that name the latter. */
+/** `baselines` answers the one grouped baseline statement the board issues, and
+ *  `baselineQueries` records it — which is what proves that read stays one
+ *  query however many cards the page carries. */
 export const boardDatabase = (
   rows: Array<Record<string, unknown>>,
-  extras: { related?: Array<Record<string, unknown>>; activity?: Array<Record<string, unknown>> } = {},
+  extras: {
+    related?: Array<Record<string, unknown>>;
+    activity?: Array<Record<string, unknown>>;
+    baselines?: Array<Record<string, unknown>>;
+    baselineQueries?: Array<{ sql: string; values: unknown[] }>;
+  } = {},
 ): PrismaClient => {
   let call = 0;
   const taskRows = [...rows].sort((left, right) => (
@@ -71,6 +79,11 @@ export const boardDatabase = (
         }))
       )),
     },
+    $queryRaw: async (query: { sql: string; values: unknown[] }) => {
+      assert.match(query.sql, /percentile_cont/u);
+      extras.baselineQueries?.push(query);
+      return extras.baselines ?? [];
+    },
     agentRepoAccess: { findMany: async () => [] },
     taskActivity: { findMany: async () => extras.activity ?? [] },
     chainControl: { findMany: async () => [] },
@@ -81,7 +94,7 @@ export const taskRow = (overrides: Record<string, unknown> = {}): Record<string,
   id: "t1", projectId: "p1", name: "Ship the thing", status: "TODO", assigneeType: "AGENT",
   assigneeAgentId: "a1", repoId: "r1", archivedAt: null, maxSessionsPerTask: 5, failureReason: null,
   scheduleKind: "NOW", runAt: null, cron: null, timezone: null, approvalGate: false,
-  templateId: null, source: "MANUAL", chainId: null, chainIndex: null, chainLayer: null, dispatchAfterTaskId: null,
+  templateId: null, templateStepId: null, source: "MANUAL", chainId: null, chainIndex: null, chainLayer: null, dispatchAfterTaskId: null,
   createdAt: new Date("2026-08-16T00:00:00.000Z"),
   updatedAt: new Date("2026-08-16T00:00:00.000Z"), templateStep: null,
   assigneeAgent: { id: "a1", title: "Senior Developer", model: "gpt-5.6-sol:medium", archivedAt: null },

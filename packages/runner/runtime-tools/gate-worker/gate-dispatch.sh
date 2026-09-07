@@ -46,9 +46,13 @@
 # stdout, so a successful fallback still has one unambiguous verdict line.
 #
 # When every usable slot is taken, this blocks and re-polls — the caller wanted a
-# verdict, not an errand. It gives up after --timeout-minutes, because a wait
-# that long means the queue is systemically full, which the caller should hear
-# about rather than sit in.
+# verdict, not an errand. --timeout-minutes bounds a queue that is not moving,
+# not the wait itself: every poll reads which pid holds each busy slot, and a
+# slot that changes hands is a gate that ended and a place in the queue this
+# dispatch just moved up. Each such turnover restarts the timeout. A deep queue
+# of ordinary gates therefore waits its turn instead of being cut off mid-queue,
+# while a queue where nothing finishes for --timeout-minutes is still reported as
+# systemically full — which is the only case the caller can act on.
 #
 # Exit codes. A verdict and the absence of a verdict are different answers and
 # never share a code: the gate's own codes pass through unchanged. SSH failure
@@ -56,7 +60,8 @@
 # verdict, this script returns 76. An automation may read 1 as FAIL only because
 # nothing else here can produce it.
 #
-#   0  PASS                 75  every eligible slot stayed busy until timeout
+#   0  PASS                 75  every eligible slot stayed busy, and none of them
+#                               changed hands for the whole timeout
 #   1  FAIL                 76  nothing ran: a precondition, the mirror push or
 #   2  usage error              a slot lock failed, so no verdict was formed
 #   3  NOT AUTHORITATIVE
@@ -64,10 +69,11 @@
 # 75 and 76 are not FAILs and must never be read as one.
 #
 # At timeout, 76 means a tried lock was broken or a worker produced no verdict;
-# otherwise 75 means the eligible slots stayed busy. Fallback is not eligible
-# while a healthy primary is busy and its grace has not elapsed. A timeout
-# shorter than the grace can therefore return 75 without probing fallback;
-# use a longer timeout or shorter grace to allow fallback on a later dispatch.
+# otherwise 75 means the eligible slots stayed busy and none of them changed
+# hands. Fallback is not eligible while a healthy primary is busy and its grace
+# has not elapsed. A timeout shorter than the grace can therefore return 75
+# without probing fallback; use a longer timeout or shorter grace to allow
+# fallback on a later dispatch.
 # A slot whose lock is broken is never counted as busy.
 set -uo pipefail
 
@@ -424,7 +430,24 @@ no_verdict() {
 }
 
 WAIT_STARTED="$(date +%s)"
+# The timeout measures stagnation, not patience: it runs from the last time the
+# queue was seen to move, which at the start is the moment the wait began.
 DEADLINE=$(( WAIT_STARTED + TIMEOUT_MINUTES * 60 ))
+# Turnover restarts the stagnation timeout, but taking a slot is an unordered
+# race for a hard link, not a place in a line: a dispatch whose poll always
+# lands after someone else's can watch the queue move and never be admitted. The
+# wait therefore also has an absolute ceiling of twice the stagnation timeout,
+# which covers a queue several times deeper than the one that broke (about ten
+# gates at 5-8 minutes) and still ends in the capacity signal instead of waiting
+# out the caller's whole budget with nothing to show for it.
+MAX_WAIT_MINUTES=$(( TIMEOUT_MINUTES * 2 ))
+HARD_DEADLINE=$(( WAIT_STARTED + MAX_WAIT_MINUTES * 60 ))
+# The pids seen holding each busy slot on the previous poll, as `slot:pid`
+# words. Only slots present in both polls are compared: a slot that appears
+# (fallback becoming eligible when its grace elapses) or disappears from the
+# observation is a change in what this dispatch is allowed to look at, not a
+# gate that ended.
+PREV_HOLDERS=""
 FIRST=1
 # Survives the rounds: once a slot's lock has been seen broken, a later 75 would
 # be a lie even if that round happened to find only busy slots.
@@ -449,6 +472,7 @@ while :; do
   primary_fully_busy=0
   round_busy=0
   round_broken=""
+  round_holders=""
 
   # The local machine is never used automatically. Opting in makes its slots
   # the first capacity tried for this invocation only.
@@ -470,7 +494,10 @@ while :; do
           UNAVAILABLE_EVER="${UNAVAILABLE_EVER} local"
           break
           ;;
-        1) round_busy=$(( round_busy + 1 )) ;;
+        1)
+          round_busy=$(( round_busy + 1 ))
+          round_holders="${round_holders} ${local_slot}:$(gate_slot_holder "$SLOT_ROOT" "$local_slot")"
+          ;;
         *) round_broken="${round_broken} ${local_slot}" ;;
       esac
     done
@@ -494,7 +521,10 @@ while :; do
           UNAVAILABLE_EVER="${UNAVAILABLE_EVER} primary"
           break
           ;;
-        1) round_busy=$(( round_busy + 1 )); primary_busy=$(( primary_busy + 1 )) ;;
+        1)
+          round_busy=$(( round_busy + 1 )); primary_busy=$(( primary_busy + 1 ))
+          round_holders="${round_holders} ${primary_slot}:$(gate_slot_holder "$SLOT_ROOT" "$primary_slot")"
+          ;;
         *) round_broken="${round_broken} ${primary_slot}" ;;
       esac
     done
@@ -532,7 +562,10 @@ while :; do
         FALLBACK_DISABLED=1
         UNAVAILABLE_EVER="${UNAVAILABLE_EVER} remote-2"
         ;;
-      1) round_busy=$(( round_busy + 1 )) ;;
+      1)
+        round_busy=$(( round_busy + 1 ))
+        round_holders="${round_holders} remote-2:$(gate_slot_holder "$SLOT_ROOT" remote-2)"
+        ;;
       *) round_broken="${round_broken} remote-2" ;;
     esac
   fi
@@ -555,18 +588,48 @@ while :; do
       "no configured worker produced a verdict"
   fi
 
+  # Turnover: a slot this dispatch was already watching is now held by a
+  # different pid, so a gate that was holding a slot ended and the queue is
+  # moving. That is the queue the caller asked to wait in, so the stagnation
+  # timeout starts again from here, up to the absolute ceiling. Slots that were
+  # not in the previous observation are not compared: their absence was this
+  # dispatcher's own rule, not a busy gate.
   now="$(date +%s)"
+  turned_over=""
+  for entry in $round_holders; do
+    slot="${entry%%:*}"
+    case " ${PREV_HOLDERS} " in
+      *" ${entry} "*) ;;
+      *" ${slot}:"*) turned_over="${turned_over} ${slot}" ;;
+    esac
+  done
+  PREV_HOLDERS="$round_holders"
+  if [ -n "$turned_over" ]; then
+    if [ "$DEADLINE" -lt "$HARD_DEADLINE" ]; then
+      DEADLINE=$(( now + TIMEOUT_MINUTES * 60 ))
+      [ "$DEADLINE" -gt "$HARD_DEADLINE" ] && DEADLINE="$HARD_DEADLINE"
+    fi
+    printf 'gate-dispatch: the queue moved (slot%s changed hands); waited %s min, waiting until %s\n' \
+      "$turned_over" "$(( (now - WAIT_STARTED) / 60 ))" \
+      "$(date -r "$DEADLINE" '+%H:%M:%S' 2>/dev/null || date -d "@${DEADLINE}" '+%H:%M:%S')" >&2
+  fi
   if [ "$now" -ge "$DEADLINE" ]; then
+    waited_minutes=$(( (now - WAIT_STARTED) / 60 ))
     # A slot seen broken at any point during the wait means the timeout is not
     # the whole story, and 75 — "the queue stayed full" — would send the caller
     # to re-dispatch into the same broken lock.
     if [ -n "$BROKEN_EVER$UNAVAILABLE_EVER" ]; then
       no_verdict \
-        "waited ${TIMEOUT_MINUTES} minutes with slots busy; unavailable:${UNAVAILABLE_EVER:- none}; broken:${BROKEN_EVER:- none}" \
+        "waited ${waited_minutes} minutes with slots busy and none of them coming free for this dispatch; unavailable:${UNAVAILABLE_EVER:- none}; broken:${BROKEN_EVER:- none}" \
         "no configured worker produced a verdict"
     fi
-    printf 'gate-dispatch: no slot freed up in %s minutes; nothing ran and no verdict exists\n' \
-      "$TIMEOUT_MINUTES" >&2
+    if [ "$now" -ge "$HARD_DEADLINE" ]; then
+      printf 'gate-dispatch: no slot came free for this dispatch in %s minutes, the ceiling on a wait even in a moving queue; nothing ran and no verdict exists\n' \
+        "$MAX_WAIT_MINUTES" >&2
+    else
+      printf 'gate-dispatch: no slot freed up or changed hands in %s minutes (waited %s min in total); nothing ran and no verdict exists\n' \
+        "$TIMEOUT_MINUTES" "$waited_minutes" >&2
+    fi
     printf 'GATE DISPATCH: NO SLOT\n'
     exit "$EXIT_NO_SLOT"
   fi
@@ -586,7 +649,7 @@ while :; do
     if [ "$fallback_held" -eq 1 ]; then
       fallback_wait="; fallback after ${FALLBACK_AFTER_MINUTES} min; waited $(( waited_seconds / 60 )) min"
     fi
-    printf 'gate-dispatch: %s slot(s) busy, polling every %ss until %s%s\n' \
+    printf 'gate-dispatch: %s slot(s) busy, polling every %ss until %s unless a slot changes hands%s\n' \
       "$round_busy" "$POLL_SECONDS" \
       "$(date -r "$DEADLINE" '+%H:%M:%S' 2>/dev/null || date -d "@${DEADLINE}" '+%H:%M:%S')" "$fallback_wait" >&2
   fi

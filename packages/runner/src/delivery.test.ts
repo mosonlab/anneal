@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
 
-import { PR_TEMPLATE_NAME } from "@anneal/db";
+import { PR_TEMPLATE_NAME, type PrHandoffOutput } from "@anneal/db";
 
 import type { ExitEvidence } from "./adapters.js";
 import type { RunnerConfig } from "./config.js";
@@ -39,6 +39,7 @@ const canonicalSha = (character: string): string => character.repeat(40);
 const canonicalBaseSha = canonicalSha("a");
 const canonicalImplementationSha = canonicalSha("b");
 const canonicalFixedSha = canonicalSha("c");
+const legacyPrTemplateName = `${PR_TEMPLATE_NAME}-legacy-model-neutral-review-step-names-delivery-test`;
 
 const canonicalDescription = (
   brief = "Ship PR\nThe complete feature brief continues here.",
@@ -49,6 +50,7 @@ const canonicalClaim = (
   outputKind: "implementation" | "fixed-implementation",
   id: string,
   chainIndex: number,
+  templateName = PR_TEMPLATE_NAME,
 ): DeliveryClaim => ({
   task: {
     id,
@@ -59,7 +61,7 @@ const canonicalClaim = (
     templateStep: {
       name: outputKind === "implementation" ? "Implementation" : "Apply review fixes",
       outputKind,
-      taskTemplate: { name: PR_TEMPLATE_NAME },
+      taskTemplate: { name: templateName },
     } as unknown as DeliveryClaim["task"]["templateStep"],
   },
   repo: { remoteUrl: "https://github.com/acme/app.git", defaultBranch: "main" },
@@ -94,12 +96,13 @@ const canonicalFinalOutputs = (
   baseSha = canonicalBaseSha,
   implementationSha = canonicalImplementationSha,
   fixedSha = canonicalFixedSha,
-) => [
+  reviewKind: "review-findings" | "sol-findings" = "review-findings",
+): PrHandoffOutput[] => [
   canonicalImplementationOutput(implementationSha, baseSha),
   {
-    taskId: "task-sol",
+    taskId: "task-review",
     chainIndex: 2,
-    kind: "sol-findings" as const,
+    kind: reviewKind,
     body: JSON.stringify({
       schemaVersion: 1,
       headSha: implementationSha,
@@ -252,7 +255,7 @@ test("canonical PR final delivery publishes a clean head and the complete review
     "## Verification",
     "Implementation:\n- npm test -- runner — exit 0: all focused tests passed\n\nFixed implementation:\n- npm test -- final — exit 0: final handover passed",
     "## Review outcomes",
-    "### Sol findings\n- SOL-1 [P1] Close the handover gap\n  Disposition: ADOPTED\n  Reason: The runner now carries the persisted evidence.\n  Code evidence: Added the run-bound evidence projection.\n  Test evidence: Added route and delivery coverage.\n\n### Blind findings\nNo findings reported.\n\nResidual risks:\n- GitHub API availability remains external.",
+    "### Code review findings\n- SOL-1 [P1] Close the handover gap\n  Disposition: ADOPTED\n  Reason: The runner now carries the persisted evidence.\n  Code evidence: Added the run-bound evidence projection.\n  Test evidence: Added route and delivery coverage.\n\n### Blind findings\nNo findings reported.\n\nResidual risks:\n- GitHub API availability remains external.",
     "## Anneal",
     "Task: task-fixed",
     "Chain: chain-pr",
@@ -261,6 +264,106 @@ test("canonical PR final delivery publishes a clean head and the complete review
   const edit = calls.find(({ executable, args }) => executable === "gh" && args[1] === "edit");
   assert.ok(edit);
   assert.equal(edit.args.at(-1), expectedBody);
+});
+
+test("legacy canonical PR final delivery accepts sol-findings and renders the neutral review label", async () => {
+  let body = "";
+  const fake: CommandRunner = async (executable, args) => {
+    if (executable === "git" && args[0] === "ls-tree") return "";
+    if (executable === "gh" && args[1] === "list") {
+      return JSON.stringify([{ url: "https://github.com/acme/app/pull/9", number: 9 }]);
+    }
+    if (executable === "gh" && args[1] === "edit") { body = args.at(-1)!; return ""; }
+    if (executable === "gh" && args[1] === "view") return body;
+    return "";
+  };
+  const result = await deliverWorkspace(
+    config,
+    canonicalClaim("fixed-implementation", "task-fixed-legacy", 4, legacyPrTemplateName),
+    { ...workspace, baseSha: canonicalImplementationSha },
+    {
+      command: fake,
+      headSha: canonicalFixedSha,
+      prWorkflowOutputs: canonicalFinalOutputs(canonicalBaseSha, canonicalImplementationSha, canonicalFixedSha, "sol-findings"),
+    },
+  );
+  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.match(body, /### Code review findings/u);
+  assert.doesNotMatch(body, /Sol findings/u);
+});
+
+test("legacy canonical PR final delivery accepts review-findings and preserves the handoff kind", async () => {
+  let body = "";
+  const fake: CommandRunner = async (executable, args) => {
+    if (executable === "git" && args[0] === "ls-tree") return "";
+    if (executable === "gh" && args[1] === "list") {
+      return JSON.stringify([{ url: "https://github.com/acme/app/pull/10", number: 10 }]);
+    }
+    if (executable === "gh" && args[1] === "edit") { body = args.at(-1)!; return ""; }
+    if (executable === "gh" && args[1] === "view") return body;
+    return "";
+  };
+  const result = await deliverWorkspace(
+    config,
+    canonicalClaim("fixed-implementation", "task-fixed-legacy-neutral", 4, legacyPrTemplateName),
+    { ...workspace, baseSha: canonicalImplementationSha },
+    {
+      command: fake,
+      headSha: canonicalFixedSha,
+      prWorkflowOutputs: canonicalFinalOutputs(canonicalBaseSha, canonicalImplementationSha, canonicalFixedSha, "review-findings"),
+    },
+  );
+  assert.equal(result.pushStatus, "SUCCEEDED");
+  assert.match(body, /### Code review findings/u);
+  assert.doesNotMatch(body, /Sol findings/u);
+});
+
+test("canonical PR final delivery rejects a missing exact review report before publication", async () => {
+  const outputs = canonicalFinalOutputs();
+  outputs.splice(1, 1);
+  const calls: string[] = [];
+  const result = await deliverWorkspace(
+    config,
+    canonicalClaim("fixed-implementation", "task-fixed", 4),
+    { ...workspace, baseSha: canonicalImplementationSha },
+    {
+      command: async (executable, args) => { calls.push(`${executable} ${args.join(" ")}`); return ""; },
+      headSha: canonicalFixedSha,
+      prWorkflowOutputs: outputs,
+    },
+  );
+  assert.equal(result.pushStatus, "FAILED");
+  assert.equal(result.failure?.operation, "canonical PR output validation");
+  assert.deepEqual(calls, []);
+});
+
+test("canonical PR final delivery rejects duplicate finding ids across review reports", async () => {
+  const outputs = canonicalFinalOutputs();
+  const blind = JSON.parse(outputs[2]!.body) as Record<string, unknown>;
+  blind.findings = [{
+    id: "SOL-1",
+    severity: "P1",
+    file: "src/change.ts",
+    line: 12,
+    title: "Close the handover gap",
+    evidence: "The old path drops evidence.",
+    requiredFix: "Carry the persisted body.",
+  }];
+  outputs[2] = { ...outputs[2]!, body: JSON.stringify(blind) };
+  const calls: string[] = [];
+  const result = await deliverWorkspace(
+    config,
+    canonicalClaim("fixed-implementation", "task-fixed", 4),
+    { ...workspace, baseSha: canonicalImplementationSha },
+    {
+      command: async (executable, args) => { calls.push(`${executable} ${args.join(" ")}`); return ""; },
+      headSha: canonicalFixedSha,
+      prWorkflowOutputs: outputs,
+    },
+  );
+  assert.equal(result.pushStatus, "FAILED");
+  assert.equal(result.failure?.operation, "canonical PR output validation");
+  assert.deepEqual(calls, []);
 });
 
 test("canonical PR final delivery ignores the informational implementation base during publication", async () => {
@@ -296,7 +399,7 @@ test("canonical PR final delivery ignores the informational implementation base 
     "## Verification",
     "Implementation:\n- npm test -- runner — exit 0: all focused tests passed\n\nFixed implementation:\n- npm test -- final — exit 0: final handover passed",
     "## Review outcomes",
-    "### Sol findings\n- SOL-1 [P1] Close the handover gap\n  Disposition: ADOPTED\n  Reason: The runner now carries the persisted evidence.\n  Code evidence: Added the run-bound evidence projection.\n  Test evidence: Added route and delivery coverage.\n\n### Blind findings\nNo findings reported.\n\nResidual risks:\n- GitHub API availability remains external.",
+    "### Code review findings\n- SOL-1 [P1] Close the handover gap\n  Disposition: ADOPTED\n  Reason: The runner now carries the persisted evidence.\n  Code evidence: Added the run-bound evidence projection.\n  Test evidence: Added route and delivery coverage.\n\n### Blind findings\nNo findings reported.\n\nResidual risks:\n- GitHub API availability remains external.",
     "## Anneal",
     "Task: task-fixed",
     "Chain: chain-pr",
@@ -309,9 +412,9 @@ test("canonical PR final delivery ignores the informational implementation base 
 
 test("canonical PR final body states when reviews required no code change", async () => {
   const outputs = canonicalFinalOutputs();
-  const sol = JSON.parse(outputs[1]!.body) as Record<string, unknown>;
-  sol.findings = [];
-  outputs[1] = { ...outputs[1]!, body: JSON.stringify(sol) };
+  const review = JSON.parse(outputs[1]!.body) as Record<string, unknown>;
+  review.findings = [];
+  outputs[1] = { ...outputs[1]!, body: JSON.stringify(review) };
   const fixed = JSON.parse(outputs[3]!.body) as Record<string, unknown>;
   fixed.dispositions = [];
   fixed.closedFindings = [];

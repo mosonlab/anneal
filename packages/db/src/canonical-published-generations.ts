@@ -58,17 +58,20 @@ export const PUBLISHED_PROMPT_GENERATIONS = {
   "direct-engineer-workflow": [
     { digest: "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543", retiredByShape: "model-neutral-review-step-names" },
     { digest: "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543" },
-    { digest: "a1a15921c9a4592c05db1e0d6d42f95ab2aa8c0011102bd20bf4d3b67b1bd0a1" },
+    { digest: "a1a15921c9a4592c05db1e0d6d42f95ab2aa8c0011102bd20bf4d3b67b1bd0a1", retiredByShape: "pre-model-neutral-review-output" },
+    { digest: "04d473928d65443202bd68b6d865df61f26983fc35870cf43e5032279e1ed107" },
   ],
   "compound-engineer-workflow": [
     { digest: "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9", retiredByShape: "model-neutral-review-step-names" },
     { digest: "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9" },
-    { digest: "be4428549ef4c428fd82ea9e6315bee040bd7874561f2fcc362a49216497bb66" },
+    { digest: "be4428549ef4c428fd82ea9e6315bee040bd7874561f2fcc362a49216497bb66", retiredByShape: "pre-model-neutral-review-output" },
+    { digest: "6d0e84947f79d3c1307727d4d0cdfae7827828e488dc6a05c2a9366480791142" },
   ],
   [PR_TEMPLATE_NAME]: [
     { digest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8", retiredByShape: "model-neutral-review-step-names" },
     { digest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8" },
-    { digest: "e1bbe7b7e56d287f1f4e7ea85beeef29bc84ab8c162882f1c4050540ca46f734" },
+    { digest: "e1bbe7b7e56d287f1f4e7ea85beeef29bc84ab8c162882f1c4050540ca46f734", retiredByShape: "pre-model-neutral-review-output" },
+    { digest: "93a909a5d88b6aa158f9f86155853d7aed7762b61bd56dc9a1b17b6e7051281f" },
   ],
 } as const satisfies Readonly<Record<CanonicalTemplateRegistryName, readonly PublishedPromptGeneration[]>>;
 

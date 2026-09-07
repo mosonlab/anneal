@@ -93,6 +93,7 @@ type NativeTaskDetail = TaskDetail<Date, Prisma.Decimal>;
 
 const nativeBoardCard = (): NativeBoardCard => ({
   id: "task-1",
+  baseline: null,
   name: "Repair the board",
   displayName: "Repair the board",
   status: "TODO",
@@ -122,6 +123,8 @@ const nativeBoardCard = (): NativeBoardCard => ({
   budgetRemaining: true,
   leaseLossRefunds: 0,
   chainAggregate: null,
+  readinessRequeues: 0,
+  readinessGrants: 0,
 });
 
 const nativeRun: NativeTaskList["runs"][number] = {
@@ -205,17 +208,19 @@ const nativeTaskBase = {
   schedulePausedAt: null,
   recurringSourceTaskId: null,
   templateStep: null,
-} satisfies Omit<NativeTaskList, "chainProgress" | "recurringLastFiredAt" | "recurringFireCount">;
+} satisfies Omit<NativeTaskList, "chainProgress" | "baseline" | "recurringLastFiredAt" | "recurringFireCount">;
 
 const nativeTaskList = (): NativeTaskList => ({
   ...nativeTaskBase,
   chainProgress: null,
+  baseline: null,
   recurringLastFiredAt: null,
   recurringFireCount: 0,
 });
 
 const nativeTaskDetail = (): NativeTaskDetail => ({
   ...nativeTaskBase,
+  baseline: null,
   moveTargets: [],
   taskCost: null,
   mergeOutcome: null,
