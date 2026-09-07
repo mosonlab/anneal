@@ -581,6 +581,9 @@ test("two ready candidates form one detached train with ordered claim metadata a
   assert.equal(metadata.regressionTaskId, seed.candidates[0]!.regression.id);
   assert.equal(metadata.baseSha, BASE);
   assert.equal(metadata.width, 2);
+  assert.deepEqual(mergeTrainClaimMetadata(await readLatestMarker(db, train.id, "train", "control-plane")), {
+    schemaVersion: 1, baseSha: BASE, width: 2, candidates: metadata.candidates,
+  });
   assert.deepEqual(metadata.candidates, seed.candidates.map((candidate) => ({
     taskId: candidate.readiness.id,
     chainId: candidate.chainId,
