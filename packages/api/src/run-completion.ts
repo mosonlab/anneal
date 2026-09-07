@@ -67,6 +67,7 @@ import {
   recordMergeTailRequeue,
   regressionVerdictForRun,
   settleMergeTailCompletion,
+  stopUnboundRepair,
 } from "./merge-tail-actions.js";
 import { explainFenceRefusal, fenceRefusalResponse, fencedRunWhere, type RunFence } from "./run-fence.js";
 import { terminalizeRun } from "./run-terminal.js";
@@ -589,7 +590,7 @@ export const completeRun = async (
     );
     if (refusal) return { reason: "forbidden", message: refusal };
   }
-  const result = await commitWithLeaseOutcome<RunCompletion>(db, async (tx) => {
+  const result = await commitWithLeaseOutcome<RunCompletion | CompleteRunRefusal>(db, async (tx) => {
     // Run owns fencing, cancellation, and terminalization. Take that mutex
     // before Task so completion, cancellation, and canonical output writes
     // cannot deadlock by entering the same two rows in opposite orders.
@@ -725,12 +726,6 @@ export const completeRun = async (
       failedRegressionVerdict?.status === "ok"
       && failedRegressionVerdict.verdict.outcome !== "pass",
     );
-    // Preserve a failed completion's diagnostic reason even when a definitive
-    // mechanical result overrides its protocol classification. Ordinary
-    // reported success still carries no failure reason.
-    const failureReason = succeeded && reported.succeeded
-      ? null
-      : missingOutputReason ?? reported.failureReason ?? "Execution failed";
     // Completion always mutates its Task, including terminal non-retryable
     // failures. Run is already locked above; acquire the Task/chain mutex now
     // before reading capped-refund history so two completion decisions cannot
@@ -856,6 +851,17 @@ export const completeRun = async (
     const auxiliaryTargetTaskId = repairMarker?.regressionTaskId
       ? repairDocumentationTask?.id ?? repairMarker.regressionTaskId
       : null;
+    const repairSourceRunId = typeof repairMarker?.raw.sourceRunId === "string"
+      ? repairMarker.raw.sourceRunId
+      : null;
+    // Preserve a failed completion's diagnostic reason even when a definitive
+    // mechanical result overrides its protocol classification. Ordinary
+    // reported success still carries no failure reason; an unbound repair's
+    // reason is written onto the Run by the rejection itself, once the ladder
+    // has decided that the mismatch is what settles this completion.
+    const failureReason = succeeded && reported.succeeded
+      ? null
+      : missingOutputReason ?? reported.failureReason ?? "Execution failed";
     // The same refund, recorded apart from the ceiling it produced. The gates
     // an operator can reach read this rather than `maxRunsPerTask`, because
     // only this can still be told apart from the configured budget after that
@@ -864,9 +870,27 @@ export const completeRun = async (
     // an attempt already authorized.
     const budgetGrants = completionBudget.budgetGrants;
     let leaseOutcome: "continue" | "stop" = "continue";
+    // Set only when the ladder rejects this completion for an unbound repair.
+    let repairBindingRejection: CompleteRunRefusal | null = null;
     if (auxiliaryTargetTaskId && auxiliaryTargetTaskId !== run.task?.id) {
       await lockTaskMutationRows(tx, auxiliaryTargetTaskId);
     }
+    // Which recovery, if any, this repair completion settles — read under the
+    // repair target chain's mutex taken just above, because the recovery
+    // aggregate is that chain's, and every other writer of it takes the same
+    // lock. Decided before the terminal write, because a repair the platform
+    // cannot bind is not an internal server error and must not escape this
+    // transaction as one: the Run carries the reason, the repair Task parks,
+    // and the completion answers a classified rejection.
+    const repairRecoveryBinding = repairMarker?.regressionTaskId && repairSourceRunId
+      ? await activeRepairRecoverySourceRun(tx, {
+          regressionTaskId: repairMarker.regressionTaskId,
+          sourceRunId: repairSourceRunId,
+        })
+      : null;
+    const unboundRepair = repairRecoveryBinding?.case === "mismatch" && repairMarker?.regressionTaskId
+      ? { regressionTaskId: repairMarker.regressionTaskId, mismatch: repairRecoveryBinding.mismatch }
+      : null;
     if (run.task && typeof (tx.task as { findUnique?: unknown }).findUnique === "function") {
       await tx.task.findUnique({ where: { id: run.task.id }, select: { status: true } });
     }
@@ -1127,6 +1151,7 @@ export const completeRun = async (
         outputRefusal: canonicalOutputFailure,
         mergeTailAuxiliary,
         mergeTailHandled: mergeTailCompletion.handled,
+        repairBindingRefusal: unboundRepair?.mismatch.reason ?? null,
         auxiliaryTargetTaskId,
         mergeTailRequeue: mergeTailSuccessorRequeue,
         mergeTailRecoverySourceRunId: mergeTailRequeueContext?.recoverySourceRunId ?? null,
@@ -1225,20 +1250,44 @@ export const completeRun = async (
                   },
                 } });
               }
-              const repairSourceRunId = typeof repairMarker?.raw.sourceRunId === "string"
-                ? repairMarker.raw.sourceRunId
-                : null;
-              const recoverySourceRunId = repairSourceRunId && repairMarker?.regressionTaskId
-                ? await activeRepairRecoverySourceRun(tx, {
-                    regressionTaskId: repairMarker.regressionTaskId,
-                    sourceRunId: repairSourceRunId,
-                  })
-                : null;
               await activateMergeTailTarget(tx, advancement.auxiliaryTargetTaskId, now, {
-                ...(recoverySourceRunId === null ? {} : { recoverySourceRunId }),
+                ...(repairRecoveryBinding?.case === "recovery"
+                  ? { recoverySourceRunId: repairRecoveryBinding.recoverySourceRunId }
+                  : {}),
               });
             }
           }
+          break;
+        }
+        case "reject-repair-binding": {
+          // The repair's own work is committed and its repairResult marker is
+          // written; only the recovery-bound activation is impossible. Park the
+          // repair Task with the reason, record the overlap on the Regression
+          // task, and leave the tail in the state the operator reentry route
+          // reopens. The completion answers a classified rejection below.
+          if (!unboundRepair) {
+            throw new Error(`Run ${run.id} rejected a repair binding it did not classify`);
+          }
+          await stopUnboundRepair(tx, {
+            runId: run.id,
+            repairTaskId: run.taskId,
+            ...(completionTaskStatus ? { repairTaskStatus: completionTaskStatus } : {}),
+            regressionTaskId: unboundRepair.regressionTaskId,
+            documentationTaskId: repairDocumentationTask?.id ?? null,
+            mismatch: unboundRepair.mismatch,
+            run: { agentId: run.agentId, sessionId: run.session.id, completedAt: now },
+          });
+          repairBindingRejection = {
+            reason: "merge-tail-repair-unbound",
+            message: unboundRepair.mismatch.reason,
+            detail: {
+              recoveryId: unboundRepair.mismatch.recoveryId,
+              boundRecoveryRunId: unboundRepair.mismatch.boundRecoveryRunId,
+              boundSourceRunId: unboundRepair.mismatch.boundSourceRunId,
+              repairedRunId: unboundRepair.mismatch.repairedRunId,
+            },
+          };
+          leaseOutcome = "stop";
           break;
         }
         case "park-task":
@@ -1329,7 +1378,12 @@ export const completeRun = async (
       });
     }
     return {
-      value: { taskId: run.taskId, succeeded, retryCreated, failureClass },
+      // A repair the platform cannot bind is not an internal server error and
+      // not the runner's fault. Everything above is committed — the Run carries
+      // the reason, the repair Task is parked, the overlap is recorded — and
+      // the completion itself answers a named 409 rather than 500.
+      value: repairBindingRejection
+        ?? { taskId: run.taskId, succeeded, retryCreated, failureClass },
       leaseOutcome: leaseOutcome === "stop"
         ? { kind: "stop", taskId: run.taskId }
         : { kind: "continue" },

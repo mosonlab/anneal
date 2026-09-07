@@ -53,6 +53,7 @@ const refusalByReason = {
   "pinned-base-commit": { reason: "pinned-base-commit", message: "pinned base" },
   "merge-evidence": { reason: "merge-evidence", message: "merge evidence" },
   "merge-confirmation": { reason: "merge-confirmation", message: "merge confirmation" },
+  "merge-tail-repair-unbound": { reason: "merge-tail-repair-unbound", message: "repair cannot bind" },
   "inbox-question-not-found": { reason: "inbox-question-not-found", message: "missing question" },
   "approval-gate-decision-invalid": { reason: "approval-gate-decision-invalid", message: "invalid decision" },
   "inbox-choice-mismatch": { reason: "inbox-choice-mismatch", message: "choice mismatch" },
