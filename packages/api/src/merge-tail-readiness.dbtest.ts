@@ -313,7 +313,9 @@ const externalRetryAfterLeaseLosses = async (
       runnerId,
       fencingToken,
       exitCode: 1,
+      pushStatus: "NOT_REQUESTED",
       cleanupStatus: "SUCCEEDED",
+      workspaceRetained: false,
       outcome: {
         case: "provider-failure",
         reason: "provider transport failed",
@@ -337,6 +339,7 @@ const externalRetryAfterLeaseLosses = async (
       },
     },
   });
+  assert.ok(!("reason" in completion), JSON.stringify(completion));
   assert.equal(completion.retryCreated, true);
   const retry = await db.run.findFirstOrThrow({
     where: { taskId: seeded.regression.id }, orderBy: { runNumber: "desc" },
