@@ -1505,7 +1505,22 @@ platform stops requeueing and parks the task for an operator, so a card showing
 `3` is one loss away from `REVIEW`. See "Lost-Run reconciliation" below.
 Every card also carries `baseline`, the same per-template-step cost and
 duration baseline `GET /tasks/:taskId` documents, or `null` for a card with no
-template step or too little history. The whole page is answered by one grouped
+template step or too little history.
+Each card's `latestRun` reports where that Run is now, so a card can be read
+without opening the task. `phase` is one of `queued`, `provisioning`,
+`executing`, `waiting-inbox`, `cleanup`, or `finished`, computed from the same
+boundaries `metrics.phases` measures between: `queued` from the Run's
+`readyAt`, `provisioning` from the Session's `provisionedAt`, `executing` from
+its `startedAt`, `cleanup` while `cleanupStartedAt` is set and
+`cleanupEndedAt` is not, and `finished` once the Session ended or the Run
+reached a terminal status. `phaseSince` is the ISO instant the Run entered that
+phase, and is `null` only for `waiting-inbox`: nothing records when an Inbox
+wait began, the same gap `metrics.phases.inboxWaitMs` reports as unknown, so no
+caller may render a time in phase for one. `lastProgressEventAt` is the last
+progress the owning runner reported for the Run — the signal its stall timeout
+is measured from — or `null` when none was reported. `maxRunsPerTask` is the
+attempt ceiling snapshotted at Run birth, which is what a card's retry count is
+read against rather than the task's configured budget of the moment. The whole page is answered by one grouped
 query, so the board's query count does not grow with the number of cards. Rows
 of the `full` view carry the same `baseline` field on the same terms, read by
 the same single grouped query.

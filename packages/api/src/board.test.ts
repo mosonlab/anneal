@@ -700,6 +700,110 @@ test("the latest run carries its claimed Codex service tier", () => {
   assert.equal(card.latestRun?.codexServiceTier, "FAST");
 });
 
+/* ------------------------------------------------------------- the phase */
+
+const PROVISIONED = new Date("2026-08-15T00:00:05.000Z");
+const STARTED = new Date("2026-08-15T00:00:20.000Z");
+const SESSION_ENDED = new Date("2026-08-15T00:04:00.000Z");
+const CLEANUP_STARTED = new Date("2026-08-15T00:04:01.000Z");
+const CLEANUP_ENDED = new Date("2026-08-15T00:04:04.000Z");
+
+/** One run of a card, as the phase rule reads it. */
+const phaseRun = (
+  status: BoardRow["runs"][number]["status"],
+  overrides: Partial<NonNullable<BoardRow["runs"][number]["session"]>> | null,
+  runOverrides: Partial<BoardRow["runs"][number]> = {},
+): BoardRow["runs"][number] => ({
+  id: "r1", runNumber: 1, status, model: "claude-opus-5", codexServiceTier: "DEFAULT",
+  budgetGrants: 0, leaseLossRefunds: 0, pullRequestUrl: null, pushedBranch: null, baseSha: null,
+  readyAt: RUN_READY, endedAt: null, lastProgressEventAt: null, maxRunsPerTask: 5,
+  session: overrides === null ? null : session(overrides),
+  ...runOverrides,
+});
+
+const phaseOf = (run: BoardRow["runs"][number]): { phase: string; phaseSince: Date | null } => {
+  const latest = boardCard(row({ runs: [run] }), null, moveContext).latestRun!;
+  return { phase: latest.phase, phaseSince: latest.phaseSince };
+};
+
+test("every phase a run can be in is named, and dated from the timestamp that opened it", () => {
+  // The queued phase starts when the run became claimable, which is the one
+  // instant a run with no session at all can be dated from.
+  assert.deepEqual(phaseOf(phaseRun("QUEUED", null)), { phase: "queued", phaseSince: RUN_READY });
+  assert.deepEqual(
+    phaseOf(phaseRun("PROVISIONING", { provisionedAt: PROVISIONED, executionStatus: "PROVISIONING" })),
+    { phase: "provisioning", phaseSince: PROVISIONED },
+  );
+  assert.deepEqual(
+    phaseOf(phaseRun("RUNNING", { provisionedAt: PROVISIONED, startedAt: STARTED, executionStatus: "RUNNING" })),
+    { phase: "executing", phaseSince: STARTED },
+  );
+  // Nothing records when an Inbox wait began, so the wait is named and left
+  // undated rather than dated from the executing start — which would publish
+  // the run's whole working time as time spent waiting on a human.
+  assert.deepEqual(
+    phaseOf(phaseRun("WAITING_INBOX", { provisionedAt: PROVISIONED, startedAt: STARTED, executionStatus: "WAITING_INBOX" })),
+    { phase: "waiting-inbox", phaseSince: null },
+  );
+  // Cleanup outranks the run's own terminality: the control plane settles the
+  // status while the runner is still disposing of the workspace.
+  assert.deepEqual(
+    phaseOf(phaseRun("SUCCEEDED", {
+      provisionedAt: PROVISIONED, startedAt: STARTED, endedAt: SESSION_ENDED, cleanupStartedAt: CLEANUP_STARTED,
+    })),
+    { phase: "cleanup", phaseSince: CLEANUP_STARTED },
+  );
+  assert.deepEqual(
+    phaseOf(phaseRun("SUCCEEDED", {
+      provisionedAt: PROVISIONED, startedAt: STARTED, endedAt: SESSION_ENDED,
+      cleanupStartedAt: CLEANUP_STARTED, cleanupEndedAt: CLEANUP_ENDED,
+    })),
+    { phase: "finished", phaseSince: CLEANUP_ENDED },
+  );
+});
+
+test("a settled run is finished whatever milestone its session stopped at", () => {
+  // A FAILED run whose session never started is not still provisioning, and a
+  // card counting time in a phase nothing will leave is a clock that never
+  // stops. The instant is the most recent one the rows can prove.
+  const failedAt = new Date("2026-08-15T00:00:30.000Z");
+  assert.deepEqual(
+    phaseOf(phaseRun("FAILED", { provisionedAt: PROVISIONED, executionStatus: "FAILED" }, { endedAt: failedAt })),
+    { phase: "finished", phaseSince: failedAt },
+  );
+  assert.deepEqual(
+    phaseOf(phaseRun("CANCELLED", null)),
+    { phase: "finished", phaseSince: RUN_READY },
+  );
+});
+
+test("a live run is dated from its phase start, not from the card being read", () => {
+  // The card counts time in phase from this instant, so a run that has been
+  // provisioning for ten minutes stops looking like one that has been
+  // executing for ten minutes. `run-metrics.test.ts` proves the same helper
+  // decides which phase the diagnostics measure to now.
+  const live = phaseRun("RUNNING", { provisionedAt: PROVISIONED, startedAt: STARTED, executionStatus: "RUNNING" });
+  assert.deepEqual(phaseOf(live), { phase: "executing", phaseSince: STARTED });
+  const provisioning = phaseRun("PROVISIONING", { provisionedAt: PROVISIONED, executionStatus: "PROVISIONING" });
+  assert.deepEqual(phaseOf(provisioning), { phase: "provisioning", phaseSince: PROVISIONED });
+});
+
+test("the card carries the run's last reported progress and its attempt ceiling", () => {
+  // The stalled badge is measured from the same signal the runner's stall
+  // timeout is, and the retry count is read against the ceiling the run was
+  // born with rather than the task's configured budget of the moment.
+  const progressAt = new Date("2026-08-15T00:03:00.000Z");
+  const card = boardCard(row({ runs: [phaseRun(
+    "RUNNING",
+    { provisionedAt: PROVISIONED, startedAt: STARTED, executionStatus: "RUNNING" },
+    { runNumber: 3, lastProgressEventAt: progressAt, maxRunsPerTask: 7 },
+  )] }), null, moveContext);
+  assert.deepEqual(card.latestRun?.lastProgressEventAt, progressAt);
+  assert.equal(card.latestRun?.maxRunsPerTask, 7);
+  // Unreported progress stays unknown; a card must not read it as "just now".
+  assert.equal(boardCard(row({ runs: [phaseRun("QUEUED", null)] }), null, moveContext).latestRun?.lastProgressEventAt, null);
+});
+
 test("the latest run carries the pull request it published, and null when it published none", () => {
   // The card's footer links this; the board reads no other delivery column.
   const run = (pullRequestUrl: string | null) => ({

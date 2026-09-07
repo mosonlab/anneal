@@ -4,7 +4,7 @@ import test from "node:test";
 import type { RunnerKind, RunStatus } from "@anneal/db";
 import type { RunBaseline } from "@anneal/db/board-contract";
 
-import { runMetrics, type RunMetricsSession, type RunMetricsToolEvent } from "./run-metrics.js";
+import { runMetrics, runPhase, type RunMetricsSession, type RunMetricsToolEvent } from "./run-metrics.js";
 
 const READY = new Date("2026-09-01T10:00:00.000Z");
 const PROVISIONED = new Date("2026-09-01T10:00:05.000Z");
@@ -105,6 +105,27 @@ test("each phase is null when either bounding timestamp is missing", () => {
   assert.deepEqual(noSession.phases, {
     queuedMs: null, provisioningMs: null, executingMs: null, inboxWaitMs: null, cleanupMs: null,
   });
+});
+
+test("the phase a run is named by is the phase its executing clock is measured to", () => {
+  // One helper, two readers: the board card names the phase and the
+  // diagnostics measure the durations between the same boundaries. A run whose
+  // phase is `executing` is exactly the run whose executingMs is still growing.
+  const live = session({
+    executionStatus: "RUNNING", endedAt: null, cleanupStartedAt: null, cleanupEndedAt: null,
+  });
+  const liveRun = { readyAt: READY, status: "RUNNING" as RunStatus, endedAt: null };
+  assert.deepEqual(runPhase(liveRun, live), { phase: "executing", phaseSince: STARTED });
+  assert.equal(
+    runMetrics({ run: liveRun, session: live, toolEvents: [], now: new Date(STARTED.getTime() + 42_000) }).phases.executingMs,
+    42_000,
+  );
+
+  // And a settled run's executing phase is closed, whatever its session status
+  // column happens to say.
+  const settledRun = { readyAt: READY, status: "SUCCEEDED" as RunStatus, endedAt: ENDED };
+  assert.equal(runPhase(settledRun, session()).phase, "finished");
+  assert.equal(metricsOf().phases.executingMs, 100_000);
 });
 
 test("a live run measures executingMs to now and leaves cleanup unknown", () => {
