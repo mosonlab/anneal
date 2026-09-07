@@ -292,7 +292,7 @@ test("the handbook documents the machine-only, run-bound decided output evidence
     assert.match(text, new RegExp(field.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
   }
   assert.match(text, /implementation delivery\s+receives only its current `implementation` entry/u);
-  assert.match(text, /final delivery receives\s+exactly `implementation`, `sol-findings`, `blind-findings`, and\s+`fixed-implementation`, in chain order/u);
+  assert.match(text, /final delivery receives\s+exactly `implementation`, `review-findings`, `blind-findings`, and\s+`fixed-implementation`, in chain order/u);
   assert.match(text, /does not widen prompt `priorOutputs`, expose sibling evidence to a blind\s+review/u);
   assert.match(text, /derive text from provider output, activity prose, or repository\s+contents/u);
   assert.match(text, /source is persisted task output[\s\S]*claimed session\/run identity/u);

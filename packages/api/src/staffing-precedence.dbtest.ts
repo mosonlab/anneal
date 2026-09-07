@@ -183,8 +183,8 @@ test("the template's default profile staffs a chain, and an explicit override ou
   assert.equal(await assigneeOf(staffed.chainId, "implementation"), seed.profileAgent.id);
   assert.equal(await assigneeOf(staffed.chainId, "fixed-implementation"), seed.profileAgent.id);
   assert.equal(await assigneeOf(staffed.chainId, seed.steps.optional.outputKind), undefined);
-  assert.equal(await assigneeOf(staffed.chainId, "sol-findings"), (await db.taskTemplateStep.findFirstOrThrow({
-    where: { taskTemplateId: seed.direct.id, outputKind: "sol-findings" },
+  assert.equal(await assigneeOf(staffed.chainId, "review-findings"), (await db.taskTemplateStep.findFirstOrThrow({
+    where: { taskTemplateId: seed.direct.id, outputKind: "review-findings" },
     select: { assigneeAgentId: true },
   })).assigneeAgentId);
 

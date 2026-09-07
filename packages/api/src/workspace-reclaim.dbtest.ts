@@ -466,7 +466,7 @@ test("a salvaged implementation continuation can deliver its unchanged base and 
     name: "Code review",
     assigneeType: "AGENT",
     prompt: "review",
-    outputKind: "sol-findings",
+    outputKind: "review-findings",
     opensPullRequest: false,
     requiresCommit: false,
     baseFromStepIndex: 2,

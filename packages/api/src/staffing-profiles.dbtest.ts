@@ -111,7 +111,7 @@ const seed = async (templateName = "custom-workflow") => {
     },
   });
   await step(1, "implementation", implementer.id, { runner: RunnerKind.CODEX });
-  await step(2, "sol-findings", reviewer.id);
+  await step(2, "review-findings", reviewer.id);
   await step(3, "blind-findings", reviewer.id, { optional: true });
   await step(4, "merge-result", integrator.id);
   await step(5, "handoff", null, { assigneeType: AssigneeType.HUMAN });
@@ -162,7 +162,7 @@ test("profiles are created, listed, replaced, reset and deleted", async () => {
 
   const replaced = await call("PUT", `/staffing-profiles/${created.body.profile.id}`, {
     name: "Renamed",
-    entries: [{ outputKind: "sol-findings", assigneeAgentId: fixture.reviewer.id }],
+    entries: [{ outputKind: "review-findings", assigneeAgentId: fixture.reviewer.id }],
   });
   assert.equal(replaced.status, 200, JSON.stringify(replaced.body));
   assert.equal(replaced.body.profile.name, "Renamed");
@@ -170,7 +170,7 @@ test("profiles are created, listed, replaced, reset and deleted", async () => {
   // optional step keeps a boolean, because a profile always states one (R3).
   assert.deepEqual(replaced.body.profile.entries, [
     { outputKind: "blind-findings", assigneeAgentId: null, include: true },
-    { outputKind: "sol-findings", assigneeAgentId: fixture.reviewer.id, include: null },
+    { outputKind: "review-findings", assigneeAgentId: fixture.reviewer.id, include: null },
   ]);
 
   const reset = await call("POST", `/staffing-profiles/${created.body.profile.id}/reset`);
@@ -180,7 +180,7 @@ test("profiles are created, listed, replaced, reset and deleted", async () => {
     { outputKind: "handoff", assigneeAgentId: null, include: null },
     { outputKind: "implementation", assigneeAgentId: fixture.implementer.id, include: null },
     { outputKind: "merge-result", assigneeAgentId: fixture.integrator.id, include: null },
-    { outputKind: "sol-findings", assigneeAgentId: fixture.reviewer.id, include: null },
+    { outputKind: "review-findings", assigneeAgentId: fixture.reviewer.id, include: null },
   ]);
 
   const listed = await call("GET", profilesPath(fixture));
@@ -321,7 +321,7 @@ test("the merge-execution binding is refused from both sides", async () => {
 
   const sentinelElsewhere = await createProfile(fixture, {
     name: "Sentinel elsewhere",
-    entries: [{ outputKind: "sol-findings", assigneeAgentId: fixture.integrator.id }],
+    entries: [{ outputKind: "review-findings", assigneeAgentId: fixture.integrator.id }],
   });
   assert.equal(sentinelElsewhere.status, 422, JSON.stringify(sentinelElsewhere.body));
   assert.equal(sentinelElsewhere.body.code, "staffing_profile_integrator_binding");
@@ -357,7 +357,7 @@ test("one agent implementing and reviewing is a warning, not a refusal", async (
     name: "Self review",
     entries: [
       { outputKind: "implementation", assigneeAgentId: fixture.implementer.id },
-      { outputKind: "sol-findings", assigneeAgentId: fixture.implementer.id },
+      { outputKind: "review-findings", assigneeAgentId: fixture.implementer.id },
     ],
   });
   assert.equal(created.status, 201, JSON.stringify(created.body));

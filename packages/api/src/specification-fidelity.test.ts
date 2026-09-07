@@ -395,7 +395,7 @@ test("direct authority is read from the implementation task and compound authori
       chainId: "direct-chain",
       chainIndex: 2,
       description: "review task description must not become authority",
-      templateStep: { stepIndex: 2, outputKind: "sol-findings", baseFromStepIndex: 1, taskTemplate: { name: "direct-engineer-workflow" } },
+      templateStep: { stepIndex: 2, outputKind: "review-findings", baseFromStepIndex: 1, taskTemplate: { name: "direct-engineer-workflow" } },
     },
     repo: { remoteUrl: "git@github.com:acme/repo.git" },
     branch: "feature/direct",
@@ -422,7 +422,7 @@ test("direct authority is read from the implementation task and compound authori
       chainId: "compound-chain",
       chainIndex: 6,
       description: "review task description must not become authority",
-      templateStep: { stepIndex: 6, outputKind: "sol-findings", baseFromStepIndex: 5, taskTemplate: { name: "compound-engineer-workflow-legacy-pre-zero-gate-row" } },
+      templateStep: { stepIndex: 6, outputKind: "review-findings", baseFromStepIndex: 5, taskTemplate: { name: "compound-engineer-workflow-legacy-pre-zero-gate-row" } },
     },
     repo: { remoteUrl: "https://github.com/acme/repo" },
     branch: "feature/compound",
@@ -446,16 +446,16 @@ test("PR review claims prepare identical implementation authority for code revie
       stepOutput: null,
     }] },
   } as unknown as Parameters<typeof prepareSpecificationVerification>[0];
-  const candidate = (outputKind: "sol-findings" | "blind-findings") => ({
+  const candidate = (outputKind: "review-findings" | "blind-findings") => ({
     task: {
       id: `pr-${outputKind}`,
       projectId: "project",
       templateId: "pr-template",
       chainId: "pr-chain",
-      chainIndex: outputKind === "sol-findings" ? 2 : 3,
+      chainIndex: outputKind === "review-findings" ? 2 : 3,
       description: "review task description must not become authority",
       templateStep: {
-        stepIndex: outputKind === "sol-findings" ? 2 : 3,
+        stepIndex: outputKind === "review-findings" ? 2 : 3,
         outputKind,
         baseFromStepIndex: 1,
         taskTemplate: { name: PR_TEMPLATE_NAME },
@@ -466,7 +466,7 @@ test("PR review claims prepare identical implementation authority for code revie
   });
 
   const [sol, blind] = await Promise.all([
-    prepareSpecificationVerification(tx, candidate("sol-findings"), "e".repeat(40)),
+    prepareSpecificationVerification(tx, candidate("review-findings"), "e".repeat(40)),
     prepareSpecificationVerification(tx, candidate("blind-findings"), "e".repeat(40)),
   ]);
   assert.equal(sol.status, "ready");
@@ -511,7 +511,7 @@ test("an unsupported repository remote is refused before repository I/O with a n
       chainId: "direct-chain",
       chainIndex: 2,
       description: "review task",
-      templateStep: { stepIndex: 2, outputKind: "sol-findings", baseFromStepIndex: 1 },
+      templateStep: { stepIndex: 2, outputKind: "review-findings", baseFromStepIndex: 1 },
     },
     repo: { remoteUrl: "https://example.test/acme/repo.git" },
     branch: "feature/direct",
@@ -533,7 +533,7 @@ test("missing or corrupt authority and an unavailable reader are non-transient r
       chainId: "compound-chain",
       chainIndex: 2,
       description: "review task",
-      templateStep: { stepIndex: 2, outputKind: "sol-findings", baseFromStepIndex: 1 },
+      templateStep: { stepIndex: 2, outputKind: "review-findings", baseFromStepIndex: 1 },
     },
     repo: { remoteUrl: "https://github.com/acme/repo" },
     branch: "feature/compound",

@@ -51,7 +51,7 @@ let seedCounter = 0;
 // both review reports already persisted. The repair task is chain-detached, so
 // these are the bodies it can only see if the repair prompt carries them.
 const IMPLEMENTATION_BODY = "Feature brief: reject unregistered graphs at every entry point. Acceptance: the webhook and manual fire paths refuse them too.";
-const SOL_FINDINGS_BODY = "sol-findings: MF-2 the HTTP layer validates but the webhook path calls the executor directly.";
+const SOL_FINDINGS_BODY = "review-findings: MF-2 the HTTP layer validates but the webhook path calls the executor directly.";
 const BLIND_FINDINGS_BODY = "blind-findings: the manual fire path repeats the same bypass and the board reads the retired field.";
 
 type RegressionSeedOptions = {
@@ -133,12 +133,12 @@ const seedRegression = async (options: RegressionSeedOptions = {}) => {
   for (const prior of options.withLibrarian
     ? [
       { index: 4, name: "Implementation", kind: "implementation", body: IMPLEMENTATION_BODY },
-      { index: 5, name: "Sol review", kind: "sol-findings", body: SOL_FINDINGS_BODY },
+      { index: 5, name: "Sol review", kind: "review-findings", body: SOL_FINDINGS_BODY },
       { index: 6, name: "Blind review", kind: "blind-findings", body: BLIND_FINDINGS_BODY },
     ]
     : [
       { index: 0, name: "Implementation", kind: "implementation", body: IMPLEMENTATION_BODY },
-      { index: 1, name: "Sol review", kind: "sol-findings", body: SOL_FINDINGS_BODY },
+      { index: 1, name: "Sol review", kind: "review-findings", body: SOL_FINDINGS_BODY },
       { index: 2, name: "Blind review", kind: "blind-findings", body: BLIND_FINDINGS_BODY },
     ]) {
     const step = await db.taskTemplateStep.create({ data: {
@@ -749,7 +749,7 @@ test("a gate-fix prompt renders its failure excerpt while other repair prompts r
   const reviewContext = [
     "Persisted outputs from prior template steps:",
     `## Implementation (implementation)\n${IMPLEMENTATION_BODY}`,
-    `## Sol review (sol-findings)\n${SOL_FINDINGS_BODY}`,
+    `## Sol review (review-findings)\n${SOL_FINDINGS_BODY}`,
     `## Blind review (blind-findings)\n${BLIND_FINDINGS_BODY}`,
   ].join("\n\n");
   assert.equal(reviewRepair.description, [

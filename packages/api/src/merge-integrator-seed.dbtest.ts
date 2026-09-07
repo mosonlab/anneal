@@ -206,7 +206,7 @@ const rebindFixStepToRetiredSeniorDev = async (projectId: string, templateId: st
 const restoreRetiredReviewStepNames = async (templateId: string): Promise<void> => {
   await Promise.all([
     db.taskTemplateStep.updateMany({
-      where: { taskTemplateId: templateId, outputKind: "sol-findings" },
+      where: { taskTemplateId: templateId, outputKind: "review-findings" },
       data: { name: "Code review (Sol)" },
     }),
     db.taskTemplateStep.updateMany({
@@ -241,7 +241,7 @@ test("a fresh seed writes the twelve-step, eight-step, and four-step canonical t
   assert.equal(step.taskTemplate.steps.some((candidate) => candidate.outputKind === "must-fix"), false);
   assert.match(
     step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 8)?.prompt ?? "",
-    /Read the immutable `sol-findings` review output and, when present, the immutable `blind-findings` output/u,
+    /Read the immutable `review-findings` review output and, when present, the immutable `blind-findings` output/u,
   );
   assert.match(
     step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 3)?.prompt ?? "",
@@ -641,7 +641,7 @@ test("canonical sync rolls quiescent adjudication-era graphs only after active R
     assert.equal(replacement.steps.some((step) => step.outputKind === "must-fix"), false);
     assert.match(
       replacement.steps.find((step) => step.outputKind === "fixed-implementation")?.prompt ?? "",
-      /Read the immutable `sol-findings` review output and, when present, the immutable `blind-findings` output/u,
+      /Read the immutable `review-findings` review output and, when present, the immutable `blind-findings` output/u,
     );
   }
 });
