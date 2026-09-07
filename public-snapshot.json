@@ -108,7 +108,7 @@
     { "glob": "packages/merge-executor/src/**/*.ts", "purpose": "merge executor TypeScript source and tests" },
     { "glob": "packages/merge-executor/tsconfig.json", "purpose": "merge executor TypeScript configuration" },
     { "glob": "packages/runner/assets/**/*.ts", "purpose": "runner extension source" },
-    { "glob": "packages/runner/assets/claude-platform-settings.json", "purpose": "versioned platform-owned Claude settings that exclude host configuration and auto-memory" },
+    { "glob": "packages/runner/assets/claude-platform-settings.json", "purpose": "versioned platform-owned Claude settings that exclude host configuration and auto-memory and enforce native subagent model policy" },
     { "glob": "packages/runner/assets/session-config-baseline/codex/config.toml", "purpose": "versioned platform-owned Codex session baseline" },
     { "glob": "packages/runner/package.json", "purpose": "runner package definition" },
     { "glob": "packages/runner/scripts/*.mjs", "purpose": "runner build tooling and its focused tests" },
