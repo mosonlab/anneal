@@ -1689,11 +1689,7 @@ test("the sweep leaves a worktree whose gate is still running", (t) => {
 // --- the scripts themselves --------------------------------------------------
 
 test("every gate-worker script parses", () => {
-  for (const name of [
-    "provision.sh",
-    "bench-postgres.sh",
-    "bench-dbtest-concurrency.sh",
-  ]) {
+  for (const name of ["provision.sh"]) {
     const result = spawnSync("bash", ["-n", join(here, name)], { encoding: "utf8" });
     assert.equal(result.status, 0, `${name}: ${result.stderr}`);
   }

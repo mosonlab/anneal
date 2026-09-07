@@ -7,6 +7,7 @@ import { RunStatus, TaskStatus } from "@anneal/db";
 
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import { withMergeLease, type ReleaseMergeLease, type WithMergeLease } from "./merge-lease.js";
+import { executorsOnline } from "./merge-executor-daemon-fixture.js";
 import { readinessTick } from "./merge-readiness-worker.js";
 import {
   IMPLEMENTATION_BASE,
@@ -14,6 +15,7 @@ import {
   installParallelReviewLifecycle,
 } from "./parallel-review-fixture.js";
 import { createApp } from "./test-app.js";
+
 
 const {
   db,
@@ -147,7 +149,7 @@ test("a direct chain without blind review advances through fixes and regression 
   assert.equal(regressionResult.status, 200, JSON.stringify(regressionResult.body));
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: fixture.regressionTaskId } })).status, TaskStatus.DONE);
 
-  const readiness = await readinessTick(db, reader, new Date(), 5, releaseLease, runWithMergeLease);
+  const readiness = await readinessTick(db, reader, new Date(), 5, releaseLease, runWithMergeLease, executorsOnline);
   assert.deepEqual(readiness, { claimed: 1, authorized: 1, requeued: 0, stopped: 0 });
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: fixture.readinessTaskId } })).status, TaskStatus.DONE);
   assert.equal(await db.run.count({ where: { taskId: fixture.mergeTaskId, status: RunStatus.QUEUED } }), 1);

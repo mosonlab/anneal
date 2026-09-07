@@ -16,10 +16,12 @@ type Observation = {
 };
 export type DaemonSnapshot = { runnerId: string; online: boolean } & DaemonTelemetry;
 
-export const createRunnerRegistry = (): {
+export type RunnerRegistry = {
   note: (runnerId: string, telemetry: Observation, now: Date) => void;
   snapshot: (now: Date) => DaemonSnapshot[];
-} => {
+};
+
+export const createRunnerRegistry = (): RunnerRegistry => {
   const entries = new Map<string, DaemonTelemetry>();
 
   return {

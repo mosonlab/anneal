@@ -78,6 +78,22 @@ const makeFixture = async (): Promise<Fixture> => {
   executable(gateScript, `#!/usr/bin/env node
 const fs = require("node:fs");
 const cp = require("node:child_process");
+// Synchronous writes only. This fixture ends on process.exit, which discards
+// whatever console.log still has queued, and the noisy behaviors below write
+// far more than a backed-up pipe holds: an async write would drop the verdict
+// line the tool reads. The loop covers a partial or EAGAIN write on a pipe the
+// reader has not drained yet.
+const say = (line) => {
+  const payload = Buffer.from(line + "\\n", "utf8");
+  let written = 0;
+  while (written < payload.length) {
+    try {
+      written += fs.writeSync(1, payload, written);
+    } catch (error) {
+      if (error.code !== "EAGAIN") throw error;
+    }
+  }
+};
 const [oid, flag, master] = process.argv.slice(2);
 if (flag !== "--master") process.exit(97);
 fs.appendFileSync(process.env.MERGE_TRAIN_FIXTURE_GATE_LOG, oid + " " + master + "\\n");
@@ -102,47 +118,47 @@ if (behavior === "delayed-pass") {
     }
     clearInterval(interval);
     fs.appendFileSync(process.env.MERGE_TRAIN_FIXTURE_GATE_LOG, "end " + oid + "\\n");
-    console.log("MERGE GATE: PASS " + oid);
+    say("MERGE GATE: PASS " + oid);
     process.exit(0);
   }, 10);
 } else if (behavior === "busy-pass") {
-  console.log("MERGE GATE: PASS " + oid);
+  say("MERGE GATE: PASS " + oid);
   process.exit(75);
 } else if (behavior === "split-pass") {
-  process.stdout.write("MERGE GATE: PA");
-  process.stderr.write("SS " + oid);
+  fs.writeSync(1, "MERGE GATE: PA");
+  fs.writeSync(2, "SS " + oid);
 } else if (behavior === "no-verdict") {
-  console.log("GATE NOT RUN: fixture no verdict " + index);
+  say("GATE NOT RUN: fixture no verdict " + index);
   process.exit(76);
 } else if (behavior === "fail-index-2" && index === 2) {
-  console.log("MERGE GATE: FAIL (fixture failure)");
+  say("MERGE GATE: FAIL (fixture failure)");
   process.exit(1);
 } else if (behavior === "noisy-fail" || behavior === "noisy-pass") {
-  // The real gate is a shell script whose writes block until the reader drains.
-  // This fixture writes far more than a pipe holds, so it must end by falling
-  // off the bottom rather than through process.exit(): Node's stdout to a pipe
-  // is asynchronous, and exiting discards the still-queued tail, which is
-  // exactly the verdict line the tool classifies.
-  console.log("run-gate: failure excerpt (last 200 lines per failing step)");
-  for (let line = 0; line < 200; line += 1) console.log("noise ".repeat(12) + line);
+  // The real gate is a shell script whose writes block until the tool drains
+  // them. This fixture writes far more than a pipe under load holds, and Node's
+  // console.log to a pipe is asynchronous, so a process.exit() would discard the
+  // still-queued tail - exactly the verdict line the tool classifies. say()
+  // writes synchronously, so the verdict survives the process.exit() below.
+  say("run-gate: failure excerpt (last 200 lines per failing step)");
+  for (let line = 0; line < 200; line += 1) say("noise ".repeat(12) + line);
   if (behavior === "noisy-pass") {
-    console.log("MERGE GATE: PASS " + oid);
-  } else {
-    console.log("MERGE GATE: FAIL (fixture failure)");
-    process.exitCode = 1;
+    say("MERGE GATE: PASS " + oid);
+    process.exit(0);
   }
+  say("MERGE GATE: FAIL (fixture failure)");
+  process.exit(1);
 } else if (behavior === "block-cleanup") {
   fs.chmodSync(require("node:path").dirname(process.cwd()), 0o500);
-  console.log("MERGE GATE: PASS " + oid);
+  say("MERGE GATE: PASS " + oid);
   process.exit(0);
 } else if (behavior === "wrong-pass") {
-  console.log("MERGE GATE: PASS " + "0".repeat(40));
+  say("MERGE GATE: PASS " + "0".repeat(40));
   process.exit(0);
 } else if (behavior === "suffix-pass") {
-  console.log("MERGE GATE: PASS " + oid + " suffix");
+  say("MERGE GATE: PASS " + oid + " suffix");
   process.exit(0);
 } else {
-  console.log("MERGE GATE: PASS " + oid);
+  say("MERGE GATE: PASS " + oid);
 }
 `);
 

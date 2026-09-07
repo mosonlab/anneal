@@ -2458,6 +2458,35 @@ Response fields:
 }
 ```
 
+### Readiness authorization and merge executor liveness
+
+Merge readiness writes an authorization only while a merge executor can claim
+it. Before the leased `authorize` decision is applied, readiness checks the
+runner ids in `MERGE_EXECUTOR_RUNNER_IDS` against the same daemon liveness
+`GET /runners` reports: at least one of them must be `online`. If none is,
+nothing is authorized and no Merge Lease is taken; readiness settles as a
+requeue of itself, leaving the regression evidence and its Run untouched, and
+writes a TaskActivity on the readiness task with `metadata.state =
+"requeued-executor-offline"`, `metadata.reason = "merge-executor-offline"` and
+the executor runner ids it checked. The next tick asks again.
+
+That wait is bounded by the 15 minutes after which the registry forgets a
+daemon altogether, and it is measured per outage: the wait starts at the first
+skipped authorization of the outage the chain is currently in, not at the first
+one this task ever recorded. An outage ends when readiness observes it ending --
+the next tick that finds an executor online, settles the Step some other way, or
+stops at the ceiling -- and never merely because time passed between two skipped
+authorizations, so `MERGE_READINESS_POLL_INTERVAL_MS` cannot lengthen or reset
+the wait. An executor still offline at the ceiling stops the tail like any
+other readiness stop: the regression and readiness tasks move to `REVIEW` with
+a `failureReason` naming `merge-executor-offline` and the runner ids. Recover by bringing the executor back and calling
+`POST /tasks/:taskId/retry`.
+
+An empty allowlist is unchanged behaviour: with `MERGE_EXECUTOR_RUNNER_IDS`
+unset no executor is named, the check is skipped, and readiness authorizes as
+before. An executor that is offline stops new authorizations by itself; drain
+by holding chains, not by stopping the executor.
+
 ## Inbox
 
 ### GET `/inbox/messages`

@@ -131,8 +131,6 @@
     { "glob": "scripts/deploy/fixtures/darwin-9a52c6ad-baseline.json", "purpose": "frozen Darwin launchd compatibility baseline for cross-platform deployment regressions" },
     { "glob": "scripts/fixtures/local-api-origin-cases.json", "purpose": "shared local API destination policy table" },
     { "glob": "scripts/fixtures/onboarding-remote-cases.json", "purpose": "shared repository remote policy table" },
-    { "glob": "scripts/gate-worker/bench-dbtest-concurrency.sh", "purpose": "gate worker: dbtest concurrency benchmark over one fixed commit" },
-    { "glob": "scripts/gate-worker/bench-postgres.sh", "purpose": "gate worker: throwaway-postgres settings benchmark over one fixed commit" },
     { "glob": "packages/runner/runtime-tools/gate-worker/gate-dispatch.sh", "purpose": "gate worker: slot-rationed dispatch across the local machine and the worker" },
     { "glob": "scripts/gate-worker/gate-dispatch.test.mjs", "purpose": "gate worker: slot-lock concurrency, dispatcher retry and exit-code behavior" },
     { "glob": "scripts/gate-worker/gate-env.mjs", "purpose": "gate worker: what the gate reads out of the environment, and which of it a fixture may inherit" },
@@ -306,16 +304,6 @@
       "category": "credential-placeholder",
       "glob": ".env.example",
       "reason": "documented empty or non-secret development placeholders"
-    },
-    {
-      "category": "credential-placeholder",
-      "glob": "scripts/gate-worker/bench-dbtest-concurrency.sh",
-      "reason": "loopback-only throwaway benchmark database connection fixtures"
-    },
-    {
-      "category": "credential-placeholder",
-      "glob": "scripts/gate-worker/bench-postgres.sh",
-      "reason": "loopback-only throwaway benchmark database connection fixtures"
     },
     {
       "category": "credential-placeholder",

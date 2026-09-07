@@ -168,6 +168,7 @@ const main = async (): Promise<void> => {
     { startEvidenceWorker },
     { startReadinessWorker },
     { startBaseDriftRecoveryWorker },
+    { createRunnerRegistry },
     files,
     { serve },
   ] = await Promise.all([
@@ -180,6 +181,7 @@ const main = async (): Promise<void> => {
     import("./merge-evidence-worker.js"),
     import("./merge-readiness-worker.js"),
     import("./merge-base-drift-worker.js"),
+    import("./runners.js"),
     import("./files/config.js"),
     import("@hono/node-server"),
   ]);
@@ -202,7 +204,10 @@ const main = async (): Promise<void> => {
 
   const githubReader = createGitHubReader(startup.githubReadToken);
   const specificationReader = createMirrorBackedSpecificationReader(githubReader);
-  const app = createApp(prisma, { ownership, specificationReader });
+  // One registry for both readers: `GET /runners` reports it, and merge
+  // readiness refuses to authorize a merge no daemon in it can execute.
+  const runnerRegistry = createRunnerRegistry();
+  const app = createApp(prisma, { ownership, specificationReader, runnerRegistry });
   const { host: hostname, port } = startup;
   const activeServer = serve({ fetch: app.fetch, hostname, port });
   server = activeServer;
@@ -227,7 +232,7 @@ const main = async (): Promise<void> => {
   // control plane and already holds the read credential, rather than inventing
   // a fourth service.
   evidenceTimer = startEvidenceWorker(prisma, githubReader);
-  readinessTimer = startReadinessWorker(prisma, githubReader);
+  readinessTimer = startReadinessWorker(prisma, githubReader, () => runnerRegistry.snapshot(new Date()));
   baseDriftRecoveryTimer = startBaseDriftRecoveryWorker(prisma, githubReader);
   startupBusy = false;
 };
