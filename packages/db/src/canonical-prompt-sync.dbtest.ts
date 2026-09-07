@@ -549,7 +549,7 @@ test("sync rolls the deployed pre-optional-review prompt generation once", async
     assert.notEqual(current.id, old.templateId);
     const currentFix = current.steps.find(({ outputKind }) => outputKind === "fixed-implementation");
     assert.ok(currentFix);
-    assert.match(currentFix.prompt, /when it is absent, the Sol report is the sole report/u);
+    assert.match(currentFix.prompt, /when it is absent, the code review report is the sole report/u);
     assert.equal(current.steps.find(({ outputKind }) => outputKind === "blind-findings")?.optional, true);
   }
 

@@ -105,7 +105,7 @@ test("a matching no-history pull-request row is current, never a rollover", () =
       optional: false,
       outputKind: "fixed-implementation",
       attachmentsFromPrevious: true,
-      priorOutputKinds: ["sol-findings", "blind-findings"],
+      priorOutputKinds: ["review-findings", "blind-findings"],
       opensPullRequest: false,
       requiresCommit: false,
       provisionDependencies: true,
