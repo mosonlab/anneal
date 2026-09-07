@@ -721,9 +721,7 @@ test("an operator rerun requeues a host-caused gate FAIL without opening a repai
     },
   );
 
-  const replay = await requestRecoveryRerun(seeded.gateTask.id, "recovery-rerun-1");
-  assert.equal(replay.status, 200, await replay.text());
-  assert.deepEqual(await replay.json(), result);
+  assert.deepEqual(await acceptedRerun(seeded.gateTask.id, "recovery-rerun-1"), result);
   assert.equal(await db.mergeRecoveryAttempt.count({
     where: { integratorTaskId: seeded.integratorTask!.id },
   }), 2);
