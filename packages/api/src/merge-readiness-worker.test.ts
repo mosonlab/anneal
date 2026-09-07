@@ -8,16 +8,9 @@ import {
   READINESS_READ_BUDGET_MS,
   startReadinessWorker,
 } from "./merge-readiness-worker.js";
+import { waitUntil } from "./worker-tick-wait.js";
 
 const wait = (milliseconds: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, milliseconds));
-
-const waitUntil = async (predicate: () => boolean, timeoutMs = 10_000): Promise<void> => {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error(`condition was not met within ${timeoutMs}ms`);
-    await wait(25);
-  }
-};
 
 test("the renewed readiness claim covers both the read budget and a lease acquire timeout", () => {
   assert.equal(READINESS_READ_BUDGET_MS, 20_000);

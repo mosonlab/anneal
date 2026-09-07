@@ -92,7 +92,14 @@ const runWithExternalSignal = async (t, fixtureData, signal, status) => {
   child.stdout.setEncoding("utf8");
   child.stdout.on("data", (chunk) => { output += chunk; });
 
-  for (let attempt = 0; attempt < 100 && !existsSync(ready); attempt += 1) await delay(10);
+  // The readiness file comes from a real `bash merge-gate.sh` fixture, and the
+  // gate worker also carries the host's Runs: at the load this worker was
+  // observed at, a bash+git start alone can exceed 10s, so a one-second wait
+  // charges startup to the signal under test. The deadline stays bounded — a
+  // child that never becomes ready must fail here rather than hang the suite —
+  // but it is sized for that loaded worker, not for an idle host.
+  const readyDeadline = Date.now() + 60_000;
+  while (!existsSync(ready) && Date.now() < readyDeadline) await delay(10);
   assert.equal(existsSync(ready), true, `repository command never became ready for ${signal}`);
   assert.equal(child.kill(signal), true, `could not send ${signal}`);
   const result = await new Promise((resolve, reject) => {

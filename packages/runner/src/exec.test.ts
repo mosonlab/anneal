@@ -33,8 +33,15 @@ const alive = (pid: number): boolean => {
   try { process.kill(pid, 0); return true; } catch { return false; }
 };
 
+/** Bounded so a descendant that is never reaped fails the test instead of
+ *  hanging the gate, but sized for the loaded gate worker rather than an idle
+ *  laptop (CONTRIBUTING.md, "Test timing"): signal delivery, reaping and the
+ *  poll's own scheduling all queue behind the load. The loop
+ *  returns the moment the pid is gone, so a green run never pays this. */
+const DESCENDANT_DEATH_BUDGET_MS = 30_000;
+
 const waitForDeath = async (pid: number): Promise<boolean> => {
-  for (let waited = 0; waited < 3_000; waited += 25) {
+  for (let waited = 0; waited < DESCENDANT_DEATH_BUDGET_MS; waited += 25) {
     if (!alive(pid)) return true;
     await new Promise<void>((resolve) => setTimeout(resolve, 25));
   }
@@ -79,7 +86,14 @@ test("a command that ignores SIGTERM is escalated to SIGKILL", async () => {
     assert.ok(error instanceof Error);
     assert.match(error.message, /timed out after 300ms/);
     assert.ok(elapsed >= 300 + KILL_GRACE_MS, `expected the SIGTERM grace to elapse, took ${elapsed}ms`);
-    assert.ok(elapsed < 300 + 3 * KILL_GRACE_MS, `expected SIGKILL to end it promptly, took ${elapsed}ms`);
+    // The floor above and the CommandTimeoutError match are the property. This
+    // ceiling only catches a SIGKILL that never lands, so it gets the same
+    // loaded-worker slack as DESCENDANT_DEATH_BUDGET_MS above rather than a
+    // small multiple of the grace, which measures the host.
+    assert.ok(
+      elapsed < 300 + KILL_GRACE_MS + DESCENDANT_DEATH_BUDGET_MS,
+      `expected SIGKILL to end it, took ${elapsed}ms`,
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

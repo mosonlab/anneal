@@ -154,7 +154,6 @@ test("a mismatched daemon rechecks on its own interval, logs each state change o
 
 test("shutdown interrupts a real pending contract recheck", async () => {
   const controller = new AbortController();
-  const started = performance.now();
   const polling = pollClaims({
     signal: controller.signal,
     pollIntervalMs: 5_000,
@@ -165,15 +164,21 @@ test("shutdown interrupts a real pending contract recheck", async () => {
       return { kind: "contract-mismatch", executorVersion: 1, apiVersion: 2 };
     },
   });
+  // The property is that shutdown interrupts the recheck rather than waiting
+  // out contractRecheckMs, which is 60s above. This bound has to stay well
+  // under that to mean anything, and well over what a loaded event loop costs
+  // a setImmediate-driven abort (CONTRIBUTING.md, "Test timing on the gate
+  // worker"). This deadline is the whole bound: an elapsed-time assertion
+  // after the race could only restate what the race already decided.
+  const INTERRUPT_BUDGET_MS = 15_000;
   let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
     await Promise.race([
       polling,
       new Promise<never>((_resolve, reject) => {
-        deadline = setTimeout(() => reject(new Error("shutdown did not interrupt the recheck")), 900);
+        deadline = setTimeout(() => reject(new Error("shutdown did not interrupt the recheck")), INTERRUPT_BUDGET_MS);
       }),
     ]);
-    assert.ok(performance.now() - started < 1_000);
   } finally {
     clearTimeout(deadline);
   }
@@ -435,7 +440,11 @@ test("a bounded non-settling key read cannot reach a GitHub surface, activity, o
     makeGitHub: (() => { surfaceCalls += 1; return {}; }) as never,
     executeDecision: (async () => { executeCalls += 1; return {}; }) as never,
   });
-  assert.ok(Date.now() - startedAt < 500);
+  // The bound under test is the 10ms githubAppAuthTimeoutMs above; this only
+  // proves the read was abandoned rather than waited on. It is a loaded-worker
+  // number: unwinding through three fetch doubles on a saturated host costs
+  // scheduler time the product is not responsible for.
+  assert.ok(Date.now() - startedAt < 30_000);
   assert.equal(surfaceCalls, 0);
   assert.equal(executeCalls, 0);
   assert.deepEqual(requests.map((request) => request.url), [
@@ -644,8 +653,20 @@ test("the daemon still starts when it is reached through a symlinked release dir
         cwd: scratch,
         env: { PATH: process.env.PATH ?? "" },
         encoding: "utf8",
+        // A refusal this child never prints would otherwise hang the suite for
+        // as long as the gate lets it run. Bounded so it fails instead, and
+        // sized for a full `node --import tsx` startup on the loaded worker
+        // (CONTRIBUTING.md, "Test timing on the gate worker").
+        timeout: 120_000,
       },
     );
+    // The bound above kills a child that never refuses, and spawnSync reports
+    // that as an ETIMEDOUT error with a null status. Check the exit first, or a
+    // daemon that printed the refusal and then stayed alive forever would be
+    // killed at 120s and still pass the very test standing in front of it.
+    assert.equal(started.error, undefined, `spawn failed: ${String(started.error)}`);
+    assert.equal(started.signal, null, `child was signalled: ${String(started.signal)}`);
+    assert.equal(started.status, 1, `expected a refusal exit, got ${String(started.status)}`);
     assert.match(started.stderr, /merge-executor startup refused:/u, `stderr was ${JSON.stringify(started.stderr)}`);
   } finally {
     rmSync(scratch, { recursive: true, force: true });

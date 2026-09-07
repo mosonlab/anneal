@@ -370,11 +370,25 @@ test("PARALLEL-DURATION charges each member for its own time, not the wait befor
     `"a group" "slow" sh -c 'sleep 3' :: "quick" sh -c 'true'`,
   );
   assert.equal(run.status, 0);
-  const quick = run.report.find((line) => line.includes("quick"));
-  assert.ok(quick, "the quick member should appear in the report");
-  const seconds = Number(/(\d+)s$/.exec(quick.trim())?.[1]);
-  assert.ok(Number.isInteger(seconds), `expected a duration, got ${quick}`);
-  assert.ok(seconds <= 1, `the quick member should not be charged for the slow one: ${quick}`);
+  const durationOf = (name) => {
+    const line = run.report.find((entry) => entry.includes(name));
+    assert.ok(line, `the ${name} member should appear in the report`);
+    const seconds = Number(/(\d+)s$/u.exec(line.trim())?.[1]);
+    assert.ok(Number.isInteger(seconds), `expected a duration, got ${line}`);
+    return { line, seconds };
+  };
+  const quick = durationOf("quick");
+  const slow = durationOf("slow");
+  // The property is relative, not absolute: an absolute `seconds <= 1` ceiling
+  // charges the quick member for its own `sh` start-up, which is a measurement
+  // of the host, not of the accounting. The margin keeps the original
+  // resolution: the regression is the quick member being charged for the
+  // parent's wait behind the slow one, so it must come in more than two of the
+  // slow member's three seconds under it, not merely one second under.
+  assert.ok(
+    quick.seconds < slow.seconds - 2,
+    `the quick member should not be charged for the slow one: ${quick.line} / ${slow.line}`,
+  );
 });
 
 test("PARALLEL-STOPPED a member killed from outside is not a FAIL", () => {
@@ -598,7 +612,11 @@ const interruptGroup = async (members, observed = "") => {
     });
     harness.stderr.on("data", () => {});
 
-    const deadline = Date.now() + 15_000;
+    // Waits for a spawned bash harness to reach the member and for the member to
+    // publish its pid. Bounded so a harness that never gets there fails the
+    // assertion below rather than hanging, and sized for
+    // the loaded gate worker (CONTRIBUTING.md, "Test timing"), not for an idle host.
+    const deadline = Date.now() + 60_000;
     let memberPid = "";
     while (Date.now() < deadline) {
       try {
@@ -672,7 +690,10 @@ test("PARALLEL-INTERRUPT stops members still running before the gate tears down"
 
     // The member has to have reported its own pid before the signal, or the
     // test would pass by racing rather than by stopping anything.
-    const deadline = Date.now() + 15_000;
+    // Bounded so a harness that never starts the member fails the assertion
+    // below rather than hanging, and sized for
+    // the loaded gate worker (CONTRIBUTING.md, "Test timing"), not for an idle host.
+    const deadline = Date.now() + 60_000;
     let memberPid = "";
     while (Date.now() < deadline) {
       try {

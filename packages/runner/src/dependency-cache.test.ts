@@ -1371,7 +1371,14 @@ test("a non-terminating npm install receives a process-group timeout", async () 
       ),
       (error: unknown) => error instanceof CommandTimeoutError && error.timeoutMs === 5_000,
     );
-    assert.ok(Date.now() - started < 9_000, "the hung install must be killed within its bounded timeout");
+    // The bound the install is held to is asserted above: the rejection is a
+    // CommandTimeoutError carrying the floored 5s ceiling. This wall clock only
+    // proves the kill actually happened rather than the promise settling some
+    // other way, so it is sized for the loaded gate worker (CONTRIBUTING.md,
+    // "Test timing"), where spawning and reaping a node child can take seconds,
+    // rather than for an idle laptop. It stays bounded so an install that is
+    // never killed fails here instead of hanging the suite.
+    assert.ok(Date.now() - started < 60_000, "the hung install must be killed within its bounded timeout");
     await assert.rejects(lstat(join(workspace, "node_modules")), /ENOENT/u);
   } finally {
     await cleanupRoot(root);

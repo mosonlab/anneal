@@ -328,7 +328,10 @@ exec "$REAL_GIT" "$@"
     {
       cwd: repo,
       encoding: "utf8",
-      timeout: 15_000,
+      // Three real git pushes through a shim. Bounded so a wedged push still
+      // fails the case, at the same budget as this file's siblings and sized for
+      // the loaded gate worker (CONTRIBUTING.md, "Test timing"), not for an idle host.
+      timeout: 60_000,
       env: {
         ...FIXTURE_ENV,
         AGENTOS_WORKSPACE_PATH: repo,
@@ -1215,7 +1218,7 @@ test("the default worker capacity serializes gates from different repositories",
         set -uo pipefail
         "$FIRST_HOME/run-gate.sh" "$FIRST_OID" > "$WORKER_ROOT/first.out" 2>&1 &
         first_pid=$!
-        for _ in $(seq 1 100); do
+        for _ in $(seq 1 600); do
           [ -s "$WORKER_LOCK_STARTS" ] && break
           sleep 0.05
         done
@@ -1234,7 +1237,11 @@ test("the default worker capacity serializes gates from different repositories",
     ],
     {
       encoding: "utf8",
-      timeout: 10_000,
+      // The `seq` loop above is what waits for the spawned run-gate.sh children
+      // to announce themselves; this only bounds a harness that wedges, so it
+      // matches this file's siblings and is sized for
+      // the loaded gate worker (CONTRIBUTING.md, "Test timing"), not for an idle host.
+      timeout: 120_000,
       env: {
         ...FIXTURE_ENV,
         PATH: `${join(workerRoot, "bin")}:${FIXTURE_ENV.PATH ?? ""}`,
@@ -1276,7 +1283,7 @@ test("worker capacity two admits exactly two gates and keeps concurrent logs dis
           "$GATE_HOME/run-gate.sh" "$GATE_OID" > "$WORKER_ROOT/$run.out" 2>&1 &
           eval "pid_$run=$!"
         done
-        for _ in $(seq 1 100); do
+        for _ in $(seq 1 600); do
           [ -s "$WORKER_LOCK_STARTS" ] \
             && [ "$(wc -l < "$WORKER_LOCK_STARTS" | tr -d ' ')" -ge 2 ] \
             && break
@@ -1295,7 +1302,11 @@ test("worker capacity two admits exactly two gates and keeps concurrent logs dis
     ],
     {
       encoding: "utf8",
-      timeout: 10_000,
+      // The `seq` loop above is what waits for the spawned run-gate.sh children
+      // to announce themselves; this only bounds a harness that wedges, so it
+      // matches this file's siblings and is sized for
+      // the loaded gate worker (CONTRIBUTING.md, "Test timing"), not for an idle host.
+      timeout: 120_000,
       env: {
         ...FIXTURE_ENV,
         PATH: `${join(workerRoot, "bin")}:${FIXTURE_ENV.PATH ?? ""}`,

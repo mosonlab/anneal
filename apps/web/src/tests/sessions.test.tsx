@@ -608,8 +608,14 @@ test("focusing the title opens the translated hover card, including Inbox-wait d
         await act(async () => {
           title.focus();
           title.dispatchEvent(new dom.window.FocusEvent("focusin", { bubbles: true }));
-          await new Promise((resolve) => dom.window.setTimeout(resolve, 240));
         });
+        // The card opens on its own delay, so wait for the card rather than for
+        // a sleep chosen to outlast that delay. Bounded at 600 polls (~15s on an
+        // idle host, longer on a starved one) so a card that never opens fails
+        // here rather than hanging the suite.
+        for (let poll = 0; poll < 600 && dom.window.document.querySelector("[data-slot='hover-card-content']") === null; poll += 1) {
+          await act(async () => { await new Promise((resolve) => dom.window.setTimeout(resolve, 25)); });
+        }
         await act(async () => { await Promise.resolve(); });
         await act(async () => { await new Promise((resolve) => dom.window.setTimeout(resolve, 0)); });
         const body = dom.window.document.body.textContent ?? "";

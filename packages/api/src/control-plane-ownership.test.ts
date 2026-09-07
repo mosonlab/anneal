@@ -479,9 +479,18 @@ const childDiagnostic = (tracked: TrackedChild): string => [
  */
 const CHILD_WAIT_BUDGET_MS = 60_000;
 
-/** A child being terminated has already started, so only signal delivery and
- *  its own cleanup remain. Escalation to SIGKILL keeps the shorter budget. */
-const CHILD_TERMINATION_BUDGET_MS = 15_000;
+/** A child being terminated has already started, so only signal delivery, its
+ *  own cleanup and reaping remain. It is still a loaded-host number: a graceful
+ *  shutdown releases ownership and its lock before it exits, and that work
+ *  queues behind the same saturation.
+ *
+ *  It must also strictly contain the child's own cleanup budget, or this wait
+ *  expires while the child was still going to exit cleanly and reports a
+ *  timeout that is a fact about the host. The ownership probe's worst case is
+ *  release() plus DESCENDANT_EXIT_BUDGET_MS on SIGTERM plus the same again on
+ *  SIGKILL (control-plane-ownership-probe.ts) = 10s + 10s + release; 60s clears
+ *  that with room, so it matches CHILD_WAIT_BUDGET_MS rather than halving it. */
+const CHILD_TERMINATION_BUDGET_MS = 60_000;
 
 const isRunning = (child: ChildProcess): boolean => child.exitCode === null && child.signalCode === null;
 
@@ -706,6 +715,11 @@ test("RP-OWN-RECOVERY-CLEANUP readiness timeout removes the owner and unknown de
   }), true);
 
   await waitForLine(owner, /OWNERSHIP_PROBE_DESCENDANT_PID \d+/u);
+  // The one short budget in this file, and deliberately so: this child was
+  // spawned with readiness suppressed at the source, so the line can never
+  // arrive and the wait can only ever time out. Load cannot make it flake — it
+  // has already printed the descendant line above — and a longer budget would
+  // only make the suite slower for the same verdict.
   await assert.rejects(waitForLine(owner, /OWNERSHIP_PROBE_READY/u, 500), (error: unknown) => {
     assert.match(String(error), /Timed out after 500ms.*readiness-timeout owner probe/u);
     assert.match(String(error), /OWNERSHIP_PROBE_DESCENDANT_PID \d+/u);
