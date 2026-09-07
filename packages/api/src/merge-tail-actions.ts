@@ -749,11 +749,13 @@ export const settleMergeTailCompletion = async (
     const expectedTarget = repairMarker.baseHeadSha;
     const bindingError: { reason: string; key: string } | null = parsedResolver.status === "invalid"
       ? { reason: parsedResolver.reason, key: parsedResolver.key }
-      : parsedResolver.result.startHeadSha !== expectedStart || parsedResolver.result.targetHeadSha !== expectedTarget
-        ? { reason: "merge-resolver-opus-medium output is bound to stale start or target heads", key: "startHeadSha" }
-        : parsedResolver.result.outcome === "resolved" && parsedResolver.result.resolvedHeadSha !== input.body.headSha
-          ? { reason: "merge-resolver-opus-medium output resolved head does not match the delivered run head", key: "resolvedHeadSha" }
-          : null;
+      : parsedResolver.result.startHeadSha !== expectedStart
+        ? { reason: "merge-resolver-opus-medium output is bound to a stale start head", key: "startHeadSha" }
+        : parsedResolver.result.targetHeadSha !== expectedTarget
+          ? { reason: "merge-resolver-opus-medium output is bound to a stale target head", key: "targetHeadSha" }
+          : parsedResolver.result.outcome === "resolved" && parsedResolver.result.resolvedHeadSha !== input.body.headSha
+            ? { reason: "merge-resolver-opus-medium output resolved head does not match the delivered run head", key: "resolvedHeadSha" }
+            : null;
     if (bindingError) {
       repairUnable = true;
       const reason = `refresh-conflict repair ${input.task.id} returned invalid output: ${bindingError.reason}`;
