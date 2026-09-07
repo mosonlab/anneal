@@ -172,6 +172,53 @@ type Handoff = {
 const handoff = (seeded: Fixture): Handoff =>
   JSON.parse(readFileSync(seeded.output, "utf8")) as Handoff;
 
+const recoveryContext = (
+  seeded: Fixture,
+  options: { priorOutcome?: "pass" | "gate-fail" | "review-fail" | "refresh-conflict"; priorHeadSha?: string; authorizedHeadSha?: string; currentBaseSha?: string } = {},
+): string => {
+  const priorHeadSha = options.priorHeadSha ?? seeded.branchSha;
+  const priorOutcome = options.priorOutcome ?? "pass";
+  const priorVerdict = priorOutcome === "pass"
+    ? {
+        schemaVersion: 2,
+        outcome: priorOutcome,
+        headSha: priorHeadSha,
+        baseHeadSha: seeded.baseSha,
+        gateVerdict: "PASS",
+        gateProof: `MERGE GATE: PASS ${priorHeadSha}`,
+      }
+    : priorOutcome === "gate-fail"
+      ? {
+          schemaVersion: 2,
+          outcome: priorOutcome,
+          headSha: priorHeadSha,
+          baseHeadSha: seeded.baseSha,
+          gateVerdict: "FAIL",
+          gateProof: "MERGE GATE: FAIL (runner package tests)",
+          summary: "runner package tests",
+          gateFailureExcerpt: "runner package tests: no per-test output in gate log",
+        }
+      : {
+          schemaVersion: 2,
+          outcome: priorOutcome,
+          headSha: priorHeadSha,
+          baseHeadSha: seeded.baseSha,
+          summary: priorOutcome === "review-fail" ? "semantic defect" : "refresh conflict",
+        };
+  return JSON.stringify({
+    state: "queued",
+    currentBaseSha: options.currentBaseSha ?? seeded.baseSha,
+    authorizedHeadSha: options.authorizedHeadSha ?? seeded.branchSha,
+    recoveryRunId: seeded.env.AGENTOS_RUN_ID,
+    priorOutput: {
+      runId: "prior-regression-run",
+      kind: "regression-verification-v2",
+      body: JSON.stringify(priorVerdict),
+      commitSha: priorHeadSha,
+    },
+  });
+};
+
 const adjacentTooling = (seeded: Fixture): { root: string; dispatchLog: string } => {
   const root = join(seeded.root, "runtime-tools");
   const worker = join(root, "gate-worker");
@@ -226,6 +273,137 @@ test("prepare refreshes before semantic review without acquiring the merge lease
   assert.equal(git(seeded.work, "merge-base", "--is-ancestor", seeded.baseSha, "HEAD"), "");
   assert.equal(readFileSync(seeded.leaseLog, "utf8"), "", "prepare held no lease");
   assert.equal(existsSync(seeded.output), false, "prepare emitted no final output");
+});
+
+test("a recovery prepare reuses an exact-head semantic PASS and finalize still runs the gate", () => {
+  const seeded = fixture();
+  advanceBase(seeded, "drift.txt", "drift\n");
+  const movedBase = git(seeded.origin, "rev-parse", "refs/heads/main");
+  seeded.env.AGENTOS_REGRESSION_RECOVERY_CONTEXT = recoveryContext(seeded, { currentBaseSha: movedBase });
+
+  const prepared = run(seeded, "prepare");
+  const refreshedHead = git(seeded.work, "rev-parse", "HEAD");
+  assert.notEqual(refreshedHead, seeded.branchSha);
+  assert.equal(git(seeded.work, "merge-base", "--is-ancestor", movedBase, refreshedHead), "");
+  assert.equal(prepared.status, 0, prepared.stderr);
+  assert.equal(prepared.stdout, `REGRESSION PREPARE: semantic-reused ${refreshedHead} from prior-regression-run\n`);
+  assert.equal(readFileSync(seeded.gateLog, "utf8"), "", "prepare must not run the gate");
+
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 0, finalized.stderr);
+  const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
+  assert.equal(verdict.headSha, refreshedHead);
+  assert.equal(readFileSync(seeded.gateLog, "utf8").trim(), `${refreshedHead} --master ${movedBase}`);
+  assert.equal(verdict.outcome, "pass");
+  assert.equal(verdict.semanticVerdict, "reused");
+  assert.equal(verdict.semanticSourceRunId, "prior-regression-run");
+});
+
+test("a recovery prepare falls back to semantic review when the pre-refresh head differs", () => {
+  const seeded = fixture();
+  advanceBase(seeded, "drift.txt", "drift\n");
+  const movedBase = git(seeded.origin, "rev-parse", "refs/heads/main");
+  seeded.env.AGENTOS_REGRESSION_RECOVERY_CONTEXT = recoveryContext(seeded, {
+    priorHeadSha: "a".repeat(40),
+    currentBaseSha: movedBase,
+  });
+
+  const prepared = run(seeded, "prepare");
+  const refreshedHead = git(seeded.work, "rev-parse", "HEAD");
+  assert.notEqual(refreshedHead, seeded.branchSha);
+  assert.equal(git(seeded.work, "merge-base", "--is-ancestor", movedBase, refreshedHead), "");
+  assert.equal(prepared.status, 0, prepared.stderr);
+  assert.equal(prepared.stdout, `REGRESSION PREPARE: ready ${refreshedHead} ${movedBase}\n`);
+  assert.doesNotMatch(prepared.stdout, /semantic-reused/u);
+
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 0, finalized.stderr);
+  const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
+  assert.equal(verdict.headSha, refreshedHead);
+  assert.equal(readFileSync(seeded.gateLog, "utf8").trim(), `${refreshedHead} --master ${movedBase}`);
+  assert.equal(verdict.outcome, "pass");
+  assert.equal(verdict.semanticVerdict, undefined);
+  assert.equal(verdict.semanticSourceRunId, undefined);
+});
+
+test("a recovery prepare refuses to reuse a non-pass semantic verdict", () => {
+  for (const priorOutcome of ["review-fail", "refresh-conflict"] as const) {
+    const seeded = fixture();
+    seeded.env.AGENTOS_REGRESSION_RECOVERY_CONTEXT = recoveryContext(seeded, { priorOutcome });
+
+    const prepared = run(seeded, "prepare");
+    assert.equal(prepared.status, 0, `${priorOutcome}: ${prepared.stderr}`);
+    assert.equal(prepared.stdout, `REGRESSION PREPARE: ready ${seeded.branchSha} ${seeded.baseSha}\n`, priorOutcome);
+
+    const finalized = run(seeded, "finalize");
+    assert.equal(finalized.status, 0, `${priorOutcome}: ${finalized.stderr}`);
+    const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
+    assert.equal(verdict.semanticVerdict, undefined, priorOutcome);
+    assert.equal(verdict.semanticSourceRunId, undefined, priorOutcome);
+  }
+});
+
+test("a malformed persisted PASS fails closed instead of authorizing reuse", () => {
+  const seeded = fixture();
+  const context = JSON.parse(recoveryContext(seeded)) as {
+    priorOutput: { body: string };
+  };
+  context.priorOutput.body = JSON.stringify({
+    schemaVersion: 2,
+    outcome: "pass",
+    headSha: seeded.branchSha,
+    baseHeadSha: seeded.baseSha,
+    gateVerdict: "PASS",
+    gateProof: `MERGE GATE: PASS ${"a".repeat(40)}`,
+  });
+  seeded.env.AGENTOS_REGRESSION_RECOVERY_CONTEXT = JSON.stringify(context);
+
+  const prepared = run(seeded, "prepare");
+  assert.equal(prepared.status, 0, prepared.stderr);
+  assert.equal(prepared.stdout, `REGRESSION PREPARE: ready ${seeded.branchSha} ${seeded.baseSha}\n`);
+});
+
+test("partial reuse state markers fail closed instead of becoming a fresh verdict", () => {
+  for (const marker of ["semanticVerdict=", "semanticSourceRunId="]) {
+    const seeded = fixture();
+    assert.equal(run(seeded, "prepare").status, 0);
+    const statePath = join(seeded.work, ".git", "agentos-regression-state");
+    writeFileSync(statePath, `${readFileSync(statePath, "utf8")}${marker}\n`);
+    const finalized = run(seeded, "finalize");
+    assert.notEqual(finalized.status, 0, marker);
+    assert.match(finalized.stderr, /recorded regression reuse state is malformed/u, marker);
+    assert.equal(readFileSync(seeded.gateLog, "utf8"), "", marker);
+  }
+});
+
+test("review-fail clears a previously selected reuse marker", () => {
+  const seeded = fixture();
+  seeded.env.AGENTOS_REGRESSION_RECOVERY_CONTEXT = recoveryContext(seeded);
+  assert.equal(run(seeded, "prepare").status, 0);
+  assert.match(readFileSync(join(seeded.work, ".git", "agentos-regression-state"), "utf8"), /semanticVerdict=reused/u);
+
+  const failed = run(seeded, "review-fail", "the recovery diff is defective");
+  assert.equal(failed.status, 0, failed.stderr);
+  assert.doesNotMatch(readFileSync(join(seeded.work, ".git", "agentos-regression-state"), "utf8"), /semanticVerdict|semanticSourceRunId/u);
+  assert.equal(JSON.parse(handoff(seeded).body).semanticVerdict, undefined);
+});
+
+test("a gate-fail recovery output is eligible for semantic reuse", () => {
+  const seeded = fixture();
+  seeded.env.AGENTOS_REGRESSION_RECOVERY_CONTEXT = recoveryContext(seeded, { priorOutcome: "gate-fail" });
+  seeded.env.REGRESSION_FIXTURE_GATE_PROOF = "MERGE GATE: FAIL (runner package tests)";
+  seeded.env.REGRESSION_FIXTURE_GATE_EXIT = "1";
+
+  const prepared = run(seeded, "prepare");
+  assert.equal(prepared.status, 0, prepared.stderr);
+  assert.match(prepared.stdout, /semantic-reused/u);
+
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 0, finalized.stderr);
+  const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
+  assert.equal(verdict.outcome, "gate-fail");
+  assert.equal(verdict.semanticVerdict, "reused");
+  assert.equal(verdict.semanticSourceRunId, "prior-regression-run");
 });
 
 // The workspace generated its Prisma client at provisioning, before the refresh
@@ -421,6 +599,30 @@ test("finalize refreshes drift outside the lease and requires semantic recheck",
   assert.equal(readFileSync(seeded.gateLog, "utf8"), "");
   assert.equal(existsSync(seeded.output), false);
   assert.equal(readFileSync(join(seeded.work, "drift.txt"), "utf8"), "drift\n");
+});
+
+test("a reused verdict is cleared when base drift refreshes the prepared head", () => {
+  const seeded = fixture();
+  seeded.env.AGENTOS_REGRESSION_RECOVERY_CONTEXT = recoveryContext(seeded);
+  assert.equal(run(seeded, "prepare").status, 0);
+  assert.match(readFileSync(join(seeded.work, ".git", "agentos-regression-state"), "utf8"), /semanticVerdict=reused/u);
+
+  advanceBase(seeded, "drift.txt", "drift\n");
+  const stale = run(seeded, "finalize");
+  assert.equal(stale.status, 77, stale.stderr);
+  assert.match(stale.stdout, /^REGRESSION FINALIZE: semantic-stale /u);
+  assert.doesNotMatch(readFileSync(join(seeded.work, ".git", "agentos-regression-state"), "utf8"), /semanticVerdict|semanticSourceRunId/u);
+  assert.equal(existsSync(seeded.output), false);
+
+  // The model would recheck the newly refreshed head before this second
+  // finalize. Calling finalize directly proves the stale head cannot inherit
+  // the skipped-review provenance from the first prepare.
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 0, finalized.stderr);
+  const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
+  assert.equal(verdict.outcome, "pass");
+  assert.equal(verdict.semanticVerdict, undefined);
+  assert.equal(verdict.semanticSourceRunId, undefined);
 });
 
 test("finalize refuses a PASS when the target moves during the gate", () => {

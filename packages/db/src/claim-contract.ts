@@ -209,6 +209,20 @@ export type ClaimPreviousRunHandoff = {
   salvage: { commitSha: string; parentSha: string } | null;
 };
 
+/**
+ * Durable context for a fresh Regression Run opened by base-drift recovery.
+ * The control plane supplies this only for the exact queued recovery Run it
+ * recorded, so the runner can decide whether a semantic verdict is reusable
+ * without trusting transcript text or a different Run's output.
+ */
+export type RegressionRecoveryContext = {
+  state: "queued";
+  currentBaseSha: string;
+  authorizedHeadSha: string;
+  recoveryRunId: string;
+  priorOutput: { runId: string; kind: string; body: string; commitSha: string | null } | null;
+};
+
 /** Server-parsed authority for runner-owned direct-chain workspace bootstrap. */
 export type ClaimSpecificationMaterialization = {
   kind: "direct-implementation";
@@ -260,6 +274,9 @@ export type ClaimContract = {
    * It carries only durable verdict/repair evidence, never provider history.
    */
   regressionRepairHandoff: RegressionRepairHandoff | null;
+  /** Present only for a control-plane queued base-drift recovery Run whose
+   * marker is bound to this exact Run id. */
+  regressionRecoveryContext?: RegressionRecoveryContext;
   resume: { providerConversationId: string; input: string } | null;
   nextEventSeq: number;
 };
