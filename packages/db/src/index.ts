@@ -112,6 +112,8 @@ export {
 } from "./chain-activation.js";
 export {
   GATE_ATTESTATION_BASE_MISMATCH,
+  MERGE_EXECUTOR_OFFLINE_REASON,
+  MERGE_EXECUTOR_OFFLINE_STATE,
   type MergeAuthorizationResult,
   MergeEvidenceError,
   isMergeEvidenceError,

@@ -9,7 +9,14 @@ import {
   authorizationMetadata,
   parseEvidence,
 } from "./merge-integrator.js";
-import { findEvidenceRequestByNonce, gateFeedsIntegratorStep } from "./merge-integrator-db.js";
+import {
+  findEvidenceRequestByNonce,
+  gateFeedsIntegratorStep,
+  mergeExecutorRunnerIds,
+  mergeExecutorsBlockingAuthorization,
+  type MergeExecutorLivenessReader,
+} from "./merge-integrator-db.js";
+import { MERGE_TAIL_KIND } from "./merge-tail.js";
 import { errorForOpenRunRefusal, openRun, parksInsteadOfRaising, recordRunBirthRefusal } from "./run-open.js";
 
 type Tx = Prisma.TransactionClient;
@@ -33,6 +40,10 @@ export const isMergeEvidenceError = (error: unknown): error is MergeEvidenceErro
 /** The named refusal for an attestation taken against another base. */
 export const GATE_ATTESTATION_BASE_MISMATCH = "gate-attestation-base-mismatch";
 
+/** These names are shared with readiness's requeue marker. */
+export const MERGE_EXECUTOR_OFFLINE_STATE = "requeued-executor-offline";
+export const MERGE_EXECUTOR_OFFLINE_REASON = "merge-executor-offline";
+
 /** Persist only after the caller's approval transaction has rolled back. */
 export const recordMergeEvidenceRefusal = async (db: PrismaClient, error: unknown): Promise<void> => {
   if (!isMergeEvidenceError(error) || !error.refusalActivity) return;
@@ -47,6 +58,89 @@ export type MergeAuthorizationResult = {
   activityId: string;
   purpose: "gate" | "confirmation";
   payload: AuthorizationPayload;
+};
+
+const executorOfflineDetail = (executorRunnerIds: readonly string[]): string =>
+  `${MERGE_EXECUTOR_OFFLINE_REASON}: no merge executor in ${executorRunnerIds.join(", ")} is online`;
+
+type OfflineMarker = { createdAt: Date; metadata: Prisma.JsonValue };
+
+const openOfflineEpisodeStart = (marker: OfflineMarker | null, now: Date): Date => {
+  if (!marker) return now;
+  const metadata = marker.metadata as { episodeStartedAt?: unknown; episodeClosed?: unknown } | null;
+  if (metadata?.episodeClosed === true) return now;
+  if (typeof metadata?.episodeStartedAt !== "string") return marker.createdAt;
+  const started = new Date(metadata.episodeStartedAt);
+  return Number.isNaN(started.getTime()) ? marker.createdAt : started;
+};
+
+/**
+ * A confirmation approval is a renewal of the mechanical Run. When the
+ * allowlisted executor fleet is offline, preserve the OPEN card by refusing
+ * the transaction and carry the same readiness marker outside its rollback.
+ * The next operator attempt can then use the evidence already on the card
+ * once a live executor is observed.
+ */
+const executorOfflineRefusal = async (
+  tx: Tx,
+  readinessTaskId: string,
+  executorRunnerIds: readonly string[],
+  now: Date,
+): Promise<MergeEvidenceError> => {
+  const marker = await tx.taskActivity.findFirst({
+    where: {
+      taskId: readinessTaskId,
+      metadata: { path: ["state"], equals: MERGE_EXECUTOR_OFFLINE_STATE },
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { createdAt: true, metadata: true },
+  });
+  const episodeStartedAt = openOfflineEpisodeStart(marker, now);
+  return new MergeEvidenceError(
+    `Merge readiness withheld its authorization: ${executorOfflineDetail(executorRunnerIds)}`,
+    {
+      taskId: readinessTaskId,
+      metadata: {
+        kind: MERGE_TAIL_KIND.readiness,
+        state: MERGE_EXECUTOR_OFFLINE_STATE,
+        reason: MERGE_EXECUTOR_OFFLINE_REASON,
+        executorRunnerIds: [...executorRunnerIds],
+        episodeStartedAt: episodeStartedAt.toISOString(),
+      },
+    },
+  );
+};
+
+/** Close the readiness outage episode in the same transaction as the live
+ * operator renewal. The readiness worker cannot own this transition because
+ * the confirmation card completes the readiness Task before this approval. */
+const closeExecutorOfflineEpisode = async (tx: Tx, readinessTaskId: string): Promise<void> => {
+  const marker = await tx.taskActivity.findFirst({
+    where: {
+      taskId: readinessTaskId,
+      metadata: { path: ["state"], equals: MERGE_EXECUTOR_OFFLINE_STATE },
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { id: true, metadata: true },
+  });
+  if (!marker) return;
+  const metadata = marker.metadata as { episodeClosed?: unknown } | null;
+  if (metadata?.episodeClosed === true) return;
+  const updatedMetadata = (marker.metadata ?? {}) as Prisma.JsonObject;
+  await tx.taskActivity.update({
+    where: { id: marker.id },
+    data: { metadata: { ...updatedMetadata, episodeClosed: true } },
+  });
+  await tx.taskActivity.create({ data: {
+    taskId: readinessTaskId,
+    actorType: "control-plane",
+    body: "Merge readiness executor-offline episode ended: executor observed online during operator renewal",
+    metadata: {
+      kind: MERGE_TAIL_KIND.readiness,
+      state: "executor-offline-closed",
+      observation: "executor observed online during operator renewal",
+    },
+  } });
 };
 
 /**
@@ -68,6 +162,8 @@ export const produceMergeAuthorization = async (
     card: { id: string; body: string; gateTaskId: string | null };
     inboxDecisionId: string;
     channel: DecisionChannel;
+    /** Shared daemon observation used only for confirmation renewals. */
+    executorLiveness?: MergeExecutorLivenessReader;
   },
   now = new Date(),
 ): Promise<MergeAuthorizationResult | null> => {
@@ -129,6 +225,16 @@ export const produceMergeAuthorization = async (
         inboxMessageId: input.card.id,
       } },
     );
+  }
+
+  if (purpose === "confirmation") {
+    // A configured executor fleet with no observation is offline by default.
+    // Callers must supply the shared daemon snapshot; an omitted reader must
+    // never turn a renewal into an authorization written against a dead fleet.
+    const allowlist = mergeExecutorRunnerIds();
+    const blocked = mergeExecutorsBlockingAuthorization(input.executorLiveness?.() ?? [], allowlist);
+    if (blocked.length > 0) throw await executorOfflineRefusal(tx, gateTaskId, blocked, now);
+    await closeExecutorOfflineEpisode(tx, gateTaskId);
   }
 
   const activity = await tx.taskActivity.create({ data: {
