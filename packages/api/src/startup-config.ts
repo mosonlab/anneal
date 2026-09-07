@@ -30,6 +30,14 @@ export const LOOPBACK_HOST = "127.0.0.1";
 
 export const DEFAULT_API_PORT = 3000;
 
+/** Merge readiness keeps its existing single-candidate path until an operator
+ * explicitly enables cumulative trains. The small upper bound also bounds the
+ * amount of work and lease time one train can hold. */
+export const DEFAULT_MERGE_TRAIN_WIDTH = 0;
+export const MAX_MERGE_TRAIN_WIDTH = 3;
+
+const MERGE_TRAIN_WIDTH_PATTERN = /^(?:0|[1-3])$/u;
+
 const HIGHEST_PORT = 65_535;
 
 /** Mirrors `scripts/setup-local.mjs`. `startup-config.test.ts` compares the two
@@ -72,6 +80,8 @@ export type StartupConfig = {
   port: number;
   /** The already-validated read-only GitHub credential for API workers. */
   githubReadToken: string;
+  /** Number of candidates a merge-readiness train may contain. */
+  mergeTrainWidth: number;
 };
 
 export type StartupConfigVerdict =
@@ -197,6 +207,23 @@ const checkListener = (reasons: string[], env: NodeJS.ProcessEnv): { host: strin
   return { host, port: Number.isSafeInteger(port) ? port : DEFAULT_API_PORT };
 };
 
+/** Read the validated train width for workers that receive configuration
+ * outside the startup verdict. An omitted variable keeps the legacy path. */
+export const mergeTrainWidth = (env: NodeJS.ProcessEnv = process.env): number => {
+  const raw = env["MERGE_TRAIN_WIDTH"];
+  if (raw === undefined) return DEFAULT_MERGE_TRAIN_WIDTH;
+  const normalized = raw.trim();
+  return MERGE_TRAIN_WIDTH_PATTERN.test(normalized) ? Number(normalized) : DEFAULT_MERGE_TRAIN_WIDTH;
+};
+
+const checkMergeTrainWidth = (reasons: string[], env: NodeJS.ProcessEnv): number => {
+  const raw = env["MERGE_TRAIN_WIDTH"];
+  if (raw !== undefined && !MERGE_TRAIN_WIDTH_PATTERN.test(raw.trim())) {
+    reasons.push("merge-train-width-invalid:MERGE_TRAIN_WIDTH");
+  }
+  return mergeTrainWidth(env);
+};
+
 /** Is this URL pointing at the database `docker-compose.yml` starts? Host and
  *  port only — the credentials are the thing being judged, so they cannot also
  *  be the thing that decides which rules apply. */
@@ -306,6 +333,7 @@ export const evaluateStartupConfig = (env: NodeJS.ProcessEnv): StartupConfigVerd
   checkGitHubReadToken(reasons, env);
   checkEncryptionKey(reasons, env);
   const listener = checkListener(reasons, env);
+  const configuredMergeTrainWidth = checkMergeTrainWidth(reasons, env);
   checkDatabase(reasons, env);
   checkBrowserExposure(reasons, env);
 
@@ -320,6 +348,7 @@ export const evaluateStartupConfig = (env: NodeJS.ProcessEnv): StartupConfigVerd
       // the success path. Keep the token on the validated config so callers do
       // not re-read an ambient environment after startup has been judged.
       githubReadToken: env["GITHUB_READ_TOKEN"]!.trim(),
+      mergeTrainWidth: configuredMergeTrainWidth,
     },
   };
 };
