@@ -13,7 +13,7 @@ import {
   type PrismaClient,
 } from "@anneal/db";
 
-import { createStaffingProfile } from "./staffing-profiles.js";
+import { copyStaffingProfiles, createStaffingProfile } from "./staffing-profiles.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
@@ -70,6 +70,37 @@ const seed = async (templateName = "custom-workflow") => {
   const claudeAgent = await agent("frontend-dev-opus-medium", "claude-opus-5:medium", RunnerPreference.CLAUDE);
   const integrator = await agent(INTEGRATOR_AGENT_NAME, "mechanical/merge-integrator", RunnerPreference.INHERIT);
   const archivedAgent = await agent("senior-dev-luna-max", "gpt-5.6-luna:max", RunnerPreference.CODEX, true);
+  const repairAgent = await db.agent.create({
+    data: {
+      projectId: project.id,
+      environmentId: environment.id,
+      canonicalRole: "senior-dev-luna-max",
+      name: "senior-dev-luna-max-active",
+      title: "Senior Developer Luna Max",
+      model: "gpt-5.6-luna:max",
+      runnerPreference: RunnerPreference.CODEX,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+    },
+  });
+  const repo = await db.repo.create({
+    data: {
+      projectId: project.id,
+      name: "staffing-repo",
+      remoteUrl: "https://example.test/staffing.git",
+      mountPath: "/repo",
+      dependencyProvisioning: "NONE",
+    },
+  });
+  await db.agentRepoAccess.create({
+    data: {
+      projectId: project.id,
+      agentId: repairAgent.id,
+      repoId: repo.id,
+      mountPath: "/repo",
+      permissions: "GIT_WRITE",
+    },
+  });
 
   const otherProject = await db.project.create({ data: { name: "Other", slug: unique("other") } });
   const otherEnvironment = await db.environment.create({
@@ -124,6 +155,8 @@ const seed = async (templateName = "custom-workflow") => {
     claudeAgent,
     integrator,
     archivedAgent,
+    repairAgent,
+    repo,
     foreignAgent,
   };
 };
@@ -432,4 +465,151 @@ test("a stored profile carries a boolean include for every optional step", async
   assert.deepEqual(skipped.body.profile.entries, [
     { outputKind: "blind-findings", assigneeAgentId: null, include: false },
   ]);
+});
+
+test("the merge-tail repair slot round-trips, checks its Repo grant and refuses archived Agents", async () => {
+  const fixture = await seed();
+  const created = await createProfile(fixture, {
+    name: "Repair slot",
+    entries: minimalEntries(fixture),
+    mergeTailRepairAgentId: fixture.repairAgent.id,
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.profile.mergeTailRepairAgentId, fixture.repairAgent.id);
+
+  const listed = await call("GET", profilesPath(fixture));
+  assert.equal(listed.status, 200, JSON.stringify(listed.body));
+  assert.equal(listed.body[0].mergeTailRepairAgentId, fixture.repairAgent.id);
+
+  // Omitting the optional slot on a whole PUT preserves the operator's choice.
+  const preserved = await call("PUT", `/staffing-profiles/${created.body.profile.id}`, {
+    name: "Repair slot renamed",
+    entries: minimalEntries(fixture),
+  });
+  assert.equal(preserved.status, 200, JSON.stringify(preserved.body));
+  assert.equal(preserved.body.profile.mergeTailRepairAgentId, fixture.repairAgent.id);
+
+  const secondRepo = await db.repo.create({
+    data: {
+      projectId: fixture.project.id,
+      name: "staffing-repo-two",
+      remoteUrl: "https://example.test/staffing-two.git",
+      mountPath: "/repo-two",
+      dependencyProvisioning: "NONE",
+    },
+  });
+  await db.agentRepoAccess.create({
+    data: {
+      projectId: fixture.project.id,
+      agentId: fixture.repairAgent.id,
+      repoId: secondRepo.id,
+      mountPath: "/repo-two",
+      permissions: "GIT_WRITE",
+    },
+  });
+  const ambiguous = await createProfile(fixture, {
+    name: "Ambiguous repair slot",
+    entries: minimalEntries(fixture),
+    mergeTailRepairAgentId: fixture.repairAgent.id,
+  });
+  assert.equal(ambiguous.status, 422, JSON.stringify(ambiguous.body));
+  assert.equal(ambiguous.body.code, "staffing_profile_repo_required");
+
+  const explicit = await createProfile(fixture, {
+    name: "Explicit repair slot",
+    entries: minimalEntries(fixture),
+    mergeTailRepairAgentId: fixture.repairAgent.id,
+    repoId: secondRepo.id,
+  });
+  assert.equal(explicit.status, 201, JSON.stringify(explicit.body));
+
+  const noGrant = await db.agent.create({
+    data: {
+      projectId: fixture.project.id,
+      environmentId: (await db.environment.findFirstOrThrow({ where: { projectId: fixture.project.id } })).id,
+      name: "ungranted-repair-agent",
+      title: "Ungranted repair Agent",
+      model: "gpt-5.6-luna:max",
+      runnerPreference: RunnerPreference.CODEX,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+    },
+  });
+  const missingGrant = await createProfile(fixture, {
+    name: "Missing repair grant",
+    entries: minimalEntries(fixture),
+    mergeTailRepairAgentId: noGrant.id,
+    repoId: fixture.repo.id,
+  });
+  assert.equal(missingGrant.status, 422, JSON.stringify(missingGrant.body));
+  assert.equal(missingGrant.body.code, "staffing_profile_missing_repo_grant");
+
+  const archived = await call("PUT", `/staffing-profiles/${created.body.profile.id}`, {
+    name: "Repair slot archived refusal",
+    entries: minimalEntries(fixture),
+    mergeTailRepairAgentId: fixture.archivedAgent.id,
+    repoId: fixture.repo.id,
+  });
+  assert.equal(archived.status, 422, JSON.stringify(archived.body));
+  assert.equal(archived.body.code, "staffing_profile_agent_archived");
+
+  const cleared = await call("PUT", `/staffing-profiles/${created.body.profile.id}`, {
+    name: "Repair slot cleared",
+    entries: minimalEntries(fixture),
+    mergeTailRepairAgentId: null,
+  });
+  assert.equal(cleared.status, 200, JSON.stringify(cleared.body));
+  assert.equal(cleared.body.profile.mergeTailRepairAgentId, null);
+});
+
+test("reset restores the canonical Luna repair slot and refuses its archived identity", async () => {
+  const fixture = await seed(INTEGRATOR_TEMPLATE_NAME);
+  const created = await createProfile(fixture, {
+    name: "Reset repair slot",
+    entries: minimalEntries(fixture),
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.profile.mergeTailRepairAgentId, null);
+
+  // An empty reset body remains compatible when the project has one Repo.
+  const resetPath = `/staffing-profiles/${created.body.profile.id}/reset`;
+  const reset = await call("POST", resetPath);
+  assert.equal(reset.status, 200, JSON.stringify(reset.body));
+  assert.equal(reset.body.profile.mergeTailRepairAgentId, fixture.repairAgent.id);
+
+  await db.agent.update({ where: { id: fixture.repairAgent.id }, data: { archivedAt: new Date() } });
+  const archivedReset = await call("POST", resetPath, { repoId: fixture.repo.id });
+  assert.equal(archivedReset.status, 422, JSON.stringify(archivedReset.body));
+  assert.equal(archivedReset.body.code, "staffing_profile_agent_archived");
+});
+
+test("copying profiles preserves the merge-tail repair slot", async () => {
+  const fixture = await seed();
+  const source = await createProfile(fixture, {
+    name: "Copied repair slot",
+    entries: minimalEntries(fixture),
+    mergeTailRepairAgentId: fixture.repairAgent.id,
+  });
+  assert.equal(source.status, 201, JSON.stringify(source.body));
+
+  const target = await db.taskTemplate.create({
+    data: {
+      projectId: fixture.project.id,
+      name: "copied-workflow",
+      description: "copy target",
+      variables: [],
+    },
+  });
+  await db.$transaction((tx) => copyStaffingProfiles(tx, {
+    projectId: fixture.project.id,
+    fromTaskTemplateId: fixture.template.id,
+    toTaskTemplateId: target.id,
+  }));
+
+  const copied = await call(
+    "GET",
+    `/projects/${fixture.project.id}/task-templates/${target.id}/staffing-profiles`,
+  );
+  assert.equal(copied.status, 200, JSON.stringify(copied.body));
+  assert.equal(copied.body[0].mergeTailRepairAgentId, fixture.repairAgent.id);
 });
