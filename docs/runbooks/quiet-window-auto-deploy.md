@@ -683,14 +683,15 @@ Environment, authentication, malformed remote state, artifact, verification,
 and filesystem-state failures stay operator-latched.
 
 The initial escalation is attempt 1. Later eligible failures atomically
-replace the marker with an incremented count. A retryable-transient marker at
-attempt 5 carries a `retryAfter` timestamp and waits five minutes before its
-next admission. If that retry fails, later retries wait 10, 20, 40, and then
-60 minutes; 60 minutes is the cap for all subsequent attempts. The marker is
-the single source of truth for this schedule. A legacy capped marker without
-`retryAfter` derives its first deadline from `escalatedAt` plus the delay for
-its attempt count. While the deadline is in the future, the tick stays stopped
-and logs:
+replace the marker with an incremented count. Retryable-transient markers at
+attempts 1 through 4 still admit on the next tick without a backoff. At
+attempt 5, the marker carries a `retryAfter` timestamp and waits five minutes
+before its next admission. If that retry fails, later retries wait 10, 20, 40,
+and then 60 minutes; 60 minutes is the cap for all subsequent attempts. The
+marker is the single source of truth for this schedule. A legacy capped marker
+without `retryAfter` derives its first deadline from `escalatedAt` plus the
+delay for its attempt count. While the deadline is in the future, the tick
+stays stopped and logs:
 
 ```text
 STOP escalation-active scope=retryable-transient retry-after=<ISO> remaining-wait-seconds=<n> path=<path>
@@ -705,10 +706,13 @@ replaces the marker with the incremented count and the next backoff. If the
 recovery notification fails, the marker remains. Confirm the SELF-CLEAR entry
 and closed recovery notification before dismissing the original failure.
 
-`commit-scoped` and `host-scoped` markers retain their operator-action
-requirement. They do not acquire a retry deadline and continue to stop later
-ticks until the named cause is repaired and an operator runs
-`--clear-escalation`.
+`host-scoped` markers retain their operator-action requirement and continue to
+stop every later tick until the named cause is repaired and an operator runs
+`--clear-escalation`. A `commit-scoped` marker blocks its recorded commit; if
+`origin/main` advances, the supersession rules below allow a newer target to
+proceed while the marker remains as history. If the recorded commit is still
+the target, it continues to stop that attempt until the cause is repaired and
+an operator runs `--clear-escalation`.
 
 ### Escalation classes
 
@@ -719,12 +723,12 @@ target commit `to` first and its `reason` second:
   `to` is a full commit oid or the literal `unknown` the deploy records when it
   failed before determining a target. A `release-artifact-build-failed`
   marker qualifies only for the source clone/fetch transport details listed
-  above; every other build detail is commit-scoped. The retry deadline and
-  self-clear rules in this section own a qualifying marker end to end; the
-  commit main points at does not change its answer, in either direction. A
-  transient-looking reason on a marker with any other `to` (missing, or a
-  value that is neither) is host-scoped instead: it spends no retry attempt and
-  blocks every deploy.
+  above; every other build detail is commit-scoped only when the marker names a
+  full target commit. The retry deadline and self-clear rules in this section
+  own a qualifying marker end to end; the commit main points at does not change
+  its answer, in either direction. A transient-looking reason on a marker with
+  any other `to` (missing, `unknown`, or a value that is neither) is host-scoped
+  instead: it spends no retry attempt and blocks every deploy.
 - **commit-scoped** — any other reason on a marker whose `to` is a full commit
   oid: the failure was determined by that commit (its non-transport artifact
   build, its migration, or its verification). It blocks that commit and only
@@ -781,9 +785,8 @@ read that fails while a commit-scoped marker is latched also stops with
 `STOP escalation-active target-unreadable reason=<reason>`, leaving the marker
 untouched: an unreadable remote cannot prove main moved.
 
-For any host-scoped escalation, a retryable-transient marker whose retry
-deadline has not expired, or a commit-scoped escalation whose commit is still
-the target,
+For any host-scoped escalation or a commit-scoped escalation whose commit is
+still the target,
 inspect the ledger, logs, pointer identities, service states, and Inbox record;
 repair the named cause, build and verify the artifact again, and rerun
 `--dry-run`.
