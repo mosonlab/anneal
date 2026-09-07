@@ -258,6 +258,35 @@ test("commitWithLeaseOutcomes deduplicates release targets and rolls back withou
   assert.equal(releasedTargets.length, 1);
 });
 
+test("commitWithLeaseOutcomes keeps a release obligation open when a newer holder owns the lease", async () => {
+  const events: string[] = [];
+  const db = transactionDb(holderTx({
+    task: {
+      chainId: "chain-1",
+      projectId: "project-1",
+      templateStep: { stepIndex: 7, outputKind: "merge-result", taskTemplate: { name: "direct-engineer-workflow" } },
+    },
+  }), events);
+  const deferredAt = new Date("2026-08-27T12:00:00.000Z");
+
+  await commitWithLeaseOutcomes(db, async () => ({
+    value: null,
+    leaseOutcomes: [{
+      kind: "stop" as const,
+      taskId: "task-1",
+      deferredRelease: {
+        eventId: "deferred-1",
+        target: leaseTarget("chain-1"),
+        at: deferredAt,
+      },
+    }],
+  }), { release: async () => ({ outcome: "skipped", heldFor: "newer-train" }) });
+
+  // Only the state transaction committed: no follow-up event settlement was
+  // attempted after the release adapter reported a different holder.
+  assert.deepEqual(events, ["commit"]);
+});
+
 test("commitWithLeaseOutcomes surfaces release failure", async () => {
   const failure = new Error("batch release failed");
   const db = transactionDb(holderTx({ task: { chainId: "chain-1", projectId: "project-1", templateStep: { stepIndex: 7, outputKind: "merge-result", taskTemplate: { name: "direct-engineer-workflow" } } } }));
