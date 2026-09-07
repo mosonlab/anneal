@@ -477,15 +477,6 @@ export const MERGE_EXECUTOR_OFFLINE_REASON = "merge-executor-offline";
 export const MERGE_EXECUTOR_OFFLINE_WAIT_MS = RUNNER_FORGET_MS;
 
 /**
- * How far apart two skipped authorizations can be and still belong to the same
- * outage. Readiness polls every two seconds and its slowest tick spends the
- * read budget, so a longer gap means readiness settled some other way in
- * between -- the executor was back -- and a later outage starts its own wait
- * rather than inheriting one this task already served.
- */
-const EXECUTOR_OFFLINE_EPISODE_GAP_MS = 60_000;
-
-/**
  * The configured merge executors when none of them is online, which is exactly
  * when an authorization must not be written; empty when one is online, and
  * empty for an unconfigured allowlist too: with no executor named, readiness
@@ -551,33 +542,60 @@ const executorOfflineRequeueSettlement = (
   },
 });
 
-/**
- * When the outage readiness is waiting out began. Every skipped authorization
- * records the start of its own episode, so a tick inherits the previous
- * marker's start only while it is contiguous with it. A marker older than that
- * belongs to an outage that ended -- readiness settled some other way, or the
- * executor came back and merged -- and the wait restarts from now, rather than
- * charging this outage for the whole history of the task.
- */
-const executorOfflineEpisodeStart = async (
+type ExecutorOfflineMarker = { id: string; createdAt: Date; metadata: Prisma.JsonValue };
+
+/** The newest skipped authorization on this readiness Step, the outage anchor. */
+const latestExecutorOfflineMarker = async (
   db: PrismaClient,
   readinessTaskId: string,
-  now: Date,
-): Promise<Date> => {
-  const latest = await db.taskActivity.findFirst({
-    where: {
-      taskId: readinessTaskId,
-      metadata: { path: ["state"], equals: EXECUTOR_OFFLINE_STATE },
-    },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    select: { createdAt: true, metadata: true },
-  });
-  if (!latest) return now;
-  if (now.getTime() - latest.createdAt.getTime() > EXECUTOR_OFFLINE_EPISODE_GAP_MS) return now;
-  const recorded = (latest.metadata as { episodeStartedAt?: unknown } | null)?.episodeStartedAt;
-  if (typeof recorded !== "string") return latest.createdAt;
+): Promise<ExecutorOfflineMarker | null> => db.taskActivity.findFirst({
+  where: {
+    taskId: readinessTaskId,
+    metadata: { path: ["state"], equals: EXECUTOR_OFFLINE_STATE },
+  },
+  orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+  select: { id: true, createdAt: true, metadata: true },
+});
+
+/**
+ * When the outage this marker belongs to began, or `null` once that outage has
+ * ended. An episode ends on an observed fact rather than after an elapsed time:
+ * readiness closes it on the tick that finds an executor online or settles the
+ * Step some other way, and on the stop it writes at the ceiling. Elapsed time
+ * cannot decide this -- `MERGE_READINESS_POLL_INTERVAL_MS` sets the distance
+ * between two skipped authorizations of one outage, so any fixed gap an
+ * interval can exceed would restart the wait every tick and let an executor
+ * stay offline forever without ever reaching the ceiling.
+ */
+const openEpisodeStart = (marker: ExecutorOfflineMarker | null): Date | null => {
+  if (!marker) return null;
+  const metadata = marker.metadata as {
+    episodeStartedAt?: unknown;
+    episodeClosed?: unknown;
+  } | null;
+  if (metadata?.episodeClosed === true) return null;
+  const recorded = metadata?.episodeStartedAt;
+  if (typeof recorded !== "string") return marker.createdAt;
   const started = new Date(recorded);
-  return Number.isNaN(started.getTime()) ? latest.createdAt : started;
+  return Number.isNaN(started.getTime()) ? marker.createdAt : started;
+};
+
+/**
+ * Ends the outage readiness was waiting out, so the next one waits out its own
+ * ceiling. Only the newest marker is closed because only the newest is ever
+ * read: an older one is already behind a closed episode.
+ */
+const closeExecutorOfflineEpisode = async (
+  db: PrismaClient,
+  readinessTaskId: string,
+): Promise<void> => {
+  const marker = await latestExecutorOfflineMarker(db, readinessTaskId);
+  if (!marker || openEpisodeStart(marker) === null) return;
+  const metadata = (marker.metadata ?? {}) as Prisma.JsonObject;
+  await db.taskActivity.update({
+    where: { id: marker.id },
+    data: { metadata: { ...metadata, episodeClosed: true } },
+  });
 };
 
 /**
@@ -596,9 +614,14 @@ const settleExecutorOffline = async (
 ): Promise<Extract<ReadinessSettlementApplication, { kind: "settled" }>> => {
   const { readiness, regression, recovery, claim } = read;
   const now = read.input.now;
-  const episodeStartedAt = await executorOfflineEpisodeStart(db, readiness.id, now);
+  const episodeStartedAt = openEpisodeStart(await latestExecutorOfflineMarker(db, readiness.id)) ?? now;
   const waitedMs = now.getTime() - episodeStartedAt.getTime();
   if (waitedMs >= MERGE_EXECUTOR_OFFLINE_WAIT_MS) {
+    // This outage is over as far as the wait is concerned: it has been paid in
+    // full and answered with a stop. Closing before the stop is applied means
+    // an interrupted stop costs another wait rather than an operator retry that
+    // stops again on its first tick without waiting at all.
+    await closeExecutorOfflineEpisode(db, readiness.id);
     const stopped = await runner.apply(stopReadinessSettlement({
       readinessTaskId: readiness.id,
       regressionTaskId: regression.id,
@@ -1072,6 +1095,11 @@ const runReadinessDecision = async (
     await settleExecutorOffline(db, read, blockedExecutors, result, preAcquireRunner);
     return;
   }
+
+  // Nothing blocks an authorization on this tick: either an executor answered
+  // the liveness read or no allowlist names one. Either way any outage this
+  // Step was waiting out has ended, and the next one starts its own wait.
+  await closeExecutorOfflineEpisode(db, readiness.id);
 
   // The alert window measures continuous contention, so anything other than
   // another refusal breaks the run. Only an authorization reaches for the

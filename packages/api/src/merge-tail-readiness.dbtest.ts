@@ -1446,15 +1446,12 @@ test("a merge executor that stays offline past the wait stops the tail by name",
       (await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, offline)).requeued,
       1,
     );
-    // The wait is measured from the outage the latest marker belongs to, and
-    // the marker rows carry a database clock: pin the episode so the ceiling is
-    // the only thing under test. Readiness polls every two seconds, so a real
-    // fifteen-minute outage leaves its latest marker one tick behind the stop.
+    // The wait is measured from the start of the outage the latest marker
+    // belongs to, whatever the distance between two skipped authorizations:
+    // MERGE_READINESS_POLL_INTERVAL_MS decides that distance, so the ceiling
+    // must not depend on it. Here the second tick is the whole wait later --
+    // one poll interval of fifteen minutes -- and it still stops.
     const expired = new Date(OFFLINE_NOW.getTime() + MERGE_EXECUTOR_OFFLINE_WAIT_MS);
-    await db.taskActivity.updateMany({
-      where: { taskId: seeded.readiness.id, metadata: { path: ["state"], equals: "requeued-executor-offline" } },
-      data: { createdAt: new Date(expired.getTime() - 2_000) },
-    });
     assert.deepEqual(
       await readinessTick(db, reader(), expired, 5, releaseChainLease, runWithMergeLease, offline),
       { claimed: 1, authorized: 0, requeued: 0, stopped: 1 },
@@ -1477,23 +1474,79 @@ test("a later outage waits out its own ceiling rather than the task's whole hist
       1,
     );
 
-    // The executor came back and the chain settled some other way -- a base
-    // drift that reran regression for two hours -- before going down again.
-    // Marker rows carry a database clock, so pin the first outage to the tick
-    // that recorded it. The second outage is seconds old: readiness waits.
+    // The executor came back: a tick observes it online and settles the Step
+    // some other way -- here the merge Lease is held elsewhere -- which is what
+    // ends the outage. Elapsed time never does.
+    const back = new Date(OFFLINE_NOW.getTime() + 4_000);
+    const contended: MergeLeaseAcquirer = async () => ({ outcome: "contended" });
+    await readinessTick(db, reader(), back, 5, releaseChainLease, leaseRunner(contended), executorsAt(SEEN_AT));
+    assert.equal(
+      ((await offlineMarkers(seeded.readiness.id))[0]!.metadata as Record<string, unknown>).episodeClosed,
+      true,
+    );
+
+    // Hours later the executor goes down again. That is a new outage: readiness
+    // waits it out rather than charging it for the wait the first one served.
     const laterOutage = new Date(OFFLINE_NOW.getTime() + 2 * 60 * 60_000);
-    await db.taskActivity.updateMany({
-      where: { taskId: seeded.readiness.id, metadata: { path: ["state"], equals: "requeued-executor-offline" } },
-      data: { createdAt: OFFLINE_NOW },
-    });
     assert.deepEqual(
       await readinessTick(db, reader(), laterOutage, 5, releaseChainLease, runWithMergeLease, offline),
       { claimed: 1, authorized: 0, requeued: 1, stopped: 0 },
     );
     const markers = await offlineMarkers(seeded.readiness.id);
     assert.equal(markers.length, 2);
+    assert.equal(
+      (markers[1]!.metadata as Record<string, unknown>).episodeStartedAt,
+      laterOutage.toISOString(),
+      "the second outage anchors its wait to itself",
+    );
     assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.TODO);
     assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } })).status, TaskStatus.DONE);
+  });
+});
+
+test("an operator retry after the executor-offline stop waits out the next outage", async () => {
+  await withExecutorAllowlist(EXECUTOR_RUNNER_ID, async () => {
+    const seeded = await seedReadiness();
+    const offline = executorsAt(OFFLINE_NOW);
+    assert.equal(
+      (await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, offline)).requeued,
+      1,
+    );
+    const expired = new Date(OFFLINE_NOW.getTime() + MERGE_EXECUTOR_OFFLINE_WAIT_MS);
+    assert.equal(
+      (await readinessTick(db, reader(), expired, 5, releaseChainLease, runWithMergeLease, offline)).stopped,
+      1,
+    );
+
+    // The stop answered that outage in full, so it closes it.
+    assert.equal(
+      ((await offlineMarkers(seeded.readiness.id))[0]!.metadata as Record<string, unknown>).episodeClosed,
+      true,
+    );
+
+    // An operator retry therefore starts a fresh wait rather than stopping
+    // again on its first tick.
+    await db.task.update({
+      where: { id: seeded.readiness.id },
+      data: { status: TaskStatus.TODO, failureReason: null },
+    });
+    await db.task.update({
+      where: { id: seeded.regression.id },
+      data: { status: TaskStatus.DONE, failureReason: null },
+    });
+    assert.deepEqual(
+      await readinessTick(
+        db,
+        reader(),
+        new Date(expired.getTime() + 1_000),
+        5,
+        releaseChainLease,
+        runWithMergeLease,
+        offline,
+      ),
+      { claimed: 1, authorized: 0, requeued: 1, stopped: 0 },
+    );
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.TODO);
   });
 });
 

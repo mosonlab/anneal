@@ -2425,10 +2425,13 @@ the executor runner ids it checked. The next tick asks again.
 That wait is bounded by the 15 minutes after which the registry forgets a
 daemon altogether, and it is measured per outage: the wait starts at the first
 skipped authorization of the outage the chain is currently in, not at the first
-one this task ever recorded. An executor still offline at the ceiling stops the
-tail like any other readiness stop: the regression and readiness tasks move to
-`REVIEW` with a `failureReason` naming `merge-executor-offline` and the runner
-ids. Recover by bringing the executor back and calling
+one this task ever recorded. An outage ends when readiness observes it ending --
+the next tick that finds an executor online, settles the Step some other way, or
+stops at the ceiling -- and never merely because time passed between two skipped
+authorizations, so `MERGE_READINESS_POLL_INTERVAL_MS` cannot lengthen or reset
+the wait. An executor still offline at the ceiling stops the tail like any
+other readiness stop: the regression and readiness tasks move to `REVIEW` with
+a `failureReason` naming `merge-executor-offline` and the runner ids. Recover by bringing the executor back and calling
 `POST /tasks/:taskId/retry`.
 
 An empty allowlist is unchanged behaviour: with `MERGE_EXECUTOR_RUNNER_IDS`
