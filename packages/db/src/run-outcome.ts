@@ -41,7 +41,7 @@ export type RunOutcome =
   /**
    * The provider stream dropped without a terminal event, and the server's own
    * copy of this Run's required output matches the delivered head. The output
-   * identity is the authority; the runner's local receipt is audit evidence.
+   * identity alone is the authority.
    */
   | { case: "delivered-then-disconnected" }
   /** A budget gate stopped the Run. `gate` is the gate that fired, not prose. */
