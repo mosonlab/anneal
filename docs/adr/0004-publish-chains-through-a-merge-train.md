@@ -147,7 +147,11 @@ need the existing per-Chain drift recovery can set `MERGE_TRAIN_WIDTH=0`.
   Merge gate work, while publication remains serialized by merge execution.
 - A settled train closes its own detached card; only an aborted train stays in
   `REVIEW` with its named reason, so a completed automation card is never
-  presented as review work.
+  presented as review work. The train session publishes its record before it
+  finishes, so settlement commonly commits while the train Run is still active:
+  once the card's control-plane marker reads `settled` or `aborted`, Run
+  completion records the Run and writes no Task status, leaving that terminal
+  state to readiness in either ordering.
 - A failure at one prefix prevents later prefixes from crossing it. Later
   candidates are either returned to `ready`, stopped with their recorded
   reason, or repaired according to the settlement table; no path silently

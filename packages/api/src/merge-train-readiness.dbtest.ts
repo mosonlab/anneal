@@ -4,6 +4,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   AssigneeType,
+  CleanupStatus,
   DependencyProvisioning,
   INTEGRATOR_SENTINEL_MODEL,
   MERGE_TRAIN_OUTPUT_KIND,
@@ -12,6 +13,7 @@ import {
   mergeTrainClaimMetadata,
   readLatestMarker,
   PrismaClient,
+  PushStatus,
   RunStatus,
   TaskStatus,
 } from "@anneal/db";
@@ -27,6 +29,7 @@ import type { MergeLeaseAcquirer } from "./merge-lease.js";
 import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 import { readinessTick } from "./merge-readiness-worker.js";
 import { claimRun } from "./run-claim.js";
+import { completeRun } from "./run-completion.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
 /**
@@ -1107,6 +1110,99 @@ test("the queued merge-train Run is claimed with the ordered candidate list", as
       branch: candidate.branch,
     })),
   });
+});
+
+test("a train settled while its Run is still active stays closed when that Run completes", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  const train = await trainTaskFor(seed);
+  const claimed = await claimRun(db, {
+    body: { runnerId: "merge-train-runner", leaseSeconds: 60, contractVersion: RUN_COMPLETION_CONTRACT_VERSION },
+    claimantClass: "runner",
+    now: new Date(TEST_NOW.getTime() + 500),
+    specificationReader: null,
+  });
+  assert.ok(claimed && "run" in claimed, JSON.stringify(claimed));
+  assert.equal(claimed.run.taskId, train.id);
+  // The session persists its record before `session.finish`, so settlement
+  // routinely runs against a Run that is still active. This is the ordering
+  // the terminal-Run lifecycle tests above cannot reach.
+  await db.taskStepOutput.create({ data: {
+    taskId: train.id,
+    runId: claimed.run.id,
+    kind: MERGE_TRAIN_OUTPUT_KIND,
+    body: recordFor(seed, ["pass", "pass"], 2),
+    commitSha: PREFIXES[0]!,
+  } });
+  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  assert.equal(settled.authorized, 2);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: train.id } })).status, TaskStatus.DONE);
+
+  const completed = await completeRun(db, {
+    runId: claimed.run.id,
+    body: {
+      runnerId: "merge-train-runner",
+      fencingToken: claimed.fencingToken,
+      outcome: { case: "succeeded" },
+      exitCode: 0,
+      cleanupStatus: CleanupStatus.SUCCEEDED,
+      pushStatus: PushStatus.NOT_REQUESTED,
+      workspaceRetained: false,
+    },
+    claimantClass: "runner",
+  }, releaseChainLease);
+  assert.ok(!("reason" in completed), JSON.stringify(completed));
+
+  // The completion records the Run and leaves the card alone: the settlement,
+  // not `session.finish`, owns a detached train card's terminal state.
+  const afterCompletion = await db.task.findUniqueOrThrow({ where: { id: train.id } });
+  assert.equal(afterCompletion.status, TaskStatus.DONE);
+  assert.equal(afterCompletion.failureReason, null);
+});
+
+test("an aborted train keeps its review state when its still-active Run completes", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease);
+  const train = await trainTaskFor(seed);
+  const claimed = await claimRun(db, {
+    body: { runnerId: "merge-train-runner", leaseSeconds: 60, contractVersion: RUN_COMPLETION_CONTRACT_VERSION },
+    claimantClass: "runner",
+    now: new Date(TEST_NOW.getTime() + 500),
+    specificationReader: null,
+  });
+  assert.ok(claimed && "run" in claimed, JSON.stringify(claimed));
+  await db.taskStepOutput.create({ data: {
+    taskId: train.id,
+    runId: claimed.run.id,
+    kind: MERGE_TRAIN_OUTPUT_KIND,
+    body: JSON.stringify({ schemaVersion: 1, baseSha: BASE }),
+    commitSha: PREFIXES[0]!,
+  } });
+  await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease);
+  const aborted = await db.task.findUniqueOrThrow({ where: { id: train.id } });
+  assert.equal(aborted.status, TaskStatus.REVIEW);
+
+  const completed = await completeRun(db, {
+    runId: claimed.run.id,
+    body: {
+      runnerId: "merge-train-runner",
+      fencingToken: claimed.fencingToken,
+      outcome: { case: "succeeded" },
+      exitCode: 0,
+      cleanupStatus: CleanupStatus.SUCCEEDED,
+      pushStatus: PushStatus.NOT_REQUESTED,
+      workspaceRetained: false,
+    },
+    claimantClass: "runner",
+  }, releaseChainLease);
+  assert.ok(!("reason" in completed), JSON.stringify(completed));
+
+  // The diagnostic reason the abort wrote survives the completion that follows it.
+  const afterCompletion = await db.task.findUniqueOrThrow({ where: { id: train.id } });
+  assert.equal(afterCompletion.status, TaskStatus.REVIEW);
+  assert.equal(afterCompletion.failureReason, aborted.failureReason);
 });
 
 test("a settled train card cannot emit merge-train claim metadata on a later claim", async () => {
