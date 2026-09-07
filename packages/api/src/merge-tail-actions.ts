@@ -5,6 +5,7 @@ import {
   asJsonObject,
   errorForOpenRunRefusal,
   findCanonicalAgent,
+  githubRepositoryFromRemote,
   isIntegratorStep,
   isRegressionVerificationOutputKind,
   latestMarker,
@@ -17,6 +18,7 @@ import {
   type Marker,
   openRun,
   parseResolverResult,
+  resolverFallbackEligible,
   parseRegressionVerdict,
   Prisma,
   readMarkerHistory,
@@ -27,6 +29,8 @@ import {
   writeMarker,
 } from "@anneal/db";
 
+import type { BranchAncestryReader } from "./github-read.js";
+import { READINESS_READ_BUDGET_MS } from "./readiness-decision.js";
 import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js";
 import { canonicalOutputRefusal } from "./canonical-task-output.js";
 import type { LeaseOutcome } from "./merge-lease.js";
@@ -56,8 +60,8 @@ type DbTx = Prisma.TransactionClient;
 const MERGE_RESOLVER_ROLE = "merge-resolver-opus-medium";
 
 /**
- * Who a repair card is assigned to: the Agent the chain already bound to its
- * fix step, or the canonical role that owns a repair no chain step does.
+ * Who a repair card is assigned to: its profile slot or fixed-implementation
+ * fallback, or the canonical role that owns refresh conflicts.
  */
 export type MergeTailRepairAssignee =
   | Readonly<{ kind: "agent"; agentId: string; label: string }>
@@ -707,10 +711,11 @@ export const settleMergeTailCompletion = async (
   tx: DbTx,
   input: {
     task: MergeTailCompletionTask;
-    run: { agentId: string; sessionId: string; completedAt: Date };
+    run: { id: string; agentId: string; sessionId: string; completedAt: Date };
     body: { headSha?: string | null };
     markers: Marker[];
     succeeded: boolean;
+    repositoryReader?: BranchAncestryReader | undefined;
   },
 ): Promise<MergeTailCompletionResult> => {
   const repairMarker = latestMarker(input.markers, "repairAttempt");
@@ -769,7 +774,60 @@ export const settleMergeTailCompletion = async (
           : parsedResolver.result.outcome === "resolved" && parsedResolver.result.resolvedHeadSha !== input.body.headSha
             ? { reason: "merge-resolver-opus-medium output resolved head does not match the delivered run head", key: "resolvedHeadSha" }
             : null;
-    if (bindingError) {
+    let adoptedHead = false;
+    const fallbackEligible = parsedResolver.status === "invalid"
+      && resolverFallbackEligible(repairOutput?.body, expectedStart, expectedTarget);
+    if (bindingError && fallbackEligible) {
+      let repositoryHead: string | null = null;
+      let fallbackError: string | null = null;
+      try {
+        const repairTask = await tx.task.findUnique({
+          where: { id: input.task.id },
+          select: { targetBranch: true, repo: { select: { remoteUrl: true } } },
+        });
+        const repository = repairTask?.repo ? githubRepositoryFromRemote(repairTask.repo.remoteUrl) : null;
+        if (!repository || !repairTask?.targetBranch || !expectedStart || !expectedTarget) {
+          throw new Error("repair repository, Chain branch, or expected heads are missing");
+        }
+        const reader = input.repositoryReader;
+        if (!reader) throw new Error("resolver repository reader is unavailable");
+        const signal = AbortSignal.timeout(READINESS_READ_BUDGET_MS);
+        const head = await reader.readBranchHead(repository, repairTask.targetBranch, signal);
+        const startComparison = await reader.compareCommits(repository, expectedStart, head, signal);
+        const baseComparison = await reader.compareCommits(repository, expectedTarget, head, signal);
+        const contains = (comparison: typeof startComparison) => comparison.behindBy === 0
+          && (comparison.status === "ahead" || comparison.status === "identical");
+        if (contains(startComparison) && contains(baseComparison)) repositoryHead = head;
+      } catch (error) {
+        fallbackError = error instanceof Error ? error.message : String(error);
+      }
+      await tx.taskActivity.create({ data: {
+        taskId: input.task.id,
+        actorType: "control-plane",
+        body: repositoryHead
+          ? `Resolver repository fallback adopted ${repositoryHead} after output rejected on ${bindingError.key}`
+          : `Resolver repository fallback ${fallbackError ? `read failed: ${fallbackError}` : "refused: branch head does not descend from both expected heads"}; output rejected on ${bindingError.key}`,
+        metadata: {
+          kind: "mergeTail.resolverRepositoryFallback", schemaVersion: 1,
+          rejectedKey: bindingError.key, reason: bindingError.reason,
+          startHeadSha: expectedStart, targetHeadSha: expectedTarget,
+          resolvedHeadSha: repositoryHead, ...(fallbackError ? { error: fallbackError } : {}),
+        },
+      } });
+      if (repositoryHead) {
+        resolvedHeadSha = repositoryHead;
+        adoptedHead = true;
+        // Keep the existing exact-head handoff contract: repository evidence
+        // supplies the durable Run/output binding, while preserving rejected text.
+        await tx.run.update({ where: { id: input.run.id }, data: { headSha: repositoryHead } });
+        await tx.taskStepOutput.upsert({
+          where: { taskId: input.task.id },
+          create: { taskId: input.task.id, runId: input.run.id, kind: input.task.templateStep?.outputKind ?? "result", body: repairOutput?.body ?? "", commitSha: repositoryHead },
+          update: { runId: input.run.id, commitSha: repositoryHead },
+        });
+      }
+    }
+    if (bindingError && !adoptedHead) {
       repairUnable = true;
       const reason = `refresh-conflict repair ${input.task.id} returned invalid output: ${bindingError.reason}`;
       await tx.task.update({ where: { id: input.task.id }, data: { status: TaskStatus.DONE, failureReason: reason } });
@@ -834,7 +892,7 @@ export const settleMergeTailCompletion = async (
   } else if (!repairUnable) {
     await writeMarker(tx, repairMarker.regressionTaskId, "repairResult", {
       actorType: "control-plane",
-      body: `Automatic ${String(repairMarker.repairKind)} attempt completed: ${String(repairMarker.headSha)} -> ${input.body.headSha ?? "missing-head"}`,
+      body: `Automatic ${String(repairMarker.repairKind)} attempt completed: ${String(repairMarker.headSha)} -> ${resolvedHeadSha ?? "missing-head"}`,
       metadata: {
         repairKind: repairMarker.repairKind,
         repairTaskId: input.task.id,
@@ -1017,15 +1075,9 @@ export const createMergeTailRepairTask = async (
   return { taskId: task.id };
 };
 
-/** Resolves the implementation repair assignee shared by automatic repair and
- * operator reentry. Keeping this lookup in one place prevents the two repair
- * entrypoints from drifting when a template binds its fixed implementation
- * step to a non-default Agent.
- *
- * A chain with no fixed-implementation step — a retired generation, or a clone
- * that dropped it — is answered `unstaffed`. There is no canonical fallback:
- * staffing the repair with an Agent nobody put on this chain is exactly the
- * silent substitution the caller must refuse to make. */
+/** Resolve residual repairs from the chain's recorded staffing profile, or the
+ * template default for chains instantiated before profiles. An empty slot keeps
+ * the fixed-implementation binding; refresh conflicts retain their resolver. */
 export const mergeTailRepairAssignee = async (
   tx: DbTx,
   input: {
@@ -1036,6 +1088,39 @@ export const mergeTailRepairAssignee = async (
   },
 ): Promise<MergeTailRepairAssignee | MergeTailRepairUnstaffed> => {
   if (input.repairKind === "refresh-conflict") return { kind: "role", canonicalRole: MERGE_RESOLVER_ROLE };
+  if (input.chainId && input.templateId) {
+    const root = await tx.task.findFirst({
+      where: { projectId: input.projectId, chainId: input.chainId, templateId: input.templateId },
+      orderBy: { chainIndex: "asc" },
+      select: { id: true },
+    });
+    // Trigger callers write this activity as operator or webhook. Its body
+    // identifies instantiation and excludes ordinary notes with colliding metadata.
+    const provenance = root ? await tx.taskActivity.findFirst({
+      where: { taskId: root.id, body: { startsWith: "Template instantiated" }, metadata: { path: ["staffingProfileId"], not: Prisma.AnyNull } },
+      orderBy: { createdAt: "asc" },
+      select: { metadata: true },
+    }) : null;
+    const recordedId = asJsonObject(provenance?.metadata)?.staffingProfileId;
+    const profile = await tx.staffingProfile.findFirst({
+      where: {
+        projectId: input.projectId,
+        taskTemplateId: input.templateId,
+        ...(typeof recordedId === "string" ? { id: recordedId } : { isDefault: true }),
+      },
+      select: { id: true, mergeTailRepairAgent: { select: { id: true, name: true, archivedAt: true } } },
+    });
+    const slot = profile?.mergeTailRepairAgent;
+    if (slot && !slot.archivedAt) return { kind: "agent", agentId: slot.id, label: slot.name };
+    if (slot?.archivedAt && root && profile) {
+      await tx.taskActivity.create({ data: {
+        taskId: root.id,
+        actorType: "control-plane",
+        body: `Merge-tail ${input.repairKind} staffing: profile ${profile.id} Agent ${slot.name} (${slot.id}) is archived; falling back to the chain's fixed-implementation Agent`,
+        metadata: { resolvedStaffingProfileId: profile.id, mergeTailRepairAgentId: slot.id, repairKind: input.repairKind, reason: "merge_tail_repair_agent_archived" },
+      } });
+    }
+  }
   const fixTask = await tx.task.findFirst({
     where: {
       projectId: input.projectId,

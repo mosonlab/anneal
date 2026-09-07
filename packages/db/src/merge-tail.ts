@@ -592,6 +592,25 @@ const resolverTradeOff = (entry: unknown): string | null => {
   return `${file}: ${decision}`;
 };
 
+/** Malformed output may recover from repository evidence, but never override
+ * an explicit refusal or a supplied stale binding, even if other fields fail
+ * validation first. Keep these wire-field rules beside the resolver parser. */
+export const resolverFallbackEligible = (
+  body: string | null | undefined,
+  expectedStart: string | null,
+  expectedTarget: string | null,
+): boolean => {
+  let value: Record<string, unknown> | null = null;
+  try {
+    const parsed: unknown = JSON.parse(body ?? "null");
+    value = typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown> : null;
+  } catch { /* Non-JSON output has no explicit refusal or stale binding. */ }
+  return value?.outcome !== "unable"
+    && (typeof value?.startHeadSha !== "string" || value.startHeadSha === expectedStart)
+    && (typeof value?.targetHeadSha !== "string" || value.targetHeadSha === expectedTarget);
+};
+
 export const parseResolverResult = (body: string | null | undefined): ResolverParse => {
   let value: Record<string, unknown> | null = null;
   try {
@@ -676,6 +695,7 @@ const DEFENSE_EXACT = new Set([
   "packages/db/src/readiness-requeue.ts",
   "packages/db/src/canonical-output-schema.ts",
   "packages/db/src/template-sources.ts",
+  "packages/db/src/staffing-profile-canonical.ts",
   "packages/db/src/agent-contract.ts",
   "packages/db/prisma/seed.ts",
   "packages/db/prisma/sync-canonical-prompts.ts",

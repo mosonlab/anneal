@@ -1,3 +1,6 @@
+import { setTimeout as delay } from "node:timers/promises";
+import { createGitHubReader, type BranchAncestryReader } from "./github-read.js";
+import { READINESS_READ_BUDGET_MS } from "./readiness-decision.js";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -63,6 +66,7 @@ type RegressionSeedOptions = {
   gateFailureExcerpt?: string;
   /** Give the canonical conflict resolver an operator-chosen name, as R9 allows. */
   renamedResolver?: boolean;
+  repairProfile?: "recorded" | "default" | "empty" | "archived" | "operator" | "webhook";
 };
 
 const seedRegression = async (options: RegressionSeedOptions = {}) => {
@@ -203,7 +207,41 @@ const seedRegression = async (options: RegressionSeedOptions = {}) => {
     runId: run.id, projectId: project.id, agentId: regressionAgent.id, taskId: regression.id,
     runner: "CODEX", executionStatus: "SUCCEEDED",
   } });
-  return { project, template, repo, regressionAgent, resolverAgent, reviewAgent, readinessStep, regression, librarian, fix, run, session };
+  const repairAgent = options.repairProfile ? await makeAgent("senior-dev-luna-max") : null;
+  if (repairAgent) {
+    await db.agentRepoAccess.create({ data: {
+      projectId: project.id, agentId: repairAgent.id, repoId: repo.id, mountPath: "/repo", permissions: "GIT_WRITE",
+    } });
+    const profile = await db.staffingProfile.create({ data: {
+      projectId: project.id, taskTemplateId: template.id, name: "Repair staffing",
+      isDefault: options.repairProfile === "default",
+      mergeTailRepairAgentId: options.repairProfile === "empty" ? null : repairAgent.id,
+    } });
+    if (options.repairProfile === "default") {
+      const root = await db.task.findFirstOrThrow({ where: { chainId }, orderBy: { chainIndex: "asc" } });
+      await db.taskActivity.create({ data: {
+        taskId: root.id, actorType: "operator", body: "ordinary note with colliding metadata",
+        metadata: { staffingProfileId: "not-instantiation-provenance" },
+      } });
+    }
+    if (options.repairProfile !== "default") {
+      // A different current default must not override the recorded profile.
+      await db.staffingProfile.create({ data: {
+        projectId: project.id, taskTemplateId: template.id, name: "Other default", isDefault: true,
+        mergeTailRepairAgentId: reviewAgent.id,
+      } });
+      const root = await db.task.findFirstOrThrow({ where: { chainId }, orderBy: { chainIndex: "asc" } });
+      await db.taskActivity.create({ data: {
+        taskId: root.id, actorType: options.repairProfile === "operator" || options.repairProfile === "webhook"
+          ? options.repairProfile : "control-plane", body: "Template instantiated",
+        metadata: { staffingProfileId: profile.id },
+      } });
+    }
+    if (options.repairProfile === "archived") {
+      await db.agent.update({ where: { id: repairAgent.id }, data: { archivedAt: new Date() } });
+    }
+  }
+  return { project, template, repo, regressionAgent, resolverAgent, reviewAgent, repairAgent, readinessStep, regression, librarian, fix, run, session };
 };
 
 const verdict = (outcome: RegressionOutcome, headSha: string = HEAD, gateFailureExcerpt?: string) => JSON.stringify(outcome === "refresh-conflict"
@@ -294,6 +332,7 @@ const completeRepair = async (
   output: string,
   headSha: string | null = RESOLVED,
   runNumber = 1,
+  repositoryReader?: BranchAncestryReader,
 ) => {
   const run = await db.run.findFirstOrThrow({ where: { taskId: repairId, runNumber } });
   const repair = await db.task.findUniqueOrThrow({ where: { id: repairId } });
@@ -317,7 +356,7 @@ const completeRepair = async (
   const prior = process.env.RUNNER_TOKEN;
   process.env.RUNNER_TOKEN = "merge-tail-repair-token";
   try {
-    const response = await createApp(db).request(`/runner/runs/${run.id}/complete`, {
+    const response = await createApp(db, { repositoryReader }).request(`/runner/runs/${run.id}/complete`, {
       method: "POST",
       headers: { Authorization: "Bearer merge-tail-repair-token", "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1837,6 +1876,32 @@ test("a rejected repair leaves a recovery that is still running alone", async ()
   }), 1);
 });
 
+for (const [outcome, repairKind] of [["review-fail", "review-fix"], ["gate-fail", "gate-fix"]] as const) {
+  for (const repairProfile of ["recorded", "default", "empty", "archived", "operator", "webhook"] as const) {
+    test(`${repairKind} honors ${repairProfile} profile repair staffing`, async () => {
+      const seeded = await exercise(outcome, { repairProfile });
+      const repair = await repairFor(seeded, repairKind);
+      const fallback = repairProfile === "empty" || repairProfile === "archived";
+      assert.equal(repair.assigneeAgentId, fallback ? seeded.fix.assigneeAgentId : seeded.repairAgent!.id);
+      if (repairProfile === "archived") {
+        const activity = await db.taskActivity.findFirstOrThrow({ where: {
+          task: { chainId: seeded.regression.chainId },
+          metadata: { path: ["reason"], equals: "merge_tail_repair_agent_archived" },
+        } });
+        assert.match(activity.body, /archived; falling back.*fixed-implementation/u);
+      }
+      // Changing a slot only affects future repairs, not an existing repair card.
+      await db.staffingProfile.updateMany({ where: { taskTemplateId: seeded.template.id }, data: { mergeTailRepairAgentId: seeded.reviewAgent.id } });
+      assert.equal((await db.task.findUniqueOrThrow({ where: { id: repair.id } })).assigneeAgentId, repair.assigneeAgentId);
+    });
+  }
+}
+
+test("refresh-conflict ignores a staffed repair slot and keeps the resolver role", async () => {
+  const seeded = await exercise("refresh-conflict", { repairProfile: "recorded", renamedResolver: true });
+  assert.equal((await repairFor(seeded, "refresh-conflict")).assigneeAgentId, seeded.resolverAgent.id);
+});
+
 type ExternalRegressionOutcome = "review-fail" | "refresh-conflict" | "gate-fail" | "pass";
 
 const v2Verdict = (outcome: ExternalRegressionOutcome) => JSON.stringify(
@@ -2068,3 +2133,56 @@ test("a persisted gate-fail keeps ordinary external git failure settlement", asy
   } }), 0);
   assert.equal(await db.task.count({ where: { templateStepId: seeded.readinessStep.id } }), 0);
 });
+
+for (const scenario of ["adopt", "no-push", "wrong-base", "slow-adopt", "read-timeout"] as const) {
+  test(`refresh-conflict malformed result uses repository ancestry: ${scenario}`, async () => {
+    const seeded = await exercise("refresh-conflict");
+    const repair = await repairFor(seeded, "refresh-conflict");
+    const head = scenario === "no-push" ? HEAD : RESOLVED;
+    const adopts = scenario === "adopt" || scenario === "slow-adopt";
+    const reads: string[] = [];
+    const repositoryReader = createGitHubReader("test-token", async (input, init) => {
+      const url = String(input);
+      reads.push(url);
+      if (url.endsWith(`/git/ref/heads/${BRANCH}`)) {
+        // Both exceed Prisma's default 5s transaction timeout. The timeout
+        // case honors the real shared repository deadline, not a fake clock.
+        if (scenario === "slow-adopt") await delay(5_500, undefined, { signal: init?.signal ?? undefined });
+        if (scenario === "read-timeout") await delay(READINESS_READ_BUDGET_MS + 5_000, undefined, { signal: init?.signal ?? undefined });
+        return Response.json({ object: { type: "commit", sha: head } });
+      }
+      assert.ok(url.endsWith(`/compare/${HEAD}...${head}`) || url.endsWith(`/compare/${BASE}...${head}`), url);
+      const missingBase = !adopts && url.endsWith(`/compare/${BASE}...${head}`);
+      return Response.json({ status: missingBase ? "diverged" : head === HEAD ? "identical" : "ahead", behind_by: missingBase ? 1 : 0, files: [] });
+    });
+    // Deliberately omit the delivered head too: the repository is the evidence.
+    await completeRepair(seeded, repair.id, "resolved it", null, 1, repositoryReader);
+    assert.equal(reads.length, scenario === "read-timeout" ? 1 : 3);
+    assert.equal((await db.run.findFirstOrThrow({ where: { taskId: repair.id } })).status, "SUCCEEDED");
+    const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+    const result = latestMarker(await readMarkerHistory(db, seeded.regression.id), "repairResult");
+    const activity = await db.taskActivity.findFirstOrThrow({ where: {
+      taskId: repair.id,
+      metadata: { path: ["kind"], equals: "mergeTail.resolverRepositoryFallback" },
+    } });
+    assert.match(activity.body, /fallback/u);
+    assert.equal(asJsonObject(activity.metadata)?.rejectedKey, "body");
+    if (scenario === "read-timeout") assert.match(activity.body, /read failed: GitHub read aborted at its deadline/u);
+    if (adopts) {
+      assert.equal(result?.resolvedHeadSha, head);
+      assert.equal(result?.state, null);
+      assert.match(activity.body, /adopted/u);
+      assert.notEqual(regression.status, TaskStatus.REVIEW);
+      assert.equal(await db.inboxMessage.count({ where: { taskId: regression.id } }), 0);
+      const claimed = await claimNext();
+      assert.equal(claimed.status, 200);
+      const body = claimed.body as { regressionRepairHandoff: { repair: { resolvedHeadSha: string } } };
+      assert.equal(body.regressionRepairHandoff.repair.resolvedHeadSha, head);
+    } else {
+      assert.equal(regression.status, TaskStatus.REVIEW);
+      assert.match(regression.failureReason ?? "", /invalid output/u);
+      assert.equal(result?.state, "invalid-output");
+      assert.equal(await db.inboxMessage.count({ where: { taskId: regression.id } }), 1);
+    }
+  });
+}

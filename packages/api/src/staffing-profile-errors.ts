@@ -23,6 +23,9 @@ export const staffingProfileRefusalStatus = {
   staffing_profile_include_not_optional: 422,
   staffing_profile_agent_not_found: 422,
   staffing_profile_agent_archived: 422,
+  staffing_profile_repo_not_found: 422,
+  staffing_profile_repo_required: 422,
+  staffing_profile_missing_repo_grant: 422,
   staffing_profile_integrator_binding: 422,
   staffing_profile_compound_implementation: 422,
 } as const satisfies Record<string, RefusalStatus>;

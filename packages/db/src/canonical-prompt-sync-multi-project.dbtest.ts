@@ -224,6 +224,8 @@ const deleteProject = async (projectId: string): Promise<void> => {
   // messages first when a fixture exercises customized-runtime notices.
   const agentIds = (await prisma.agent.findMany({ where: { projectId }, select: { id: true } })).map(({ id }) => id);
   if (agentIds.length > 0) await prisma.inboxMessage.deleteMany({ where: { agentId: { in: agentIds } } });
+  // Profiles restrict deletion of their Agents, even during Project cascade.
+  await prisma.staffingProfile.deleteMany({ where: { projectId } });
   await prisma.project.delete({ where: { id: projectId } });
 };
 

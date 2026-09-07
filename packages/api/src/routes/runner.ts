@@ -293,6 +293,7 @@ export const registerRunnerRoutes = (
         runId,
         body,
         claimantClass: principal.kind === "merge-executor" ? "merge-executor" : "runner",
+        repositoryReader: options.repositoryReader,
       }, releaseChainLease);
       if ("message" in result) return refusalJson(context, result);
       await options.ownership.assertHeld();

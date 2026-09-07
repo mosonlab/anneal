@@ -8,6 +8,7 @@ import {
   planCanonicalInstallation,
   type CanonicalInstallationRow,
 } from "../src/canonical-template-installation.js";
+import { installCanonicalDefaultStaffingProfiles } from "../src/staffing-profile-canonical.js";
 import {
   INTEGRATOR_AGENT_NAME,
   INTEGRATOR_OUTPUT_KIND,
@@ -233,6 +234,7 @@ const main = async (): Promise<void> => {
       templateStepsByName,
       { synchronizeCurrent: true },
     );
+    await installCanonicalDefaultStaffingProfiles(tx, project.id);
     const templates = await tx.taskTemplate.findMany({
       where: { projectId: project.id, name: { in: [...canonicalNames] } },
     });
