@@ -883,13 +883,9 @@ export const instantiateTemplate = async (
           predecessorChainId: predecessor.chainId,
         } : {}),
         ...options.activityMetadata,
-        ...(effectiveSteps[index]?.step.outputKind === "implementation" && (
-          routedImplementationStepIndex === effectiveSteps[index]?.step.stepIndex
-          || requestedStepOverrides[String(effectiveSteps[index]?.step.stepIndex)]?.assigneeAgentId !== undefined
-        ) ? {
-          implementationAssigneeOverride: routedImplementationStepIndex === effectiveSteps[index]?.step.stepIndex
-            ? "Route" : "stepOverrides",
-        } : {}),
+        ...(effectiveSteps[index]?.step.outputKind === "implementation"
+          && requestedStepOverrides[String(effectiveSteps[index]?.step.stepIndex)]?.assigneeAgentId !== undefined
+          ? { implementationAssigneeOverride: "stepOverrides" } : {}),
       },
     })) });
     if (predecessor) {
