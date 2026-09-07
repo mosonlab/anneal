@@ -208,11 +208,12 @@ const nativeTaskBase = {
   schedulePausedAt: null,
   recurringSourceTaskId: null,
   templateStep: null,
-} satisfies Omit<NativeTaskList, "chainProgress" | "recurringLastFiredAt" | "recurringFireCount">;
+} satisfies Omit<NativeTaskList, "chainProgress" | "baseline" | "recurringLastFiredAt" | "recurringFireCount">;
 
 const nativeTaskList = (): NativeTaskList => ({
   ...nativeTaskBase,
   chainProgress: null,
+  baseline: null,
   recurringLastFiredAt: null,
   recurringFireCount: 0,
 });

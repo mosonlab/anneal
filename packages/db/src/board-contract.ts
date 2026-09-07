@@ -771,6 +771,9 @@ type TaskBase<DateTime, DecimalValue> = {
 /** `GET /tasks` full-list projection, including list-only enrichment. */
 export type TaskList<DateTime = string, DecimalValue = string> = TaskBase<DateTime, DecimalValue> & {
   chainProgress: ChainProgress | null;
+  /** See `BoardCard.baseline`. The full list answers the whole page with the
+   *  same single grouped query the board uses. */
+  baseline: RunBaseline | null;
   recurringLastFiredAt: DateTime | null;
   recurringFireCount: number;
 };

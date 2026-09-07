@@ -1255,9 +1255,19 @@ export const readTaskList = async (
     _count: { _all: true },
   });
   const firedByDefinition = new Map(firedGroups.map((group) => [group.recurringSourceTaskId, group]));
+  // One grouped statement for every template step in the list, whatever its
+  // length: the same constraint the board read carries.
+  const baselines = await readRunBaselines(db, tasks.flatMap((task) => (
+    task.templateStepId === null
+      ? []
+      : [{ projectId: task.projectId, templateStepId: task.templateStepId }]
+  )));
 
   return tasks.map((task) => ({
     ...task,
+    baseline: task.templateStepId === null
+      ? null
+      : baselines.get(baselineKey({ projectId: task.projectId, templateStepId: task.templateStepId })) ?? null,
     strandedSalvageBranches: strandedSalvageBranchesFromRuns(salvageRunsByTask.get(task.id) ?? []),
     executionOwner: chainExecutionOwner(task),
     chainProgress: progressFor(task),

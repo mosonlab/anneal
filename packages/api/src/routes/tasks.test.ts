@@ -1427,6 +1427,47 @@ test("the board reads one baseline statement however many cards the page carries
   });
 });
 
+test("the full list carries the same baseline from one statement, whatever the page", async () => {
+  await withTokens(async () => {
+    const page = (size: number): Array<Record<string, unknown>> => Array.from({ length: size }, (_unused, index) => taskRow({
+      id: `task-${index}`,
+      projectId: "p1",
+      templateStepId: index % 2 === 0 ? "step-1" : "step-2",
+      createdAt: new Date(`2026-08-${String(10 + index).padStart(2, "0")}T00:00:00.000Z`),
+    }));
+    const baselines = [
+      baselineRow({ projectId: "p1", templateStepId: "step-1" }),
+      // Two runs of the other step: no baseline, so its rows carry null.
+      baselineRow({ projectId: "p1", templateStepId: "step-2", sampleSize: 2, costSampleSize: 2, durationSampleSize: 2 }),
+    ];
+    for (const size of [1, 12]) {
+      const baselineQueries: Array<{ sql: string; values: unknown[] }> = [];
+      const response = await getTasks(boardDatabase(page(size), { baselines, baselineQueries }), "?view=full");
+      assert.equal(response.status, 200);
+      const body = await response.json() as Array<{ id: string; baseline: unknown }>;
+      assert.equal(body.length, size);
+      assert.equal(baselineQueries.length, 1, "the list's baseline read must not grow with the page");
+      for (const row of body) {
+        const step1 = Number(row.id.slice("task-".length)) % 2 === 0;
+        assert.deepEqual(row.baseline, step1
+          ? { sampleSize: 8, costUsd: { sampleSize: 8, p50: 3, p90: 5 }, durationMs: { sampleSize: 8, p50: 50_000, p90: 80_000 } }
+          : null);
+      }
+    }
+  });
+});
+
+test("a full list with no template step anywhere asks for no baseline at all", async () => {
+  await withTokens(async () => {
+    const baselineQueries: Array<{ sql: string; values: unknown[] }> = [];
+    const response = await getTasks(boardDatabase([taskRow()], { baselineQueries }), "?view=full");
+    assert.equal(response.status, 200);
+    const body = await response.json() as Array<{ baseline: unknown }>;
+    assert.equal(body[0]!.baseline, null);
+    assert.equal(baselineQueries.length, 0);
+  });
+});
+
 test("task detail attaches read-time diagnostics to every run from one tool-event query", async () => {
   await withTokens(async () => {
     const queries: SessionEventQuery[] = [];

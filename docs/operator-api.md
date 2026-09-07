@@ -1506,7 +1506,9 @@ platform stops requeueing and parks the task for an operator, so a card showing
 Every card also carries `baseline`, the same per-template-step cost and
 duration baseline `GET /tasks/:taskId` documents, or `null` for a card with no
 template step or too little history. The whole page is answered by one grouped
-query, so the board's query count does not grow with the number of cards.
+query, so the board's query count does not grow with the number of cards. Rows
+of the `full` view carry the same `baseline` field on the same terms, read by
+the same single grouped query.
 For a Chain member, the first emitted member also carries the
 `chainAggregate` projection. Its `activation.state` is one of
 `parked-unactivated`, `waiting-on-predecessor`, `running`, `idle`, `held`, or
