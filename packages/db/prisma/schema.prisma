@@ -796,6 +796,11 @@ model MergeRecoveryAttempt {
   revalidations           Int                       @default(0)
   boundSourceRunId        String?
   authorizationActivityId String?
+  /// The fresh readiness authorization whose integrator Run birth a Chain hold
+  /// refused. The aggregate is the single owner of that replay: `chain/resume`
+  /// opens the Run exactly once, clears this column, and only then may the
+  /// aggregate reach SUCCEEDED.
+  pendingAuthorizationId  String?
   recoveryRunId           String?
   readinessTaskId         String?
   regressionTaskId        String?
@@ -815,6 +820,7 @@ model MergeRecoveryAttempt {
 
   @@unique([sourceStopId, attempt])
   @@index([integratorTaskId, status])
+  @@index([pendingAuthorizationId])
   @@index([status, refusalCode, updatedAt])
   @@index([recoveryRunId])
   @@index([repository, prNumber, targetBranch])

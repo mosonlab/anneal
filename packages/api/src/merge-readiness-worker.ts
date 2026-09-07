@@ -925,7 +925,14 @@ const authorizeReadinessSettlement = (
         if (recoveryActivation.outcome === "refused") {
           throw new MergeRecoveryRefusalError(recoveryActivation.refusalCode);
         }
-        activated = recoveryActivation;
+        // A Hold on the integrator's layer refused the Run birth, not the
+        // authorization: it is written, and the aggregate now carries the
+        // pending intent `chain/resume` replays. Settle this tick with no
+        // successor and no handoff, so the readiness Lease is released rather
+        // than retained for a Run that does not exist.
+        activated = recoveryActivation.outcome === "withheld"
+          ? { nextTaskId: null, gated: false }
+          : recoveryActivation;
       } else {
         activated = await activateChainSuccessor(tx, readiness, {}, read.input.now);
       }

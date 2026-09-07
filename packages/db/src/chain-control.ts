@@ -15,6 +15,10 @@ import { compare, denseOrdinals, layerOf } from "./chain-order.js";
 import { enqueueTaskRunInternal, errorForOpenRunRefusal } from "./run-open.js";
 import { lockAgentRepoGrant, lockChainRows, lockChainStructure } from "./locks.js";
 import { markerFromMetadata } from "./merge-tail-markers.js";
+import {
+  pendingIntegratorAuthorization,
+  replayPendingIntegratorAuthorization,
+} from "./merge-recovery-intent.js";
 import { stepRole } from "./step-role.js";
 
 type ChainControlDb = Pick<Prisma.TransactionClient, "chainControl">;
@@ -78,6 +82,24 @@ type ResumeFirstLayerTask = {
     taskTemplate: { name: string } | null;
   } | null;
 };
+
+/**
+ * Everything `resumeFirstLayerRefusal` reads beyond the Task row itself. Shared
+ * with the held merge-integrator replay so both admissions ask the same
+ * questions of the same columns.
+ */
+const RESUME_ADMISSION_INCLUDE = {
+  assigneeAgent: { select: { name: true, archivedAt: true } },
+  repo: { select: { name: true } },
+  dispatchAfter: { select: { status: true } },
+  templateStep: {
+    select: {
+      stepIndex: true,
+      outputKind: true,
+      taskTemplate: { select: { name: true } },
+    },
+  },
+} as const;
 
 /**
  * Resume of a held-before-first-layer Chain is the same operator admission as
@@ -434,11 +456,55 @@ export const holdChain = async (
   return { control: chainControlMutationProjection(held), duplicate: false };
 };
 
+/**
+ * Replay the merge-integrator authorization this Hold refused, if there is one.
+ *
+ * The admission is the checklist `POST /tasks/:taskId/start` applies, run here
+ * because Resume owns the Chain mutex the route cannot enter. A refusal leaves
+ * the pending authorization recorded for a later Resume rather than spending it
+ * or blocking the release the operator asked for.
+ */
+const replayHeldIntegratorAuthorization = async (
+  tx: Prisma.TransactionClient,
+  address: ChainControlAddress,
+  now: Date,
+) => {
+  const pending = await pendingIntegratorAuthorization(tx, {
+    projectId: address.projectId,
+    chainId: address.chainId,
+  });
+  if (!pending) return null;
+  const integrator = await tx.task.findUnique({
+    where: { id: pending.integratorTaskId },
+    include: RESUME_ADMISSION_INCLUDE,
+  });
+  const admissionRefusal = integrator === null
+    ? `Merge integrator task ${pending.integratorTaskId} no longer exists`
+    : (await resumeFirstLayerRefusal(tx, integrator))?.message ?? null;
+  if (admissionRefusal === null) return replayPendingIntegratorAuthorization(tx, pending, now);
+  await tx.taskActivity.create({ data: {
+    taskId: pending.integratorTaskId,
+    actorType: "control-plane",
+    body: `Chain resumed but the held recovery authorization was not replayed: ${admissionRefusal}`,
+    metadata: {
+      kind: "chainControl.integratorAuthorizationNotAdmitted",
+      schemaVersion: 1,
+      aggregateId: pending.id,
+      authorizationActivityId: pending.pendingAuthorizationId,
+      reason: admissionRefusal,
+    },
+  } });
+  return null;
+};
+
 export type ResumeChainResult = {
   control: ReturnType<typeof chainControlMutationProjection> | null;
   duplicate: boolean;
   nextTaskId: string | null;
   gated: boolean;
+  /** The merge-integrator Run this Resume replayed for a held base-drift
+   *  recovery, when there was one waiting. */
+  replayedIntegratorRunId?: string;
 };
 
 export const resumeChain = async (
@@ -505,18 +571,7 @@ export const resumeChain = async (
       .sort(chainOrder);
     const loaded = await tx.task.findMany({
       where: { id: { in: firstLayerRows.map((row) => row.id) } },
-      include: {
-        assigneeAgent: { select: { name: true, archivedAt: true } },
-        repo: { select: { name: true } },
-        dispatchAfter: { select: { status: true } },
-        templateStep: {
-          select: {
-            stepIndex: true,
-            outputKind: true,
-            taskTemplate: { select: { name: true } },
-          },
-        },
-      },
+      include: RESUME_ADMISSION_INCLUDE,
     });
     const loadedById = new Map(loaded.map((task) => [task.id, task]));
     firstLayerTasks = firstLayerRows.map((row) => {
@@ -636,14 +691,23 @@ export const resumeChain = async (
     };
   }
 
+  // A base-drift recovery whose authorization landed under this Hold left the
+  // integrator Run birth on the aggregate. It is replayed before ordinary
+  // activation, because the integrator's unresolved stop refuses an ordinary
+  // enqueue: the replayed authorization is the only birth intent that may open
+  // this Run, and once it has, activation reads the successor as already active
+  // instead of parking it on the stop it cannot answer.
+  const replayed = await replayHeldIntegratorAuthorization(tx, input, now);
+
   const activated = anchor
     ? await activateChainSuccessor(tx, anchor, { sourceRunId: sourceRun?.id ?? null }, now)
     : { nextTaskId: null, gated: false };
   return {
     control: chainControlMutationProjection(released),
     duplicate: false,
-    nextTaskId: activated.nextTaskId,
+    nextTaskId: activated.nextTaskId ?? replayed?.integratorTaskId ?? null,
     gated: activated.gated,
+    ...(replayed ? { replayedIntegratorRunId: replayed.runId } : {}),
   };
 };
 

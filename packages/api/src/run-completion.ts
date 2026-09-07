@@ -22,6 +22,7 @@ import {
   lockChainRows,
   lockRunRow,
   MERGE_TAIL_KIND,
+  MergeLeaseEventState,
   mechanicalPrincipalRefusal,
   openRun,
   parseMergeResult,
@@ -74,6 +75,10 @@ import {
   commitWithLeaseOutcome,
   type ReleaseMergeLease,
 } from "./merge-lease.js";
+import {
+  settleFailedIntegratorRun,
+  type IntegratorFailureExit,
+} from "./merge-integrator-failure-exit.js";
 import type { Refusal } from "./refusal.js";
 import { FAILURE_REASON_LIMIT, failureReasonText } from "./failure-reason.js";
 import { lockTask, lockTaskMutationRows } from "./task-write.js";
@@ -868,6 +873,18 @@ export const completeRun = async (
     // row: a task's budget being edited mid-run must not retroactively refuse
     // an attempt already authorized.
     const budgetGrants = completionBudget.budgetGrants;
+    // The merge either landed in this Run or it did not. Everything that is not
+    // a valid, same-Run `merged` result is a Run that ended holding a Lease it
+    // never spent, and §D-P7's operators had to steal that Lease by hand.
+    const mechanicalMerged = succeeded && mechanical
+      && persistedMechanicalOutcome?.outcome === "merged";
+    const strandedHandoff = mechanical && !mechanicalMerged
+      ? await tx.mergeLeaseEvent.findFirst({
+        where: { handedOffRunId: run.id, state: MergeLeaseEventState.HANDOFF_PENDING },
+        select: { id: true, projectId: true, chainId: true },
+      })
+      : null;
+    let integratorFailureExit: IntegratorFailureExit = { kind: "none" };
     let leaseOutcome: "continue" | "stop" = "continue";
     // Set only when the ladder rejects this completion for an unbound repair.
     let repairBindingRejection: CompleteRunRefusal | null = null;
@@ -1315,6 +1332,21 @@ export const completeRun = async (
           throw new Error(`Run ${run.id} decided an unhandled completion advancement ${JSON.stringify(unhandled)}`);
         }
       }
+      // §D-P7's exit guarantee. A canonical `base-drift` stop defers its
+      // operator question to the recovery worker, and the intent that opened
+      // this Run was the one bypass that stop allows. A failed Run therefore
+      // leaves a Task that refuses `retry` and `start` with no card to answer
+      // unless this completion decides the exit here, beside the failure it
+      // just recorded.
+      if (mechanical && !succeeded && !retryCreated) {
+        integratorFailureExit = await settleFailedIntegratorRun(tx, {
+          integratorTaskId: run.taskId,
+          runId: run.id,
+          external,
+          failureReason: missingOutputReason ?? reported.failureReason ?? "execution failed",
+          now,
+        });
+      }
       const activityBody = completionActivityBody(advancementFacts);
       if (activityBody) await tx.taskActivity.create({
         data: {
@@ -1336,7 +1368,10 @@ export const completeRun = async (
           },
         });
       }
-      if (retryRefusal) {
+      // The refusal an unresolved stop raises is not news once this completion
+      // has already re-queued the integrator past it; saying "retry refused"
+      // there is the message that sent operators looking for a card to answer.
+      if (retryRefusal && integratorFailureExit.kind !== "requeued") {
         await tx.inboxMessage.create({
           data: {
             from: "AGENT",
@@ -1384,8 +1419,24 @@ export const completeRun = async (
       // the completion itself answers a named 409 rather than 500.
       value: repairBindingRejection
         ?? { taskId: run.taskId, succeeded, retryCreated, failureClass },
-      leaseOutcome: leaseOutcome === "stop"
-        ? { kind: "stop", taskId: run.taskId }
+      // A stranded handoff forces the stop: the Lease was handed to this Run and
+      // this Run is over, so the same completion that records the failure both
+      // releases it on origin and settles its `MergeLeaseEvent`.
+      leaseOutcome: leaseOutcome === "stop" || strandedHandoff
+        ? {
+          kind: "stop",
+          taskId: run.taskId,
+          ...(strandedHandoff
+            ? {
+              releasedHandoff: {
+                eventId: strandedHandoff.id,
+                toRunId: run.id,
+                target: { projectId: strandedHandoff.projectId, chainId: strandedHandoff.chainId },
+                at: now,
+              },
+            }
+            : {}),
+        }
         : { kind: "continue" },
     };
   // ReadCommitted lets successor CAS losers observe count=0 instead of
