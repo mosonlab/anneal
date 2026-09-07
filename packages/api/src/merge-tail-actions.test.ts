@@ -441,18 +441,28 @@ test("openMergeTailStopNotice derives its dedupe key from the task and reason", 
   });
 });
 
-test("openDefenseAuditNotice records the triggered paths against the readiness task", async () => {
-  let upsert: Record<string, unknown> | undefined;
+test("openDefenseAuditNotice records one control-plane activity per readiness task and head", async () => {
+  const activities: Array<{ taskId: string; actorType: string; body: string; metadata: Record<string, unknown> }> = [];
   const tx = {
-    inboxMessage: {
-      upsert: async (args: Record<string, unknown>) => {
-        upsert = args;
-        return {};
+    taskActivity: {
+      findFirst: async ({ where }: { where: Prisma.TaskActivityWhereInput }) => {
+        assert.equal(where.actorType, "control-plane");
+        const filters = where.AND as Array<{ metadata: { path: string[]; equals: unknown } }>;
+        assert.deepEqual(filters.map((filter) => filter.metadata.path), [["kind"], ["headSha"]]);
+        assert.equal(filters[0]!.metadata.equals, "defenseAudit");
+        return activities.find((activity) => activity.taskId === where.taskId
+          && filters.every((filter) => activity.metadata[filter.metadata.path[0]!] === filter.metadata.equals)) ?? null;
+      },
+      create: async ({ data }: { data: typeof activities[number] }) => {
+        activities.push(data);
+        return data;
       },
     },
+    inboxMessage: {
+      upsert: async () => assert.fail("defense audits must not write Inbox messages"),
+    },
   } as unknown as Prisma.TransactionClient;
-
-  await openDefenseAuditNotice(tx, {
+  const input = {
     readinessTaskId: "readiness-task-1",
     headSha: "a".repeat(40),
     baseSha: "b".repeat(40),
@@ -460,24 +470,26 @@ test("openDefenseAuditNotice records the triggered paths against the readiness t
       { path: "packages/api/src/app.ts", reason: "merge-tail-machinery" },
       { path: "scripts/gate-worker/run.sh", reason: "gate-worker" },
     ],
-  });
+  };
 
-  const dedupeKey = `defense-audit:readiness-task-1:${"a".repeat(40)}`;
-  assert.deepEqual(upsert, {
-    where: { dedupeKey },
-    create: {
-      from: "AGENT",
-      taskId: "readiness-task-1",
-      kind: "TEXT",
-      body: [
-        "Merge proceeded with defense-list changes",
-        `Exact range ${"b".repeat(40)}..${"a".repeat(40)}.`,
-        "- packages/api/src/app.ts (merge-tail-machinery)\n- scripts/gate-worker/run.sh (gate-worker)",
-      ].join("\n\n"),
-      dedupeKey,
-    },
-    update: {},
-  });
+  await openDefenseAuditNotice(tx, input);
+  assert.deepEqual(activities, [{
+    taskId: input.readinessTaskId,
+    actorType: "control-plane",
+    body: [
+      "Merge proceeded with defense-list changes",
+      `Exact range ${input.baseSha}..${input.headSha}.`,
+      "- packages/api/src/app.ts (merge-tail-machinery)\n- scripts/gate-worker/run.sh (gate-worker)",
+    ].join("\n\n"),
+    metadata: { kind: "defenseAudit", headSha: input.headSha, baseSha: input.baseSha, triggers: input.triggers },
+  }]);
+  await openDefenseAuditNotice(tx, input);
+  await openDefenseAuditNotice(tx, { ...input, baseSha: "c".repeat(40) });
+  assert.equal(activities.length, 1, "same task and head retains the original audit even if the base changes");
+  assert.equal(activities[0]!.metadata.baseSha, input.baseSha);
+  await openDefenseAuditNotice(tx, { ...input, headSha: "d".repeat(40) });
+  await openDefenseAuditNotice(tx, { ...input, readinessTaskId: "readiness-task-2" });
+  assert.equal(activities.length, 3, "different heads and readiness tasks have their own audits");
 });
 
 test("settleMergeTailCompletion records a successful repair", async () => {
