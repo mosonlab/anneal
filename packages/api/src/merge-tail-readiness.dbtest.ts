@@ -1909,9 +1909,8 @@ test("a deferred read inside an outage keeps the outage's wait", async () => {
       1,
     );
 
-    // A GitHub timeout defers the tick before it can observe the executor at
-    // all, so it says nothing about whether the outage ended: the episode stays
-    // open and the wait keeps its start rather than being handed a new window.
+    // A GitHub timeout defers the tick, but the executor is still observed
+    // offline: the episode stays open and keeps its original wait.
     const timingOut: PullRequestReader = {
       readPullRequest: async () => {
         throw new GitHubReadError("readiness evaluation timed out", "timeout");
@@ -2090,4 +2089,141 @@ test("exception requeues are bounded and the stop past the limit counts them", a
   assert.equal((await exceptionRequeueMarkers(seeded.regression.id)).length, READINESS_EXCEPTION_REQUEUE_LIMIT);
   const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
   assert.equal(notice.body, `Autonomous merge readiness stopped: ${reason}`);
+});
+
+test("a live skip tick closes outage A before a held Step resumes into outage B", async () => {
+  await withExecutorAllowlist(EXECUTOR_RUNNER_ID, async () => {
+    const seeded = await seedReadiness();
+    const offline = executorsAt(OFFLINE_NOW);
+    await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, offline);
+    await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.REVIEW } });
+    await readinessTick(db, reader(), new Date(OFFLINE_NOW.getTime() + 60_000), 5,
+      releaseChainLease, runWithMergeLease, executorsAt(ONLINE_NOW));
+    assert.equal(((await offlineMarkers(seeded.readiness.id))[0]!.metadata as Record<string, unknown>).episodeClosed, true);
+    await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.DONE } });
+    const later = new Date(OFFLINE_NOW.getTime() + 2 * 86_400_000);
+    const tick = await readinessTick(db, reader(), later, 5, releaseChainLease, runWithMergeLease, offline);
+    assert.equal(tick.requeued, 1);
+    assert.equal(tick.stopped, 0);
+    assert.equal(((await offlineMarkers(seeded.readiness.id)).at(-1)!.metadata as Record<string, unknown>).episodeStartedAt,
+      later.toISOString());
+  });
+});
+
+for (const drifted of [false, true]) {
+  test(`a ceiling stop re-arms on executor return without opening Regression (base drift=${drifted})`, async () => {
+    await withExecutorAllowlist(EXECUTOR_RUNNER_ID, async () => {
+      const seeded = await seedReadiness();
+      const offline = executorsAt(OFFLINE_NOW);
+      await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, offline);
+      const expired = new Date(OFFLINE_NOW.getTime() + MERGE_EXECUTOR_OFFLINE_WAIT_MS);
+      await readinessTick(db, reader(), expired, 5, releaseChainLease, runWithMergeLease, offline);
+      const notices = await db.inboxMessage.findMany({ where: { taskId: seeded.regression.id, status: "OPEN" } });
+      assert.ok(notices.length > 0);
+      const before = await db.run.count({ where: { taskId: seeded.regression.id } });
+      const live = executorsAt(ONLINE_NOW);
+      const facts = reader();
+      const current = drifted ? { ...facts, readPullRequest: async (...args: Parameters<PullRequestReader["readPullRequest"]>) => ({
+        ...await facts.readPullRequest(...args), baseSha: "d".repeat(40),
+      }) } : facts;
+      const resumed = await readinessTick(db, current, new Date(expired.getTime() + 1_000), 5,
+        releaseChainLease, runWithMergeLease, live);
+      assert.equal(resumed.authorized, drifted ? 0 : 1);
+      assert.equal(resumed.requeued, drifted ? 1 : 0);
+      if (!drifted) assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), before);
+      assert.equal(await db.inboxMessage.count({ where: { id: { in: notices.map((notice) => notice.id) }, status: "OPEN" } }), 0);
+    });
+  });
+}
+
+test("a tick whose readiness claim was replaced cannot close the offline episode", async () => {
+  await withExecutorAllowlist(EXECUTOR_RUNNER_ID, async () => {
+    const seeded = await seedReadiness();
+    await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, executorsAt(OFFLINE_NOW));
+    const { claimReadinessStep } = await import("./readiness-claim.js");
+    const { closeExecutorOfflineEpisode } = await import("./merge-readiness-worker.js");
+    const claim = await claimReadinessStep(db, seeded.readiness.id, OFFLINE_NOW);
+    assert.ok(claim);
+    await db.task.update({ where: { id: seeded.readiness.id }, data: { readinessClaimToken: "replacement" } });
+    await closeExecutorOfflineEpisode(db, seeded.readiness.id, claim, "executor observed online");
+    assert.notEqual(((await offlineMarkers(seeded.readiness.id))[0]!.metadata as Record<string, unknown>).episodeClosed, true);
+  });
+});
+
+test("executor return re-arms a ceiling stop without discarding its recovery aggregate", async () => {
+  await withExecutorAllowlist(EXECUTOR_RUNNER_ID, async () => {
+    const seeded = await seedReadiness();
+    const run = await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
+    const stop = await db.taskActivity.create({ data: {
+      taskId: seeded.integrator.id, actorType: "control-plane", body: "base drift stop",
+    } });
+    const authorization = await db.taskActivity.create({ data: {
+      taskId: seeded.readiness.id, actorType: "control-plane", body: "prior authorization",
+    } });
+    const aggregate = await db.mergeRecoveryAttempt.create({ data: {
+      integratorTaskId: seeded.integrator.id, sourceStopId: stop.id, attempt: 1,
+      status: MergeRecoveryStatus.AWAITING_AUTHORIZATION, boundSourceRunId: run.id,
+      authorizationActivityId: authorization.id, recoveryRunId: run.id,
+      readinessTaskId: seeded.readiness.id, regressionTaskId: seeded.regression.id,
+      repository: "acme/widgets", prNumber: 41, targetBranch: "main",
+      authorizedHeadSha: HEAD, authorizedBaseSha: BASE, observedBaseSha: BASE, currentBaseSha: BASE,
+    } });
+    const offline = executorsAt(OFFLINE_NOW);
+    await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, offline);
+    const expired = new Date(OFFLINE_NOW.getTime() + MERGE_EXECUTOR_OFFLINE_WAIT_MS);
+    await readinessTick(db, reader(), expired, 5, releaseChainLease, runWithMergeLease, offline);
+    assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } })).status,
+      MergeRecoveryStatus.BLOCKED_DOWNSTREAM);
+    const result = await readinessTick(db, reader([], snapshot({ baseSha: "d".repeat(40) })),
+      new Date(expired.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, executorsAt(ONLINE_NOW));
+    assert.equal(await db.inboxMessage.count({ where: {
+      taskId: seeded.regression.id, status: "OPEN",
+      dedupeKey: { startsWith: "merge-base-drift-recovery-tail-stop:" },
+    } }), 0);
+    assert.equal(result.authorized, 0);
+    assert.equal(result.requeued, 1);
+    assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } })).status,
+      MergeRecoveryStatus.REPAIRING);
+  });
+});
+
+test("a second identical outage ceiling reopens its previously closed stop notice", async () => {
+  await withExecutorAllowlist(EXECUTOR_RUNNER_ID, async () => {
+    const seeded = await seedReadiness();
+    const offline = executorsAt(OFFLINE_NOW);
+    await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, offline);
+    const expired = new Date(OFFLINE_NOW.getTime() + MERGE_EXECUTOR_OFFLINE_WAIT_MS);
+    await readinessTick(db, reader(), expired, 5, releaseChainLease, runWithMergeLease, offline);
+    const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id, status: "OPEN" } });
+    const second = new Date(expired.getTime() + 1_000);
+    let observations = 0;
+    // The executor returns for re-arm, then outage B starts before authorization.
+    await readinessTick(db, reader(), second, 5, releaseChainLease, runWithMergeLease,
+      () => ++observations === 1 ? executorsAt(ONLINE_NOW)() : offline());
+    assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: notice.id } })).status, "CLOSED");
+    await readinessTick(db, reader(), new Date(second.getTime() + MERGE_EXECUTOR_OFFLINE_WAIT_MS),
+      5, releaseChainLease, runWithMergeLease, offline);
+    const reopened = await db.inboxMessage.findUniqueOrThrow({ where: { id: notice.id } });
+    assert.equal(reopened.status, "OPEN");
+    assert.equal(reopened.answeredAt, null);
+    for (const id of [seeded.regression.id, seeded.readiness.id]) {
+      assert.equal((await db.task.findUniqueOrThrow({ where: { id } })).status, TaskStatus.REVIEW);
+    }
+    assert.equal(await db.inboxMessage.count({ where: { dedupeKey: notice.dedupeKey } }), 1);
+  });
+});
+
+test("pending Regression with no allowlist or episode never takes a readiness claim", async () => {
+  const seeded = await seedReadiness();
+  await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.TODO } });
+  const before = await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } });
+  for (const allowlist of ["", EXECUTOR_RUNNER_ID]) {
+    await withExecutorAllowlist(allowlist, async () => {
+      const result = await readinessTick(db, reader(), ONLINE_NOW, 5, releaseChainLease, runWithMergeLease, executorsAt(ONLINE_NOW));
+      assert.equal(result.authorized, 0);
+      const after = await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } });
+      assert.deepEqual(after.updatedAt, before.updatedAt);
+      assert.equal(after.readinessClaimToken, null);
+    });
+  }
 });

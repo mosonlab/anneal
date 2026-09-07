@@ -112,6 +112,8 @@ export {
 } from "./chain-activation.js";
 export {
   GATE_ATTESTATION_BASE_MISMATCH,
+  MERGE_EXECUTOR_OFFLINE_REASON,
+  MERGE_EXECUTOR_OFFLINE_STATE,
   type MergeAuthorizationResult,
   MergeEvidenceError,
   isMergeEvidenceError,
@@ -140,6 +142,11 @@ export * from "./template-sources.js";
 export * from "./canonical-agent-lookup.js";
 export * from "./canonical-template-transition.js";
 export * from "./canonical-template-installation.js";
+export * from "./staffing-profile-canonical.js";
 export * from "./canonical-output-schema.js";
 export * from "./verify-starter-onboarding.js";
 export * from "./chain-control.js";
+
+export { parseLocalApiDestination } from "./local-origin.js";
+
+export { executorOfflineDetail, latestExecutorOfflineMarker, openEpisodeStart, closeExecutorOfflineEpisodeTx } from "./merge-tail-markers.js";

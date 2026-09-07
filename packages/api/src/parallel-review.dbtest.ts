@@ -87,6 +87,11 @@ test("failed, parked, and archived-Agent review siblings fail-stop the join unti
         select: { assigneeAgentId: true },
       });
       assert.ok(blindTask.assigneeAgentId);
+      // Release seeded profile references before exercising the archive route.
+      await db.staffingProfileEntry.updateMany({
+        where: { assigneeAgentId: blindTask.assigneeAgentId },
+        data: { assigneeAgentId: null },
+      });
       const archived = await operatorRequest(`/agents/${blindTask.assigneeAgentId}/archive`, "POST");
       assert.equal(archived.status, 200, JSON.stringify(archived.body));
       // This models an archived assignee already stored on a runnable chain

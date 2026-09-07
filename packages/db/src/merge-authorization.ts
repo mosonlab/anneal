@@ -9,7 +9,15 @@ import {
   authorizationMetadata,
   parseEvidence,
 } from "./merge-integrator.js";
-import { findEvidenceRequestByNonce, gateFeedsIntegratorStep } from "./merge-integrator-db.js";
+import {
+  findEvidenceRequestByNonce,
+  gateFeedsIntegratorStep,
+  mergeExecutorRunnerIds,
+  isUnreadableExecutorObservation,
+  mergeExecutorsBlockingAuthorization,
+  type MergeExecutorLivenessReader,
+} from "./merge-integrator-db.js";
+import { MERGE_TAIL_KIND } from "./merge-tail.js";
 import { errorForOpenRunRefusal, openRun, parksInsteadOfRaising, recordRunBirthRefusal } from "./run-open.js";
 
 type Tx = Prisma.TransactionClient;
@@ -33,6 +41,10 @@ export const isMergeEvidenceError = (error: unknown): error is MergeEvidenceErro
 /** The named refusal for an attestation taken against another base. */
 export const GATE_ATTESTATION_BASE_MISMATCH = "gate-attestation-base-mismatch";
 
+export { MERGE_EXECUTOR_OFFLINE_STATE, MERGE_EXECUTOR_OFFLINE_REASON } from "./merge-tail-markers.js";
+import { MERGE_EXECUTOR_OFFLINE_STATE, MERGE_EXECUTOR_OFFLINE_REASON,
+  executorOfflineDetail, latestExecutorOfflineMarker, openEpisodeStart } from "./merge-tail-markers.js";
+
 /** Persist only after the caller's approval transaction has rolled back. */
 export const recordMergeEvidenceRefusal = async (db: PrismaClient, error: unknown): Promise<void> => {
   if (!isMergeEvidenceError(error) || !error.refusalActivity) return;
@@ -47,6 +59,39 @@ export type MergeAuthorizationResult = {
   activityId: string;
   purpose: "gate" | "confirmation";
   payload: AuthorizationPayload;
+};
+
+/**
+ * A confirmation approval is a renewal of the mechanical Run. When the
+ * allowlisted executor fleet is offline, preserve the OPEN card by refusing
+ * the transaction and carry the same readiness marker outside its rollback.
+ * The next operator attempt can then use the evidence already on the card
+ * once a live executor is observed.
+ */
+const executorOfflineRefusal = async (
+  tx: Tx,
+  readinessTaskId: string,
+  executorRunnerIds: readonly string[],
+  now: Date,
+  unreadableCause?: string,
+): Promise<MergeEvidenceError> => {
+  const marker = await latestExecutorOfflineMarker(tx, readinessTaskId);
+  const episodeStartedAt = openEpisodeStart(marker) ?? now;
+  return new MergeEvidenceError(
+    `Merge readiness withheld its authorization: ${unreadableCause ? `${MERGE_EXECUTOR_OFFLINE_REASON}: executor liveness unreadable (${unreadableCause})` : executorOfflineDetail(executorRunnerIds)}`,
+    {
+      taskId: readinessTaskId,
+      metadata: {
+        kind: MERGE_TAIL_KIND.readiness,
+        state: unreadableCause ? "requeued-executor-unobservable" : MERGE_EXECUTOR_OFFLINE_STATE,
+        reason: MERGE_EXECUTOR_OFFLINE_REASON,
+        executorRunnerIds: [...executorRunnerIds],
+        ...(unreadableCause
+          ? { observation: "unreadable", cause: unreadableCause }
+          : { episodeStartedAt: episodeStartedAt.toISOString() }),
+      },
+    },
+  );
 };
 
 /**
@@ -68,6 +113,8 @@ export const produceMergeAuthorization = async (
     card: { id: string; body: string; gateTaskId: string | null };
     inboxDecisionId: string;
     channel: DecisionChannel;
+    /** Shared daemon observation used only for confirmation renewals. */
+    executorLiveness?: MergeExecutorLivenessReader;
   },
   now = new Date(),
 ): Promise<MergeAuthorizationResult | null> => {
@@ -129,6 +176,20 @@ export const produceMergeAuthorization = async (
         inboxMessageId: input.card.id,
       } },
     );
+  }
+
+  if (purpose === "confirmation") {
+    // Missing observations fail closed without fabricating an outage episode.
+    // Callers must supply the shared daemon snapshot to authorize a renewal.
+    const allowlist = mergeExecutorRunnerIds();
+    if (allowlist.length > 0) {
+      const observation = input.executorLiveness?.() ?? { observation: "unreadable", cause: "no-reader" };
+      if (isUnreadableExecutorObservation(observation)) {
+        throw await executorOfflineRefusal(tx, gateTaskId, allowlist, now, observation.cause);
+      }
+      const blocked = mergeExecutorsBlockingAuthorization(observation, allowlist);
+      if (blocked.length > 0) throw await executorOfflineRefusal(tx, gateTaskId, blocked, now);
+    }
   }
 
   const activity = await tx.taskActivity.create({ data: {

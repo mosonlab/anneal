@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { PrismaClient } from "@anneal/db";
+import { TaskStatus, type PrismaClient } from "@anneal/db";
 
 import {
   MERGE_EXECUTOR_OFFLINE_WAIT_MS,
@@ -263,3 +263,71 @@ test("an exception requeue returns readiness to TODO and records the retry", asy
   assert.equal(metadata.limit, 3);
   assert.equal(metadata.recoveryAggregateId, null);
 });
+
+test("closing an offline episode cannot mutate a marker after claim loss", async () => {
+  const { closeExecutorOfflineEpisodeTx } = await import("./merge-readiness-worker.js");
+  let reads = 0;
+  const tx = { taskActivity: { findFirst: async () => { reads += 1; throw new Error("unfenced read"); } } };
+  const claim = {
+    settle: async () => ({ settled: false, ownership: "released" }),
+  } as unknown as import("./readiness-claim.js").ReadinessClaimHandle;
+  await closeExecutorOfflineEpisodeTx(tx as unknown as import("@anneal/db").Prisma.TransactionClient,
+    "readiness", claim, "executor observed online");
+  assert.equal(reads, 0);
+});
+
+test("a claimed live observation closes the episode once and records why", async () => {
+  const { closeExecutorOfflineEpisodeTx } = await import("./merge-readiness-worker.js");
+  const marker = { id: "offline", createdAt: new Date(), metadata: { episodeStartedAt: "2026-09-01T00:00:00.000Z" } as Record<string, unknown> };
+  const activities: string[] = [];
+  const tx = { taskActivity: {
+    findFirst: async () => marker,
+    update: async (input: { data: { metadata: Record<string, unknown> } }) => { marker.metadata = input.data.metadata; },
+    create: async (input: { data: { body: string } }) => { activities.push(input.data.body); },
+  } } as unknown as import("@anneal/db").Prisma.TransactionClient;
+  const claim = {
+    settle: async <T>(client: import("@anneal/db").Prisma.TransactionClient,
+      transition: import("./readiness-claim.js").ReadinessClaimTransition<T>) => {
+      assert.equal(transition.kind, "keep");
+      return { settled: true, claim: "retained", value: await transition.apply(client) };
+    },
+  } as unknown as import("./readiness-claim.js").ReadinessClaimHandle;
+  await closeExecutorOfflineEpisodeTx(tx, "readiness", claim, "executor observed online on a skipped tick");
+  await closeExecutorOfflineEpisodeTx(tx, "readiness", claim, "executor observed online on a skipped tick");
+  assert.equal(marker.metadata.episodeClosed, true);
+  assert.equal(activities.length, 1);
+  assert.match(activities[0]!, /executor observed online on a skipped tick/u);
+});
+
+for (const allowlist of ["", "merge-executor-1"]) {
+  test(`a pending Regression without an episode performs no claim transactions (allowlist=${allowlist})`, async () => {
+    const { readinessTick } = await import("./merge-readiness-worker.js");
+    const previous = process.env.MERGE_EXECUTOR_RUNNER_IDS;
+    process.env.MERGE_EXECUTOR_RUNNER_IDS = allowlist;
+    let regressionReads = 0;
+    let markerReads = 0;
+    const db = {
+      task: {
+        findMany: async (input: { where: { chainId?: null } }) => input.where.chainId === null ? [] : [{
+          id: "readiness", status: TaskStatus.TODO, chainId: "chain", projectId: "project", repoId: "repo", templateId: "template",
+          templateStep: { outputKind: "merge-authorization", stepIndex: 6, taskTemplate: { name: "direct-engineer-workflow" } },
+        }],
+        findFirst: async () => { regressionReads++; return { id: "regression", status: TaskStatus.TODO }; },
+      },
+      taskActivity: { findFirst: async () => { markerReads++; return null; } },
+      $transaction: async () => { throw new Error("a skipped tick must not claim"); },
+    } as unknown as PrismaClient;
+    try {
+      const result = await readinessTick(db, {} as import("./github-read.js").PullRequestReader, new Date(), 5,
+        async () => { throw new Error("no lease to release"); },
+        async () => { throw new Error("no lease to acquire"); },
+        () => [{ runnerId: "merge-executor-1", online: true }] as import("./runners.js").DaemonSnapshot[], 0);
+      assert.equal(result.claimed, 0);
+      assert.equal(regressionReads, 1);
+      assert.equal(markerReads, allowlist ? 1 : 0);
+    } finally {
+      if (previous === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;
+      else process.env.MERGE_EXECUTOR_RUNNER_IDS = previous;
+    }
+  });
+}

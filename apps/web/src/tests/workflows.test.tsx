@@ -102,6 +102,7 @@ const profile = (overrides: Partial<StaffingProfile> & Pick<StaffingProfile, "id
   projectId: PROJECT.id,
   taskTemplateId: TEMPLATE.id,
   isDefault: false,
+  mergeTailRepairAgentId: null,
   createdAt: "2026-09-03T00:00:00.000Z",
   updatedAt: "2026-09-03T00:00:00.000Z",
   entries: [],

@@ -776,6 +776,8 @@ const unstaffedRepairTx = (fixTask: { id: string; assigneeAgent: null } | null =
   tx.mergeRecoveryAttempt.findFirst = async () => null;
   tx.taskActivity.findMany = async () => [];
   tx.task.findFirst = async () => fixTask;
+  tx.taskActivity.findFirst = async () => null;
+  tx.staffingProfile = { findFirst: async () => null };
   tx.task.create = async (args: Record<string, any>) => {
     created.push(args);
     return { id: "repair-1" };
@@ -870,6 +872,38 @@ test("a fixed-implementation task with no agent stops with an accurate notice", 
   assert.equal(observed.notices[0]?.create.body, `Autonomous merge tail stopped: ${reason}`);
   assert.equal(observed.notices[0]?.create.taskId, "regression-1");
 });
+
+for (const recovery of [null, recoveryContext]) {
+  test(`a later offline ceiling reopens the same notice (recovery=${recovery !== null})`, async () => {
+    const observed = stopTx(MergeRecoveryStatus.AWAITING_AUTHORIZATION);
+    const notices = new Map<string, Record<string, unknown>>();
+    const tx = observed.tx as unknown as { inboxMessage: { upsert: (input: {
+      where: { dedupeKey: string }; create: Record<string, unknown>; update: Record<string, unknown>;
+    }) => Promise<unknown> } };
+    tx.inboxMessage.upsert = async ({ where, create, update }) => {
+      const current = notices.get(where.dedupeKey);
+      const next = current ? { ...current, ...update } : { status: "OPEN", ...create };
+      notices.set(where.dedupeKey, next);
+      return next;
+    };
+    const input = { phase: "readiness" as const, readinessTaskId: "readiness-1", regressionTaskId: "regression-1",
+      reason: "merge-executor-offline: no merge executor in executor is online after 15 minutes",
+      at: new Date(), recovery };
+    await stopMergeTail(observed.tx, input);
+    const first = [...notices.values()][0]!;
+    first.status = "CLOSED";
+    first.answeredAt = new Date();
+    first.body = "previous notice";
+    await stopMergeTail(observed.tx, input);
+    assert.equal(notices.size, 1);
+    const reopened = [...notices.values()][0]!;
+    assert.equal(reopened.status, "OPEN");
+    assert.equal(reopened.answeredAt, null);
+    assert.match(String(reopened.body), /merge-executor-offline/u);
+    await stopMergeTail(observed.tx, input);
+    assert.equal(notices.size, 1, "repeated settlement within an episode stays idempotent");
+  });
+}
 
 for (const scenario of ["adopt", "missing-head", "no-push", "wrong-base", "wrong-start", "read-error"] as const) {
   test(`malformed refresh-conflict output repository fallback: ${scenario}`, async (t) => {

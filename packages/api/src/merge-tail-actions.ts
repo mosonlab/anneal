@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import {
   ACTIVE_RUN_STATUSES,
+  MERGE_EXECUTOR_OFFLINE_REASON,
   asJsonObject,
   errorForOpenRunRefusal,
   findCanonicalAgent,
@@ -60,8 +61,8 @@ type DbTx = Prisma.TransactionClient;
 const MERGE_RESOLVER_ROLE = "merge-resolver-opus-medium";
 
 /**
- * Who a repair card is assigned to: the Agent the chain already bound to its
- * fix step, or the canonical role that owns a repair no chain step does.
+ * Who a repair card is assigned to: its profile slot or fixed-implementation
+ * fallback, or the canonical role that owns refresh conflicts.
  */
 export type MergeTailRepairAssignee =
   | Readonly<{ kind: "agent"; agentId: string; label: string }>
@@ -564,7 +565,7 @@ type CompletionOwnedStopMergeTailInput = Exclude<StopMergeTailInput, ReadinessSt
 
 const stopNotice = async (
   tx: DbTx,
-  input: { taskId: string; body: string; dedupeKey: string; agentId?: string; sessionId?: string },
+  input: { taskId: string; body: string; dedupeKey: string; agentId?: string; sessionId?: string; reopen?: boolean },
 ): Promise<void> => {
   await tx.inboxMessage.upsert({ where: { dedupeKey: input.dedupeKey }, create: {
     from: "AGENT",
@@ -574,7 +575,7 @@ const stopNotice = async (
     kind: "TEXT",
     body: input.body,
     dedupeKey: input.dedupeKey,
-  }, update: {} });
+  }, update: input.reopen ? { status: "OPEN", answeredAt: null, body: input.body } : {} });
 };
 
 /**
@@ -635,7 +636,8 @@ export async function stopMergeTail(
       });
       if (!recovery) {
         const dedupeKey = `merge-readiness-stop:${input.readinessTaskId}:${createHash("sha256").update(input.reason).digest("hex")}`;
-        await stopNotice(tx, { taskId: input.regressionTaskId, body, dedupeKey });
+        await stopNotice(tx, { taskId: input.regressionTaskId, body, dedupeKey,
+          reopen: input.reason.startsWith(`${MERGE_EXECUTOR_OFFLINE_REASON}:`) });
       }
     }
     if (input.phase === "readiness") {
@@ -1075,15 +1077,9 @@ export const createMergeTailRepairTask = async (
   return { taskId: task.id };
 };
 
-/** Resolves the implementation repair assignee shared by automatic repair and
- * operator reentry. Keeping this lookup in one place prevents the two repair
- * entrypoints from drifting when a template binds its fixed implementation
- * step to a non-default Agent.
- *
- * A chain with no fixed-implementation step — a retired generation, or a clone
- * that dropped it — is answered `unstaffed`. There is no canonical fallback:
- * staffing the repair with an Agent nobody put on this chain is exactly the
- * silent substitution the caller must refuse to make. */
+/** Resolve residual repairs from the chain's recorded staffing profile, or the
+ * template default for chains instantiated before profiles. An empty slot keeps
+ * the fixed-implementation binding; refresh conflicts retain their resolver. */
 export const mergeTailRepairAssignee = async (
   tx: DbTx,
   input: {
@@ -1094,6 +1090,39 @@ export const mergeTailRepairAssignee = async (
   },
 ): Promise<MergeTailRepairAssignee | MergeTailRepairUnstaffed> => {
   if (input.repairKind === "refresh-conflict") return { kind: "role", canonicalRole: MERGE_RESOLVER_ROLE };
+  if (input.chainId && input.templateId) {
+    const root = await tx.task.findFirst({
+      where: { projectId: input.projectId, chainId: input.chainId, templateId: input.templateId },
+      orderBy: { chainIndex: "asc" },
+      select: { id: true },
+    });
+    // Trigger callers write this activity as operator or webhook. Its body
+    // identifies instantiation and excludes ordinary notes with colliding metadata.
+    const provenance = root ? await tx.taskActivity.findFirst({
+      where: { taskId: root.id, body: { startsWith: "Template instantiated" }, metadata: { path: ["staffingProfileId"], not: Prisma.AnyNull } },
+      orderBy: { createdAt: "asc" },
+      select: { metadata: true },
+    }) : null;
+    const recordedId = asJsonObject(provenance?.metadata)?.staffingProfileId;
+    const profile = await tx.staffingProfile.findFirst({
+      where: {
+        projectId: input.projectId,
+        taskTemplateId: input.templateId,
+        ...(typeof recordedId === "string" ? { id: recordedId } : { isDefault: true }),
+      },
+      select: { id: true, mergeTailRepairAgent: { select: { id: true, name: true, archivedAt: true } } },
+    });
+    const slot = profile?.mergeTailRepairAgent;
+    if (slot && !slot.archivedAt) return { kind: "agent", agentId: slot.id, label: slot.name };
+    if (slot?.archivedAt && root && profile) {
+      await tx.taskActivity.create({ data: {
+        taskId: root.id,
+        actorType: "control-plane",
+        body: `Merge-tail ${input.repairKind} staffing: profile ${profile.id} Agent ${slot.name} (${slot.id}) is archived; falling back to the chain's fixed-implementation Agent`,
+        metadata: { resolvedStaffingProfileId: profile.id, mergeTailRepairAgentId: slot.id, repairKind: input.repairKind, reason: "merge_tail_repair_agent_archived" },
+      } });
+    }
+  }
   const fixTask = await tx.task.findFirst({
     where: {
       projectId: input.projectId,

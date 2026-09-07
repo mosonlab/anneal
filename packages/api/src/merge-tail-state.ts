@@ -1,4 +1,5 @@
 import {
+  MERGE_EXECUTOR_OFFLINE_REASON,
   attemptRunBirth,
   closeIntegratorQuestions,
   enqueueTaskRunInternal,
@@ -194,7 +195,7 @@ const requireRecoveryRepairIdentity = async (
 
 const stopNotice = async (
   tx: DbTx,
-  input: { taskId: string; body: string; dedupeKey: string },
+  input: { taskId: string; body: string; dedupeKey: string; reopen?: boolean },
 ): Promise<void> => {
   await tx.inboxMessage.upsert({ where: { dedupeKey: input.dedupeKey }, create: {
     from: "AGENT",
@@ -202,7 +203,7 @@ const stopNotice = async (
     kind: "TEXT",
     body: input.body,
     dedupeKey: input.dedupeKey,
-  }, update: {} });
+  }, update: input.reopen ? { status: "OPEN", answeredAt: null, body: input.body } : {} });
 };
 
 /** Readiness checks its drift ceiling before calling; persist any Run-birth refusal. */
@@ -447,7 +448,8 @@ export const blockDownstream = async (
   for (const taskId of [recovery.integratorTaskId, recovery.regressionTaskId]) {
     await writeMarker(tx, taskId, "baseDriftRecovery", { actorType: "control-plane", body, metadata });
   }
-  await stopNotice(tx, { taskId: recovery.regressionTaskId, body, dedupeKey });
+  await stopNotice(tx, { taskId: recovery.regressionTaskId, body, dedupeKey,
+    reopen: input.phase === "readiness" && input.reason.startsWith(`${MERGE_EXECUTOR_OFFLINE_REASON}:`) });
 };
 
 export const reopenAfterHeadAdoption = async (

@@ -1126,6 +1126,33 @@ export const mergeExecutorRunnerIds = (raw = process.env.MERGE_EXECUTOR_RUNNER_I
 export const isMergeExecutorRunnerId = (runnerId: string, allowlist = mergeExecutorRunnerIds()): boolean =>
   allowlist.includes(runnerId);
 
+/** The small liveness projection the API's daemon registry shares with the
+ * database authorization path. Keeping this structural lets the database
+ * package apply the allowlist rule without importing the API's registry. */
+export type MergeExecutorDaemonSnapshot = { runnerId: string; online: boolean };
+export type MergeExecutorObservation = readonly MergeExecutorDaemonSnapshot[]
+  | { observation: "unreadable"; cause: string };
+export type MergeExecutorLivenessReader = () => MergeExecutorObservation;
+export const isUnreadableExecutorObservation = (
+  observation: MergeExecutorObservation,
+): observation is { observation: "unreadable"; cause: string } => !Array.isArray(observation);
+
+/**
+ * The configured merge executors for which the current daemon observation has
+ * no live member. An empty allowlist is deliberately unchanged behaviour: no
+ * executor is named, so the liveness gate is not applicable. This is the same
+ * allowlist predicate used by readiness before it writes a mechanical
+ * authorization.
+ */
+export const mergeExecutorsBlockingAuthorization = (
+  daemons: readonly MergeExecutorDaemonSnapshot[],
+  allowlist = mergeExecutorRunnerIds(),
+): string[] => {
+  if (allowlist.length === 0) return [];
+  const online = new Set(daemons.filter((daemon) => daemon.online).map((daemon) => daemon.runnerId));
+  return allowlist.some((runnerId) => online.has(runnerId)) ? [] : allowlist;
+};
+
 /**
  * The authenticated class of a caller on the runner protocol. This is derived
  * from the bearer the caller presented, never from anything in a request body:

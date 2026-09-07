@@ -1557,7 +1557,7 @@ test("a readiness claim is released when the repository mutex is already held", 
 });
 
 
-test("a train deferral preserves the open executor-offline episode", async () => {
+test("a train deferral closes the executor-offline episode when authorization is unblocked", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(1, { evidenceBaseSha: "9".repeat(40) });
   const candidate = seed.candidates[0]!;
@@ -1582,10 +1582,10 @@ test("a train deferral preserves the open executor-offline episode", async () =>
     releaseChainLease, runWithMergeLease, () => { livenessReads += 1; return []; });
   assert.equal(result.authorized, 0);
   assert.equal(result.requeued, 0, "base drift defers for a train without rerunning Regression");
-  assert.equal(livenessReads, 0, "a deferred tick observes no executor liveness");
+  assert.equal(livenessReads, 0, "an unconfigured allowlist is unblocked without reading the registry");
   const persisted = await db.taskActivity.findUniqueOrThrow({ where: { id: marker.id } });
   assert.equal((persisted.metadata as Record<string, unknown>).episodeStartedAt, episodeStartedAt);
-  assert.notEqual((persisted.metadata as Record<string, unknown>).episodeClosed, true);
+  assert.equal((persisted.metadata as Record<string, unknown>).episodeClosed, true);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.regression.id } })).status, TaskStatus.DONE);
   assert.equal(await db.run.count({ where: { taskId: candidate.regression.id } }), 1);
 });

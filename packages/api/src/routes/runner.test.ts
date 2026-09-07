@@ -367,7 +367,7 @@ test("a mismatch Inbox failure aborts the claim before a later candidate is cons
   });
 });
 
-const matchingMechanicalClaimHarness = () => {
+const matchingMechanicalClaimHarness = (draining = false) => {
   const now = new Date("2026-09-02T23:00:00.000Z");
   const task = {
     id: "task-mechanical", projectId: "project-1", repoId: "repo-1",
@@ -420,7 +420,13 @@ const matchingMechanicalClaimHarness = () => {
     },
     $executeRawUnsafe: async () => 0,
     chainControl: { findMany: async () => [] },
-    dispatchDrain: { findFirst: async () => null },
+    dispatchDrain: {
+      findFirst: async () => draining ? {
+        reason: "quiet-window-wait-exceeded host=unit-test",
+        startedAt: new Date(now.getTime() - 60_000),
+        expiresAt: new Date(now.getTime() + 60_000),
+      } : null,
+    },
     mergeLeaseEvent: { findMany: async () => [] },
     run: {
       findMany: async ({ where }: { where: { id?: { not?: string } } }) => where.id?.not ? [] : [candidate],
@@ -520,6 +526,19 @@ test("a mechanical claim with the matching completion contract version claims no
     assert.equal(harness.activities.filter((activity) => (
       (activity.metadata as Record<string, unknown> | undefined)?.code === "mechanical_contract_mismatch"
     )).length, 0);
+  }));
+});
+
+test("a mechanical claim proceeds while an active dispatch drain is present", async () => {
+  await withTokens(async () => withMechanicalRunnerId(async () => {
+    const harness = matchingMechanicalClaimHarness(true);
+    const response = await harness.request(RUN_COMPLETION_CONTRACT_VERSION);
+
+    assert.equal(response.status, 200);
+    const claim = await response.json() as { executionMode: string; run: { id: string } };
+    assert.equal(claim.executionMode, "mechanical");
+    assert.equal(claim.run.id, harness.candidate.id);
+    assert.equal(harness.runMutations(), 1);
   }));
 });
 

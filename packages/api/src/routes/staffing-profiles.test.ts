@@ -46,3 +46,51 @@ test("PUT refuses a legacy control-plane assignment with 400 before any mutation
     });
   });
 });
+
+test("PUT refuses an archived merge-tail repair Agent before profile mutation", async () => {
+  await withTokens(async () => {
+    const database = {
+      $transaction: async (operation: (client: unknown) => Promise<unknown>) => operation({
+        $queryRaw: async () => [{ id: "template-1", projectId: "project-1", name: "Workflow" }],
+        staffingProfile: {
+          findUnique: async () => ({
+            id: "profile-1",
+            projectId: "project-1",
+            taskTemplateId: "template-1",
+            name: "Legacy",
+            mergeTailRepairAgentId: null,
+          }),
+          update: async () => { assert.fail("refused PUT must not mutate the profile"); },
+        },
+        staffingProfileEntry: {
+          deleteMany: async () => { assert.fail("refused PUT must not delete entries"); },
+        },
+        taskTemplateStep: { findMany: async () => [] },
+        agent: {
+          findMany: async () => [{
+            id: "agent-archived",
+            name: "senior-dev-luna-max",
+            projectId: "project-1",
+            archivedAt: new Date(),
+            model: "gpt-5.6-luna:max",
+            runnerPreference: "CODEX",
+          }],
+        },
+      }),
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/staffing-profiles/profile-1", {
+      method: "PUT",
+      headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "Legacy",
+        entries: [],
+        mergeTailRepairAgentId: "agent-archived",
+      }),
+    });
+    assert.equal(response.status, 422);
+    assert.deepEqual(await response.json(), {
+      code: "staffing_profile_agent_archived",
+      error: "Merge-tail repair Agent senior-dev-luna-max is archived",
+    });
+  });
+});
