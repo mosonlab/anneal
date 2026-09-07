@@ -69,7 +69,13 @@ import {
   type LatestAgentMessageEvent,
 } from "../latest-agent-message.js";
 import { baselineKey, readRunBaselines } from "../run-baseline.js";
-import { runMetrics, TOOL_METRIC_EVENT_TYPES, type RunMetricsToolEvent } from "../run-metrics.js";
+import {
+  runMetrics,
+  TOOL_METRIC_EVENT_TYPES,
+  TTFT_METRIC_EVENT_TYPES,
+  type RunMetricsToolEvent,
+  type RunMetricsTtftEvent,
+} from "../run-metrics.js";
 import { lockDoneTasks, partitionArchivable } from "../task-archive.js";
 import { editableBrief } from "../task-brief.js";
 import {
@@ -344,16 +350,23 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         take: LATEST_AGENT_MESSAGE_EVENT_LIMIT,
       });
     const latestSessionEvents: LatestAgentMessageEvent[] = sessionEvents.reverse();
-    // One tool-event read for the whole task, never one per run: a task with
-    // five runs must not cost five queries. MODEL_DELTA and PROVIDER_RAW
-    // payloads are the bulk of a session's events and are never loaded here.
+    // One metric-event read for the whole task, never one per run: a task with
+    // five runs must not cost five queries. Provider-raw and model-output
+    // payloads are projected to the small fields the diagnostics read.
     const metricsSessionIds = task.runs.flatMap((run) => run.session === null ? [] : [run.session.id]);
-    // Project only names and outcome markers in PostgreSQL: provider tool
-    // output can be megabytes and must never enter the metrics input.
-    const toolEvents = metricsSessionIds.length === 0 ? [] : await db.$queryRaw<
-      Array<RunMetricsToolEvent & { id: string; sessionId: string }>
+    // Project only names, outcome markers and the namespaced TTFT value in
+    // PostgreSQL: provider tool output can be megabytes and must never enter
+    // the metrics input.
+    const metricEvents = metricsSessionIds.length === 0 ? [] : await db.$queryRaw<
+      Array<{
+        sessionId: string;
+        type: string;
+        at: Date;
+        toolCallId: string | null;
+        payload: unknown;
+      }>
     >(Prisma.sql`
-      SELECT "id", "sessionId", "type", "at", "toolCallId",
+      SELECT "sessionId", "type", "at", "toolCallId",
         jsonb_build_object(
           'type', CASE WHEN jsonb_typeof("payload"->'type') = 'string' THEN "payload"->'type' END,
           'name', CASE WHEN jsonb_typeof("payload"->'name') = 'string' THEN "payload"->'name' END,
@@ -361,17 +374,37 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
           'is_error', CASE WHEN jsonb_typeof("payload"->'is_error') = 'boolean' THEN "payload"->'is_error' END,
           'isError', CASE WHEN jsonb_typeof("payload"->'isError') = 'boolean' THEN "payload"->'isError' END,
           'exit_code', CASE WHEN jsonb_typeof("payload"->'exit_code') = 'number' THEN "payload"->'exit_code' END,
-          'error', CASE WHEN "payload"->'error' IS NOT NULL AND "payload"->'error' <> 'null'::jsonb THEN true END
+          'error', CASE WHEN "payload"->'error' IS NOT NULL AND "payload"->'error' <> 'null'::jsonb THEN true END,
+          'anneal', CASE WHEN jsonb_typeof("payload"->'anneal') = 'object' THEN jsonb_build_object(
+            'ttftMs', CASE WHEN jsonb_typeof("payload"->'anneal'->'ttftMs') = 'number'
+              THEN "payload"->'anneal'->'ttftMs' END
+          ) END
         ) AS "payload"
       FROM "SessionEvent"
       WHERE "sessionId" IN (${Prisma.join(metricsSessionIds)})
-        AND "type"::text IN (${Prisma.join([...TOOL_METRIC_EVENT_TYPES])})
+        AND ("type"::text IN (${Prisma.join(TOOL_METRIC_EVENT_TYPES)}) OR (
+            ("type"::text = 'MODEL_DELTA' AND (
+              "payload"->>'type' = 'assistant'
+              OR ("payload"->>'type' = 'item.completed' AND "payload"->'item'->>'type' = 'agent_message')
+            ))
+            OR ("type"::text = 'MODEL_COMPLETED'
+              AND "payload"->>'type' = 'message_end'
+              AND "payload"->'message'->>'role' = 'assistant')
+        ))
       ORDER BY "sessionId" ASC, "seq" ASC
     `);
     const toolEventsBySession = new Map<string, RunMetricsToolEvent[]>();
-    for (const event of toolEvents) {
-      const events = toolEventsBySession.get(event.sessionId);
-      if (events) events.push(event); else toolEventsBySession.set(event.sessionId, [event]);
+    const ttftEventsBySession = new Map<string, RunMetricsTtftEvent[]>();
+    for (const event of metricEvents) {
+      if ((TOOL_METRIC_EVENT_TYPES as readonly string[]).includes(event.type)) {
+        const events = toolEventsBySession.get(event.sessionId);
+        if (events) events.push(event);
+        else toolEventsBySession.set(event.sessionId, [event]);
+      } else if ((TTFT_METRIC_EVENT_TYPES as readonly string[]).includes(event.type)) {
+        const events = ttftEventsBySession.get(event.sessionId);
+        if (events) events.push(event);
+        else ttftEventsBySession.set(event.sessionId, [event]);
+      }
     }
     // One statement for the task's step, or none at all for a standalone task:
     // there is no population to compare a task without a template step against.
@@ -414,6 +447,7 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         run,
         session: run.session,
         toolEvents: run.session === null ? [] : toolEventsBySession.get(run.session.id) ?? [],
+        ttftEvents: run.session === null ? [] : ttftEventsBySession.get(run.session.id) ?? [],
         baseline,
       }),
       mergeOutcome: runOwnsMergeOutcome(task.stepOutput, run.id, latestRunId) ? mergeOutcome : null,
