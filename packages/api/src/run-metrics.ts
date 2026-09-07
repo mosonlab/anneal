@@ -6,6 +6,7 @@ import type {
   RunPhase,
   RunPhaseMetrics,
   RunTerminationMetrics,
+  RunTtftMetrics,
   RunTokenMetrics,
   RunToolMetrics,
   RunToolNameMetrics,
@@ -104,7 +105,20 @@ export type RunMetricsToolEvent = {
   payload: unknown;
 };
 
+/** A persisted model-completion row carrying the adapter's in-memory TTFT
+ * measurement. The route filters provider completion rows before handing them
+ * here and selects only the `anneal.ttftMs` field. */
+export type RunMetricsTtftEvent = {
+  type: string;
+  payload: unknown;
+};
+
 export const TOOL_METRIC_EVENT_TYPES = ["TOOL_STARTED", "TOOL_COMPLETED"] as const;
+
+/** Normalized event types that can carry a provider completion payload. The
+ * adapter-specific completion marker is in the payload; the adapter adds the
+ * `anneal.ttftMs` field only to that completion row. */
+export const TTFT_METRIC_EVENT_TYPES = ["MODEL_DELTA", "MODEL_COMPLETED"] as const;
 
 /** How many tool names the `byName` breakdown keeps. */
 const TOP_TOOL_NAMES = 5;
@@ -119,6 +133,9 @@ const asRecord = (value: unknown): Record<string, unknown> | null =>
 
 const stringField = (record: Record<string, unknown>, key: string): string | null =>
   typeof record[key] === "string" && record[key].length > 0 ? record[key] : null;
+
+const finiteNumberField = (record: Record<string, unknown>, key: string): number | null =>
+  typeof record[key] === "number" && Number.isFinite(record[key]) ? record[key] : null;
 
 /** Elapsed milliseconds, or null when either bound is missing. Clock skew is
  *  clamped at 0 rather than published as a negative duration. */
@@ -224,6 +241,38 @@ const tokenMetrics = (session: RunMetricsSession | null): RunTokenMetrics => {
     cacheHitRatio: split === null || split.inputTokens === 0
       ? null
       : round(split.cachedInputTokens / split.inputTokens, 4),
+  };
+};
+
+/** PostgreSQL's percentile_cont interpolation over a small in-memory sample.
+ * TTFT samples are whole milliseconds, but a percentile between two samples
+ * can be fractional, so the continuous value is retained. */
+const percentile = (values: readonly number[], fraction: number): number => {
+  const ordered = [...values].sort((left, right) => left - right);
+  const rank = (ordered.length - 1) * fraction;
+  const lower = Math.floor(rank);
+  const upper = Math.ceil(rank);
+  if (lower === upper) return ordered[lower]!;
+  const weight = rank - lower;
+  return ordered[lower]! + (ordered[upper]! - ordered[lower]!) * weight;
+};
+
+const ttftValue = (payload: unknown): number | null => {
+  const record = asRecord(payload);
+  const anneal = asRecord(record?.anneal);
+  const value = anneal === null ? null : finiteNumberField(anneal, "ttftMs");
+  return value === null || value < 0 ? null : value;
+};
+
+const ttftMetrics = (events: readonly RunMetricsTtftEvent[]): RunTtftMetrics | null => {
+  const values = events
+    .map((event) => ttftValue(event.payload))
+    .filter((value): value is number => value !== null);
+  if (values.length === 0) return null;
+  return {
+    p50Ms: percentile(values, 0.5),
+    p90Ms: percentile(values, 0.9),
+    samples: values.length,
   };
 };
 
@@ -384,6 +433,7 @@ export const runMetrics = (input: {
   run: RunMetricsRun;
   session: RunMetricsSession | null;
   toolEvents: readonly RunMetricsToolEvent[];
+  ttftEvents: readonly RunMetricsTtftEvent[];
   baseline?: RunBaseline | null;
   now?: Date;
 }): RunMetrics => {
@@ -411,6 +461,7 @@ export const runMetrics = (input: {
     outputTokensPerSecond: tokens.output === null || modelActiveMs === null || modelActiveMs === 0
       ? null
       : round(tokens.output / (modelActiveMs / 1_000), 2),
+    ttft: ttftMetrics(input.ttftEvents),
     termination: terminationMetrics(session),
     // Measured against the same executing phase published above, so the
     // comparison and the figure it compares can never disagree. A session that

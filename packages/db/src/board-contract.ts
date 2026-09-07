@@ -360,6 +360,15 @@ export type RunTerminationMetrics = {
   signal: string | null;
 };
 
+/** Time-to-first-token percentiles over the persisted completion events of one
+ * session. `samples` is the number of completion events that reported a
+ * numeric value. */
+export type RunTtftMetrics = {
+  p50Ms: number;
+  p90Ms: number;
+  samples: number;
+};
+
 /** One percentile pair over completed runs of the same template step, with the
  *  number of runs that produced it. */
 export type RunBaselineMetric = {
@@ -397,6 +406,9 @@ export type RunMetrics = {
   phases: RunPhaseMetrics;
   tokens: RunTokenMetrics;
   tools: RunToolMetrics;
+  /** Provider-boundary time-to-first-token, or null when no completion event
+   * carried a measurement (including runs recorded before this was deployed). */
+  ttft: RunTtftMetrics | null;
   /** executingMs minus tool time and Inbox wait, clamped at 0. Null when
    *  `executingMs` is unknown. */
   modelActiveMs: number | null;

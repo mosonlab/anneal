@@ -7,9 +7,13 @@ import type { AgentScratch } from "../workspace.js";
 import {
   asRecord,
   capturePreflight,
+  carriesTextPayload,
+  consumeTurnTtft,
   createAdapterState,
   emitAdapterEvent,
+  markFirstChunk,
   markInFlightToolProgress,
+  markTurnRequested,
   modelSpec,
   PREFLIGHT_REASONS,
   preflightFailure,
@@ -98,6 +102,14 @@ const PI_SUPPRESSED_PROVIDER_EVENT_TYPES = new Set([
 export const providerEventPersistence = (event: Record<string, unknown>): boolean =>
   !PI_SUPPRESSED_PROVIDER_EVENT_TYPES.has(stringField(event, "type") ?? "");
 
+const isPiMessageChunk = (event: Record<string, unknown>): boolean => {
+  const messageEvent = asRecord(event.assistantMessageEvent);
+  if (!messageEvent) return false;
+  const type = stringField(messageEvent, "type");
+  return type?.endsWith("_delta") === true
+    && carriesTextPayload(messageEvent);
+};
+
 const piState = (state: AdapterState): PiState => state.providerState as PiState;
 
 const piNumber = (value: unknown, field: string, integral: boolean): number | null => {
@@ -171,6 +183,9 @@ export const parsePiEvent = (
   const type = stringField(event, "type");
   if (type === "session") {
     state.providerConversationId = stringField(event, "id") ?? state.providerConversationId;
+    // PI's session event closes the first prompt boundary. Later turns begin
+    // at a completed tool call or a completed user message below.
+    if (!state.turnRequestSeen) markTurnRequested(state);
     emitAdapterEvent(state, sink, "MODEL_STARTED", event);
   } else if (type === "tool_execution_start") {
     const toolId = stringField(event, "toolCallId") ?? "unknown";
@@ -181,13 +196,20 @@ export const parsePiEvent = (
     markInFlightToolProgress(state);
     emitAdapterEvent(state, sink, "TOOL_PROGRESS", event, stringField(event, "toolCallId"));
   } else if (type === "message_update") {
+    // PI's message_update is the chunk already consumed for liveness. It is
+    // intentionally filtered from persistence by providerEventPersistence.
+    if (isPiMessageChunk(event)) markFirstChunk(state);
     emitAdapterEvent(state, sink, "MODEL_DELTA", event);
   } else if (type === "tool_execution_end") {
+    // Stamp at provider-event arrival, before the completion sink can do
+    // synchronous work that would distort the provider-boundary TTFT.
+    markTurnRequested(state);
     state.inFlightTool = null;
     emitAdapterEvent(state, sink, "TOOL_COMPLETED", event, stringField(event, "toolCallId"));
   } else if (type === "turn_end" || type === "message_end") {
     provider.turnCompleted = true;
     const message = asRecord(event.message);
+    if (message && stringField(message, "role") === "user") markTurnRequested(state);
     if (type === "message_end" && message && stringField(message, "role") === "assistant") {
       harvestUsage(provider.usage, message);
     }
@@ -198,7 +220,10 @@ export const parsePiEvent = (
         .join("\n");
       if (text) state.finalOutput = text;
     }
-    emitAdapterEvent(state, sink, "MODEL_COMPLETED", event);
+    emitAdapterEvent(state, sink, "MODEL_COMPLETED", type === "message_end"
+      && message !== null && stringField(message, "role") === "assistant"
+      ? consumeTurnTtft(state, event)
+      : event);
   } else if (type === "agent_end") {
     const messages = Array.isArray(event.messages) ? event.messages : [];
     const finalMessage = asRecord(messages.at(-1));
