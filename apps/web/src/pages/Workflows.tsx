@@ -74,23 +74,6 @@ const emptyTierSlots = (): StaffingTierSlots => ({
   hazard: null,
 });
 
-/** The tier slots were added after the original profile contract. Keep the
- * editor tolerant of a profile read from an older control plane: an omitted
- * slot is the same empty slot the server uses, while every write sends the
- * complete four-key object. */
-const profileTierSlots = (profile: StaffingProfile): StaffingTierSlots => {
-  const tiers = (profile as StaffingProfile & {
-    tiers?: Partial<Record<ImplementationTier, string | null>>;
-  }).tiers;
-  const empty = emptyTierSlots();
-  return {
-    default: tiers?.default ?? empty.default,
-    frontend: tiers?.frontend ?? empty.frontend,
-    hard: tiers?.hard ?? empty.hard,
-    hazard: tiers?.hazard ?? empty.hazard,
-  };
-};
-
 /** The profile as the editor holds it: one row per template step, keyed by the
  *  step's own output kind, with the profile's opinion or the empty one. */
 export const draftOf = (template: TaskTemplate, profile: StaffingProfile): Draft => ({
@@ -99,7 +82,7 @@ export const draftOf = (template: TaskTemplate, profile: StaffingProfile): Draft
     const held = profile.entries.find((entry) => entry.outputKind === step.outputKind);
     return [step.outputKind, { assigneeAgentId: held?.assigneeAgentId ?? "", include: held?.include ?? true }];
   })),
-  tiers: profileTierSlots(profile),
+  tiers: profile.tiers,
 });
 
 /**
@@ -133,7 +116,7 @@ const tiersOf = (draft: Draft): StaffingTierSlots => ({
 });
 
 const seedOf = (profile: StaffingProfile): string =>
-  JSON.stringify({ name: profile.name, entries: profile.entries, tiers: profileTierSlots(profile) });
+  JSON.stringify({ name: profile.name, entries: profile.entries, tiers: profile.tiers });
 
 /* ------------------------------------------------------------ template list */
 
@@ -370,7 +353,7 @@ export const WorkflowDetailPage = ({ templateId }: { templateId: string }): Reac
           new Set(held.map((candidate) => candidate.name)),
         ),
         entries: profile.entries,
-        tiers: profileTierSlots(profile),
+        tiers: profile.tiers,
       });
       profiles.reload();
     });
