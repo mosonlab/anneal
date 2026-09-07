@@ -67,11 +67,12 @@ test("bound revalidation PATCH becomes implementation spec.md authority for both
   const completedRevalidation = await complete(revalidation, "revalidation-runner", {
     outputKind: "revalidation",
     output: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       headSha: IMPLEMENTATION_BASE,
       outcome: "updated",
       summary: "Refreshed descriptive route names.",
       changedReferences: ["route names"],
+      route: { tier: "default", reason: "the refreshed references remain covered by existing checks" },
     },
     headSha: IMPLEMENTATION_BASE,
     baseSha: IMPLEMENTATION_BASE,

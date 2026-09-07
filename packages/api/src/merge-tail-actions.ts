@@ -58,7 +58,7 @@ type DbTx = Prisma.TransactionClient;
  *  repair, so it has no staffed Agent to address. It is a role file name — the
  *  Agent's canonical identity under R9 — and never the operator-editable `name`
  *  column, so a renamed canonical Agent still answers. */
-const MERGE_RESOLVER_ROLE = "merge-resolver-opus-medium";
+const MERGE_RESOLVER_ROLE = "merge-resolver-luna-max";
 
 /**
  * Who a repair card is assigned to: its profile slot or fixed-implementation
@@ -770,11 +770,11 @@ export const settleMergeTailCompletion = async (
     const bindingError: { reason: string; key: string } | null = parsedResolver.status === "invalid"
       ? { reason: parsedResolver.reason, key: parsedResolver.key }
       : parsedResolver.result.startHeadSha !== expectedStart
-        ? { reason: "merge-resolver-opus-medium output is bound to a stale start head", key: "startHeadSha" }
+        ? { reason: "merge-resolver-luna-max output is bound to a stale start head", key: "startHeadSha" }
         : parsedResolver.result.targetHeadSha !== expectedTarget
-          ? { reason: "merge-resolver-opus-medium output is bound to a stale target head", key: "targetHeadSha" }
+          ? { reason: "merge-resolver-luna-max output is bound to a stale target head", key: "targetHeadSha" }
           : parsedResolver.result.outcome === "resolved" && parsedResolver.result.resolvedHeadSha !== input.body.headSha
-            ? { reason: "merge-resolver-opus-medium output resolved head does not match the delivered run head", key: "resolvedHeadSha" }
+            ? { reason: "merge-resolver-luna-max output resolved head does not match the delivered run head", key: "resolvedHeadSha" }
             : null;
     let adoptedHead = false;
     const fallbackEligible = parsedResolver.status === "invalid"

@@ -175,12 +175,12 @@ test("named canonical roles use their model catalog runner and retired role name
   const canonical = new Map((await loadAgentSources()).roles.map((role) => [role.name, role]));
   for (const name of [
     "spec-opus-high",
-    "code-reviewer-opus-high",
+    "code-reviewer-opus-medium",
     "frontend-dev-opus-medium",
     "frontend-dev-opus-high",
     "review-coordinator-astra-medium",
     "code-reviewer-sol-high",
-    "regression-verifier-luna-xhigh",
+    "regression-verifier-luna-max",
     "librarian-luna-xhigh",
     "senior-dev-astra-medium",
     "senior-dev-sol-high",
@@ -188,7 +188,7 @@ test("named canonical roles use their model catalog runner and retired role name
     "senior-dev-opus-high",
     "senior-dev-astra-low",
     "spec-revalidator-luna-xhigh",
-    "plan-executor-astra-medium",
+    "plan-executor-astra-low",
   ]) {
     const role = canonical.get(name);
     assert.ok(role, `role source must contain ${name}`);
@@ -223,8 +223,8 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
   const [planReview, firstReview, blindReview, regressionVerification] = await Promise.all([
     roleSource("review-coordinator-astra-medium"),
     roleSource("code-reviewer-sol-high"),
-    roleSource("code-reviewer-opus-high"),
-    roleSource("regression-verifier-luna-xhigh"),
+    roleSource("code-reviewer-opus-medium"),
+    roleSource("regression-verifier-luna-max"),
   ]);
 
   assert.match(planReview, /never review implementation\s+diffs/u);
@@ -267,7 +267,7 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
     assert.doesNotMatch(review, /adjudicate findings/u);
   }
 
-  assert.equal(frontmatterValue(regressionVerification, "model"), "gpt-5.6-luna:xhigh");
+  assert.equal(frontmatterValue(regressionVerification, "model"), "gpt-5.6-luna:max");
   assert.equal(frontmatterValue(regressionVerification, "runner"), "codex");
   assert.equal(frontmatterValue(regressionVerification, "inboxAccess"), "false");
   assert.match(regressionVerification, /complete persisted review package/u);
@@ -286,8 +286,8 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
 });
 
 test("the executioner delegates only through platform-pinned native Luna children", async () => {
-  const executioner = await roleSource("plan-executor-astra-medium");
-  assert.equal(frontmatterValue(executioner, "model"), "gpt-6-astra:medium");
+  const executioner = await roleSource("plan-executor-astra-low");
+  assert.equal(frontmatterValue(executioner, "model"), "gpt-6-astra:low");
   assert.match(executioner, /pins every native child to Luna max/u);
   assert.match(executioner, /eight concurrent child threads/u);
   assert.match(executioner, /Delegation is not one slice per child/u);
@@ -305,13 +305,13 @@ test("the canonical twelve-step layered template sources split review and preser
       { stepIndex: 1, layer: 1, agentName: "spec-opus-high", outputKind: "spec" },
       { stepIndex: 2, layer: 2, agentName: "plan-fable-medium", outputKind: "plan" },
       { stepIndex: 3, layer: 3, agentName: "review-coordinator-astra-medium", outputKind: "plan-review" },
-      { stepIndex: 4, layer: 4, agentName: "plan-reviser-opus-high", outputKind: "revised-plan" },
-      { stepIndex: 5, layer: 5, agentName: "plan-executor-astra-medium", outputKind: "implementation" },
+      { stepIndex: 4, layer: 4, agentName: "plan-reviser-opus-medium", outputKind: "revised-plan" },
+      { stepIndex: 5, layer: 5, agentName: "plan-executor-astra-low", outputKind: "implementation" },
       { stepIndex: 6, layer: 6, agentName: "code-reviewer-sol-high", outputKind: "review-findings" },
-      { stepIndex: 7, layer: 6, agentName: "code-reviewer-opus-high", outputKind: "blind-findings" },
+      { stepIndex: 7, layer: 6, agentName: "code-reviewer-opus-medium", outputKind: "blind-findings" },
       { stepIndex: 8, layer: 7, agentName: "senior-dev-astra-low", outputKind: "fixed-implementation" },
       { stepIndex: 9, layer: 8, agentName: "librarian-luna-xhigh", outputKind: "documentation" },
-      { stepIndex: 10, layer: 9, agentName: "regression-verifier-luna-xhigh", outputKind: "regression-verification-v2" },
+      { stepIndex: 10, layer: 9, agentName: "regression-verifier-luna-max", outputKind: "regression-verification-v2" },
       { stepIndex: 11, layer: 10, agentName: "review-coordinator-astra-medium", outputKind: "merge-authorization" },
       { stepIndex: 12, layer: 11, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
@@ -399,9 +399,9 @@ test("the direct template sources expose the layered review spine and mechanical
       { stepIndex: 1, layer: 1, agentName: "spec-revalidator-luna-xhigh", outputKind: "revalidation" },
       { stepIndex: 2, layer: 2, agentName: "senior-dev-luna-max", outputKind: "implementation" },
       { stepIndex: 3, layer: 3, agentName: "code-reviewer-sol-high", outputKind: "review-findings" },
-      { stepIndex: 4, layer: 3, agentName: "code-reviewer-opus-high", outputKind: "blind-findings" },
+      { stepIndex: 4, layer: 3, agentName: "code-reviewer-opus-medium", outputKind: "blind-findings" },
       { stepIndex: 5, layer: 4, agentName: "senior-dev-astra-low", outputKind: "fixed-implementation" },
-      { stepIndex: 6, layer: 5, agentName: "regression-verifier-luna-xhigh", outputKind: "regression-verification-v2" },
+      { stepIndex: 6, layer: 5, agentName: "regression-verifier-luna-max", outputKind: "regression-verification-v2" },
       { stepIndex: 7, layer: 6, agentName: "review-coordinator-astra-medium", outputKind: "merge-authorization" },
       { stepIndex: 8, layer: 7, agentName: "merge-integrator", outputKind: "merge-result" },
     ],

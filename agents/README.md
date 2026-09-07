@@ -85,7 +85,7 @@ the model or the effort.
 ```yaml
 stepIndex: 5
 layer: 5
-agent: plan-executor-astra-medium # Agent.name, or null for a human step
+agent: plan-executor-astra-low # Agent.name, or null for a human step
 approvalGate: false
 optional: false
 outputKind: implementation
@@ -157,7 +157,7 @@ implementation-assignee routing rules in `docs/governance/task-routing-v1.md`:
 the Sol fallback when the Astra model is unavailable, and the Claude
 Opus 5 medium and high routes an operator names to spend Claude capacity.
 `senior-dev-astra-low` is canonical because every template binds it to the
-review-fix step; it is not an implementation route. Keep
+review-fix step and the `hard` implementation tier. Keep
 experiments out of `roles/`; create them as local overlays and archive them
 when no longer needed so a seed cannot silently turn an experiment into a
 release default. Implementation-assignee escalation follows the

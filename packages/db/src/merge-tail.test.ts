@@ -312,7 +312,7 @@ test("readiness role is mechanical across template generations and ordinals", ()
   assert.equal(isMergeReadinessStep({ stepIndex: 6, outputKind: "approval", taskTemplateName: "direct-engineer-workflow" }), false);
 });
 
-test("merge-resolver-opus-medium results are versioned and head-bound", () => {
+test("merge-resolver-luna-max results are versioned and head-bound", () => {
   assert.equal(parseResolverResult(JSON.stringify({
     schemaVersion: 1, outcome: "resolved", startHeadSha: A, targetHeadSha: B,
     resolvedHeadSha: B, tradeOffs: [], changedTestExpectations: [],

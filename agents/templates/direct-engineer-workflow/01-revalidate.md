@@ -39,6 +39,38 @@ otherwise change repository state. An unreadable repository, rejected PATCH,
 or tool error fails this step loudly with the reason recorded; normal retry
 semantics apply.
 
+After checking the brief and the tree, judge the implementation tier. The
+default is the answer unless one specific criterion below applies; escalation
+is by hazard or by output kind, never by path. Name the criterion in the route
+reason and check the listed not-a-reason cases before choosing a tier other than
+`default`:
+
+- `default` — everything else. Acceptance that existing tests or grep can
+  check stays here whatever it touches. It is not a reason to leave `default`
+  that the change crosses packages, touches web files, touches many files,
+  lands in a sensitive directory, or that an audit report once suggested a
+  stronger model. The current Agent is `senior-dev-luna-max`.
+- `frontend` — the deliverable is a new page, a page redesign, or a new
+  interaction or visual scheme. It is not a reason to choose `frontend` to add
+  a field, wire data, or change copy on an existing component. The current
+  Agent is `frontend-dev-opus-medium`.
+- `hard` — a behavior that neither the brief nor an existing test pins down has
+  to be defined by the implementer, and getting it wrong would not show in
+  review or regression; for example, keeping an untested semantic intact
+  across several providers' event handling. It is not a reason that the change
+  is large, spans modules, or needs a lot of reading. The current Agent is
+  `senior-dev-astra-low`.
+- `hazard` — the failure the acceptance suite cannot witness: concurrency,
+  transaction boundaries, lock or lease windows, cross-module contract
+  migrations; or the change alters what the merge gate, merge automation, a
+  migration, or authorization does. It is not a reason merely to touch those
+  files without changing their behavior. The current Agent is
+  `senior-dev-astra-medium`.
+
+Record the selected tier and the specific criterion that applies, or explain
+why none applies when selecting `default`, in `route.reason`. The route is an
+assessment only: never edit the brief's `Route` line, even when it is present.
+
 After the PATCH succeeds, or when no descriptive references need changing,
 persist exactly one JSON object as this step's output:
-`{"schemaVersion":1,"headSha":"<current HEAD>","outcome":"updated|unchanged|proceeded-after-premise-collapse","summary":"<result>","changedReferences":["<reference>"]}`.
+`{"schemaVersion":2,"headSha":"<current HEAD>","outcome":"updated|unchanged|proceeded-after-premise-collapse","summary":"<result>","changedReferences":["<reference>"],"route":{"tier":"default|frontend|hard|hazard","reason":"<criterion that applies, or why none does>"}}`.

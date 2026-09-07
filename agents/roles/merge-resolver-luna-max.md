@@ -1,8 +1,8 @@
 ---
-name: merge-resolver-opus-medium
+name: merge-resolver-luna-max
 title: Merge Resolver
-model: claude-opus-5:medium
-runner: claude
+model: gpt-5.6-luna:max
+runner: codex
 inboxAccess: true
 collaborators: []
 ---

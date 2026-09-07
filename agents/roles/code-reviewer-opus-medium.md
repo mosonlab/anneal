@@ -1,7 +1,7 @@
 ---
-name: code-reviewer-opus-high
+name: code-reviewer-opus-medium
 title: Code Reviewer
-model: claude-opus-5:high
+model: claude-opus-5:medium
 runner: claude
 inboxAccess: true
 collaborators: []

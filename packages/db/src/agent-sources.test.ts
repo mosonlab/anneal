@@ -75,15 +75,15 @@ test("the loader exposes the two independent review roles exactly once", async (
   const sources = await loadAgentSources();
   const reviewRoles = sources.roles.filter(({ canonicalRole }) => (
     canonicalRole === "code-reviewer-sol-high"
-    || canonicalRole === "code-reviewer-opus-high"
+    || canonicalRole === "code-reviewer-opus-medium"
   ));
   assert.deepEqual(reviewRoles.map(({ canonicalRole }) => canonicalRole).sort(), [
-    "code-reviewer-opus-high",
+    "code-reviewer-opus-medium",
     "code-reviewer-sol-high",
   ]);
   // The adjudication role is archived: the fix step dispositions both reports itself.
   assert.equal(sources.roles.some(({ canonicalRole }) => canonicalRole === "review-adjudicator-opus"), false);
-  const blind = reviewRoles.find(({ canonicalRole }) => canonicalRole === "code-reviewer-opus-high");
+  const blind = reviewRoles.find(({ canonicalRole }) => canonicalRole === "code-reviewer-opus-medium");
   assert.ok(blind);
   assert.equal(blind.runnerPreference, RunnerPreference.CLAUDE);
 });
