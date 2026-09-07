@@ -1294,6 +1294,44 @@ fi
   assert.match(result.stderr, /no slot freed up or changed hands in 2 minutes/u);
 });
 
+test("a queue that moves without ever admitting this dispatch still ends in 75", (t) => {
+  // Taking a slot is a race for a hard link, not a place in a line, so a
+  // dispatch can watch every gate before it end and still never be the one that
+  // wins the lock. Turnover must not be able to extend the wait forever: the
+  // ceiling of twice the stagnation timeout keeps the capacity signal reachable.
+  const repo = fixtureRepo(t, {});
+  const cache = busyCache(t, ["remote-1", "remote-1-2"]);
+  const holders = [spawn("sleep", ["300"]), spawn("sleep", ["300"])];
+  t.after(() => holders.forEach((holder) => holder.kill()));
+  const { env, clock } = dispatchClock(t);
+  writeFileSync(join(dirname(clock), "sleep"), `#!/usr/bin/env bash
+printf '%s' "$(( $(cat "$TEST_CLOCK") + 60 ))" > "$TEST_CLOCK"
+round=0
+[ -e "$TEST_ROUNDS" ] && round="$(cat "$TEST_ROUNDS")"
+round=$(( round + 1 ))
+printf '%s' "$round" > "$TEST_ROUNDS"
+if [ $(( round % 2 )) -eq 1 ]; then
+  printf '%s\\n' "$TEST_HOLDER_A" > "$TEST_SLOT"
+else
+  printf '%s\\n' "$TEST_HOLDER_B" > "$TEST_SLOT"
+fi
+`);
+  const result = runDispatch(repo, cache, [repo.head, "--timeout-minutes", "2"], {
+    ...env,
+    TEST_SLOT: join(cache, "gate-dispatch", "remote-1.slot"),
+    TEST_HOLDER_A: String(holders[0].pid),
+    TEST_HOLDER_B: String(holders[1].pid),
+    TEST_ROUNDS: join(cache, "rounds"),
+  });
+  assert.equal(result.status, 75, result.stderr);
+  assert.match(result.stderr, /the queue moved \(slot remote-1 changed hands\)/u);
+  // 1000 start, turnover on every poll, so the two-minute stagnation timeout is
+  // reset until it hits the four-minute ceiling and the wait ends at 1240.
+  assert.equal(readFileSync(clock, "utf8"), "1240");
+  assert.match(result.stderr, /no slot came free for this dispatch in 4 minutes/u);
+  assert.match(result.stdout, /GATE DISPATCH: NO SLOT/);
+});
+
 test("a configured grace period controls the fallback boundary", (t) => {
   const repo = fixtureRepo(t, {});
   const { env, clock } = dispatchClock(t);

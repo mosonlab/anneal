@@ -420,6 +420,15 @@ WAIT_STARTED="$(date +%s)"
 # The timeout measures stagnation, not patience: it runs from the last time the
 # queue was seen to move, which at the start is the moment the wait began.
 DEADLINE=$(( WAIT_STARTED + TIMEOUT_MINUTES * 60 ))
+# Turnover restarts the stagnation timeout, but taking a slot is an unordered
+# race for a hard link, not a place in a line: a dispatch whose poll always
+# lands after someone else's can watch the queue move and never be admitted. The
+# wait therefore also has an absolute ceiling of twice the stagnation timeout,
+# which covers a queue several times deeper than the one that broke (about ten
+# gates at 5-8 minutes) and still ends in the capacity signal instead of waiting
+# out the caller's whole budget with nothing to show for it.
+MAX_WAIT_MINUTES=$(( TIMEOUT_MINUTES * 2 ))
+HARD_DEADLINE=$(( WAIT_STARTED + MAX_WAIT_MINUTES * 60 ))
 # The pids seen holding each busy slot on the previous poll, as `slot:pid`
 # words. Only slots present in both polls are compared: a slot that appears
 # (fallback becoming eligible when its grace elapses) or disappears from the
@@ -567,11 +576,11 @@ while :; do
   fi
 
   # Turnover: a slot this dispatch was already watching is now held by a
-  # different pid, so the gate that occupied it ended and this dispatch is one
-  # place further up the queue. That is progress, and a queue that is moving is
-  # exactly what the caller asked to wait in, so the stagnation timeout starts
-  # again from here. Slots that were not in the previous observation are not
-  # compared: their absence was this dispatcher's own rule, not a busy gate.
+  # different pid, so a gate that was holding a slot ended and the queue is
+  # moving. That is the queue the caller asked to wait in, so the stagnation
+  # timeout starts again from here, up to the absolute ceiling. Slots that were
+  # not in the previous observation are not compared: their absence was this
+  # dispatcher's own rule, not a busy gate.
   now="$(date +%s)"
   turned_over=""
   for entry in $round_holders; do
@@ -583,21 +592,31 @@ while :; do
   done
   PREV_HOLDERS="$round_holders"
   if [ -n "$turned_over" ]; then
-    DEADLINE=$(( now + TIMEOUT_MINUTES * 60 ))
-    printf 'gate-dispatch: the queue moved (slot%s changed hands); waited %s min, giving up only after %s min without turnover\n' \
-      "$turned_over" "$(( (now - WAIT_STARTED) / 60 ))" "$TIMEOUT_MINUTES" >&2
+    if [ "$DEADLINE" -lt "$HARD_DEADLINE" ]; then
+      DEADLINE=$(( now + TIMEOUT_MINUTES * 60 ))
+      [ "$DEADLINE" -gt "$HARD_DEADLINE" ] && DEADLINE="$HARD_DEADLINE"
+    fi
+    printf 'gate-dispatch: the queue moved (slot%s changed hands); waited %s min, waiting until %s\n' \
+      "$turned_over" "$(( (now - WAIT_STARTED) / 60 ))" \
+      "$(date -r "$DEADLINE" '+%H:%M:%S' 2>/dev/null || date -d "@${DEADLINE}" '+%H:%M:%S')" >&2
   fi
   if [ "$now" -ge "$DEADLINE" ]; then
+    waited_minutes=$(( (now - WAIT_STARTED) / 60 ))
     # A slot seen broken at any point during the wait means the timeout is not
     # the whole story, and 75 — "the queue stayed full" — would send the caller
     # to re-dispatch into the same broken lock.
     if [ -n "$BROKEN_EVER$UNAVAILABLE_EVER" ]; then
       no_verdict \
-        "waited ${TIMEOUT_MINUTES} minutes with slots busy and none changing hands; unavailable:${UNAVAILABLE_EVER:- none}; broken:${BROKEN_EVER:- none}" \
+        "waited ${waited_minutes} minutes with slots busy and none of them coming free for this dispatch; unavailable:${UNAVAILABLE_EVER:- none}; broken:${BROKEN_EVER:- none}" \
         "no configured worker produced a verdict"
     fi
-    printf 'gate-dispatch: no slot freed up or changed hands in %s minutes (waited %s min in total); nothing ran and no verdict exists\n' \
-      "$TIMEOUT_MINUTES" "$(( (now - WAIT_STARTED) / 60 ))" >&2
+    if [ "$now" -ge "$HARD_DEADLINE" ]; then
+      printf 'gate-dispatch: no slot came free for this dispatch in %s minutes, the ceiling on a wait even in a moving queue; nothing ran and no verdict exists\n' \
+        "$MAX_WAIT_MINUTES" >&2
+    else
+      printf 'gate-dispatch: no slot freed up or changed hands in %s minutes (waited %s min in total); nothing ran and no verdict exists\n' \
+        "$TIMEOUT_MINUTES" "$waited_minutes" >&2
+    fi
     printf 'GATE DISPATCH: NO SLOT\n'
     exit "$EXIT_NO_SLOT"
   fi

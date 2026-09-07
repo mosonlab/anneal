@@ -158,16 +158,21 @@ AGENTOS_WORKSPACE_PATH="$(git rev-parse --show-toplevel)" AGENTOS_GATE_SERVER=pr
   `GATE_DISPATCH_POLL_SECONDS`). `GATE_DISPATCH_TIMEOUT_MINUTES` (default 60)
   bounds a queue that is *not moving*, not the wait itself. Every poll reads the
   pid each busy slot's lock names; when a slot this dispatch was already
-  watching changes hands, the gate that held it ended, this dispatch moved one
-  place up the queue, and the timeout starts again from that moment
+  watching changes hands, a gate that was holding a slot ended, the queue is
+  moving, and the timeout starts again from that moment
   (`gate-dispatch: the queue moved (slot <slot> changed hands)`). A queue deeper
-  than the timeout divided by a gate's duration therefore waits its turn instead
+  than the timeout divided by a gate's duration therefore keeps waiting instead
   of being cut off mid-queue — which is what made 16 runners sharing one slot
-  burn a full wait and re-queue at the back.
-  Only a queue where nothing finishes for the whole timeout exits **75** with
+  burn a full wait and re-queue at the back. The wait still has an absolute
+  ceiling of twice the timeout, because acquiring a slot is a race rather than a
+  place in a line: a dispatch that keeps losing that race would otherwise watch
+  the queue move forever.
+  A queue where nothing finishes for the whole timeout, and a moving queue that
+  never lets this dispatch in before the ceiling, both exit **75** with
   `GATE DISPATCH: NO SLOT`: nothing ran, no verdict exists, and re-dispatching is
-  the recovery. That now means the queue is stuck, not merely deep — a capacity
-  or a hung-gate question, not a code question. A slot that appears in the
+  the recovery. The stderr line above it says which of the two happened — a
+  stalled gate is a hung-gate question, a queue that moves without admitting this
+  dispatch is a capacity question, and neither is a code question. A slot that appears in the
   observation only because its own rule let it (the fallback at the end of its
   grace) is not turnover, so the grace never extends the timeout.
 - A slot whose lock cannot be *operated* — a read-only slot root, a lock left by
@@ -243,7 +248,7 @@ always arrive together.
 | `1` | `MERGE GATE: FAIL (<step>)` | yes |
 | `2` | usage error | no gate ran |
 | `3` | `MERGE GATE: NOT AUTHORITATIVE` — the run was asked to leave state behind (`--keep-postgres`), or every step passed and the host then failed to finish tearing the run down (`cleanup: ...`) | yes |
-| `75` | `GATE DISPATCH: NO SLOT` — every slot stayed busy and none of them changed hands for the whole timeout | no gate ran |
+| `75` | `GATE DISPATCH: NO SLOT` — every slot stayed busy and either none of them changed hands for the whole timeout or none came free for this dispatch before the ceiling of twice the timeout | no gate ran |
 | `76` | `GATE NOT RUN: <reason>` — no configured worker produced a verdict, or a precondition failed: a mirror push failed, a slot lock could not be operated, origin was unreadable, the baseline is absent, the toolchain is incomplete, **the docker preflight found no `docker` or no reachable daemon**, **the wait for a worker execution slot exceeded `SLOT_WAIT_MINUTES`**, a step was stopped from outside before it could be judged, or `merge-gate.sh` died without printing a verdict | no gate ran |
 | `130` / `143` | interrupted — `merge-gate.sh` prints `GATE NOT RUN: <reason>` and exits under the signal that stopped it | no gate ran |
 | `128+N` | the gate process died on signal N without a verdict; `137` is `SIGKILL`, which is almost always the OOM killer | no gate ran |
@@ -267,9 +272,10 @@ promise its container is gone, so it is `3`: not a FAIL, and not authority for
 a merge either.
 
 `75` and `76` are not interchangeable. `75` means at least one slot existed that
-could have been taken, stayed busy for the whole timeout, and never changed
-hands during it — a queue that stopped moving, so re-dispatching later is the
-fix. `76` means the slot lock itself could not be
+could have been taken and stayed busy: either nothing changed hands for a whole
+timeout — a queue that stopped moving — or the queue kept moving without this
+dispatch ever winning a slot before the ceiling. Either way re-dispatching later
+is the fix. `76` means the slot lock itself could not be
 operated (a read-only cache directory, a lock left by the pre-#132 dispatcher, a
 lock naming no pid): waiting changes nothing, and the message names what to
 clear. A slot whose lock is broken is never counted as busy, so a run that sees
@@ -617,9 +623,11 @@ docker rm -f <name>
 ```
 
 **`GATE DISPATCH: NO SLOT` keeps recurring** — the configured slots are
-systemically full: no gate finished in a whole timeout, so this is a stalled
-queue rather than a deep one. Check the workers for a gate that is not
-progressing before reading it as capacity. If the gates are moving and this
+systemically full. Read the stderr line above it: `no slot freed up or changed
+hands` means no gate finished in a whole timeout, a stalled queue rather than a
+deep one, so check the workers for a gate that is not progressing; `no slot came
+free for this dispatch` means the queue was moving the whole time and never had
+room for this one, which is capacity. If the gates are moving and this
 still recurs, it is a capacity signal, not an error to retry harder: either
 stagger the merges, or repeat the same-commit overlap acceptance before changing
 host capacity.
