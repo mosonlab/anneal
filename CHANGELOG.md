@@ -9,6 +9,14 @@ written.
 
 ## Unreleased
 
+- A gate dispatch queued behind other gates no longer gives up while the queue
+  is moving. `GATE_DISPATCH_TIMEOUT_MINUTES` now bounds a queue that makes no
+  progress: each poll reads which process holds each busy slot, and a slot that
+  changes hands restarts the timeout, up to an absolute ceiling of twice the
+  timeout so a dispatch that keeps losing the race for a slot still gives up.
+  `GATE DISPATCH: NO SLOT` (exit 75) now reports either a queue where nothing
+  finished for the whole timeout or one that moved for the whole ceiling without
+  room for this dispatch, and the stderr line above it says which.
 - Editing a chain step's brief after implementation has started no longer parks
   the chain. A review claim now checks the materialized `.chain/<branch>/spec.md`
   against the brief the implementer was actually handed instead of against the

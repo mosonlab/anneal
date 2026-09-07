@@ -55,6 +55,14 @@ SPEC and Plan are optional. The Product Contract is required.
 Current-session work is outside these tiers and needs no Product Contract. The
 tiers apply only to a task chain the human user explicitly requests.
 
+A change stays in the session when its diff can be named in one sentence
+before it is written and its Acceptance is an existing named suite: a
+constant, a threshold, prose, configuration, a rename, or a single-function
+fix. The host window delivers it through the gate and the single-candidate
+path in `CONTRIBUTING.md`. A change goes to a chain when writing it takes
+implementation judgement the review steps must check, or when it alters what
+the merge gate, merge automation, or a migration does.
+
 Choose the shortest tier satisfying the Product Contract:
 
 - Direct: no specification or plan; implementation starts from the task brief
