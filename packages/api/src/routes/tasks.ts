@@ -206,7 +206,10 @@ type TaskStartabilityResponse = SerializesTo<TaskStartabilityContract, TaskStart
 type TaskStepOutputResponse = SerializesTo<TaskStepOutputContract<Date>, TaskStepOutputContract>;
 
 export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
-  const { db } = deps;
+  const { db, runners } = deps;
+  // Use the app's shared heartbeat registry. The snapshot is taken before the
+  // PATCH transaction so the DB layer remains a pure persistence boundary.
+  const mergeExecutorLiveness = () => runners.snapshot(new Date());
 
   app.get("/tasks", async (context) => {
     const projectId = context.req.query("projectId");
@@ -591,7 +594,7 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
   });
   app.patch("/tasks/:taskId", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    const result = await patchTask(db, taskId, await readJson(context.req.raw, taskPatch));
+    const result = await patchTask(db, taskId, await readJson(context.req.raw, taskPatch), { mergeExecutorLiveness });
     if ("message" in result) return refusalJson(context, result);
     return context.json(result.task);
   });

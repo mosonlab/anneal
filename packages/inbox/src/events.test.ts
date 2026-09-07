@@ -16,6 +16,7 @@ test("event_id is the stable Feishu dedupe identity", () => {
 
 test("inbound text nobody is waiting on lands as a visible human message", async () => {
   let landed: Record<string, unknown> | undefined;
+  let livenessReads = 0;
   const tx = {
     inboxExternalEvent: { create: async () => ({}), update: async () => ({}) },
     inboxMessage: {
@@ -30,6 +31,11 @@ test("inbound text nobody is waiting on lands as a visible human message", async
   const result = await processFeishuEvent(db, {
     header: { event_id: "evt-9", event_type: "im.message.receive_v1" },
     event: { message: { message_id: "om-9", chat_id: "oc-1", content: JSON.stringify({ text: "怎么样了？" }) } },
+  }, new Date(), {
+    readMergeExecutorLiveness: async () => {
+      livenessReads += 1;
+      return [];
+    },
   });
   assert.deepEqual(result, { duplicate: false, resumed: false, unmatched: true, messageId: "inbound-1" });
   assert.equal(landed?.from, "HUMAN");
@@ -38,6 +44,7 @@ test("inbound text nobody is waiting on lands as a visible human message", async
   // Unmatched text is inert: no session, no gate, nothing to decide.
   assert.equal(landed?.sessionId, undefined);
   assert.equal(landed?.status, "CLOSED");
+  assert.equal(livenessReads, 1, "an unthreaded message still receives the liveness observation before candidate lookup");
 });
 
 test("a card click that matches nothing still fails loudly instead of being filed", async () => {

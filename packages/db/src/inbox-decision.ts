@@ -15,6 +15,7 @@ import { activateChainSuccessor } from "./chain-activation.js";
 import { lockChainRows, lockTaskRow } from "./locks.js";
 import { produceMergeAuthorization, recordMergeEvidenceRefusal } from "./merge-authorization.js";
 import { MERGE_INTEGRATOR_KIND } from "./merge-integrator.js";
+import type { MergeExecutorLivenessReader } from "./merge-integrator-db.js";
 import { applyStopAnswer, parseStopQuestionKey, recoverRefreshRequestedConfirmationCard } from "./merge-integrator-db.js";
 import {
   isGatedMergeReadinessTask,
@@ -45,6 +46,8 @@ export type InboxDecisionInput = {
    * trims and bounds this value; keeping it optional here preserves the
    * Feishu and existing decision callers. */
   note?: string;
+  /** Shared daemon observation used to fence confirmation renewals. */
+  mergeExecutorLiveness?: MergeExecutorLivenessReader;
 };
 
 export type InboxDecisionResult = {
@@ -316,6 +319,9 @@ export const applyInboxDecisionTx = async (
           card: { id: question.id, body: question.body, gateTaskId: question.gateTaskId },
           inboxDecisionId: decisionRow.id,
           channel: "inbox",
+          ...(input.mergeExecutorLiveness === undefined
+            ? {}
+            : { executorLiveness: input.mergeExecutorLiveness }),
         }, now);
         if (!authorization || authorization.purpose !== "gate") {
           throw new WorkflowRefusalError(
@@ -344,6 +350,9 @@ export const applyInboxDecisionTx = async (
         card: { id: question.id, body: question.body, gateTaskId: question.gateTaskId },
         inboxDecisionId: decisionRow.id,
         channel: "inbox",
+        ...(input.mergeExecutorLiveness === undefined
+          ? {}
+          : { executorLiveness: input.mergeExecutorLiveness }),
       }, now);
       // A confirmation card's run is created by produceMergeAuthorization at the
       // raised ceiling; activating the successor again would enqueue a second
