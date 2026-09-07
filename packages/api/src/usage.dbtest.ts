@@ -110,6 +110,40 @@ test("0: the locked recompute runs at all against a real database", async () => 
   assert.equal(await recomputeSessionUsage(db, seeded.session.id), false);
 });
 
+/* -------------------------------------------------------------- test 0b */
+
+test("0b: resumed Claude results use one cumulative total per provider session", async () => {
+  const seeded = await seedSession("claude-resume-usage");
+  const result = {
+    type: "result",
+    session_id: "claude-provider-session",
+    total_cost_usd: 1.25,
+    usage: { input_tokens: 90, output_tokens: 20 },
+    modelUsage: {
+      "claude-opus-5": { inputTokens: 100, outputTokens: 20, costUSD: 1.25 },
+    },
+  };
+
+  // Claude emits the same session-cumulative result after each --resume. The
+  // old fold added every row, producing four times these values.
+  for (let seq = 1; seq <= 4; seq += 1) await addFinalOutput(seeded, seq, result);
+
+  assert.equal(await recomputeSessionUsage(db, seeded.session.id), true);
+  const columns = await storedColumns(seeded.session.id);
+  assert.equal(columns.inputTokens, 100);
+  assert.equal(columns.outputTokens, 20);
+  assert.equal(columns.totalTokens, 120);
+  assert.equal(columns.costUsd?.toString(), "1.25");
+
+  // Recomputing the already-corrected cache is idempotent.
+  assert.equal(await recomputeSessionUsage(db, seeded.session.id), false);
+  const unchanged = await storedColumns(seeded.session.id);
+  assert.equal(unchanged.inputTokens, 100);
+  assert.equal(unchanged.outputTokens, 20);
+  assert.equal(unchanged.totalTokens, 120);
+  assert.equal(unchanged.costUsd?.toString(), "1.25");
+});
+
 /* -------------------------------------------------------------- test 1 */
 
 test("1: a recompute that reads a stale event set cannot overwrite a fresher total", { timeout: 20_000 }, async () => {
