@@ -174,7 +174,7 @@ export const completionActivityBody = (facts: CompletionAdvancementFacts): strin
   if (facts.succeeded && facts.mechanical) return null;
   const run = `Run ${facts.runNumber}`;
   if (facts.durableNegativeRegressionVerdict) {
-    return `${run} failed after publishing a negative Regression verdict; repair queued`;
+    return `${run} failed after publishing a negative Regression verdict; merge tail settled on the persisted verdict`;
   }
   if (facts.mergeTrainSettled) {
     return `${run} ${facts.succeeded ? "succeeded" : "failed"}; the merge train settlement already decided this card`;

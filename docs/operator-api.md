@@ -240,6 +240,14 @@ curl -X DELETE "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERA
   metadata cannot classify priced spend. Unknown cache splits are counted and
   excluded from cache metrics; unpriced chain runs never receive a fabricated
   cost.
+- For Claude, `FINAL_OUTPUT` events with the same provider `session_id` are
+  session-cumulative: `total_cost_usd` and `modelUsage` are the running totals,
+  so the latest event supplies that provider session's cost and model tokens.
+  Events with different `session_id` values are separate sessions and their
+  latest totals are added. The top-level `usage` block remains per invocation.
+  Session usage recomputation from stored events applies the same rule and is
+  idempotent: repeating it without new events leaves the derived totals
+  unchanged.
 
 ```sh
 curl "$BASE_URL/projects/$PROJECT_ID/costs?days=1&tz=America%2FLos_Angeles" \
@@ -2074,6 +2082,57 @@ curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/rerun" \
   -d '{"requestId":"rerun-recovery-gate-001","reason":"The failing test is outside this branch and timed out under host load"}'
 ```
 
+### Regression verdict precedence after an external Run failure
+
+A Regression verification Run can persist its `regression-verification-v2`
+output and then fail for an external reason: for example, a task-failed Git
+operation during target refresh or WIP salvage, or a provider stream failure.
+Completion qualifies the persisted semantic result before deciding whether to
+retry or settle the Task as an ordinary external failure. This ordering
+preserves the result the Run already authored.
+Only persisted v2 `review-fail` and `refresh-conflict` results receive this new
+external-failure precedence; `gate-fail` and a Run with no such output
+keep the existing external-failure path, including the legacy protocol-error
+handling.
+
+The persisted result is control-plane evidence only when all of these bindings
+hold:
+
+- the `TaskStepOutput` belongs to the same Run (`runId`),
+- its body is valid `regression-verification-v2` JSON and its authored commit
+  is present, and
+- the verdict's `headSha`, the output's `commitSha`, and the Run's exact head
+  agree.
+
+When completion has no `headSha`, this external-failure path uses the output's
+authored `commitSha` as the persisted head for validation. A repair then binds
+to that head, so the operator does not need to carry the branch forward manually. A result from another Run, a
+malformed body, a missing authored commit, or a mismatched head is refused and
+does not control the Chain. Run text and `TaskActivity` rows never synthesize a
+verdict.
+
+For a validated negative result, the merge tail uses the persisted semantic
+outcome even though the Run itself records an external failure. `review-fail`
+queues the normal `review-fix` repair and `refresh-conflict` queues the
+`refresh-conflict` repair, both against the persisted head and its recorded
+base. The external failure remains visible as a diagnostic
+`TaskActivity` on the Regression task; inspect it with
+`GET /tasks/:taskId/activity`. It is diagnostic history, not a replacement for
+the persisted verdict and not another source of semantic authority.
+
+Inside a base-drift recovery Run, the same validation and precedence apply,
+but the settlement is the recovery stop carrying the persisted verdict's
+reason. It does not open an automatic repair from the failed Run. The recovery
+attempt and its existing Regression, Merge readiness, and merge-integrator
+tasks remain in the documented recovery-stop state, so the recovery ceiling
+and `POST /tasks/:taskId/merge-tail/repair` re-entry rules continue to apply.
+
+A persisted `pass` is excluded from this failed-completion rule. An external
+failure after a PASS never advances the Chain or creates a repair on the basis
+of that PASS. Advancement uses the ordinary successful-completion path, with
+the exact head named by completion and a persisted gate verdict for that same
+head.
+
 ### Settling a chain whose repair cannot bind
 
 Two merge-tail mechanisms can overlap on one Chain: a base-drift recovery
@@ -2796,6 +2855,36 @@ unset no executor is named, the check is skipped, and readiness authorizes as
 before. An executor that is offline stops new authorizations by itself; drain
 by holding chains, not by stopping the executor.
 
+### Readiness base-drift requeues
+
+When a Regression PASS was valid for its exact `(headSha, baseHeadSha)` and the
+control plane's remote read finds that the default branch moved before
+authorization, readiness returns the candidate to Regression and grants the
+replacement Run. This readiness base-drift requeue does not increment
+`leaseLossRefunds`: the agent did not lose its Run lease, and the requeue is
+bounded independently. This exemption applies only to `base-advanced` and
+`train-base-stale`. Readiness requeues for `stale-head` or `ancestry-refused`
+still spend the shared three-refund cap, as do lease-loss, late-salvage, and
+other ordinary merge-tail replacement births; completed-repair grants remain
+the existing separate exemption. Provider-transport and Regression target-fetch
+failures remain on `EXTERNAL_FAILURE_REFUND_CAP`.
+
+Outside a base-drift recovery, the readiness task has a fixed ceiling of three
+requeues, `READINESS_BASE_DRIFT_REQUEUE_LIMIT`. This is a platform constant,
+not an environment setting. When the ceiling is reached, readiness makes no
+further Run birth, parks the Regression and readiness tasks in `REVIEW`, and
+records the named stop reason
+`readiness-base-drift-requeue-limit: <count> requeues reached ceiling <limit>`.
+Only base-drift requeues outside a recovery spend this standalone ceiling;
+other requeue classes and requeues belonging to past recovery attempts do not.
+
+Inside a base-drift recovery, the requeues use the recovery aggregate's
+existing `MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES` ceiling of two instead of the
+per-readiness-task ceiling. Once it is reached, readiness parks the recovery
+tail (including its integrator) and records
+`base-drift-recovery-requeue-limit: <count> requeues reached ceiling <limit>`;
+the aggregate is `BLOCKED_DOWNSTREAM` and the tail tasks are in `REVIEW`.
+
 ## Inbox
 
 ### GET `/inbox/messages`
@@ -3241,15 +3330,24 @@ by calling `POST /tasks/:taskId/retry`; the new Run does not require increasing
 `maxSessionsPerTask`. Mechanical Runs without that rejection record and agent
 Runs continue through the normal lost-Run retry path.
 
+#### Lease-loss retry refused
+
 That retry path is bounded and spaced. Each lost lease refunds the attempt it
 cost, and each refund raises the ceiling it is measured against, so the run
 budget alone can never end a pure lease-loss sequence. A task may therefore have
 at most three attempts refunded this way — counted on the Run as
 `leaseLossRefunds`, projected on the board card of the same name, and shared
-with the other platform-caused refunds (late-salvage claim invalidation, and the
-merge-tail requeue). Each replacement is queued with the completion path's
-exponential delay derived from that count (30s, then 60s, then 120s) rather than
-immediately, so a runner host that is down is given time to come back.
+with the other platform-caused refunds: a late-salvage claim invalidation and
+ordinary merge-tail replacement births, excluding `repairCompleted` completed-
+repair grants. A readiness base-drift requeue is exempt only for the
+`base-advanced` and `train-base-stale` conditions, when a Regression PASS was
+valid at its exact base; see [Readiness base-drift requeues](#readiness-base-drift-requeues).
+Provider-transport and Regression target-fetch failures use the separate
+`EXTERNAL_FAILURE_REFUND_CAP` and do not spend `leaseLossRefunds`. Each
+replacement created by this lease-loss path is queued with the completion
+path's exponential delay derived from that count (30s, then 60s, then 120s)
+rather than immediately, so a runner host that is down is given time to come
+back.
 
 At the bound nothing is requeued: the Task moves to `REVIEW` with
 `failureReason` beginning `Lease-loss retry refused: Lease-loss refunds
@@ -3257,14 +3355,19 @@ exhausted`, an Inbox message, and a TaskActivity carrying
 `metadata.refusal = "lease-loss-refunds-exhausted"`. The refused refund is not
 granted, so the Task's recorded budget is what it was before the loss. Recover
 by raising `maxSessionsPerTask` through `PATCH /tasks/:taskId` and calling
-`POST /tasks/:taskId/retry`; an operator retry is not a platform refund, so it
-neither spends one nor resets the count, and a later lease loss on the retried
-Run is refused the same way. A late-salvage claim invalidation at the bound
-behaves the same: the stale claim is still revoked, because its clone base is
-wrong, but nothing replaces it and the Task is parked with the same reason.
+`POST /tasks/:taskId/retry`. When the refused task is a Chain Regression task,
+that operator retry resets its `leaseLossRefunds` to `0` and records a
+TaskActivity naming the reset in the same retry transaction; this is the
+recovery for the documented lease-loss refusal. The retry is not itself a
+platform refund, and a later lease loss on the retried Run is measured against
+the fresh cap. A late-salvage claim invalidation at the bound behaves the same:
+the stale claim is still revoked, because its clone base is wrong, but nothing
+replaces it and the Task is parked with the same reason.
 
-Readiness requeues that exhaust this shared bound also park the Regression and
-readiness Tasks in `REVIEW`, with a TaskActivity on Regression carrying
-`metadata.refusal = "lease-loss-refunds-exhausted"`. A recovery readiness requeue
-also parks its integrator and marks the recovery `BLOCKED_DOWNSTREAM`. The
-refund reason is preserved even when the ordinary run budget is also exhausted.
+Readiness base-drift requeues have their own ceilings and stop reasons; they do
+not park by exhausting this shared lease-loss bound. Ordinary merge-tail births
+still spend `leaseLossRefunds`, except for `repairCompleted` grants and the two
+readiness base-drift conditions in
+[Readiness base-drift requeues](#readiness-base-drift-requeues).
+The refund reason is preserved even when the ordinary run budget is also
+exhausted.

@@ -6,6 +6,7 @@ import test from "node:test";
 import {
   COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
   InboxStatus,
+  LEASE_LOSS_REFUND_EXHAUSTED_PREFIX,
   RunnerKind,
   RunnerPreference,
   type PrismaClient,
@@ -182,8 +183,10 @@ const retryRequest = async (
     outputKind?: string;
     taskTemplate?: { name: string };
   } | null = null,
+  options: { leaseLossRefunds?: number; taskStatus?: string; failureReason?: string | null; maxSessionsPerTask?: number } = {},
 ) => {
   let created: Record<string, unknown> | undefined;
+  const activities: Array<Record<string, unknown>> = [];
   const currentTemplateStep = templateStep
     ? { stepIndex: 1, outputKind: "result", taskTemplate: { name: "direct-engineer-workflow" }, ...templateStep }
     : null;
@@ -207,10 +210,13 @@ const retryRequest = async (
     // Nothing granted, so the retry ceiling is the task's configured budget —
     // which is what `maxRunsPerTask: 4` already was.
     budgetGrants: 0,
+    leaseLossRefunds: options.leaseLossRefunds ?? 0,
   };
   const currentTask = {
     id: "task-1",
     projectId: "project-1",
+    status: options.taskStatus ?? "TODO",
+    failureReason: options.failureReason ?? null,
     name: "Retry me",
     description: "Use current config",
     assigneeType: "AGENT",
@@ -219,7 +225,7 @@ const retryRequest = async (
     repo: null,
     templateId: null,
     templateStepId: currentTemplateStep ? "step-1" : null,
-    maxSessionsPerTask: 4,
+    maxSessionsPerTask: options.maxSessionsPerTask ?? 4,
     maxDurationMin: 120,
     stallTimeoutMin: 10,
     opensPullRequest: true,
@@ -246,7 +252,14 @@ const retryRequest = async (
       },
       run: {
         count: async () => 0,
-        findFirst: async () => null,
+        findFirst: async ({ where }: { where?: Record<string, unknown> } = {}) => (
+          where && Object.keys(where).length === 1 && where.taskId === "task-1" ? last : null
+        ),
+        update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+          if (where.id === "run-2" && created) Object.assign(created, data);
+          else Object.assign(last, data);
+          return last;
+        },
         groupBy: async () => [{
           taskId: "task-1",
           status: "FAILED",
@@ -259,14 +272,19 @@ const retryRequest = async (
         },
       },
       agentRepoAccess: { count: async () => 1 },
-      taskActivity: { create: async () => ({}) },
+      taskActivity: {
+        create: async ({ data }: { data: Record<string, unknown> }) => {
+          activities.push(data);
+          return data;
+        },
+      },
     }),
   } as unknown as PrismaClient;
   const response = await createApp(database).request("/tasks/task-1/retry", {
     method: "POST",
     headers: { Authorization: "Bearer operator-unit-token" },
   });
-  return { response, created, last };
+  return { response, created, last, activities };
 };
 
 type SessionEventQuery = { where?: Record<string, any>; select?: Record<string, unknown>; sql?: string; values?: unknown[] };
@@ -743,6 +761,78 @@ test("operator retry re-derives runtime configuration and clears promptHash unti
     assert.equal(created?.branch, last.branch);
     assert.equal(created?.targetBranch, last.targetBranch);
     assert.equal(created?.maxRunsPerTask, last.maxRunsPerTask);
+  });
+});
+
+test("operator retry resets an exhausted lease-loss counter for Regression", async () => {
+  await withTokens(async () => {
+    const { response, created, last, activities } = await retryRequest({
+      id: "old-agent",
+      model: "old-model",
+      runnerPreference: RunnerPreference.CLAUDE,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+    }, {
+      runner: RunnerKind.CLAUDE,
+      outputKind: "regression-verification-v2",
+    }, { leaseLossRefunds: 3, taskStatus: "REVIEW", failureReason: `Lease-loss retry refused: ${LEASE_LOSS_REFUND_EXHAUSTED_PREFIX} after 3 platform-refunded attempts; raise maxSessionsPerTask and retry` });
+    assert.equal(response.status, 201, JSON.stringify(await response.json()));
+    assert.equal(created?.leaseLossRefunds, 0);
+    assert.equal(last.leaseLossRefunds, 3, "the historical source Run remains unchanged");
+    assert.deepEqual(activities, [{
+      taskId: "task-1",
+      actorType: "operator",
+      body: "Lease-loss refund counter reset from 3 to 0 by operator retry",
+      metadata: { kind: "lease-loss-refunds-reset", previous: 3, current: 0 },
+    }, {
+      taskId: "task-1",
+      actorType: "operator",
+      body: "Run 2 queued by operator retry",
+    }]);
+  });
+});
+
+test("operator retry does not reset the lease-loss counter on an ordinary task", async () => {
+  await withTokens(async () => {
+    const { response, created, last, activities } = await retryRequest({
+      id: "old-agent",
+      model: "old-model",
+      runnerPreference: RunnerPreference.CLAUDE,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+    }, null, { leaseLossRefunds: 3, taskStatus: "REVIEW", failureReason: `Lease-loss retry refused: ${LEASE_LOSS_REFUND_EXHAUSTED_PREFIX} after 3 platform-refunded attempts; raise maxSessionsPerTask and retry` });
+    assert.equal(response.status, 201);
+    assert.equal(created?.leaseLossRefunds, 3);
+    assert.equal(last.leaseLossRefunds, 3);
+    assert.deepEqual(activities, [{
+      taskId: "task-1",
+      actorType: "operator",
+      body: "Run 2 queued by operator retry",
+    }]);
+  });
+});
+
+test("a refused Regression retry leaves its lease-loss counter and reset activity untouched", async () => {
+  await withTokens(async () => {
+    const { response, created, last, activities } = await retryRequest({
+      id: "old-agent",
+      model: "old-model",
+      runnerPreference: RunnerPreference.CLAUDE,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+    }, {
+      runner: RunnerKind.CLAUDE,
+      outputKind: "regression-verification-v2",
+    }, {
+      leaseLossRefunds: 3,
+      taskStatus: "REVIEW",
+      failureReason: `Lease-loss retry refused: ${LEASE_LOSS_REFUND_EXHAUSTED_PREFIX} after 3 platform-refunded attempts; raise maxSessionsPerTask and retry`,
+      maxSessionsPerTask: 1,
+    });
+    assert.equal(response.status, 409);
+    assert.equal(created, undefined);
+    assert.equal(last.leaseLossRefunds, 3);
+    assert.deepEqual(activities, []);
   });
 });
 

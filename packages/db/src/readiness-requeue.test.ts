@@ -127,3 +127,18 @@ test("activity of any other kind is not a requeue", () => {
     readinessGrants: 0,
   });
 });
+
+test("requeue metadata retains the refund class and recovery owner", async () => {
+  const { tx, rows } = recordingTx();
+  for (const baseDrift of [false, true]) {
+    await recordReadinessRequeue(tx, {
+      readinessTaskId: "readiness", regressionTaskId: "regression",
+      staleBaseSha: "old", currentBaseSha: "new", budgetGrant: 1,
+      reason: "readiness requeue", baseDrift, recoveryAggregateId: "recovery",
+    });
+  }
+  assert.deepEqual(rows.map((row) => {
+    const metadata = row.metadata as Record<string, unknown>;
+    return [metadata.baseDrift, metadata.recoveryAggregateId];
+  }), [[false, "recovery"], [true, "recovery"]]);
+});

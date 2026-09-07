@@ -307,7 +307,7 @@ test("the board card carries the refund count beside the budget verdict", async 
   assert.equal(cards[0]?.budgetRemaining, true);
 });
 
-test("a fourth readiness base-drift requeue parks with the shared refund refusal", async () => {
+test("a fourth readiness base-drift requeue parks at its independent ceiling", async () => {
   const { requeueRegressionSettlement } = await import("./merge-readiness-worker.js");
   const seeded = await seedTask("readiness-refund-sequence");
   const readiness = await db.task.create({ data: {
@@ -328,17 +328,20 @@ test("a fourth readiness base-drift requeue parks with the shared refund refusal
     await db.$transaction((tx) => requeueRegressionSettlement({
       readinessTaskId: readiness.id, regressionTaskId: seeded.task.id,
       staleBaseSha: `base-${attempt}`, currentBaseSha: `base-${attempt + 1}`,
-      reason: "base drift", now: new Date(), recovery: null,
+      condition: "base-advanced", reason: "base drift", now: new Date(), recovery: null,
     }).body(tx, claim));
     assert.equal(await db.run.count({ where: { taskId: seeded.task.id } }), Math.min(attempt + 1, 4));
   }
   for (const id of [seeded.task.id, readiness.id]) {
     const parked = await db.task.findUniqueOrThrow({ where: { id } });
     assert.equal(parked.status, TaskStatus.REVIEW);
-    assert.match(String(parked.failureReason), /Lease-loss refunds exhausted/);
+    assert.equal(parked.failureReason, "readiness-base-drift-requeue-limit: 3 requeues reached ceiling 3");
     assert.doesNotMatch(String(parked.failureReason), /readiness evaluation failed/);
   }
+  const latest = await latestRun(seeded.task.id);
+  assert.equal(latest.leaseLossRefunds, 0, "readiness requeues do not spend the lease-loss counter");
   assert.equal(await db.taskActivity.count({ where: {
-    taskId: seeded.task.id, metadata: { path: ["refusal"], equals: "lease-loss-refunds-exhausted" },
+    taskId: seeded.task.id,
+    body: { contains: "readiness-base-drift-requeue-limit: 3 requeues reached ceiling 3" },
   } }), 1);
 });
