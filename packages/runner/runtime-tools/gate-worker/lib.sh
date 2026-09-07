@@ -154,6 +154,19 @@ GATE_SLOT_BROKEN=2
 
 gate_slot_path() { printf '%s/%s.slot' "$1" "$2"; }
 
+# Who holds this slot right now, as the pid the lock names, or nothing when the
+# lock is absent or unreadable. It is an observation and never a decision: a
+# waiting dispatcher compares it across polls to tell a queue that is moving
+# from one that is stuck, and only gate_slot_try may act on a slot.
+gate_slot_holder() {
+  local holder
+  holder="$(cat "$(gate_slot_path "$1" "$2")" 2>/dev/null || true)"
+  case "$holder" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  printf '%s' "$holder"
+}
+
 # 0 held, 1 busy, 2 broken. Every non-zero return prints its reason on stderr
 # except the ordinary one, which is that another dispatcher holds the slot.
 gate_slot_try() {
