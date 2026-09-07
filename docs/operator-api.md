@@ -1635,13 +1635,36 @@ new attempt. See "Task spend cap" below for what counts as spend.
 
 Every card also carries `baseline`, the same per-template-step cost and
 duration baseline `GET /tasks/:taskId` documents, or `null` for a card with no
-template step or too little history. The whole page is answered by one grouped
-query, so the board's query count does not grow with the number of cards. Rows
+template step or too little history.
+Each card's `latestRun` reports where that Run is now, so a card can be read
+without opening the task. `phase` is one of `queued`, `provisioning`,
+`executing`, `waiting-inbox`, `cleanup`, or `finished`, computed from the same
+boundaries `metrics.phases` measures between: `queued` from the Run's
+`readyAt`, `provisioning` from the Session's `provisionedAt`, `executing` from
+its `startedAt`, `cleanup` while `cleanupStartedAt` is set and
+`cleanupEndedAt` is not, and `finished` once the Session ended or the Run
+reached a terminal status. The current runner does not write
+`cleanupStartedAt`, so `cleanup` is currently unreachable in normal execution;
+the projection supports that milestone when recorded. `phaseSince` is the ISO instant the Run entered that
+phase. For `waiting-inbox` it is the creation time of the exact question
+referenced by `Session.waitingOnMessageId`, resolved in one batched lookup for
+the page; a missing question leaves it `null`. Historical total Inbox wait
+remains unknown because resume boundaries are not recorded. `lastProgressEventAt` is the last
+progress the owning runner reported for the Run — the signal its stall timeout
+is measured from — or `null` when none was reported. `maxRunsPerTask` is the
+attempt ceiling snapshotted at Run birth, which is what a card's retry count is
+read against rather than the task's configured budget of the moment. Baselines
+for the whole page are answered by one grouped query, so the board's query count does not grow with the number of cards. Rows
 of the `full` view carry the same `baseline` field on the same terms, read by
 the same single grouped query.
 
 For a Chain member, the first emitted member also carries the
-`chainAggregate` projection. Its `activation.state` is one of
+`chainAggregate` projection. Its `firstRunStartedAt` is the earliest non-null
+`Run.startedAt` across the complete primary-Step run history, including failed
+attempts and archived primary Steps, or `null` before any primary Run starts.
+The browser uses this origin for Chain lead time so a retry cannot shorten it;
+the server computes it from existing full-chain reads without per-card requests.
+Its `activation.state` is one of
 `parked-unactivated`, `waiting-on-predecessor`, `running`, `idle`, `held`, or
 `settled`; `held` is a derived aggregate state, not a persisted Task status.
 The aggregate's `activation.hold` is either `null` or

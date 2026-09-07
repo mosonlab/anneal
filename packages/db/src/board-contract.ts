@@ -479,6 +479,25 @@ export type ChainProgress = {
   position: number | null;
 };
 
+/**
+ * Where a Run is in its lifecycle right now, as one word.
+ *
+ * The same boundaries `RunPhaseMetrics` measures between, so a card's phase and
+ * the detail page's phase durations are two readings of one arithmetic: queued
+ * from `Run.readyAt`, provisioning from `Session.provisionedAt`, executing from
+ * `Session.startedAt`, cleanup from `Session.cleanupStartedAt`, and finished
+ * once the run is terminal. `waiting-inbox` is the executing phase suspended on
+ * a question, which the board distinguishes because a card that has waited an
+ * hour for a human is not a card that has been working for an hour.
+ */
+export type RunPhase =
+  | "queued"
+  | "provisioning"
+  | "executing"
+  | "waiting-inbox"
+  | "cleanup"
+  | "finished";
+
 export type BoardLatestRun<DateTime = string> = {
   id: string;
   runNumber: number;
@@ -494,6 +513,21 @@ export type BoardLatestRun<DateTime = string> = {
   /** The pull request the Run published, or null when it opened none. Cards
    *  link it; nothing on the board derives anything else from it. */
   pullRequestUrl: string | null;
+  /** Which phase this Run is in, computed server-side by the one helper the
+   *  detail page's phase durations also go through. */
+  phase: RunPhase;
+  /** When the Run entered `phase`. For waiting-inbox, the creation timestamp
+   *  of Session.waitingOnMessageId's question. Null if that question is missing;
+   *  no caller may render an unknown start as a duration. */
+  phaseSince: DateTime | null;
+  /** The last progress the owning runner reported for this Run, which is the
+   *  same signal its stall timeout is measured from. Null when none was ever
+   *  reported. */
+  lastProgressEventAt: DateTime | null;
+  /** The Run's own attempt ceiling for its Task, snapshotted at Run birth.
+   *  A card's retry count is read against this and never against the Task's
+   *  configured budget of the moment, which grants may already have raised. */
+  maxRunsPerTask: number;
 };
 
 /** A durable salvage ref from a LOST Run that a later Run did not consume. */
@@ -559,6 +593,8 @@ export type ChainAggregate<DateTime = string> = {
     } | null;
   };
   totalCost: UsageCost | null;
+  /** Earliest Run.startedAt across every primary Step attempt, or null before any start. */
+  firstRunStartedAt: DateTime | null;
   createdAt: DateTime;
   updatedAt: DateTime;
 };

@@ -2,7 +2,7 @@ import { RUN_STATUS_IS_ACTIVE } from "@anneal/db/board-contract";
 import { type ChainControlActionKind, chainControlAction } from "./chain-aggregate";
 import { formatDateTime, formatT } from "./format";
 import { cronProse } from "./schedule";
-import type { BoardTask, ChainAggregate, RunStatus, TaskStatus } from "./types";
+import type { BoardLatestRun, BoardTask, ChainAggregate, RunStatus, TaskStatus } from "./types";
 
 /** The board's five columns, in the order they are read. Backlog is first: it is
  *  where work waits before it is queued, and the scheduler never picks anything
@@ -280,8 +280,10 @@ export type RunLiveness = {
   elapsedSince: string | null;
   /** RUNNING is the one status word a clock replaces: the amber dot already
    *  says the run is live and the elapsed time says more than the word. Every
-   *  other status still names itself, because nothing else on a card
-   *  distinguishes queued from waiting inbox. */
+   *  other status still names itself, because nothing else beside the line
+   *  distinguishes queued from waiting inbox. That is the rule where the line
+   *  draws its own clock; the task card's footer names the phase instead, so
+   *  its line drops the word for every live status (see `ElapsedOwner`). */
   statusSuppressed: boolean;
 };
 
@@ -297,6 +299,79 @@ export const runLiveness = (run: RunLivenessSubject): RunLiveness => {
   const live = isActiveRunStatus(run.status);
   const elapsedSince = live && run.startedAt !== null ? run.startedAt : null;
   return { live, elapsedSince, statusSuppressed: run.status === "RUNNING" && elapsedSince !== null };
+};
+
+/* ------------------------------------------------------------- the badges */
+
+/**
+ * How long a run may go without reporting progress before the card calls it
+ * stalled. The card's own threshold, not the runner's: the runner measures its
+ * `stallTimeoutMs` from the same `lastProgressEventAt`, so this sits below it
+ * and names the run before the runner gives up on it.
+ */
+export const STALLED_AFTER_MS = 5 * 60_000;
+
+/** Which baseline comparison the over-baseline badge fired on. */
+export type OverBaselineMetric = "cost" | "duration" | "both";
+
+/** One anomaly a card calls out on its newest run, with the figures its hover
+ *  text names. */
+export type CardBadge =
+  | { kind: "stalled" }
+  | { kind: "over-baseline"; metric: OverBaselineMetric; sampleSize: number }
+  | { kind: "retries"; n: number; max: number };
+
+const ms = (instant: string): number => new Date(instant).getTime();
+
+/**
+ * Twice the step's usual figure, on either metric that has both a baseline and
+ * a reading. Null on either side is unknown and never compared.
+ *
+ * The executing time is compared live, which `run-metrics.ts` refuses to do
+ * for its `durationRatio`: a ratio below one on an unfinished run would report
+ * "not finished yet" as "faster than usual". The comparison here is only ever
+ * read in the other direction — a run that has already passed twice the p50 of
+ * completed runs is over it whatever it does next — so the live reading is
+ * sound.
+ */
+const overBaseline = (task: Pick<BoardTask, "baseline">, run: BoardLatestRun, now: number): CardBadge | null => {
+  const { baseline } = task;
+  if (baseline === null) return null;
+  const cost = baseline.costUsd !== null && run.costUsd !== null && Number(run.costUsd) > 2 * baseline.costUsd.p50;
+  const executionEnd = run.endedAt === null
+    ? (run.phase === "executing" || run.phase === "waiting-inbox" ? now : null)
+    : ms(run.endedAt);
+  const duration = baseline.durationMs !== null && run.startedAt !== null && executionEnd !== null
+    && executionEnd - ms(run.startedAt) > 2 * baseline.durationMs.p50;
+  if (!cost && !duration) return null;
+  return { kind: "over-baseline", metric: cost && duration ? "both" : cost ? "cost" : "duration", sampleSize: Math.min(
+    cost ? baseline.costUsd!.sampleSize : Infinity,
+    duration ? baseline.durationMs!.sampleSize : Infinity,
+  ) };
+};
+
+/**
+ * The anomaly badges a card shows for its newest run, in the order they read.
+ *
+ * `now` is a parameter so the two clocks here — silence since the last progress
+ * event, and a live executing phase against the baseline — are stated against
+ * one instant and can be tested at any. A run with nothing to compare against
+ * gets no badge: the absence of a figure is unknown, not zero, and a badge on
+ * unknown data would be an accusation.
+ */
+export const cardBadges = (task: Pick<BoardTask, "latestRun" | "baseline">, now: number): CardBadge[] => {
+  const run = task.latestRun;
+  if (run === null) return [];
+  const stalled = run.phase === "executing" && run.lastProgressEventAt !== null
+    && now - ms(run.lastProgressEventAt) > STALLED_AFTER_MS;
+  const over = overBaseline(task, run, now);
+  return [
+    ...(stalled ? [{ kind: "stalled" } as const] : []),
+    ...(over === null ? [] : [over]),
+    // Run numbers are dense and one-based, so the newest run's number is how
+    // many runs the task has had; a first run is not a retry.
+    ...(run.runNumber >= 2 ? [{ kind: "retries", n: run.runNumber, max: run.maxRunsPerTask } as const] : []),
+  ];
 };
 
 /* -------------------------------------------------------------- the actions */

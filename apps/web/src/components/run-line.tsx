@@ -56,10 +56,13 @@ export type RunLineSubject = RunLivenessSubject & {
   codexServiceTier: CodexServiceTier;
 };
 
-/** Which element draws the run's elapsed clock. `caller` is the task card,
- *  whose footer owns a ticking clock of its own. Stated rather than defaulted,
- *  because the answer is never "nobody": the line drops the RUNNING word on the
- *  strength of a clock showing somewhere. */
+/** Which element draws the run's live state. `caller` is the task card, whose
+ *  footer names the phase and counts time in it, so the line drops the status
+ *  word for every live run rather than reading "Provisioning" above a footer
+ *  saying "Provisioning · 20s". `line` draws its own clock and drops only the
+ *  RUNNING word. Stated rather than defaulted, because the answer is never
+ *  "nobody": a live run's word goes on the strength of a clock showing
+ *  somewhere. */
 export type ElapsedOwner = "line" | "caller";
 
 /** The sole board rendering of a Run: number, dot tone, status word, and merge override. */
@@ -84,14 +87,15 @@ export const RunLine = ({
     : null;
   const model = showModel ? splitModel(run.model) : null;
   const badge = mergeBadge(mergeOutcome);
-  const hideStatus = liveness.statusSuppressed && badge === null;
+  const hideStatus = badge === null && (elapsedOwner === "caller" ? liveness.live : liveness.statusSuppressed);
   const runDetailParts = [
     ...(model === null ? [] : [
       cardModelName(model.model),
       ...(model.effort === null ? [] : [model.effort]),
       ...(run.codexServiceTier === "FAST" ? ["fast"] : []),
     ]),
-    // `statusSuppressed` owns why RUNNING is the one word a clock replaces.
+    // `statusSuppressed` owns why RUNNING is the one word a clock replaces;
+    // `ElapsedOwner` owns why a task card's line names no live status at all.
     ...(hideStatus ? [] : [t(presentation.key)]),
     ...(elapsed === null ? [] : [elapsed]),
   ];
