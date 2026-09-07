@@ -265,25 +265,33 @@ test("train ownership reads select only control-plane markers", async () => {
   });
 });
 
-test("agent-authored settled and aborted train markers are ignored by every marker reader", async () => {
-  const rows = [
-    { actorType: "agent", ...marker("train", { state: "settled", trainTaskId: "train-1" }) },
-    { actorType: "agent", ...marker("train", { state: "aborted", trainTaskId: "train-1" }) },
-  ];
-  const { tx } = recordingTx(rows);
+for (const forgedState of ["settled", "aborted"] as const) {
+  test(`agent-authored ${forgedState} train marker is ignored by every marker reader`, async () => {
+    const rows = [
+      { actorType: "agent", ...marker("train", { state: forgedState, trainTaskId: "train-1" }) },
+      { actorType: "control-plane", ...marker("train", { state: "queued", trainTaskId: "train-1" }) },
+      { actorType: "control-plane", ...marker("train", { state: forgedState, trainTaskId: "train-1" }) },
+    ];
+    const { tx } = recordingTx(rows);
 
-  assert.deepEqual(await readMarkers(tx, "train-1"), []);
-  assert.deepEqual(await readMarkerHistory(tx, "train-1"), []);
+    // The trusted rows remain visible, while the forged terminal row is gone.
+    const expectedStates = ["queued", forgedState];
+    assert.deepEqual((await readMarkers(tx, "train-1")).map(({ state }) => state), expectedStates);
+    assert.deepEqual((await readMarkerHistory(tx, "train-1")).map(({ state }) => state), expectedStates);
 
-  let observed: { where: Record<string, unknown> } | undefined;
-  const latestTx = {
-    taskActivity: {
-      findFirst: async (input: { where: Record<string, unknown> }) => {
-        observed = input;
-        return input.where.actorType === "control-plane" ? null : { metadata: rows[0]!.metadata };
+    let observed: { where: Record<string, unknown> } | undefined;
+    const latestTx = {
+      taskActivity: {
+        findFirst: async (input: { where: Record<string, unknown> }) => {
+          observed = input;
+          const row = rows.find((candidate) => (
+            input.where.actorType === undefined || candidate.actorType === input.where.actorType
+          ));
+          return row ? { metadata: row.metadata } : null;
+        },
       },
-    },
-  } as unknown as Prisma.TransactionClient;
-  assert.equal(await readLatestMarker(latestTx, "train-1", "train"), null);
-  assert.equal(observed?.where.actorType, "control-plane");
-});
+    } as unknown as Prisma.TransactionClient;
+    assert.equal((await readLatestMarker(latestTx, "train-1", "train"))?.state, "queued");
+    assert.equal(observed?.where.actorType, "control-plane");
+  });
+}
