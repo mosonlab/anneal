@@ -10,7 +10,23 @@ const ownership = await acquireControlPlaneOwnership({
 
 let descendant: ReturnType<typeof spawn> | undefined;
 const keepAlive = setInterval(() => undefined, 1_000);
-const waitForExit = (child: ChildProcess, timeoutMs = 5_000): Promise<void> => {
+/** This probe is a test fixture that the gate runs, so its own cleanup carries
+ *  the same rule as the suite spawning it (CONTRIBUTING.md, "Test timing on the
+ *  gate worker"): bounded, so a descendant that never dies is reported (the
+ *  caller escalates to SIGKILL and then fails), but sized for the loaded gate
+ *  worker rather than an idle host — signal delivery and
+ *  reaping queue behind whatever else the worker is carrying. The wait ends the
+ *  moment the descendant exits, so a healthy run never pays this.
+ *
+ *  This budget nests strictly inside the parent's: control-plane-ownership.test.ts
+ *  waits CHILD_TERMINATION_BUDGET_MS (60s) for this probe to exit, and this
+ *  probe's worst case is ownership.release() plus SIGTERM (10s) plus SIGKILL
+ *  (10s). Raising this above ~20s would let the parent kill the probe before
+ *  the probe could report its own descendant — the load-induced false FAIL this
+ *  whole change exists to remove. Keep inner + release well under the outer. */
+const DESCENDANT_EXIT_BUDGET_MS = 10_000;
+
+const waitForExit = (child: ChildProcess, timeoutMs = DESCENDANT_EXIT_BUDGET_MS): Promise<void> => {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {

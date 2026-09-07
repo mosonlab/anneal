@@ -514,7 +514,10 @@ test("the real web invocation starts from a read-only release without writing in
   child.stderr.on("data", (chunk) => { output += chunk; });
 
   let response = null;
-  const readinessDeadline = Date.now() + 30_000;
+  // A real `vite preview` child: it has to install-check, boot and serve. The
+  // loop already breaks the moment it answers or the child exits, so the deadline
+  // only bounds a child that never comes up — sized for the loaded gate worker, not for an idle host (CONTRIBUTING.md, "Test timing on the gate worker").
+  const readinessDeadline = Date.now() + 120_000;
   while (Date.now() < readinessDeadline) {
     if (child.exitCode !== null) break;
     try {

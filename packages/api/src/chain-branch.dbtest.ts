@@ -15,6 +15,7 @@ import { buildChildEnvironment } from "@anneal/runner/adapters";
 import type { ClaimedTask } from "@anneal/runner/api";
 import type { RunnerConfig } from "@anneal/runner/config";
 
+import { blockedLockCount, waitForBlockedLocks } from "./blocked-locks-wait.js";
 import { createApp } from "./test-app.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import { instantiateTemplate } from "./templates.js";
@@ -1119,27 +1120,6 @@ test("operator note character bounds never inject a partial note", async () => {
 
 test("T19b: PATCH is serialized before automatic retry and lost-lease snapshots", async () => {
   const seed = await seedProject("t19b");
-  const wait = (milliseconds: number) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-  const blockedLockCount = async (): Promise<number> => {
-    const [row] = await db.$queryRaw<Array<{ count: number }>>`
-      SELECT count(*)::int AS "count"
-      FROM pg_stat_activity
-      WHERE datname = current_database() AND wait_event_type = 'Lock'
-    `;
-    return row?.count ?? 0;
-  };
-  const waitForBlockedLocks = async (minimum: number): Promise<void> => {
-    // Patience, not a timing assumption: the wait returns as soon as the locks
-    // appear, so this budget only bounds the failure case. 5s was enough on a
-    // developer laptop and not enough on a two-core CI runner, where the first
-    // request through the app pays for pool warm-up before it reaches FOR UPDATE.
-    const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline) {
-      if (await blockedLockCount() >= minimum) return;
-      await wait(10);
-    }
-    assert.fail(`timed out waiting for ${minimum} blocked database lock(s)`);
-  };
   const holdTask = async (taskId: string) => {
     let release!: () => void;
     let locked!: () => void;
@@ -1160,15 +1140,15 @@ test("T19b: PATCH is serialized before automatic retry and lost-lease snapshots"
   const automaticRun = await db.run.findFirstOrThrow({ where: { taskId: automatic.body.id } });
   const automaticClaim = await claimRun(automaticRun.id);
   const heldAutomatic = await holdTask(automatic.body.id);
-  const automaticBaseline = await blockedLockCount();
+  const automaticBaseline = await blockedLockCount(db);
   const patchAutomatic = operatorRequest(`/tasks/${automatic.body.id}`, {
     method: "PATCH", body: JSON.stringify({ opensPullRequest: false }),
   });
-  await waitForBlockedLocks(automaticBaseline + 1);
+  await waitForBlockedLocks(db, automaticBaseline + 1);
   const completeAutomatic = completeRunViaRoute(automaticClaim, {
     exitCode: 1, outcome: transientFailure, pushStatus: "FAILED",
   });
-  await waitForBlockedLocks(automaticBaseline + 2);
+  await waitForBlockedLocks(db, automaticBaseline + 2);
   heldAutomatic.release();
   assert.equal((await patchAutomatic).status, 200);
   assert.equal((await completeAutomatic).status, 200);
@@ -1187,13 +1167,13 @@ test("T19b: PATCH is serialized before automatic retry and lost-lease snapshots"
     runner: "CLAUDE", executionStatus: "RUNNING",
   } });
   const heldLost = await holdTask(lost.body.id);
-  const lostBaseline = await blockedLockCount();
+  const lostBaseline = await blockedLockCount(db);
   const patchLost = operatorRequest(`/tasks/${lost.body.id}`, {
     method: "PATCH", body: JSON.stringify({ opensPullRequest: false }),
   });
-  await waitForBlockedLocks(lostBaseline + 1);
+  await waitForBlockedLocks(db, lostBaseline + 1);
   const reconcile = reconcileDatabaseRuns(db, new Date());
-  await waitForBlockedLocks(lostBaseline + 2);
+  await waitForBlockedLocks(db, lostBaseline + 2);
   heldLost.release();
   assert.equal((await patchLost).status, 200);
   assert.ok(await reconcile > 0);

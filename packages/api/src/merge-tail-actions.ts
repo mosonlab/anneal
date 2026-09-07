@@ -1151,7 +1151,8 @@ export const handleRegressionCompletion = async (
   // A refresh conflict is a merge of two fixed trees: a second resolver run on
   // the same head has nothing new to work with. A semantic or gate FAIL does —
   // the first repair moved the tree, and the verdict it now fails on is a
-  // different one — so those get a second attempt before the tail stops.
+  // different one — so those get further attempts, up to the limit, before
+  // the tail stops.
   const attemptLimit = repairKind === "refresh-conflict" ? 1 : MAX_MERGE_TAIL_REPAIR_ATTEMPTS;
   if (priorAttempts >= attemptLimit) {
     return stop(repairKind === "refresh-conflict"
