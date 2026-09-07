@@ -13,6 +13,7 @@ import {
   integratorBindingRefusal,
   INTEGRATOR_OUTPUT_KIND,
   isMergeReadinessStep,
+  isRegressionVerificationOutputKind,
   isPinnedBaseCommitError,
   LEGACY_ALL_PRIOR_OUTPUTS,
   MERGE_TAIL_KIND,
@@ -47,6 +48,7 @@ import { makeFencingToken } from "./execution.js";
 import { openMergeTailStopNotice } from "./merge-tail-actions.js";
 import { hasOpenOperatorAlert, openOperatorAlert } from "./operator-alert.js";
 import { regressionRepairHandoffForClaim } from "./regression-repair-handoff.js";
+import { regressionRecoveryContextForClaim } from "./regression-recovery-context.js";
 import { activeRunStatuses } from "./run-fence.js";
 import { runnerBackendAllowsClaim } from "./runner-backend-health.js";
 import { decryptSecret } from "./secrets.js";
@@ -1170,6 +1172,9 @@ export const claimRun = async (
       const mergeTrain = candidate.task.chainId === null && candidate.task.templateStep === null
         ? mergeTrainClaimMetadata(await readLatestMarker(tx, candidate.task.id, "train"))
         : null;
+      const regressionRecoveryContext = isRegressionVerificationOutputKind(candidate.task.templateStep?.outputKind)
+        ? await regressionRecoveryContextForClaim(tx, { taskId: candidate.task.id, runId: run.id })
+        : null;
       return {
         outcome: "claimed" as const,
         claim: {
@@ -1259,6 +1264,7 @@ export const claimRun = async (
           regressionRepairHandoff: regressionRepairHandoff.status === "ok"
             ? regressionRepairHandoff.handoff
             : null,
+          ...(regressionRecoveryContext ? { regressionRecoveryContext } : {}),
           specificationMaterialization,
           resume: priorResume,
           nextEventSeq: (latestEvent._max.seq ?? -1) + 1,
