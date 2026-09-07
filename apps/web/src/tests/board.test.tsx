@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  chainBinding, chainBindingLabel, chainParked, clampScroll, columnStep, countByStatus, defaultTab, edgeState,
-  focusAfterMove, orderColumn, parseStatus, retryShape, retryable, runLiveness, sameEdges, scheduleLabel, storedScroll,
+  STALLED_AFTER_MS, cardBadges, chainBinding, chainBindingLabel, chainParked, clampScroll, columnStep, countByStatus,
+  defaultTab, edgeState, focusAfterMove, orderColumn, parseStatus, retryShape, retryable, runLiveness, sameEdges,
+  scheduleLabel, storedScroll,
 } from "../lib/board";
-import type { BoardTask, ChainProgress, RunStatus } from "../lib/types";
+import type { BoardLatestRun, BoardTask, ChainProgress, RunBaseline, RunStatus } from "../lib/types";
+import { boardRun } from "./board-run";
 
 const task = (overrides: Partial<BoardTask> = {}): BoardTask => ({
   id: "t1", name: "Ship the thing", displayName: overrides.name ?? "Ship the thing", status: "TODO", moveTargets: [], failureReason: null,
@@ -218,6 +220,81 @@ test("one liveness rule answers the clock, the live state and the suppressed sta
   for (const { status, startedAt, ...expected } of rows) {
     assert.deepEqual(runLiveness({ status, startedAt }), expected, `${status} startedAt=${startedAt}`);
   }
+});
+
+/* ------------------------------------------------------------- the badges */
+
+const NOW = new Date("2026-08-16T00:12:00.000Z").getTime();
+const at = (offsetMs: number): string => new Date(NOW + offsetMs).toISOString();
+const MINUTE = 60_000;
+
+/** Seven completed runs of the step: a dollar and five minutes at the median. */
+const baseline = (overrides: Partial<RunBaseline> = {}): RunBaseline => ({
+  sampleSize: 7,
+  costUsd: { sampleSize: 7, p50: 1, p90: 2 },
+  durationMs: { sampleSize: 7, p50: 5 * MINUTE, p90: 8 * MINUTE },
+  ...overrides,
+});
+
+const executing = (overrides: Partial<BoardLatestRun> = {}): BoardLatestRun =>
+  boardRun({ status: "RUNNING", startedAt: at(-3 * MINUTE), lastProgressEventAt: at(-MINUTE), ...overrides });
+
+test("the stall threshold is the card's own, and defaults to five minutes", () => {
+  assert.equal(STALLED_AFTER_MS, 5 * MINUTE);
+});
+
+test("a run is stalled only while executing, and only past a reported silence", () => {
+  const silent = at(-STALLED_AFTER_MS - 1_000);
+  assert.deepEqual(cardBadges(task({ latestRun: executing({ lastProgressEventAt: silent }) }), NOW), [{ kind: "stalled" }]);
+  // Strictly past the threshold: at the threshold the runner has not called it yet either.
+  assert.deepEqual(cardBadges(task({ latestRun: executing({ lastProgressEventAt: at(-STALLED_AFTER_MS) }) }), NOW), []);
+  // A runner that never reported progress is unknown, not silent since forever.
+  assert.deepEqual(cardBadges(task({ latestRun: executing({ lastProgressEventAt: null }) }), NOW), []);
+  // Silence in any other phase is that phase's business: provisioning reports
+  // nothing, and an Inbox wait is silent by design.
+  assert.deepEqual(cardBadges(task({
+    latestRun: boardRun({ status: "PROVISIONING", phase: "provisioning", phaseSince: at(-MINUTE), lastProgressEventAt: silent }),
+  }), NOW), []);
+  assert.deepEqual(cardBadges(task({ latestRun: boardRun({ status: "WAITING_INBOX", lastProgressEventAt: silent }) }), NOW), []);
+});
+
+test("over baseline names the metric that fired, and needs a figure on both sides", () => {
+  const over = (run: BoardLatestRun, base: RunBaseline | null = baseline()) =>
+    cardBadges(task({ baseline: base, latestRun: run }), NOW).filter((badge) => badge.kind === "over-baseline");
+  const overBoth = { kind: "over-baseline", metric: "both", sampleSize: 7 } as const;
+  assert.deepEqual(over(executing({ costUsd: "2.50" })), [{ ...overBoth, metric: "cost" }]);
+  assert.deepEqual(over(executing({ startedAt: at(-11 * MINUTE) })), [{ ...overBoth, metric: "duration" }]);
+  assert.deepEqual(over(executing({ costUsd: "2.50", startedAt: at(-11 * MINUTE) })), [overBoth]);
+  // Twice the median exactly is not over it.
+  assert.deepEqual(over(executing({ costUsd: "2", startedAt: at(-10 * MINUTE) })), []);
+  // A finished run is measured to its own end, not to now.
+  assert.deepEqual(over(boardRun({ startedAt: at(-30 * MINUTE), endedAt: at(-22 * MINUTE) })), []);
+  assert.deepEqual(over(boardRun({ startedAt: at(-30 * MINUTE), endedAt: at(-19 * MINUTE) })), [{ ...overBoth, metric: "duration" }]);
+  // Unknown on either side is no comparison: no baseline, a baseline with no
+  // cost samples beside a run that is expensive, a run that never reported a
+  // cost, and a run that has not started.
+  assert.deepEqual(over(executing({ costUsd: "99", startedAt: at(-11 * MINUTE) }), null), []);
+  assert.deepEqual(over(executing({ costUsd: "99" }), baseline({ costUsd: null })), []);
+  assert.deepEqual(over(executing({ startedAt: at(-11 * MINUTE) }), baseline({ costUsd: null })), [{ ...overBoth, metric: "duration" }]);
+  assert.deepEqual(over(executing({ costUsd: null })), []);
+  assert.deepEqual(over(boardRun({ status: "QUEUED", startedAt: null }), baseline({ costUsd: null })), []);
+});
+
+test("a retry badge counts the newest run against its own attempt ceiling", () => {
+  // Run numbers are dense and one-based: the first run is not a retry.
+  assert.deepEqual(cardBadges(task({ latestRun: boardRun({ runNumber: 1 }) }), NOW), []);
+  assert.deepEqual(
+    cardBadges(task({ latestRun: boardRun({ runNumber: 2, maxRunsPerTask: 5 }) }), NOW),
+    [{ kind: "retries", n: 2, max: 5 }],
+  );
+});
+
+test("a task with no run has no badge, and the badges read in one order", () => {
+  assert.deepEqual(cardBadges(task(), NOW), []);
+  assert.deepEqual(cardBadges(task({
+    baseline: baseline(),
+    latestRun: executing({ runNumber: 3, costUsd: "9", lastProgressEventAt: at(-6 * MINUTE) }),
+  }), NOW).map((badge) => badge.kind), ["stalled", "over-baseline", "retries"]);
 });
 
 /* -------------------------------------------------------------- the focus */

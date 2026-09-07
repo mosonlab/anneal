@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { type ChainControlActionKind, chainControlAction, chainStepPosition } from "../lib/chain-aggregate";
+import { type ChainControlActionKind, chainAggregateFigures, chainControlAction, chainStepPosition } from "../lib/chain-aggregate";
 import type { BoardTask, ChainAggregate, ChainAggregateState } from "../lib/types";
+import { boardRun } from "./board-run";
 
 const HOLD = { heldLayer: 2, heldAt: "2026-08-16T00:00:00.000Z", holdReason: null };
 
@@ -80,4 +81,53 @@ test("the Step a card names falls back from the projection to the member to the 
 
 test("a sparse frontier member never reports a position above the aggregate step count", () => {
   assert.equal(chainStepPosition(aggregate(null, 2, 3), [member({ chainIndex: 8 })]), 3);
+});
+
+const HOUR = 60 * 60_000;
+const NOW = Date.parse("2026-08-30T12:00:00.000Z");
+const at = (hoursBeforeNow: number): string => new Date(NOW - hoursBeforeNow * HOUR).toISOString();
+const REPAIR = { chainId: "chain-1", chainName: "Release", repairKind: "gate-fix" };
+const COST = { costUsd: "13.74", estimated: true, inputTokens: null, cachedInputTokens: null, cacheCreationInputTokens: null, outputTokens: null };
+
+test("the figures state the server's chain cost, never a client re-sum of the visible rows", () => {
+  const priced = { ...aggregate(3, 2), totalCost: COST };
+  const cheaper = member({ taskCost: { ...COST, costUsd: "0.10" } });
+  assert.equal(chainAggregateFigures(priced, [cheaper], NOW).cost, COST);
+  assert.equal(chainAggregateFigures(aggregate(3, 2), [cheaper], NOW).cost, null);
+});
+
+test("lead time runs from the earliest known start to now while a run is active, and to the last end once none is", () => {
+  const first = member({ id: "step-1", latestRun: boardRun({ startedAt: at(30), endedAt: at(29) }) });
+  const second = member({ id: "step-2", latestRun: boardRun({ startedAt: at(20), endedAt: at(18) }) });
+  const running = { ...aggregate(3, 2), frontier: { ...aggregate(3, 2).frontier, latestRun: boardRun({ status: "RUNNING", startedAt: at(1) }) } };
+  assert.equal(chainAggregateFigures(running, [first, second], NOW).leadTimeMs, 30 * HOUR);
+  // A queued frontier has not started but the chain is still going: the span
+  // keeps ticking rather than stopping at the last recorded end.
+  const queued = { ...aggregate(3, 2), frontier: { ...aggregate(3, 2).frontier, latestRun: boardRun({ status: "QUEUED" }) } };
+  assert.equal(chainAggregateFigures(queued, [first, second], NOW).leadTimeMs, 30 * HOUR);
+  const settled = { ...aggregate(3, 2), frontier: { ...aggregate(3, 2).frontier, latestRun: boardRun({ startedAt: at(3), endedAt: at(2) }) } };
+  assert.equal(chainAggregateFigures(settled, [first, second], NOW).leadTimeMs, 28 * HOUR);
+  // The frontier and the active repair count even when their rows are off the page.
+  const repairing = { ...settled, activeRepair: { repairKind: "gate-fix", latestRun: boardRun({ status: "RUNNING", startedAt: at(1) }) } };
+  assert.equal(chainAggregateFigures(repairing, [], NOW).leadTimeMs, 3 * HOUR);
+});
+
+test("lead time is unknown, not zero, until a run has started or once nothing dates the end", () => {
+  assert.equal(chainAggregateFigures(aggregate(3, 2), [member()], NOW).leadTimeMs, null);
+  const queued = { ...aggregate(3, 2), frontier: { ...aggregate(3, 2).frontier, latestRun: boardRun({ status: "QUEUED" }) } };
+  assert.equal(chainAggregateFigures(queued, [member()], NOW).leadTimeMs, null);
+  // Started, no longer active, and no end recorded: the board cannot say how
+  // long the chain ran, so it does not.
+  const undated = member({ latestRun: boardRun({ status: "LOST", startedAt: at(2) }) });
+  assert.equal(chainAggregateFigures(aggregate(3, 2), [undated], NOW).leadTimeMs, null);
+});
+
+test("repair rounds count the visible repair rows, or the detached repair the aggregate alone can see", () => {
+  const repairs = [member({ id: "fix-1", repairOf: REPAIR }), member({ id: "fix-2", repairOf: REPAIR }), member()];
+  assert.equal(chainAggregateFigures(aggregate(3, 2), repairs, NOW).repairRounds, 2);
+  assert.equal(chainAggregateFigures(aggregate(3, 2), [member()], NOW).repairRounds, 0);
+  const detached = { ...aggregate(3, 2), activeRepair: { repairKind: "gate-fix", latestRun: boardRun({ status: "RUNNING", startedAt: at(1) }) } };
+  assert.equal(chainAggregateFigures(detached, [member()], NOW).repairRounds, 1);
+  // A visible repair row is the same round the aggregate names, not a second one.
+  assert.equal(chainAggregateFigures(detached, [member({ id: "fix-1", repairOf: REPAIR })], NOW).repairRounds, 1);
 });

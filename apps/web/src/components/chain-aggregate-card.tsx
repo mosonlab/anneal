@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 
-import { type ChainControlAction, chainControlAction, chainStepPosition } from "../lib/chain-aggregate";
-import { timeAgo, usageCostAmount } from "../lib/format";
+import { type ChainControlAction, chainAggregateFigures, chainControlAction, chainStepPosition } from "../lib/chain-aggregate";
+import { spanMs, timeAgo, usageCostAmount } from "../lib/format";
 import type { BoardTask, ChainAggregate, ChainAggregateState } from "../lib/types";
 import { navigate } from "../lib/router";
 import { BoardCardShell, CardPullRequest } from "./board-card-shell";
@@ -84,7 +84,10 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
     (count, member) => count + member.strandedSalvageBranches.length,
     0,
   );
-  const cost = usageCostAmount(aggregate.totalCost);
+  // Cost, lead time and repair rounds come from one derivation, so the footer
+  // and the figures row cannot read the chain two different ways.
+  const figures = chainAggregateFigures(aggregate, members);
+  const cost = usageCostAmount(figures.cost);
   const handlers: ChainAggregateActions = actions ?? {
     onActivate: () => undefined,
     onHold: () => undefined,
@@ -102,6 +105,19 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
             : t("tasks.aggregate.state.heldAfter", { n: hold.heldLayer })}
         </Pill>
       : null;
+  // A null lead time is unknown — no run has started — and says nothing rather
+  // than "0s". Zero repairs is the ordinary case, so the pill appears only
+  // when there is a round to report [A8].
+  const leadTime = figures.leadTimeMs === null
+    ? null
+    : <span data-chain-lead-time="" title={t("tasks.aggregate.leadTime.title")}>
+        {t("tasks.aggregate.leadTime", { duration: spanMs(figures.leadTimeMs) })}
+      </span>;
+  const repairRounds = figures.repairRounds === 0
+    ? null
+    : <span data-chain-repair-rounds="">
+        <Pill tone="amber">{t("tasks.aggregate.repairRounds", { n: figures.repairRounds })}</Pill>
+      </span>;
   const metaRows: ReactNode[] = [
       ...(strandedSalvageCount === 0 ? [] : [<span data-card-stranded-salvage="">
         <Pill tone="amber">{t("tasks.card.strandedSalvage", { n: strandedSalvageCount })}</Pill>
@@ -125,6 +141,12 @@ export const ChainAggregateCard = ({ aggregate, members = [], representativeTask
           <span>{activeRepair.repairKind}</span>
           <span aria-hidden="true"> · </span>
           <RunLine run={activeRepair.latestRun} elapsed="line" showModel />
+        </span>,
+      ]),
+      ...(leadTime === null && repairRounds === null ? [] : [
+        <span data-chain-figures="" className="contents">
+          {leadTime}
+          {repairRounds}
         </span>,
       ]),
       ...(controlAction?.kind === "activate" ? [
