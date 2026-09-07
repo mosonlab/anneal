@@ -325,8 +325,10 @@ export const en = {
   "errors.unreachable": "Cannot reach the control plane ({base}). Start {command} first.",
 
   "format.daysAgo": "{n}d ago",
+  "format.daysHours": "{d}d {h}h",
   "format.durationWithInboxWait": "{duration} wall-clock (includes Inbox wait)",
   "format.hoursAgo": "{n}h ago",
+  "format.hoursMinutes": "{h}h {m}m",
   "format.inHours": "in {n}h",
   "format.inMinutes": "in {n}m",
   "format.inUnderAMinute": "in under a minute",

@@ -322,8 +322,10 @@ export const zh = {
   "errors.unreachable": "无法连接控制面（{base}）。先启动 {command}。",
 
   "format.daysAgo": "{n} 天前",
+  "format.daysHours": "{d} 天 {h} 小时",
   "format.durationWithInboxWait": "{duration} 墙上时钟时间（包括收件箱等待）",
   "format.hoursAgo": "{n} 小时前",
+  "format.hoursMinutes": "{h} 小时 {m} 分",
   "format.inHours": "{n} 小时后",
   "format.inMinutes": "{n} 分钟后",
   "format.inUnderAMinute": "不到一分钟后",
