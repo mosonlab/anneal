@@ -71,6 +71,7 @@
     { "glob": "docs/adr/0001-merge-lease-hold-window.md", "purpose": "superseded decision to narrow the merge-lease hold window; its diagnosis is kept in operator records" },
     { "glob": "docs/adr/0002-coordinate-main-delivery-with-merge-trains.md", "purpose": "accepted fixed-width cumulative-prefix design for concurrent host delivery" },
     { "glob": "docs/adr/0003-acquire-merge-lease-in-readiness.md", "purpose": "accepted readiness-owned merge-lease boundary and retry semantics" },
+    { "glob": "docs/adr/0004-publish-chains-through-a-merge-train.md", "purpose": "accepted switch, lease window, settlement, and semantic verification trade-off for readiness merge trains" },
     { "glob": "docs/runbooks/add-a-project.md", "purpose": "operator procedure for adding a GitHub Repo and starting A1's pull-request workflow" },
     { "glob": "docs/repo-contract/merge-gate.sh", "purpose": "standalone repository merge-gate contract reference" },
     { "glob": "docs/runbooks/gate-worker.md", "purpose": "the offshore merge-gate worker and gate dispatcher runbook: slot model, red lines, deployment, troubleshooting" },
