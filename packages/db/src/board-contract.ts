@@ -360,6 +360,39 @@ export type RunTerminationMetrics = {
   signal: string | null;
 };
 
+/** One percentile pair over completed runs of the same template step, with the
+ *  number of runs that produced it. */
+export type RunBaselineMetric = {
+  sampleSize: number;
+  p50: number;
+  p90: number;
+};
+
+/** What one template step's runs usually cost and how long they usually take,
+ *  within one project. A null member means insufficient history — never 0, and
+ *  no caller may render it as one. Each metric carries its own sample size
+ *  because a run can report a duration without reporting a cost. */
+export type RunBaseline = {
+  /** Terminally successful runs of this step in this project, whatever they
+   *  reported. It is the population the two metrics draw their samples from. */
+  sampleSize: number;
+  /** Percentiles in USD over the runs whose session reported a cost. */
+  costUsd: RunBaselineMetric | null;
+  /** Percentiles in milliseconds over the runs whose session has both
+   *  `startedAt` and `endedAt`. */
+  durationMs: RunBaselineMetric | null;
+};
+
+/** One run measured against its step's baseline: the run's own value divided by
+ *  the baseline p50. Null whenever the baseline metric or the run's own value is
+ *  unknown. Above 1 is slower or dearer than usual. */
+export type RunVsBaseline = {
+  costRatio: number | null;
+  /** Null until the session has ended: an unfinished executing phase is not a
+   *  duration the completed runs in the baseline can be compared with. */
+  durationRatio: number | null;
+};
+
 export type RunMetrics = {
   phases: RunPhaseMetrics;
   tokens: RunTokenMetrics;
@@ -375,6 +408,10 @@ export type RunMetrics = {
    *  unknown or `modelActiveMs` is unknown or 0. */
   outputTokensPerSecond: number | null;
   termination: RunTerminationMetrics;
+  /** This run against the baseline of its task's template step. Both ratios are
+   *  null when the task has no template step, when its history is too short, or
+   *  when this run reported no value of its own. */
+  vsBaseline: RunVsBaseline;
 };
 
 /** A serialized Run as embedded by Task detail responses. */
@@ -571,6 +608,10 @@ export type BoardCard<DateTime = string> = {
   leaseLossRefunds: number;
   /** Carried once by one visible member of each Chain; null otherwise. */
   chainAggregate: ChainAggregate<DateTime> | null;
+  /** What this card's template step usually costs and how long it usually
+   *  takes, over the project's completed runs. Null on a task with no template
+   *  step and on a step with too little history. */
+  baseline: RunBaseline | null;
   /** How many times merge readiness returned this Step's chain to Regression
    *  because the base moved before authorization, and how many extra Run
    *  attempts those requeues granted. Both are zero on every Step that is not
@@ -746,6 +787,9 @@ type TaskBase<DateTime, DecimalValue> = {
 /** `GET /tasks` full-list projection, including list-only enrichment. */
 export type TaskList<DateTime = string, DecimalValue = string> = TaskBase<DateTime, DecimalValue> & {
   chainProgress: ChainProgress | null;
+  /** See `BoardCard.baseline`. The full list answers the whole page with the
+   *  same single grouped query the board uses. */
+  baseline: RunBaseline | null;
   recurringLastFiredAt: DateTime | null;
   recurringFireCount: number;
 };
@@ -759,6 +803,9 @@ export type TaskDetail<DateTime = string, DecimalValue = string> = TaskBase<Date
   mergeRecovery: MergeRecovery<DateTime> | null;
   /** See `BoardCard.budgetRemaining`. */
   budgetRemaining: boolean;
+  /** See `BoardCard.baseline`. Every run's `metrics.vsBaseline` is measured
+   *  against this same object, so the two can never disagree. */
+  baseline: RunBaseline | null;
   /** The prompt text an operator may rewrite, or null when this task has none.
    *  A template Step sends its brief — the fenced section `PATCH /tasks/:id`
    *  rewrites in place, leaving the platform-authored prompt and suffix alone —

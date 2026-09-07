@@ -48,6 +48,7 @@ const row = (overrides: Partial<BoardRow> = {}): BoardRow => ({
   chainId: null,
   chainIndex: null,
   chainLayer: null,
+  templateStepId: null,
   dispatchAfterTaskId: null,
   createdAt: new Date("2026-08-15T00:00:00.000Z"),
   updatedAt: new Date("2026-08-16T00:00:00.000Z"),
@@ -213,7 +214,7 @@ test("the board projection carries every field the board consumes and nothing el
   // Spelled out rather than derived: a field added to the projection is a
   // deliberate act with a payload cost, so it has to be added here too.
   assert.deepEqual(Object.keys(boardCard(row(), null, moveContext)).sort(), [
-    "approvalGate", "assigneeAgent", "assigneeType", "blockedOn", "budgetRemaining", "chainAggregate", "chainId", "chainIndex", "chainName", "chainProgress", "createdAt", "cron",
+    "approvalGate", "assigneeAgent", "assigneeType", "baseline", "blockedOn", "budgetRemaining", "chainAggregate", "chainId", "chainIndex", "chainName", "chainProgress", "createdAt", "cron",
     "displayName", "failureReason", "id", "latestRun", "leaseLossRefunds", "mergeOutcome", "moveTargets", "name", "readinessGrants", "readinessRequeues", "repairOf", "runAt", "scheduleKind", "source", "spendCapUsage", "status",
     "strandedSalvageBranches", "taskCost", "templateId", "timezone", "updatedAt",
   ]);
@@ -635,6 +636,7 @@ test("blockedOn is projected from the resolved predecessor without storing its s
     budgetRemaining: true,
     leaseLossRefunds: 0,
     chainAggregate: null,
+    baseline: null,
     readinessRequeues: 0,
     readinessGrants: 0,
   });

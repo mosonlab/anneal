@@ -1,0 +1,151 @@
+import { Prisma, type PrismaClient } from "@anneal/db";
+import type { RunBaseline, RunBaselineMetric, RunVsBaseline } from "@anneal/db/board-contract";
+
+/**
+ * What a template step usually costs and how long it usually takes.
+ *
+ * Chain tasks reference their TaskTemplateStep through `Task.templateStepId`,
+ * so every "Implementation" run of the same template shares a step id. That is
+ * the population an operator wants to compare a run against, scoped to one
+ * project: the same step in another project is another codebase and another
+ * agent roster.
+ *
+ * TERMINALLY SUCCESSFUL is `RunStatus.SUCCEEDED` and nothing else. FAILED,
+ * TIMED_OUT, CANCELLED and LOST are runs that stopped, and what a run that
+ * stopped cost or how long it took says nothing about what the step takes to
+ * complete: a cancelled run is cheap for the wrong reason. The live statuses
+ * (QUEUED, CLAIMED, PROVISIONING, RUNNING, WAITING_INBOX) have not finished, so
+ * their duration is not a duration yet.
+ *
+ * The percentiles are computed by PostgreSQL in one grouped statement over the
+ * whole page's steps, never by loading runs into JavaScript and never one query
+ * per task. `null` means insufficient history throughout; it is never a
+ * stand-in for zero.
+ */
+
+/** The value PostgreSQL stores for `RunStatus.SUCCEEDED`. Prisma maps the enum
+ *  names to their own spellings (`TIMED_OUT` is stored as `timed-out`), so the
+ *  stored value is bound literally instead of derived by lowercasing a name
+ *  that only coincidentally matches. */
+const SUCCEEDED_STATUS_VALUE = "succeeded";
+
+/** Below this many samples a metric is not a baseline, it is an anecdote. */
+export const BASELINE_MIN_SAMPLE = 5;
+
+/** One project-scoped template step. */
+export type BaselineKey = { projectId: string; templateStepId: string };
+
+/** The map key `readRunBaselines` returns, and the one callers look up with. */
+export const baselineKey = (key: BaselineKey): string =>
+  `${key.projectId}\u0000${key.templateStepId}`;
+
+/** One grouped row as PostgreSQL returns it. The percentile columns are
+ *  `double precision`, which arrives as a number, and are null when their
+ *  ordered set was empty. */
+type BaselineRow = {
+  projectId: string;
+  templateStepId: string;
+  sampleSize: number;
+  costSampleSize: number;
+  costP50: number | null;
+  costP90: number | null;
+  durationSampleSize: number;
+  durationP50: number | null;
+  durationP90: number | null;
+};
+
+const round = (value: number, decimals: number): number => {
+  const factor = 10 ** decimals;
+  return Math.round(value * factor) / factor;
+};
+
+/** A metric survives only with enough samples *and* both percentiles: an
+ *  aggregate over an empty ordered set is null, not 0. */
+const metric = (
+  sampleSize: number,
+  p50: number | null,
+  p90: number | null,
+  decimals: number,
+): RunBaselineMetric | null => (
+  sampleSize < BASELINE_MIN_SAMPLE || p50 === null || p90 === null
+    ? null
+    : { sampleSize, p50: round(p50, decimals), p90: round(p90, decimals) }
+);
+
+/** Cost is stored as `Decimal(12, 4)`; duration is whole milliseconds. */
+export const baselineFromRow = (row: BaselineRow): RunBaseline | null => {
+  const costUsd = metric(row.costSampleSize, row.costP50, row.costP90, 4);
+  const durationMs = metric(row.durationSampleSize, row.durationP50, row.durationP90, 0);
+  // Nothing left to compare against is not a baseline. Both metrics null also
+  // covers a step whose whole population is under the threshold.
+  return costUsd === null && durationMs === null
+    ? null
+    : { sampleSize: row.sampleSize, costUsd, durationMs };
+};
+
+/**
+ * Read the baselines for every project-scoped template step given, in one
+ * statement. A step with insufficient history is absent from the map rather
+ * than present with a null value, so a lookup miss and a short sample are the
+ * same answer to the caller: no baseline.
+ */
+export const readRunBaselines = async (
+  db: PrismaClient,
+  keys: readonly BaselineKey[],
+): Promise<Map<string, RunBaseline>> => {
+  const distinct = [...new Map(keys.map((key) => [baselineKey(key), key])).values()];
+  if (distinct.length === 0) return new Map();
+  const pairs = Prisma.join(distinct.map((key) => (
+    Prisma.sql`(${key.projectId}, ${key.templateStepId})`
+  )));
+  const rows = await db.$queryRaw<BaselineRow[]>(Prisma.sql`
+    SELECT
+      task."projectId" AS "projectId",
+      task."templateStepId" AS "templateStepId",
+      count(*)::int AS "sampleSize",
+      count(session."costUsd")::int AS "costSampleSize",
+      percentile_cont(0.5) WITHIN GROUP (
+        ORDER BY session."costUsd"::double precision) AS "costP50",
+      percentile_cont(0.9) WITHIN GROUP (
+        ORDER BY session."costUsd"::double precision) AS "costP90",
+      count(*) FILTER (
+        WHERE session."startedAt" IS NOT NULL AND session."endedAt" IS NOT NULL)::int
+        AS "durationSampleSize",
+      percentile_cont(0.5) WITHIN GROUP (
+        ORDER BY EXTRACT(EPOCH FROM (session."endedAt" - session."startedAt")) * 1000)
+        AS "durationP50",
+      percentile_cont(0.9) WITHIN GROUP (
+        ORDER BY EXTRACT(EPOCH FROM (session."endedAt" - session."startedAt")) * 1000)
+        AS "durationP90"
+    FROM "Run" run
+    JOIN "Task" task ON task."id" = run."taskId"
+    JOIN "Session" session ON session."runId" = run."id"
+    WHERE run."status" = ${SUCCEEDED_STATUS_VALUE}::"RunStatus"
+      AND (task."projectId", task."templateStepId") IN (${pairs})
+    GROUP BY task."projectId", task."templateStepId"
+  `);
+  const baselines = new Map<string, RunBaseline>();
+  for (const row of rows) {
+    const baseline = baselineFromRow(row);
+    if (baseline !== null) baselines.set(baselineKey(row), baseline);
+  }
+  return baselines;
+};
+
+/** A ratio exists only when both sides do, and a p50 of 0 has no ratio to
+ *  report — that is unknown, not infinity. */
+const ratio = (value: number | null, p50: number | null | undefined): number | null =>
+  value === null || p50 === null || p50 === undefined || p50 === 0 ? null : round(value / p50, 3);
+
+/**
+ * Measure one run against its step's baseline. The inputs are the raw values
+ * the diagnostics already expose — the session's own `costUsd` and the
+ * executing phase — so a ratio and the figures beside it cannot disagree.
+ */
+export const vsBaseline = (
+  baseline: RunBaseline | null,
+  run: { costUsd: number | null; durationMs: number | null },
+): RunVsBaseline => ({
+  costRatio: baseline === null ? null : ratio(run.costUsd, baseline.costUsd?.p50),
+  durationRatio: baseline === null ? null : ratio(run.durationMs, baseline.durationMs?.p50),
+});

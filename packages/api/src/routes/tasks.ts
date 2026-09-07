@@ -66,6 +66,7 @@ import {
   projectLatestAgentMessage,
   type LatestAgentMessageEvent,
 } from "../latest-agent-message.js";
+import { baselineKey, readRunBaselines } from "../run-baseline.js";
 import { runMetrics, TOOL_METRIC_EVENT_TYPES, type RunMetricsToolEvent } from "../run-metrics.js";
 import { lockDoneTasks, partitionArchivable } from "../task-archive.js";
 import { editableBrief } from "../task-brief.js";
@@ -369,6 +370,13 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
       const events = toolEventsBySession.get(event.sessionId);
       if (events) events.push(event); else toolEventsBySession.set(event.sessionId, [event]);
     }
+    // One statement for the task's step, or none at all for a standalone task:
+    // there is no population to compare a task without a template step against.
+    const stepKey = task.templateStepId === null
+      ? null
+      : { projectId: task.projectId, templateStepId: task.templateStepId };
+    const baselines = await readRunBaselines(db, stepKey === null ? [] : [stepKey]);
+    const baseline = stepKey === null ? null : baselines.get(baselineKey(stepKey)) ?? null;
     const admission = await readStepAdmission(db, task.id, { locked: false });
     if (!admission.task || !admission.verdict) {
       throw new Error(`Task ${task.id} disappeared while projecting operator move targets`);
@@ -403,6 +411,7 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         run,
         session: run.session,
         toolEvents: run.session === null ? [] : toolEventsBySession.get(run.session.id) ?? [],
+        baseline,
       }),
       mergeOutcome: runOwnsMergeOutcome(task.stepOutput, run.id, latestRunId) ? mergeOutcome : null,
       mergeRecovery: recoveryRow
@@ -420,6 +429,7 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
       mergeOutcome,
       mergeRecovery,
       budgetRemaining: admission.verdict.checklist.budgetRemaining,
+      baseline,
       editableBrief: editableBrief(task, templateStep),
       // Re-stated rather than spread: the row carries `priorOutputKinds` for
       // the brief read above, and the projection does not publish it.
