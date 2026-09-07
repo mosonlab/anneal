@@ -559,3 +559,25 @@ test("control-plane watchdog budgets the post-barrier target rebuild without cha
   assert.ok(deployBarrierTimeoutMsForRole("control-plane", serviceCount)
     >= runnerBudget + controlPlaneOnlyPhases + DEPLOY_STEP_TIMEOUT_MS.releaseArtifactBuild + 97_000);
 });
+
+test("watchdog target update preserves the deadline and persists the refreshed target", { timeout: 10_000 }, async () => {
+  const directory = mkdtempSync(join(tmpdir(), "anneal-watchdog-retarget-"));
+  const escalationPath = join(directory, "escalated.json");
+  let timedOut;
+  const expired = new Promise((resolve) => { timedOut = resolve; });
+  const watchdog = await createBarrierWatchdog({
+    timeoutMs: 500,
+    escalationPath,
+    escalationRecord: { outcome: "failure", reason: BARRIER_TIMEOUT_REASON, ...revisions },
+    onTimeout: timedOut,
+  });
+  try {
+    await watchdog.updateEscalationRecord({ outcome: "failure", reason: BARRIER_TIMEOUT_REASON,
+      from: revisions.from, to: "c".repeat(40) });
+    await expired;
+    assert.equal(JSON.parse(readFileSync(escalationPath, "utf8")).to, "c".repeat(40));
+  } finally {
+    await watchdog.release();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});

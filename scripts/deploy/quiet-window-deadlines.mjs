@@ -342,6 +342,34 @@ export const createBarrierWatchdog = async ({
   });
   await ready;
   return Object.freeze({
+    // Acknowledge the new record before artifact construction can block this
+    // process. The independent child's original deadline is never restarted.
+    updateEscalationRecord: (record) => new Promise((resolve, reject) => {
+      if (released || exited || timeoutReported) {
+        reject(new DeployFailure("deploy-barrier-watchdog-unavailable", "target-update-after-exit"));
+        return;
+      }
+      const cleanup = () => {
+        child.off("message", updated);
+        child.off("close", closed);
+      };
+      const updated = (message) => {
+        if (message?.type !== "record-updated") return;
+        cleanup();
+        resolve();
+      };
+      const closed = () => {
+        cleanup();
+        reject(new DeployFailure("deploy-barrier-watchdog-unavailable", "target-update-unacknowledged"));
+      };
+      child.on("message", updated);
+      child.once("close", closed);
+      child.send({ type: "update-record", record }, (error) => {
+        if (!error) return;
+        cleanup();
+        reject(new DeployFailure("deploy-barrier-watchdog-unavailable", "target-update-failed"));
+      });
+    }),
     release: async () => {
       if (released) return;
       released = true;

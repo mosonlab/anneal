@@ -3069,8 +3069,9 @@ exclusive half that protects the release once deployment starts. An already
 claimed Run is never interrupted. A refused claim creates no session, claims
 no Run, parks no Task, and consumes neither `maxSessionsPerTask` nor any
 transient budget, so a runner that keeps polling through the drain loses only
-the poll. The claim still records the runner's telemetry, so `GET /runners`
-reports it online throughout. A drain whose `expiresAt` has passed is treated
+the poll. Drain refusal precedes repository-grant handling, so a revoked Repo
+grant cannot cause a drained agent claim to park its Task. The claim still
+records the runner's telemetry, so `GET /runners` reports it online throughout. A drain whose `expiresAt` has passed is treated
 as absent and admits claims again.
 
 The machine-only `POST /runner/tasks/claim` request used by the merge executor

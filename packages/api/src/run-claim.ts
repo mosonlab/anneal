@@ -659,6 +659,14 @@ export const claimRun = async (
     // claim without one, `claimed` carries the run handed to the runner.
     const activateCandidate = async (candidate: (typeof candidates)[number]): Promise<CandidateDecision> => {
       if (!candidate.task || !candidate.repo) return SKIP;
+      const executionMode = executionModeFor(candidate.task.templateStep);
+      // Refuse agent work before any candidate mutation, including parking a
+      // Task whose Repo grant was revoked. An executor must pass over agent
+      // candidates to reach mechanical work while dispatch is draining.
+      if (drain) {
+        if (!claimantMayTake(executionMode, claimantClass, body.runnerId, executorRunnerIds)) return SKIP;
+        if (executionMode === "agent") return dispatchDrainingRefusal(drain);
+      }
       if (!candidate.agent.repoAccess.some((grant) => grant.repoId === candidate.repoId && grant.projectId === candidate.projectId)) {
         const reason = "repository-grant-missing: restore the agent Repo grant, then retry this run";
         const stranded = await tx.run.updateMany({
@@ -697,20 +705,12 @@ export const claimRun = async (
       // Run row for it, no model runner or merge executor may claim it; the
       // readiness worker consumes the TODO task row directly.
       if (isMergeReadinessStep(candidate.task.templateStep)) return SKIP;
-      const executionMode = executionModeFor(candidate.task.templateStep);
       // §D-P1 rule 3, symmetric and fail-closed: only the independently
       // authenticated merge-executor principal is offered an integrator run,
       // and it is offered nothing else. With `MERGE_EXECUTOR_RUNNER_IDS`
       // empty — the shipped default — or with `MERGE_EXECUTOR_TOKEN` unset or
       // aliased onto the runner token, no integrator run is claimable at all.
       if (!claimantMayTake(executionMode, claimantClass, body.runnerId, executorRunnerIds)) return SKIP;
-      // A dispatch drain applies only to work that would start an agent
-      // session. Mechanical merge execution is covered by the deploy barrier
-      // acquired when the deploy actually starts, so an allowlisted executor
-      // may claim it while the drain is in force. Keep this after the
-      // claimant check: an executor polling a mixed queue must skip ordinary
-      // agent candidates and continue until it can find its mechanical work.
-      if (drain && executionMode === "agent") return dispatchDrainingRefusal(drain);
       // Compatibility with the independently released merge executor is one
       // decision, and `mechanicalContractMismatch` is all of it: the
       // comparison, the refusal on the wire, this record and the alert. What

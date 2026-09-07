@@ -53,7 +53,9 @@ export class DeploymentAttempt {
       }
     }
     for (const [name, value] of Object.entries(facts)) {
-      if (name !== "resources") this.#facts.set(name, value);
+      if (name === "resources") continue;
+      if (value === undefined) this.#facts.delete(name);
+      else this.#facts.set(name, value);
     }
   }
 

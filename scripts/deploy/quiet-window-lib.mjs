@@ -55,7 +55,7 @@ const resourceReleaseFailureOf = (error) => {
   return deployFailure ?? failureOf(error);
 };
 
-const DEPLOY_MODE_ARGUMENTS = Object.freeze(["--dry-run", "--clear-escalation", "--prune-history"]);
+const DEPLOY_MODE_ARGUMENTS = Object.freeze(["--dry-run", "--clear-escalation", "--prune-history", "--now"]);
 
 /** The requested mode, read from argv exactly once per process. */
 export const parseDeployArguments = (args) => {
@@ -130,7 +130,7 @@ export const decideInvocation = async (startup, mode) => {
     }
     if (mode === "prune-history") return { mode, lock, retryEscalation: null };
     const admitTarget = async ({ targetCommit, retryEscalation, supersededEscalation }) => {
-      if (typeof startup.evaluateCadence !== "function") {
+      if (mode === "now" || typeof startup.evaluateCadence !== "function") {
         return {
           mode,
           targetCommit,
@@ -171,11 +171,13 @@ export const decideInvocation = async (startup, mode) => {
         return { mode, exitCode: 2 };
       }
       // The marker stays on disk as history; the new commit is a new question.
-      return await admitTarget({
+      return {
+        mode,
+        lock,
         targetCommit: superseded.targetCommit,
         retryEscalation: null,
         supersededEscalation: superseded.fact,
-      });
+      };
     }
     let targetCommit;
     try {
@@ -196,6 +198,19 @@ export const decideInvocation = async (startup, mode) => {
   }
 };
 
+export const recordDeploymentLedger = async (attempt, state, metadata = {}) => {
+  const ledger = attempt.fact("ledger");
+  if (!ledger) throw new TypeError("deployment-attempt-fact-missing:ledger");
+  try {
+    const record = attempt.ledgerMetadata(metadata);
+    if (state === "STARTED" && typeof ledger.start === "function") await ledger.start(record);
+    else if (typeof ledger.record === "function") await ledger.record(state, record);
+    else throw new TypeError("deployment-ledger-record-missing");
+  } catch (error) {
+    throw error instanceof DeploymentLedgerError ? error : new DeploymentLedgerError("record", error);
+  }
+};
+
 /** Execute the full deployment attempt through the host seam. Every phase
  * receives the attempt and establishes facts for the phases that follow. */
 export const executeUpgrade = async (host, attempt, deployRole = DEFAULT_DEPLOY_ROLE) => {
@@ -203,21 +218,7 @@ export const executeUpgrade = async (host, attempt, deployRole = DEFAULT_DEPLOY_
   let activationAttempted = false;
   let activationOutcomeProven = false;
   let upgradeStarted = false;
-  const ledgerError = (operation, error) => error instanceof DeploymentLedgerError
-    ? error
-    : new DeploymentLedgerError(operation, error);
-  const recordLedger = async (state, metadata = {}) => {
-    const ledger = attempt.fact("ledger");
-    if (!ledger) throw new TypeError("deployment-attempt-fact-missing:ledger");
-    try {
-      const record = attempt.ledgerMetadata(metadata);
-      if (state === "STARTED" && typeof ledger.start === "function") await ledger.start(record);
-      else if (typeof ledger.record === "function") await ledger.record(state, record);
-      else throw new TypeError("deployment-ledger-record-missing");
-    } catch (error) {
-      throw ledgerError("record", error);
-    }
-  };
+  const recordLedger = (state, metadata = {}) => recordDeploymentLedger(attempt, state, metadata);
   /** A retryable escalation is kept on disk until the whole attempt (or a
    * deliberate already-deployed no-op) succeeds. The production host owns the
    * concrete marker/notification implementation; keeping this hook optional

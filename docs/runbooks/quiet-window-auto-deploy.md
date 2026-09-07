@@ -79,9 +79,9 @@ deploy recorded in `.agentos-deploy/auto-deploy-state.json` as
 hours)**. Both host roles read the same non-negative whole-minute setting; a
 runner-only host retains its existing `/version` follow behavior. The cadence
 floor applies to control-plane automatic deploys, on Linux or macOS. For an
-on-demand invocation of the existing script, set
-`AUTO_DEPLOY_MIN_INTERVAL_MINUTES=0` in that command's environment to bypass
-coalescing; the quiet window and deploy barrier still apply.
+on-demand invocation of the existing script, pass `--now` to bypass
+coalescing; the quiet window and deploy barrier still apply. Manual deploys
+do not advance the automatic success timestamp.
 
 If the interval has elapsed, the tick enters the normal artifact, quiet-window,
 and activation path. A tick may deploy earlier when its first quiet-window
@@ -99,7 +99,9 @@ proceeds without either one. If blockers appear or the barrier is contended
 before that early window is secured, the tick coalesces instead of waiting.
 The success timestamp is written after verification, notification, and resource
 cleanup succeed, while the deploy process lock is still held. Failed attempts
-and coalesced ticks do not advance it.
+and coalesced ticks do not advance it. If recording the timestamp fails after
+a successful deploy, the job logs `cadence-marker-unrecorded` and retains its
+success verdict; the interval cannot be enforced from an unrecorded success.
 
 ## Runtime layout
 
@@ -830,7 +832,8 @@ the serving state. This fact also protects runner hosts without a migration.
 ### Supersession by a newer commit
 
 When a commit-scoped marker is latched and `origin/main` has moved to a
-different commit, the tick reads the new target and proceeds with it, logging
+different commit, the tick reads the new target and proceeds with it regardless
+of the cadence floor, logging
 
 ```text
 SUPERSEDE escalation reason=<reason> failed-commit=<oid> target=<oid>

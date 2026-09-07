@@ -28,6 +28,7 @@ import {
   executeUpgrade,
   failureOf,
   parseDeployArguments,
+  recordDeploymentLedger,
   shouldPersistFailure,
 } from "./quiet-window-lib.mjs";
 import { resolveServiceInventory, serviceWrapperPath } from "./service-inventory.mjs";
@@ -1200,19 +1201,18 @@ export const createDeployHost = ({
       }),
     };
   };
-  const prepareRefreshedArtifact = async (attempt) => {
-    const { preparedRelease } = await prepareReleaseArtifact(attempt);
-    const verifiedRelease = verifyReleaseArtifact({
+  const verifyArtifact = async (attempt) => ({
+    verifiedRelease: verifyReleaseArtifact({
       deployRoot: attempt.deployRoot,
       revision: attempt.targetCommit,
-      releaseName: preparedRelease.releaseName,
-    });
-    attempt.establish({ preparedRelease, verifiedRelease });
-    const ledger = attempt.fact("ledger");
-    if (ledger) {
-      await ledger.record("ARTIFACT_PREPARED", attempt.ledgerMetadata());
-      await ledger.record("ARTIFACT_VERIFIED", attempt.ledgerMetadata());
-    }
+      releaseName: attempt.requireFact("preparedRelease").releaseName,
+    }),
+  });
+  const prepareRefreshedArtifact = async (attempt) => {
+    attempt.establish(await prepareReleaseArtifact(attempt));
+    await recordDeploymentLedger(attempt, "ARTIFACT_PREPARED");
+    attempt.establish(await verifyArtifact(attempt));
+    await recordDeploymentLedger(attempt, "ARTIFACT_VERIFIED");
   };
   return createProductionHost({
     selfClearEscalation: async (attempt) => {
@@ -1270,16 +1270,7 @@ export const createDeployHost = ({
       }),
     }),
     prepareReleaseArtifact,
-    verifyArtifact: async (attempt) => {
-      const preparedRelease = attempt.requireFact("preparedRelease");
-      return {
-        verifiedRelease: verifyReleaseArtifact({
-          deployRoot: attempt.deployRoot,
-          revision: attempt.targetCommit,
-          releaseName: preparedRelease.releaseName,
-        }),
-      };
-    },
+    verifyArtifact,
     waitForQuiet: async (attempt) => {
       const revisions = attempt.requireFact("revisions");
       const barrierTimeoutMs = deployBarrierTimeoutMsForRole(deployRole, serviceLabels.length);
@@ -1300,8 +1291,8 @@ export const createDeployHost = ({
               reason: dispatchDrainReason({
                 host: deployHostname,
                 role: deployRole,
-                from: revisions.from,
-                to: revisions.to,
+                from: attempt.requireFact("revisions").from,
+                to: attempt.targetCommit,
               }),
               requestedBy: `auto-deploy:${attempt.transactionId}`,
               expiresAt: new Date(Date.now() + drainDeadlineMs),
@@ -1370,6 +1361,11 @@ export const createDeployHost = ({
           const previousTarget = attempt.targetCommit;
           attempt.retarget(refreshedTarget);
           attempt.establish({ revisions: { ...revisions, to: refreshedTarget }, preparedRelease: undefined, verifiedRelease: undefined });
+          await watchdog.updateEscalationRecord({
+            outcome: "failure", reason: BARRIER_TIMEOUT_REASON,
+            detail: `budget-${barrierTimeoutMs}ms`,
+            ...attempt.requireFact("revisions"),
+          });
           logImpl(`target-advanced from=${previousTarget} to=${refreshedTarget}`);
           await prepareRefreshedArtifact(attempt);
         }
@@ -1642,14 +1638,18 @@ export const createDeployHost = ({
 // process was a dry run, which must never leave an escalation behind.
 let deployMode = null;
 
-const main = async () => {
-  deployMode = parseDeployArguments(process.argv.slice(2));
-  const startup = createDeployStartup();
+export const main = async ({
+  args = process.argv.slice(2),
+  startup = createDeployStartup(),
+  createHost = createDeployHost,
+  prune = pruneHistory,
+} = {}) => {
+  deployMode = parseDeployArguments(args);
   const invocation = await decideInvocation(startup, deployMode);
   if (invocation.exitCode !== undefined) return invocation.exitCode;
   if (invocation.mode === "prune-history") {
     try {
-      pruneHistory();
+      prune();
     } finally {
       await invocation.lock.release();
     }
@@ -1666,7 +1666,7 @@ const main = async () => {
       retryEscalation: invocation.retryEscalation,
       supersededEscalation: invocation.supersededEscalation ?? null,
     });
-    const host = createDeployHost({
+    const host = createHost({
       deployRole,
       // Runner-role target resolution remains its existing API/source-remote
       // path. Only a control-plane attempt rereads origin/main under the held
@@ -1684,10 +1684,14 @@ const main = async () => {
       // The marker is deliberately after executeUpgrade, whose success includes
       // notification and resource release. A ledger SUCCEEDED event alone is
       // not enough to earn the next automatic interval.
-      if (deployRole === "control-plane") {
-        await startup.recordAutomaticSuccess({ targetCommit: attempt.targetCommit });
+      if (deployRole === "control-plane" && invocation.mode !== "now") {
+        try {
+          await startup.recordAutomaticSuccess({ targetCommit: attempt.targetCommit });
+        } catch (error) {
+          startup.log(`STOP ${failureOf(error).reason}; cadence-marker-unrecorded`);
+        }
       }
-      pruneHistory();
+      prune();
     }
     return result.ok ? 0 : 1;
   } finally {

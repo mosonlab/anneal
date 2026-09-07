@@ -67,6 +67,7 @@ const makeDatabase = (
   barrierGranted = true,
   onCandidateRead: () => void = () => undefined,
   drain: DrainRow | null = null,
+  onMutation: () => void = () => undefined,
 ): PrismaClient => {
   const tx = {
     dispatchDrain: drainReader(drain),
@@ -89,7 +90,7 @@ const makeDatabase = (
     run: {
       findMany: async () => { onCandidateRead(); return candidates; },
       findFirst: async () => null,
-      updateMany: async () => ({ count: 1 }),
+      updateMany: async () => { onMutation(); return { count: 1 }; },
       findUniqueOrThrow: async ({ where }: { where: { id: string } }) => ({ id: where.id, status: RunStatus.CLAIMED }),
     },
     runnerBackendState: { findUnique: async () => null },
@@ -119,7 +120,7 @@ const makeDatabase = (
           status: task.status ?? "TODO",
         };
       },
-      update: async () => ({}),
+      update: async () => { onMutation(); return {}; },
     },
     taskActivity: { findMany: async () => [], findFirst: async () => null, create: async () => ({}) },
     mergeLeaseEvent: { findMany: async () => [] },
@@ -242,58 +243,61 @@ test("a stale heartbeat still records that the daemon is alive", async () => {
   });
 });
 
-test("an unexpired dispatch drain refuses every claim and explains the idle fleet", async () => {
-  await withTokens(async () => {
-    let candidateRead = false;
-    const drain = {
-      reason: "quiet-window-wait-exceeded host=vm-control-plane role=control-plane from=aaaaaaaaaaaa to=bbbbbbbbbbbb",
-      startedAt: new Date("2026-09-07T01:00:00.000Z"),
-      expiresAt: new Date(Date.now() + 60 * 60_000),
-    };
-    const candidate = {
-      id: "drained-run",
-      projectId: "project-1",
-      taskId: "drained-task",
-      goalId: null,
-      agentId: "agent-1",
-      repoId: "repo-1",
-      runner: RunnerKind.CLAUDE,
-      runNumber: 1,
-      leaseGeneration: 0,
-      maxDurationMin: 120,
-      session: null,
-      task: { id: "drained-task", chainId: null, chainIndex: null, templateStep: null },
-      repo: { id: "repo-1" },
-      agent: {
-        id: "agent-1",
-        repoAccess: [{ repoId: "repo-1", projectId: "project-1" }],
-        environment: { secrets: [] },
-        secretGrants: [],
-      },
-    };
-    const app = createApp(makeDatabase([candidate], true, () => { candidateRead = true; }, drain));
+for (const hasGrant of [true, false]) {
+  test(`an unexpired dispatch drain refuses without mutations (Repo grant: ${hasGrant})`, async () => {
+    await withTokens(async () => {
+      let candidateRead = false;
+      const drain = {
+        reason: "quiet-window-wait-exceeded host=vm-control-plane role=control-plane from=aaaaaaaaaaaa to=bbbbbbbbbbbb",
+        startedAt: new Date("2026-09-07T01:00:00.000Z"),
+        expiresAt: new Date(Date.now() + 60 * 60_000),
+      };
+      const candidate = {
+        id: "drained-run",
+        projectId: "project-1",
+        taskId: "drained-task",
+        goalId: null,
+        agentId: "agent-1",
+        repoId: "repo-1",
+        runner: RunnerKind.CLAUDE,
+        runNumber: 1,
+        leaseGeneration: 0,
+        maxDurationMin: 120,
+        session: null,
+        task: { id: "drained-task", chainId: null, chainIndex: null, templateStep: null },
+        repo: { id: "repo-1" },
+        agent: {
+          id: "agent-1",
+          repoAccess: hasGrant ? [{ repoId: "repo-1", projectId: "project-1" }] : [],
+          environment: { secrets: [] },
+          secretGrants: [],
+        },
+      };
+      const app = createApp(makeDatabase([candidate], true, () => { candidateRead = true; }, drain, () => assert.fail("drained claim must not mutate a Run or Task")));
 
-    const refused = await runnerRequest(app, {});
-    assert.equal(refused.status, 409);
-    assert.deepEqual(await refused.json(), {
-      error: `Dispatch is draining for a pending deploy (${drain.reason})`,
-      reason: "dispatch-draining",
-      code: "dispatch-draining",
-      expiresAt: drain.expiresAt.toISOString(),
-    });
-    assert.equal(candidateRead, true, "a drained claim checks the candidate step before refusing agent work");
+      const refused = await runnerRequest(app, {});
+      assert.equal(refused.status, 409);
+      assert.deepEqual(await refused.json(), {
+        error: `Dispatch is draining for a pending deploy (${drain.reason})`,
+        reason: "dispatch-draining",
+        code: "dispatch-draining",
+        expiresAt: drain.expiresAt.toISOString(),
+      });
+      assert.equal(candidateRead, true, "a drained claim checks the candidate step before refusing agent work");
 
-    const status = await app.request("/runners", { headers: { Authorization: "Bearer runners-test-operator" } });
-    const body = await status.json() as { daemons: Array<{ online: boolean }>; dispatchDrain: unknown };
-    // The refused runner is still online: it heartbeats through the drain.
-    assert.deepEqual(body.daemons.map(({ online }) => online), [true]);
-    assert.deepEqual(body.dispatchDrain, {
-      reason: drain.reason,
-      startedAt: drain.startedAt.toISOString(),
-      expiresAt: drain.expiresAt.toISOString(),
+      const status = await app.request("/runners", { headers: { Authorization: "Bearer runners-test-operator" } });
+      const body = await status.json() as { daemons: Array<{ online: boolean }>; dispatchDrain: unknown };
+      // The refused runner is still online: it heartbeats through the drain.
+      assert.deepEqual(body.daemons.map(({ online }) => online), [true]);
+      assert.deepEqual(body.dispatchDrain, {
+        reason: drain.reason,
+        startedAt: drain.startedAt.toISOString(),
+        expiresAt: drain.expiresAt.toISOString(),
+      });
     });
   });
-});
+
+}
 
 test("an expired dispatch drain is absent to the claim and to GET /runners", async () => {
   await withTokens(async () => {

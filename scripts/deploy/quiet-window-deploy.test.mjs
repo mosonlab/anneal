@@ -1219,7 +1219,12 @@ test("runner quiet-window SQL admits only exact local runner ids", () => {
   assert.equal(defaults.sql.includes('AND "runnerId" IN'), false);
   assert.equal(defaults.sql.includes('"status"::text AS "status", "runnerId" FROM "Run"'), true);
   const scoped = blockingRunsStatement(undefined, ["mac-runner-1", "mac-runner-2"]);
-  assert.equal(scoped.sql, 'SELECT "id", "status"::text AS "status", "runnerId" FROM "Run" WHERE "status"::text IN ($1,$2,$3) AND "runnerId" IN ($4,$5) ORDER BY "id"');
+  assert.ok(scoped.sql.includes('AND "runnerId" IN ($4,$5)'));
+  for (const statement of [defaults, scoped]) {
+    assert.ok(statement.sql.includes('FROM "Task" AS task JOIN "TaskTemplateStep" AS step ON step."id" = task."templateStepId"'));
+    assert.ok(statement.sql.includes(`WHERE task."id" = "Run"."taskId" AND step."outputKind" IN ('merge-result','merge-authorization')`));
+    assert.ok(statement.sql.includes('AND NOT EXISTS'));
+  }
   assert.deepEqual(scoped.parameters, ["claimed", "provisioning", "running", "mac-runner-1", "mac-runner-2"]);
 });
 
@@ -3198,6 +3203,7 @@ const drainFixture = ({
   allowWait = () => true,
   insert = null,
   remove = null,
+  readBlockers = null,
 } = {}) => {
   const writes = { inserted: [], removed: [] };
   const blocking = [{ id: "run-1", status: "running", runnerId: "mac-runner-1" }];
@@ -3223,6 +3229,7 @@ const drainFixture = ({
       // The interruption reaches the wait exactly where SIGTERM and the
       // barrier watchdog do: the next blocking-runs read.
       if (quietAfterPolls === "interrupted" && polls > 1) throw new DeployFailure("deploy-interrupted", "SIGTERM");
+      if (readBlockers) return readBlockers({ polls, writes });
       return quietAfterPolls === "interrupted" || polls < quietAfterPolls ? blocking : [];
     },
     acquireBarrier: async () => ({ release: async () => undefined, verify: async () => true }),
@@ -3390,7 +3397,6 @@ test("a wait longer than the drain deadline extends its row instead of opening a
   assert.equal(renewals, 2);
 });
 
-
 test("capped source read failure waits under the lock, retries, and backs off again", async (t) => {
   let time = Date.parse("2026-09-07T12:00:00.000Z");
   const marker = escalationFixture(t, {
@@ -3500,65 +3506,96 @@ test("an early quiet tick coalesces if blockers race or the barrier is contended
   }
 });
 
-test("main advancing at the barrier builds and deploys the refreshed target", async (t) => {
-  withDeployBinaries(t);
-  const deployRoot = mkdtempSync(join(tmpdir(), "anneal-target-refresh-"));
-  t.after(() => removeTree(deployRoot));
-  const advanced = "c".repeat(40);
-  let remote = revisions.to;
-  let watchdogHeld = false;
-  let barrierHeld = false;
-  const builds = [];
-  const lines = [];
-  const production = createDeployHost({
-    environment: controlPlaneEnvironment(),
-    serviceControl: {},
-    blockingRunsAdapter: async () => [],
-    acquireBarrier: async () => {
-      remote = advanced;
-      barrierHeld = true;
-      return { release: async () => { barrierHeld = false; }, verify: async () => barrierHeld };
-    },
-    createWatchdog: async () => {
-      watchdogHeld = true;
-      return { release: async () => { watchdogHeld = false; } };
-    },
-    log: (line) => lines.push(line),
-    readTargetRevision: async () => {
-      assert.ok(barrierHeld && watchdogHeld, "remote read is protected by barrier and watchdog");
-      return remote;
-    },
-    runCommand: async (_program, args) => {
-      const target = args.at(-1);
-      builds.push(target);
-      if (target === advanced) assert.ok(barrierHeld && watchdogHeld);
-      const source = join(deployRoot, `source-${target}`);
-      minimalBuildTree(source, target);
-      const artifact = assembleReleaseDirectory({ stageRoot: source, deployRoot, revision: target,
-        artifactPaths: COMPLETE_ARTIFACT_PATHS, optionalArtifactPaths: [] });
-      return { code: 0, stdout: `RELEASE-ARTIFACT ${JSON.stringify({ releaseName: artifact.releaseName })}\n`, stderr: "" };
-    },
+for (const refreshOutcome of ["success", "barrier-timeout", "ledger-failure"]) {
+  test(`main advancing at the barrier: ${refreshOutcome}`, async (t) => {
+    withDeployBinaries(t);
+    const deployRoot = mkdtempSync(join(tmpdir(), "anneal-target-refresh-"));
+    t.after(() => removeTree(deployRoot));
+    const advanced = "c".repeat(40);
+    let remote = revisions.to;
+    let watchdogHeld = false;
+    let barrierHeld = false;
+    const builds = [];
+    const lines = [];
+    let watchdogRecord;
+    const production = createDeployHost({
+      environment: controlPlaneEnvironment(),
+      serviceControl: {},
+      blockingRunsAdapter: async () => [],
+      acquireBarrier: async () => {
+        remote = advanced;
+        barrierHeld = true;
+        return { release: async () => { barrierHeld = false; }, verify: async () => barrierHeld };
+      },
+      createWatchdog: async () => {
+        watchdogHeld = true;
+        return { updateEscalationRecord: async (record) => { watchdogRecord = record; assert.equal(record.to, advanced); }, release: async () => { watchdogHeld = false; } };
+      },
+      log: (line) => lines.push(line),
+      readTargetRevision: async () => {
+        assert.ok(barrierHeld && watchdogHeld, "remote read is protected by barrier and watchdog");
+        return remote;
+      },
+      runCommand: async (_program, args) => {
+        const target = args.at(-1);
+        builds.push(target);
+        if (target === advanced) {
+          assert.ok(barrierHeld && watchdogHeld);
+          if (refreshOutcome === "barrier-timeout") {
+            assert.equal(watchdogRecord.to, advanced);
+            throw new DeployFailure("deploy-barrier-timeout", "fixture-timeout");
+          }
+        }
+        const source = join(deployRoot, `source-${target}`);
+        minimalBuildTree(source, target);
+        const artifact = assembleReleaseDirectory({ stageRoot: source, deployRoot, revision: target,
+          artifactPaths: COMPLETE_ARTIFACT_PATHS, optionalArtifactPaths: [] });
+        return { code: 0, stdout: `RELEASE-ARTIFACT ${JSON.stringify({ releaseName: artifact.releaseName })}\n`, stderr: "" };
+      },
+    });
+    const run = fixture();
+    const attempt = openDeploymentAttempt({ deployRoot, targetCommit: remote, transactionId: "target-refresh" });
+    for (const method of ["prepareReleaseArtifact", "verifyArtifact", "waitForQuiet"]) run.host[method] = production[method];
+    run.host.prepareWorkspace = async () => ({ operationWorkspace: "/fixture/operation" });
+    let published;
+    run.host.publishBuild = async (current) => {
+      published = current.requireFact("verifiedRelease").revision;
+      return { publication: { rollback: async () => {} } };
+    };
+    run.host.restartServices = async () => {};
+    if (refreshOutcome === "ledger-failure") {
+      const original = run.host.startDeploymentLedger;
+      run.host.startDeploymentLedger = async (current) => {
+        const facts = await original(current);
+        const record = facts.ledger.record;
+        facts.ledger.record = (state, metadata) => {
+          if (state === "ARTIFACT_PREPARED" && current.targetCommit === advanced) throw new Error("disk-full");
+          return record(state, metadata);
+        };
+        return facts;
+      };
+    }
+    const result = await executeUpgrade(run.host, attempt);
+    if (refreshOutcome !== "success") {
+      assert.equal(result.ok, false);
+      assert.equal(result.failure.reason, refreshOutcome === "ledger-failure" ? "deployment-ledger-write-failed" : "deploy-barrier-timeout");
+      assert.equal(run.state.escalated.to, advanced);
+      assert.equal(published, undefined);
+      assert.equal(barrierHeld, false);
+      assert.equal(watchdogHeld, false);
+      return;
+    }
+    assert.equal(result.ok, true, JSON.stringify(result));
+    assert.deepEqual(builds, [revisions.to, advanced]);
+    assert.equal(published, advanced);
+    assert.equal(attempt.targetCommit, advanced);
+    assert.equal(run.records.at(-1).metadata.targetCommit, advanced);
+    assert.ok(lines.some((line) => line.includes(`target-advanced from=${revisions.to} to=${advanced}`)));
+    assert.equal(barrierHeld, false);
+    assert.equal(watchdogHeld, false);
   });
-  const run = fixture();
-  const attempt = openDeploymentAttempt({ deployRoot, targetCommit: remote, transactionId: "target-refresh" });
-  for (const method of ["prepareReleaseArtifact", "verifyArtifact", "waitForQuiet"]) run.host[method] = production[method];
-  run.host.prepareWorkspace = async () => ({ operationWorkspace: "/fixture/operation" });
-  let published;
-  run.host.publishBuild = async (current) => {
-    published = current.requireFact("verifiedRelease").revision;
-    return { publication: { rollback: async () => {} } };
-  };
-  run.host.restartServices = async () => {};
-  const result = await executeUpgrade(run.host, attempt);
-  assert.equal(result.ok, true, JSON.stringify(result));
-  assert.deepEqual(builds, [revisions.to, advanced]);
-  assert.equal(published, advanced);
-  assert.equal(attempt.targetCommit, advanced);
-  assert.equal(run.records.at(-1).metadata.targetCommit, advanced);
-  assert.ok(lines.some((line) => line.includes(`target-advanced from=${revisions.to} to=${advanced}`)));
-  assert.equal(barrierHeld, false);
-  assert.equal(watchdogHeld, false);
-});
+
+}
 
 test("wait exceeded sends informational Chinese text rather than a deploy failure", async () => {
   const run = fixture();
@@ -3635,4 +3672,71 @@ test("a zero interval admits an on-demand invocation of the existing deploy scri
   });
   assert.equal(decision.coalesced, undefined);
   assert.equal(decision.allowWait, true);
+});
+
+test("manual --now bypasses a coalescing automatic interval", async () => {
+  assert.equal(parseDeployArguments(["--now"]), "now");
+  const { automaticCadenceForTick } = await import("./quiet-window-deploy.mjs");
+  const cadence = await automaticCadenceForTick({
+    targetCommit: revisions.to, readDeployed: () => revisions.from,
+    readBlockingRuns: async () => [{ status: "running" }], environment: {},
+    now: () => new Date("2026-09-07T12:00:00Z"),
+    readLastSuccessful: () => new Date("2026-09-07T11:00:00Z"),
+  });
+  assert.equal(cadence.coalesced, true);
+  let evaluations = 0;
+  const state = startupFixture({ evaluateCadence: async () => { evaluations += 1; return cadence; } });
+  const invocation = await decideInvocation(state.startup, "now");
+  assert.equal(evaluations, 0);
+  assert.equal(invocation.targetCommit, revisions.to);
+  assert.equal(invocation.exitCode, undefined);
+  await invocation.lock.release();
+});
+
+test("superseding a latched escalation bypasses coalescing", async () => {
+  const state = startupFixture({
+    checkEscalation: async () => ({ active: true, supersedable: { failedCommit: revisions.from, reason: "fixture-failure" } }),
+    evaluateCadence: async () => assert.fail("recovery must not coalesce"),
+  });
+  const invocation = await decideInvocation(state.startup, "upgrade");
+  assert.equal(invocation.targetCommit, revisions.to);
+  assert.equal(invocation.supersededEscalation.failedCommit, revisions.from);
+  await invocation.lock.release();
+});
+
+test("invalidating artifact facts restores the missing-fact guard", () => {
+  const { attempt } = fixture();
+  attempt.establish({ preparedRelease: {}, verifiedRelease: {} });
+  attempt.establish({ preparedRelease: undefined, verifiedRelease: undefined });
+  for (const name of ["preparedRelease", "verifiedRelease"]) {
+    assert.throws(() => attempt.requireFact(name), new RegExp(`deployment-attempt-fact-missing:${name}`));
+  }
+});
+
+test("successful deploy stays exit zero when cadence bookkeeping fails", async () => {
+  const { main } = await import("./quiet-window-deploy.mjs");
+  const run = fixture();
+  const state = startupFixture({ recordAutomaticSuccess: async () => { throw new DeployFailure("automatic-deploy-state-write-failed"); } });
+  const exitCode = await main({ args: [], startup: state.startup, createHost: () => run.host, prune: () => {} });
+  assert.equal(exitCode, 0);
+  assert.equal(run.calls.some((call) => call.startsWith("escalate")), false);
+  assert.ok(state.logs.some((line) => line.includes("cadence-marker-unrecorded")));
+});
+
+test("a drain reaches the barrier while a mechanical merge remains running", async () => {
+  const mechanical = { id: "merge-run", status: "running", runnerId: "merge-host" };
+  const agent = { id: "agent-run", status: "running", runnerId: "agent-host" };
+  // The query contract is covered by the SQL assertion and dispatch-drain
+  // dbtest. Its result excludes the mechanical row throughout this wait.
+  const run = deployWithDrain({ readBlockers: ({ polls, writes }) => {
+    assert.equal(mechanical.status, "running");
+    if (polls > 0) assert.equal(writes.inserted.length, 1);
+    return polls === 0 ? [agent] : [];
+  } });
+  const result = await executeUpgrade(run.host, run.attempt);
+  assert.equal(result.ok, true);
+  assert.equal(run.writes.inserted.length, 1);
+  assert.equal(run.writes.removed.length, 1);
+  assert.equal(run.state.serving, "candidate");
+  assert.equal(mechanical.status, "running");
 });
