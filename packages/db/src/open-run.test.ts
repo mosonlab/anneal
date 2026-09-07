@@ -1837,10 +1837,9 @@ test("a held chain outranks the spend cap, so a hold never parks a task in REVIE
   assert.equal(taskUpdates.length, 0);
 });
 
-test("a no-result repair retry uses its recorded start despite a salvage publication", async () => {
+test("a no-result repair retry uses its repair card ref despite a salvage publication", async () => {
   const repo = { id: "repo-1", defaultBranch: "main" };
   const shared = "feat/shared";
-  const startHead = "a".repeat(40);
   const salvage = "wip/partial-repair";
   const prior = priorRun({ repoId: repo.id, runNumber: 1, maxRunsPerTask: 2, budgetGrants: 0,
     leaseLossRefunds: 0, targetBranch: shared, branch: shared, pushedBranch: salvage });
@@ -1852,11 +1851,11 @@ test("a no-result repair retry uses its recorded start despite a salvage publica
   const opened = await openRun(tx, task.id, {
     kind: "retry-after-completion", readyAt: now, sourceRunId: prior.id,
     sourceMaxRunsPerTask: 2, sourceBudgetGrants: 0, budgetGrant: 0,
-    repairStartHeadSha: startHead,
+    retryFailedRepair: true,
   });
   assert.equal(opened.ok, true);
   assert.equal(creates[0]?.branch, shared);
-  assert.equal(creates[0]?.targetBranch, startHead);
+  assert.equal(creates[0]?.targetBranch, shared);
   assert.equal(creates[0]?.runNumber, 2);
   assert.equal(creates[0]?.maxRunsPerTask, 2);
   assert.equal(creates[0]?.budgetGrants, 0);

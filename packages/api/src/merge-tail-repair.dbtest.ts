@@ -1533,6 +1533,9 @@ test("a failed resolver Run without a result automatically uses its remaining se
   const markersBefore = await readMarkerHistory(db, seeded.regression.id);
   // A partial salvage publication must not become the retry's starting tree.
   await db.run.update({ where: { id: run.id }, data: { pushedBranch: "wip/failed-repair", headSha: "f".repeat(40) } });
+  await db.taskActivity.createMany({ data: Array.from({ length: 25 }, (_, index) => ({
+    taskId: repair.id, actorType: "agent", body: `Verification progress ${index}`,
+  })) });
   await failRepairRunWithoutResult(seeded, repair, run);
   const runs = await db.run.findMany({ where: { taskId: repair.id }, orderBy: { runNumber: "asc" } });
   assert.equal(runs.length, 2);
@@ -1544,7 +1547,7 @@ test("a failed resolver Run without a result automatically uses its remaining se
   assert.equal(runs[1]!.budgetGrants, 0);
   assert.equal(runs[1]!.leaseLossRefunds, 0);
   assert.equal(runs[1]!.branch, run.branch);
-  assert.equal(runs[1]!.targetBranch, HEAD);
+  assert.equal(runs[1]!.targetBranch, BRANCH);
   const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
   assert.equal(regression.status, before.status);
   assert.equal(regression.failureReason, before.failureReason);

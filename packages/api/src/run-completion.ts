@@ -36,6 +36,7 @@ import {
   PushStatus,
   readLatestMarker,
   readMarkers,
+  readMarkerHistory,
   recordIntegratorStop,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
   runBudgetCeiling,
@@ -815,10 +816,11 @@ export const completeRun = async (
     // A task-failed repair with no current-Run result spends its next ordinary
     // session before the tail stops. Use the immutable Run ceiling, just like
     // other completion retries; this grants neither a refund nor a new repair.
-    const failedRepairMarker = !succeeded && failureClass === FailureClass.TASK_FAILED
-      && run.runNumber < budgetCeiling
-      ? latestMarker(tailMarkers, "repairAttempt")
-      : null;
+    const failedRepairHistory = !succeeded && failureClass === FailureClass.TASK_FAILED
+      && run.taskId && run.runNumber < budgetCeiling
+      ? await readMarkerHistory(tx, run.taskId)
+      : [];
+    const failedRepairMarker = latestMarker(failedRepairHistory, "repairAttempt");
     const failedRepairOutput = failedRepairMarker?.regressionTaskId && run.taskId
       ? await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId }, select: { runId: true } })
       : null;
@@ -826,7 +828,7 @@ export const completeRun = async (
       && failedRepairMarker.headSha
       && ["refresh-conflict", "review-fix", "gate-fix"].includes(failedRepairMarker.repairKind ?? "")
       && failedRepairOutput?.runId !== run.id
-      && !tailMarkers.some((marker) => marker.kind === "repairResult" && marker.raw.runId === run.id));
+      && !failedRepairHistory.some((marker) => marker.kind === "repairResult" && marker.raw.runId === run.id));
     const succeededMarkers = succeeded ? tailMarkers : [];
     const mergeTailRequeueContext = documentationStepSucceeded && run.task
       ? await mergeTailRequeueContextForRun(tx, { taskId: run.task.id, runId: run.id })
@@ -1056,7 +1058,7 @@ export const completeRun = async (
         sourceMaxRunsPerTask: run.maxRunsPerTask,
         sourceBudgetGrants: run.budgetGrants,
         budgetGrant: refunded,
-        ...(retryFailedRepair ? { repairStartHeadSha: failedRepairMarker!.headSha! } : {}),
+        ...(retryFailedRepair ? { retryFailedRepair: true } : {}),
         readyAt: retryAt ?? now,
       });
       if (opened.ok) {

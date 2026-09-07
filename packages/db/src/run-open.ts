@@ -519,7 +519,7 @@ export type RunBirthTask = Omit<RunBranchTask, "repo"> & { repo: { defaultBranch
  *  applies, which ref this Run would own, and what its predecessor carried. */
 export type RunBirth = {
   intent: OpenRunIntent["kind"];
-  repairStartHeadSha?: string;
+  retryFailedRepair?: boolean;
   runNumber: number;
   prior: { branch: string | null; targetBranch: string | null; runNumber: number } | null;
 };
@@ -777,18 +777,13 @@ export const resolveRunBranches = async (
   birth: RunBirth,
 ): Promise<{ branch: string | null; targetBranch: string | null }> => {
   const { intent, prior } = birth;
-  // A failed no-result repair retries the recorded clean start, even when its
-  // prior session published a partially resolved salvage tree.
-  if (intent === "retry-after-completion" && birth.repairStartHeadSha) {
-    return { branch: prior?.branch ?? task.targetBranch, targetBranch: birth.repairStartHeadSha };
-  }
   // A Task with no Repo publishes nothing, so there is no head to declare; it
   // carries its predecessor's columns forward untouched.
   if (!task.repo) {
     return { branch: prior?.branch ?? null, targetBranch: prior?.targetBranch ?? task.targetBranch };
   }
   const repoTask = { ...task, repo: task.repo };
-  const declared = await declaredPublishTarget(tx, repoTask, intent, prior);
+  const declared = await declaredPublishTarget(tx, repoTask, birth.retryFailedRepair ? "merge-tail-repair" : intent, prior);
   return {
     branch: declared.branch ?? runOwnedHead(task.id, birth.runNumber),
     targetBranch: declared.targetBranch,
@@ -880,7 +875,7 @@ export type OpenRunIntent =
     sourceRunId: string;
     sourceMaxRunsPerTask: number;
     sourceBudgetGrants: number;
-    repairStartHeadSha?: string;
+    retryFailedRepair?: boolean;
     budgetGrant: 0 | 1;
   }
   | {
@@ -1277,11 +1272,11 @@ export const openRun = async (
   }
 
   // Every intent asks the same module. A no-result repair retry supplies its
-  // recorded start; other intents derive their base from publication evidence.
+  // repair card branch rule; other intents derive their base from publication evidence.
   const branches = await resolveRunBranches(tx, task, {
     intent: intent.kind,
-    ...(intent.kind === "retry-after-completion" && intent.repairStartHeadSha
-      ? { repairStartHeadSha: intent.repairStartHeadSha } : {}),
+    ...(intent.kind === "retry-after-completion" && intent.retryFailedRepair
+      ? { retryFailedRepair: true } : {}),
     runNumber,
     prior: prior ?? null,
   });

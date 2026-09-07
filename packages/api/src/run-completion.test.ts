@@ -782,10 +782,11 @@ for (const outputKind of ["regression-verification", "regression-verification-v2
 }
 
 for (const repairKind of ["refresh-conflict", "review-fix", "gate-fix"]) {
-  for (const scenario of ["remaining", "exhausted", "result", "prior-result", "result-marker"] as const) {
+  for (const scenario of ["remaining", "exhausted", "result", "prior-result", "result-marker", "long-history", "old-result-marker"] as const) {
     test(`failed ${repairKind} repair session: ${scenario}`, async () => {
       const harness = statefulCompletionHarness({
-        opensPullRequest: false, maxSessionsPerTask: 2,
+        opensPullRequest: false, maxSessionsPerTask: 2, repo: { defaultBranch: "main" },
+        targetBranch: "fix/repair",
         assigneeAgent: { id: "agent-1", name: "Repair agent", archivedAt: null },
       }, scenario.endsWith("result") ? { runId: scenario === "result" ? "run-1" : "older-run", body: "result" } : null);
       harness.activities.push({ taskId: "task-refunds", actorType: "control-plane", body: "Repair opened",
@@ -793,10 +794,15 @@ for (const repairKind of ["refresh-conflict", "review-fix", "gate-fix"]) {
           regressionTaskId: "parent-regression", repairTaskId: "task-refunds", repairKind,
           headSha: baseSha, baseHeadSha: "6".repeat(40) },
       });
-      if (scenario === "result-marker") {
+      if (scenario === "result-marker" || scenario === "old-result-marker") {
         harness.activities.push({ taskId: "task-refunds", actorType: "control-plane", body: "Repair result recorded",
           metadata: { kind: "mergeTail.repairResult", schemaVersion: 1, runId: "run-1", repairKind },
         });
+      }
+      if (scenario === "long-history" || scenario === "old-result-marker") {
+        for (let index = 0; index < 25; index++) {
+          harness.activities.push({ taskId: "task-refunds", actorType: "agent", body: `Progress ${index}` });
+        }
       }
       await harness.complete({
         runNumber: scenario === "exhausted" ? 2 : 1, maxRunsPerTask: 2, budgetGrants: 0,
@@ -807,15 +813,17 @@ for (const repairKind of ["refresh-conflict", "review-fix", "gate-fix"]) {
           stderrSummary: "resolver crashed", stdoutSummary: null, terminalEventSeen: true, terminalSuccess: false,
         } },
       });
-      const retries = scenario === "remaining" || scenario === "prior-result";
+      const retries = scenario === "remaining" || scenario === "prior-result" || scenario === "long-history";
       assert.equal(harness.queuedRuns.length, retries ? 1 : 0);
       assert.equal(harness.activities.some(({ body }) => body === "merge-tail repair Run 1 failed before a result; Run 2 queued"), retries);
       if (retries) {
+        assert.equal(harness.queuedRuns[0]!.branch, "fix/repair");
+        assert.equal(harness.queuedRuns[0]!.targetBranch, "fix/repair");
         assert.equal(harness.queuedRuns[0]!.maxRunsPerTask, 2);
         assert.equal(harness.queuedRuns[0]!.budgetGrants, 0);
         assert.equal(harness.queuedRuns[0]!.leaseLossRefunds, 0);
         assert.equal(harness.taskUpdates.some((update) => update.status === "REVIEW"), false);
-      } else {
+      } else if (scenario !== "old-result-marker") {
         assert.ok(harness.taskUpdates.some((update) => String(update.failureReason).includes("failed without closing the repair")));
       }
     });
