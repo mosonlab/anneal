@@ -1846,6 +1846,68 @@ curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/repair" \
   -d '{"requestId":"reenter-recovery-repair-001","reason":"Fix the regression found during base-drift recovery"}'
 ```
 
+### POST `/tasks/:taskId/merge-tail/rerun`
+
+- Required path parameter: `taskId`, naming the Chain's Regression
+  verification task.
+- Required JSON field: `requestId` (a non-empty operator request identifier).
+- Optional JSON field: `reason` (why the gate FAIL is not the branch's).
+- Use this route instead of `POST /tasks/:taskId/merge-tail/repair` when the
+  recovery's merge gate FAIL was caused by the host and not by the branch — a
+  test that timed out under host load, a gate worker that ran out of memory —
+  so there is nothing for a `gate-fix` repair to fix. Use the repair route when
+  the verdict names a real defect, and for every `review-fail` verdict. Confirm
+  the failing test is outside the branch's change set before re-running: this
+  route re-runs the same head against the same base and will reproduce a
+  genuine failure.
+- The request is accepted only for the latest `MergeRecoveryAttempt` bound to
+  this regression task when its aggregate is `BLOCKED_DOWNSTREAM`, its
+  `refusalCode` is `null`, and its `regressionTaskId` equals `taskId`. The
+  stored `TaskStepOutput` must be produced by that attempt's `recoveryRunId`
+  and carry a `gate-fail` verdict. The regression, merge readiness, and
+  integrator tasks must all be in `REVIEW`, with no active Run on any of them.
+- The accepted operation is one serializable transaction under the Chain lock.
+  It creates a new recovery attempt row for the same source stop at
+  `attempt + 1`, bound to the same authorized head, base, PR, and readiness and
+  integrator tasks; queues a fresh Regression Run through the ordinary recovery
+  path; clears the regression and readiness `failureReason`; and records the
+  operator activity, its `reason`, and the new attempt number on the regression
+  task. It creates no repair task, charges no repair budget, and leaves the
+  `repairAttempt` markers the repair budget counts untouched. It spends none of
+  the two automatic base-drift recovery attempts either: those are counted per
+  recovery source stop, and a rerun re-runs a stop that is already counted. The
+  queued Run carries a one-time budget grant, so a rerun does not consume one of
+  the Regression task's `maxSessionsPerTask` attempts.
+- On success, the API returns `200 OK` with `aggregateId` (the new attempt),
+  `attempt`, `recoveryRunId` (the queued Regression Run), and the verdict
+  `headSha` and `baseHeadSha`. The same `requestId` is idempotent: a replay
+  returns the original `200` result and creates no attempt, Run, or activity.
+- Refusals are `409 Conflict` JSON responses with a typed `code` and no side
+  effect:
+
+  - `merge_tail_rerun_not_blocked`: the task has no matching latest recovery
+    attempt in `BLOCKED_DOWNSTREAM` with complete recovery identity and a null
+    `refusalCode`, or its regression, readiness, or integrator task is not in
+    `REVIEW`.
+  - `merge_tail_rerun_verdict_not_gate_fail`: the recovery Run owns no readable
+    verdict, or its verdict is `review-fail`, `refresh-conflict`, or `pass`.
+    Those are the branch's own results: use the repair route for a `review-fail`
+    verdict, and neither route for a refresh conflict, which needs a resolver
+    result.
+  - `merge_tail_rerun_active_run`: the regression, readiness, or integrator
+    task has an active Run.
+  - `merge_tail_rerun_budget_exhausted`: this recovery source stop has already
+    been re-run `MAX_MERGE_TAIL_OPERATOR_RERUNS` times. A gate that fails three
+    times on the same head is not a host failure; carry the branch forward with
+    [Recovering a merge tail stopped after its repair
+    budget](#recovering-a-merge-tail-stopped-after-its-repair-budget).
+
+```sh
+curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/rerun" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+  -d '{"requestId":"rerun-recovery-gate-001","reason":"The failing test is outside this branch and timed out under host load"}'
+```
+
 ### Settling a chain whose repair cannot bind
 
 Two merge-tail mechanisms can overlap on one Chain: a base-drift recovery
@@ -2053,14 +2115,19 @@ occurs inside base-drift recovery, the merge tail is parked in
 `BLOCKED_DOWNSTREAM` with the recovery attempt's `recoveryRunId`. After
 confirming the failing output and stop notice, call
 `POST /tasks/:taskId/merge-tail/repair` on the regression task before
-considering a successor Chain. The route re-enters the ordinary `review-fix`
-or `gate-fix` round against the recorded head and base, charges the Chain's
-existing repair budget, and moves the aggregate to `REPAIRING`. Once that
-repair genuinely completes, the regression is rerun with the recovery context:
-a PASS proceeds to `awaitAuthorization`; another FAIL parks the tail in
-`BLOCKED_DOWNSTREAM` again and can be re-entered with this route while budget
-remains. A refresh-conflict verdict keeps its existing recovery stop and is
-not re-entered by this route.
+considering a successor Chain. The repair route re-enters the ordinary
+`review-fix` or `gate-fix` round against the recorded head and base, charges
+the Chain's existing repair budget, and moves the aggregate to `REPAIRING`.
+Once that repair genuinely completes, the regression is rerun with the recovery
+context: a PASS proceeds to `awaitAuthorization`; another FAIL parks the tail in
+`BLOCKED_DOWNSTREAM` again and can be re-entered with the repair route while
+budget remains. A refresh-conflict verdict keeps its existing recovery stop and
+is not re-entered by either route.
+
+For a `gate-fail` verdict whose failure is the host's and not the branch's — a
+test outside the change set that timed out under load — call
+`POST /tasks/:taskId/merge-tail/rerun` instead: it re-runs the recovery without
+opening a repair card for a defect that does not exist.
 
 Carry the delivered branch forward in this order. The brief used in step (c)
 must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-from-a-delivered-branch).

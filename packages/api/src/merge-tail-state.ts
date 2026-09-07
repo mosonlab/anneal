@@ -234,6 +234,14 @@ export const enterRepair = async (
     currentBaseSha: string;
     now: Date;
     readinessRequeue?: { staleBaseSha: string; reason: string };
+    /**
+     * A one-shot grant for a re-run the branch did not earn. An operator rerun
+     * of a host-caused gate FAIL is platform compensation, exactly like the
+     * readiness requeue below: without it the queued Run can be born past
+     * `maxSessionsPerTask` — `enqueue` does not refuse there — and the runner
+     * kills it at claim as `budget-exhausted` after the route answered 200.
+     */
+    budgetGrant?: 1;
   },
 ): Promise<{ recoveryRunId: string } | null> => {
   const context = await requireRecoveryRepairIdentity(tx, input.aggregateId);
@@ -288,7 +296,13 @@ export const enterRepair = async (
     // Not `enqueueTaskRun`: a raised refusal aborts this transaction, and a
     // spend cap must leave the regression task parked with the cap that
     // refused it. Every other refusal keeps raising.
-    const opened = await enqueueTaskRunInternal(tx, context.regressionTaskId, input.now, null);
+    const opened = await enqueueTaskRunInternal(
+      tx,
+      context.regressionTaskId,
+      input.now,
+      null,
+      input.budgetGrant === 1 ? { budgetGrant: 1 } : {},
+    );
     if (!opened.ok) {
       if (!parksInsteadOfRaising(opened.refusal)) throw errorForOpenRunRefusal(opened.refusal);
       await recordRunBirthRefusal(tx, context.regressionTaskId, opened.refusal);

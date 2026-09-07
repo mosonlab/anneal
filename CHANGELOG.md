@@ -9,6 +9,13 @@ written.
 
 ## Unreleased
 
+- A base-drift recovery that stopped on a merge gate FAIL the branch did not
+  cause can be re-run from the API:
+  `POST /tasks/:taskId/merge-tail/rerun` on the Regression task opens the next
+  recovery attempt against the same head and queues a fresh Regression Run. It
+  opens no repair task, charges no repair budget, spends none of the two
+  automatic base-drift recovery attempts, and grants the queued Run its own
+  budget, and it is bounded at two re-runs per recovery stop.
 - A gate dispatch queued behind other gates no longer gives up while the queue
   is moving. `GATE_DISPATCH_TIMEOUT_MINUTES` now bounds a queue that makes no
   progress: each poll reads which process holds each busy slot, and a slot that
