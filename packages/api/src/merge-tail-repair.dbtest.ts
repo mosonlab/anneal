@@ -1894,6 +1894,11 @@ const completeRegressionAfterExternalGitFailure = async (
   } });
   if (options.recovery) await seedRecoveryBoundTo(seeded, seeded.run.id);
 
+  // Keep completion's lease release observable without invoking the host adapter.
+  const releasedChains: string[] = [];
+  const release: ReleaseMergeLease = async (target) => {
+    if (target) releasedChains.push(target.chainId);
+  };
   const completion = await completeRun(db, {
     runId: seeded.run.id,
     body: {
@@ -1931,8 +1936,9 @@ const completeRegressionAfterExternalGitFailure = async (
       headSha: options.completionHead ?? null,
     },
     claimantClass: "runner",
-  });
+  }, release);
   assert.ok("taskId" in completion, JSON.stringify(completion));
+  assert.deepEqual(releasedChains, [seeded.regression.chainId]);
   return {
     completion,
     run: await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } }),
