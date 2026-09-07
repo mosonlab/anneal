@@ -720,21 +720,28 @@ export const completeRun = async (
     // existing retryable protocol-error case too. The canonical qualifier owns
     // Run identity, JSON validation and exact authored-head binding; only an
     // unreported head may fall back to persisted evidence. PASS stays excluded.
-    const externalRegressionFailure = external
-      && run.task?.templateStep?.outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND;
+    // The legacy output kind deliberately keeps its existing failure path.
+    const persistedV2RegressionStep = run.task?.templateStep?.outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND;
+    const externalRegressionFailure = external && persistedV2RegressionStep;
+    const retryableProtocolRegressionFailure = failureClass === FailureClass.PROTOCOL_ERROR && retryable
+      && isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind);
     const failedRegressionVerdict = !succeeded
-      && (externalRegressionFailure || (failureClass === FailureClass.PROTOCOL_ERROR && retryable))
-      && run.taskId && run.task && isRegressionVerificationOutputKind(run.task.templateStep?.outputKind)
+      && (externalRegressionFailure || retryableProtocolRegressionFailure)
+      && run.taskId && run.task
       ? await regressionVerdictForRun(tx, {
           task: run.task,
           runId: run.id,
-          runHeadSha: body.headSha ?? (externalRegressionFailure ? run.headSha : null) ?? null,
+          runHeadSha: body.headSha ?? null,
           allowPersistedHeadWhenUnreported: externalRegressionFailure,
         })
       : null;
     const durableNegativeRegressionVerdict = Boolean(
       failedRegressionVerdict?.status === "ok"
-      && failedRegressionVerdict.verdict.outcome !== "pass",
+      && failedRegressionVerdict.verdict.outcome !== "pass"
+      && ((retryableProtocolRegressionFailure && body.headSha === failedRegressionVerdict.headSha)
+        || (externalRegressionFailure
+          && (failedRegressionVerdict.verdict.outcome === "review-fail"
+            || failedRegressionVerdict.verdict.outcome === "refresh-conflict"))),
     );
     const completionHeadSha = durableNegativeRegressionVerdict && failedRegressionVerdict?.status === "ok"
       ? failedRegressionVerdict.headSha

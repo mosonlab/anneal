@@ -2074,8 +2074,9 @@ operation during target refresh or WIP salvage, or a provider stream failure.
 Completion qualifies the persisted semantic result before deciding whether to
 retry or settle the Task as an ordinary external failure. This ordering
 preserves the result the Run already authored.
-Only a persisted v2 result receives this precedence; a Run with no such output
-keeps the existing external-failure path, including the legacy protocol-error
+Only persisted v2 `review-fail` and `refresh-conflict` results receive this new
+external-failure precedence; `gate-fail` and a Run with no such output
+keep the existing external-failure path, including the legacy protocol-error
 handling.
 
 The persisted result is control-plane evidence only when all of these bindings
@@ -2087,11 +2088,9 @@ hold:
 - the verdict's `headSha`, the output's `commitSha`, and the Run's exact head
   agree.
 
-When completion has no `headSha`, the persisted Run head is used when present.
-Only when neither completion nor the Run supplies a head does this
-external-failure path use the output's authored `commitSha` as the persisted
-head for validation. A repair then binds to that head, so the operator does
-not need to carry the branch forward manually. A result from another Run, a
+When completion has no `headSha`, this external-failure path uses the output's
+authored `commitSha` as the persisted head for validation. A repair then binds
+to that head, so the operator does not need to carry the branch forward manually. A result from another Run, a
 malformed body, a missing authored commit, or a mismatched head is refused and
 does not control the Chain. Run text and `TaskActivity` rows never synthesize a
 verdict.

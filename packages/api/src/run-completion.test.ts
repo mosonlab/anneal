@@ -312,7 +312,6 @@ const statefulCompletionHarness = (
     outcome,
     templateStep = null,
     headSha,
-    runHeadSha,
   }: {
     runNumber: number;
     maxRunsPerTask: number;
@@ -320,14 +319,13 @@ const statefulCompletionHarness = (
     outcome: RunOutcome;
     templateStep?: Record<string, unknown> | null;
     headSha?: string;
-    runHeadSha?: string;
   }) => {
     task.templateStep = templateStep;
     currentRun = {
       id: `run-${runNumber}`, projectId: task.projectId, taskId: task.id, goalId: null,
       agentId: task.assigneeAgentId, repoId: task.repoId, runNumber, maxRunsPerTask, budgetGrants,
       runner: "CODEX", model: "gpt-5.6-sol:high", targetBranch: "main", branch: "feat/refunds",
-      headSha: runHeadSha, pushedBranch: null, baseSha: null, runnerId: "runner-1", fencingToken: `fence-${runNumber}`,
+      headSha: null, pushedBranch: null, baseSha: null, runnerId: "runner-1", fencingToken: `fence-${runNumber}`,
       requiresCommit: false, opensPullRequest: task.opensPullRequest, codexServiceTier: "DEFAULT",
       subagentModel: null, subagentMaxConcurrent: null, promptHash: "hash",
       maxDurationMin: 120, stallTimeoutMin: 10, task: { ...task }, session: { id: `session-${runNumber}` },
@@ -688,27 +686,27 @@ test("a retryable detached repair whose retry is refused keeps ordinary task fai
 });
 
 for (const outcome of ["review-fail", "refresh-conflict"]) {
-  for (const scenario of ["unreported", "reported", "foreign-run", "malformed", "stale-output", "reported-mismatch", "persisted-mismatch", "absent", "pass"] as const) {
+  for (const scenario of ["unreported", "reported", "foreign-run", "malformed", "stale-output", "reported-mismatch", "absent", "pass", "gate-fail", "legacy"] as const) {
     test(`completeRun qualifies ${outcome} after external git failure: ${scenario}`, async () => {
       const reason = "git fetch failed: gnutls_handshake() failed";
       const otherHead = "7".repeat(40);
       const accepted = scenario === "unreported" || scenario === "reported";
-      const reportedHead = scenario === "reported" ? baseSha : scenario === "reported-mismatch" ? otherHead : undefined;
+      const reportedHead = (scenario === "reported" || scenario === "pass") ? baseSha : scenario === "reported-mismatch" ? otherHead : undefined;
       const harness = statefulCompletionHarness({}, scenario === "absent" ? null : {
         runId: scenario === "foreign-run" ? "other-run" : "run-1",
-        kind: "regression-verification-v2", commitSha: scenario === "stale-output" ? otherHead : baseSha,
+        kind: scenario === "legacy" ? "regression-verification" : "regression-verification-v2", commitSha: scenario === "stale-output" ? otherHead : baseSha,
         body: scenario === "malformed" ? "invalid JSON" : JSON.stringify({
-          schemaVersion: 2, outcome: scenario === "pass" ? "pass" : outcome,
+          schemaVersion: scenario === "legacy" ? 1 : 2, outcome: scenario === "pass" || scenario === "gate-fail" ? scenario : outcome,
           headSha: baseSha, baseHeadSha: "6".repeat(40), summary: "persisted reason",
           ...(scenario === "pass" ? { gateVerdict: "PASS", gateProof: `MERGE GATE: PASS ${baseSha}` } : {}),
+          ...(scenario === "gate-fail" ? { gateVerdict: "FAIL", gateProof: "MERGE GATE: FAIL (unit tests)" } : {}),
         }),
         metadata: null,
       });
       const closed = await harness.complete({
         runNumber: 1, maxRunsPerTask: 1, budgetGrants: 0,
         ...(reportedHead ? { headSha: reportedHead } : {}),
-        ...(scenario === "persisted-mismatch" ? { runHeadSha: otherHead } : {}),
-        templateStep: { outputKind: "regression-verification-v2", requiresCommit: true, taskTemplate: { name: "direct-engineer-workflow" } },
+        templateStep: { outputKind: scenario === "legacy" ? "regression-verification" : "regression-verification-v2", requiresCommit: true, taskTemplate: { name: "direct-engineer-workflow" } },
         outcome: {
           case: "provider-failure", reason,
           envelope: {
@@ -722,6 +720,32 @@ for (const outcome of ["review-fail", "refresh-conflict"]) {
       assert.equal(closed.headSha, accepted ? baseSha : reportedHead ?? null);
       assert.equal(closed.failureClass, FailureClass.TASK_FAILED);
       assert.equal(harness.activities.some((activity) => activity.metadata?.failureReason === reason), accepted);
+    });
+  }
+}
+
+for (const outputKind of ["regression-verification", "regression-verification-v2"]) {
+  for (const reportHead of [true, false]) {
+    test(`retryable protocol gate-fail keeps exact reported-head binding: ${outputKind}, reported=${reportHead}`, async () => {
+      const reason = "the provider stream ended without a terminal event";
+      const harness = statefulCompletionHarness({}, {
+        runId: "run-1", kind: outputKind, commitSha: baseSha,
+        body: JSON.stringify({
+          schemaVersion: outputKind === "regression-verification-v2" ? 2 : 1,
+          outcome: "gate-fail", headSha: baseSha, baseHeadSha: "6".repeat(40),
+          gateVerdict: "FAIL", gateProof: "MERGE GATE: FAIL (unit tests)", summary: "gate failed",
+        }), metadata: null,
+      });
+      const closed = await harness.complete({
+        runNumber: 1, maxRunsPerTask: 1, budgetGrants: 0,
+        ...(reportHead ? { headSha: baseSha } : {}),
+        templateStep: { outputKind, requiresCommit: true, taskTemplate: { name: "direct-engineer-workflow" } },
+        outcome: { case: "provider-failure", reason, envelope: envelope({
+          exitCode: 0, terminalEventSeen: false, terminalSuccess: false, stderrSummary: null,
+        }) },
+      });
+      assert.equal(closed.failureClass, FailureClass.PROTOCOL_ERROR);
+      assert.equal(harness.activities.some((activity) => activity.metadata?.failureReason === reason), reportHead);
     });
   }
 }

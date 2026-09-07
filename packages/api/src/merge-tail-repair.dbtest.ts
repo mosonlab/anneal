@@ -1837,7 +1837,7 @@ test("a rejected repair leaves a recovery that is still running alone", async ()
   }), 1);
 });
 
-type ExternalRegressionOutcome = "review-fail" | "refresh-conflict" | "pass";
+type ExternalRegressionOutcome = "review-fail" | "refresh-conflict" | "gate-fail" | "pass";
 
 const v2Verdict = (outcome: ExternalRegressionOutcome) => JSON.stringify(
   outcome === "pass"
@@ -1855,6 +1855,7 @@ const v2Verdict = (outcome: ExternalRegressionOutcome) => JSON.stringify(
       headSha: HEAD,
       baseHeadSha: BASE,
       summary: outcome === "review-fail" ? "MF-2 remains open" : "merge conflict",
+      ...(outcome === "gate-fail" ? { gateVerdict: "FAIL", gateProof: "MERGE GATE: FAIL (unit tests)" } : {}),
     },
 );
 
@@ -2045,4 +2046,19 @@ test("a persisted PASS does not advance after an external git failure", async ()
   } }), 0);
   assert.equal(await db.task.count({ where: { templateStepId: seeded.readinessStep.id } }), 0);
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
+});
+
+test("a persisted gate-fail keeps ordinary external git failure settlement", async () => {
+  const seeded = await seedRegression();
+  const settled = await completeRegressionAfterExternalGitFailure(seeded, "gate-fail");
+
+  assert.equal(settled.run.status, "FAILED");
+  assert.equal(settled.run.failureClass, "TASK_FAILED");
+  assert.equal(settled.run.headSha, null);
+  assert.equal(settled.task.status, TaskStatus.REVIEW);
+  assert.equal(await db.task.count({ where: {
+    projectId: seeded.project.id,
+    name: { startsWith: "Autonomous merge tail:" },
+  } }), 0);
+  assert.equal(await db.task.count({ where: { templateStepId: seeded.readinessStep.id } }), 0);
 });
