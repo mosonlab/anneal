@@ -199,6 +199,60 @@ test("buildPrompt combines foundational, role, and task context", () => {
   assert.match(buildPrompt(claim), /Foundation[\s\S]*Role \(senior-dev-astra-medium\): Implement[\s\S]*Task: Ship it[\s\S]*Do the work/);
 });
 
+test("a recovery Regression claim carries the pinned context and skip instruction through every adapter", () => {
+  const context = {
+    state: "queued" as const,
+    currentBaseSha: "b".repeat(40),
+    authorizedHeadSha: "a".repeat(40),
+    recoveryRunId: "run-1",
+    priorOutput: {
+      runId: "prior-run",
+      kind: "regression-verification-v2",
+      body: "{\"schemaVersion\":2,\"outcome\":\"pass\"}",
+      commitSha: "a".repeat(40),
+    },
+  };
+  const recoveryClaim = {
+    ...claim,
+    task: {
+      ...claim.task,
+      templateStep: {
+        name: "Regression",
+        outputKind: "regression-verification-v2",
+        provisionDependencies: true,
+        taskTemplate: { name: "regression-workflow" },
+      },
+    },
+    regressionRecoveryContext: context,
+  } as unknown as ClaimedTask;
+  const prompt = buildPrompt(recoveryClaim);
+  assert.match(prompt, /Platform-pinned base-drift recovery instruction:/u);
+  assert.match(prompt, /semantic-reused[\s\S]*skip the semantic model recheck[\s\S]*finalize immediately/u);
+  assert.match(prompt, /finalize always runs the Merge gate/u);
+
+  const config = {
+    path: "/bin",
+    home: "/runner",
+    apiUrl: "http://api",
+    runAsPrefix: ["/usr/bin/env", "-i"],
+    workspaceRoot: productionRoot,
+    hostProofSlots: 3,
+  };
+  for (const runner of ["CLAUDE", "CODEX", "PI"] as const) {
+    const env = buildChildEnvironment(config, { ...recoveryClaim, runner }, scratch, "/work");
+    assert.deepEqual(JSON.parse(env.AGENTOS_REGRESSION_RECOVERY_CONTEXT ?? "null"), context, runner);
+    const launch = launchArgv(
+      { binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" }, runAsPrefix: config.runAsPrefix },
+      runner,
+      [],
+      env,
+    );
+    assert.ok(launch.args.includes(`AGENTOS_REGRESSION_RECOVERY_CONTEXT=${env.AGENTOS_REGRESSION_RECOVERY_CONTEXT}`), runner);
+    const ordinary = buildChildEnvironment(config, { ...claim, runner }, scratch, "/work");
+    assert.equal(ordinary.AGENTOS_REGRESSION_RECOVERY_CONTEXT, undefined, runner);
+  }
+});
+
 test("buildPrompt injects runner-owned worktree containment into every session", () => {
   for (const runner of ["CLAUDE", "CODEX", "PI"] as const) {
     const prompt = buildPrompt({
