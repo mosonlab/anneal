@@ -42,6 +42,8 @@ const authorityRun = (overrides: Partial<LockedAuthorityRun> = {}): LockedAuthor
   repoId: "repo-1",
   runNumber: 1,
   pushedBranch: null,
+  baseSha: null,
+  basePublishedAt: null,
   branch: "feature/task-1",
   targetBranch: "main",
   ...overrides,
