@@ -9,6 +9,12 @@ written.
 
 ## Unreleased
 
+- `PATCH /tasks/:taskId` accepts `dispatchAfterTaskId` on the first step of a
+  Chain that has no Run, re-pointing or (with `null`) releasing its Chain
+  binding instead of forcing the Chain to be deleted and instantiated again. A
+  started Chain, a later step, or a standalone task is refused with
+  `chain_binding_immutable_after_start`; an archived, foreign, standalone, or
+  same-chain predecessor with `chain_binding_target_invalid`.
 - An exception thrown while merge readiness evaluates a Chain now requeues the
   readiness step instead of stopping the merge tail. The retry is bounded by
   `MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT` (default 3); past the bound the tail
