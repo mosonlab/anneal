@@ -73,7 +73,10 @@ import { runMetrics } from "../run-metrics.js";
 import { readRunMetricEvents } from "../run-metric-events.js";
 import { lockDoneTasks, partitionArchivable } from "../task-archive.js";
 import { editableBrief } from "../task-brief.js";
+import { isRevalidationStep } from "../revalidation.js";
+import { applyRevalidationRoute } from "../revalidation-routing.js";
 import {
+  canonicalBodyRefusal,
   isCanonicalBlindFindingsStep,
   isCanonicalReviewFindingsStep,
 } from "../canonical-task-output.js";
@@ -1034,6 +1037,13 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
       || isCanonicalBlindFindingsStep(task.templateStep);
       if (immutableReview && existing) {
         return refusal("conflict", `${task.templateStep?.outputKind ?? body.kind} task output is immutable once persisted`);
+      }
+      if (task.templateStep && isRevalidationStep(task.templateStep)) {
+        if (body.kind !== "revalidation") return refusal("conflict", "task_output kind must be revalidation for this canonical step");
+        const invalid = canonicalBodyRefusal(task.templateStep, body.body, body.commitSha ?? null, null);
+        if (invalid) return refusal("conflict", invalid);
+        const artifact = JSON.parse(body.body) as { route: Parameters<typeof applyRevalidationRoute>[2] };
+        await applyRevalidationRoute(tx, taskId, artifact.route);
       }
       const output = await tx.taskStepOutput.upsert({
         where: { taskId },
