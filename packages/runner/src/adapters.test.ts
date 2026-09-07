@@ -126,8 +126,8 @@ const processAlive = (pid: number): boolean => {
  * Bounded on purpose: a descendant that never dies has to fail rather than hang
  * the gate forever. The number comes from the loaded host, not this laptop. The
  * merge gate runs one workspace suite per CPU while each suite runs its files
- * concurrently, and on the worker that saturated on 2026-09-06 (load1 20-55) a
- * healthy node startup was still short of its first output ten seconds in. Each
+ * concurrently, and on a saturated worker a healthy node startup was still
+ * short of its first output ten seconds in (CONTRIBUTING.md, "Test timing"). Each
  * wait below returns the moment its condition holds, so these budgets cost
  * nothing on a run that passes.
  */
@@ -135,11 +135,14 @@ const CHILD_START_BUDGET_MS = 60_000;
 /** A process being killed has already started, so only signal delivery and
  *  reaping remain — a shorter budget still leaves room for a starved reaper. */
 const CHILD_EXIT_BUDGET_MS = 30_000;
-/** The node:test bound for a case that launches real provider children. It has
- *  to exceed the waits inside the case by a wide margin, or the case dies of
- *  the outer budget while an inner wait was still going to succeed. Bounded so
- *  a child that never answers is still reported as a failure. */
-const SPAWNING_TEST_TIMEOUT_MS = 120_000;
+/** The node:test bound for a case that launches real provider children. It is
+ *  the outer bound, and every such case uses it directly: it has to exceed the
+ *  waits inside the case by a wide margin, or the case dies of the outer budget
+ *  while an inner wait was still going to succeed. The widest case waits
+ *  CHILD_START_BUDGET_MS then CHILD_EXIT_BUDGET_MS in series (90s), so this
+ *  clears the inner waits by a further 90s. Bounded so a child that never
+ *  answers is still reported as a failure. */
+const SPAWNING_TEST_TIMEOUT_MS = 180_000;
 
 const waitForProcessExit = async (pid: number): Promise<boolean> => {
   for (let waited = 0; waited < CHILD_EXIT_BUDGET_MS; waited += 25) {
@@ -149,7 +152,7 @@ const waitForProcessExit = async (pid: number): Promise<boolean> => {
   return false;
 };
 
-test("cancellation drains a Run-owned descendant that starts a separate process group", { timeout: CHILD_START_BUDGET_MS + CHILD_EXIT_BUDGET_MS + SPAWNING_TEST_TIMEOUT_MS }, async () => {
+test("cancellation drains a Run-owned descendant that starts a separate process group", { timeout: SPAWNING_TEST_TIMEOUT_MS }, async () => {
   const fixture = await mkdtemp(join(tmpdir(), "agentos-run-drain-"));
   const binary = join(fixture, "provider.mjs");
   const pidFile = join(fixture, "descendant.pid");

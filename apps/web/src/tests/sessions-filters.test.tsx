@@ -77,9 +77,9 @@ const requestMark = (page: PageHarness): number => listRequests(page).length;
  * How many 25ms polls a wait for such a request may take. Counted rather than
  * clocked because two tests below mock `Date`, and bounded so a timer that
  * never fires fails here rather than hanging the suite. The count is sized for
- * the loaded merge-gate worker — on 2026-09-06 it carried load1 20-55 all day,
- * where a real one-second timer is descheduled well past the fixed sleeps these
- * waits replaced — and costs nothing on a green run, because every wait returns
+ * the loaded merge-gate worker (CONTRIBUTING.md, "Test timing"), where a real
+ * one-second timer is descheduled well past the fixed sleeps these waits
+ * replaced, and costs nothing on a green run, because every wait returns
  * at the first request that matches.
  */
 const REQUEST_POLL_LIMIT = 1_200;
@@ -416,9 +416,20 @@ for (const range of ["7d", "30d"]) test(`${range} refreshes on the hourly bounda
   context.mock.timers.enable({ apis: ["Date"], now: new Date(2026, 7, 16, 14, 59, 59) });
   const page = await mountSessions([], `#/sessions?range=${range}`);
   try {
-    const initial = listRequests(page).at(-1)?.get("since");
+    // Name both requests by what they are, not by position: the head keeps
+    // polling on its own timer, so an `at(-1)` read across a settle can land on
+    // a poll this case never meant. The mount's window is the first list
+    // request; the property is that nothing re-asks with a different one before
+    // the hour rolls.
+    const initial = listRequests(page).at(0)?.get("since");
+    assert.ok(initial, "the mount should have asked for a window");
+    const beforeSettle = requestMark(page);
     await page.settle();
-    assert.equal(listRequests(page).at(-1)?.get("since"), initial);
+    assert.deepEqual(
+      listRequests(page).slice(beforeSettle).map((query) => query.get("since")).filter((since) => since !== initial),
+      [],
+      "no request should move the window before the hour rolls",
+    );
     const next = new Date(2026, 7, 16, 15, 0, 1);
     const mark = requestMark(page);
     context.mock.timers.setTime(next.getTime());

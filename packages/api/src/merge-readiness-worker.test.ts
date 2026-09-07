@@ -8,21 +8,9 @@ import {
   READINESS_READ_BUDGET_MS,
   startReadinessWorker,
 } from "./merge-readiness-worker.js";
+import { waitUntil } from "./worker-tick-wait.js";
 
 const wait = (milliseconds: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, milliseconds));
-
-/** Patience, not a timing assumption: the loop returns the moment the condition
- *  holds, so this budget only bounds the failure case — a worker that never
- *  ticks still fails rather than hanging the suite. The size comes from the
- *  loaded gate worker (load1 20-55 on 2026-09-06), where a real 250ms interval
- *  and the sleeps inside a tick queue behind the host, not from an idle one. */
-const waitUntil = async (predicate: () => boolean, timeoutMs = 30_000): Promise<void> => {
-  const deadline = Date.now() + timeoutMs;
-  while (!predicate()) {
-    if (Date.now() >= deadline) throw new Error(`condition was not met within ${timeoutMs}ms`);
-    await wait(25);
-  }
-};
 
 test("the renewed readiness claim covers both the read budget and a lease acquire timeout", () => {
   assert.equal(READINESS_READ_BUDGET_MS, 20_000);

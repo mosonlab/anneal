@@ -302,12 +302,14 @@ test("PARALLEL-DURATION charges each member for its own time, not the wait befor
   };
   const quick = durationOf("quick");
   const slow = durationOf("slow");
-  // The property is relative, not absolute: the quick member must be charged
-  // strictly less than the member it waited behind. A wall-clock ceiling would
-  // instead charge it for its own `sh` start-up, which on
-  // the loaded gate worker of 2026-09-06 (load1 20-55) is not the parent's wait this case is about.
+  // The property is relative, not absolute: an absolute `seconds <= 1` ceiling
+  // charges the quick member for its own `sh` start-up, which is a measurement
+  // of the host, not of the accounting. The margin keeps the original
+  // resolution: the regression is the quick member being charged for the
+  // parent's wait behind the slow one, so it must come in more than two of the
+  // slow member's three seconds under it, not merely one second under.
   assert.ok(
-    quick.seconds < slow.seconds,
+    quick.seconds < slow.seconds - 2,
     `the quick member should not be charged for the slow one: ${quick.line} / ${slow.line}`,
   );
 });
@@ -536,7 +538,7 @@ const interruptGroup = async (members, observed = "") => {
     // Waits for a spawned bash harness to reach the member and for the member to
     // publish its pid. Bounded so a harness that never gets there fails the
     // assertion below rather than hanging, and sized for
-    // the loaded gate worker of 2026-09-06 (load1 20-55), not for an idle host.
+    // the loaded gate worker (CONTRIBUTING.md, "Test timing"), not for an idle host.
     const deadline = Date.now() + 60_000;
     let memberPid = "";
     while (Date.now() < deadline) {
@@ -613,7 +615,7 @@ test("PARALLEL-INTERRUPT stops members still running before the gate tears down"
     // test would pass by racing rather than by stopping anything.
     // Bounded so a harness that never starts the member fails the assertion
     // below rather than hanging, and sized for
-    // the loaded gate worker of 2026-09-06 (load1 20-55), not for an idle host.
+    // the loaded gate worker (CONTRIBUTING.md, "Test timing"), not for an idle host.
     const deadline = Date.now() + 60_000;
     let memberPid = "";
     while (Date.now() < deadline) {

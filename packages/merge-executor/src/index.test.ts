@@ -154,7 +154,6 @@ test("a mismatched daemon rechecks on its own interval, logs each state change o
 
 test("shutdown interrupts a real pending contract recheck", async () => {
   const controller = new AbortController();
-  const started = performance.now();
   const polling = pollClaims({
     signal: controller.signal,
     pollIntervalMs: 5_000,
@@ -170,6 +169,8 @@ test("shutdown interrupts a real pending contract recheck", async () => {
   // under that to mean anything, and well over what a saturated event loop
   // costs a setImmediate-driven abort: on the gate worker of 2026-09-06 (load1
   // 20-55) sub-second wall clocks were what turned passing suites into FAILs.
+  // This deadline is the whole bound: an elapsed-time assertion after the race
+  // could only restate what the race already decided.
   const INTERRUPT_BUDGET_MS = 15_000;
   let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -179,7 +180,6 @@ test("shutdown interrupts a real pending contract recheck", async () => {
         deadline = setTimeout(() => reject(new Error("shutdown did not interrupt the recheck")), INTERRUPT_BUDGET_MS);
       }),
     ]);
-    assert.ok(performance.now() - started < INTERRUPT_BUDGET_MS);
   } finally {
     clearTimeout(deadline);
   }
@@ -652,6 +652,13 @@ test("the daemon still starts when it is reached through a symlinked release dir
         timeout: 120_000,
       },
     );
+    // The bound above kills a child that never refuses, and spawnSync reports
+    // that as an ETIMEDOUT error with a null status. Check the exit first, or a
+    // daemon that printed the refusal and then stayed alive forever would be
+    // killed at 120s and still pass the very test standing in front of it.
+    assert.equal(started.error, undefined, `spawn failed: ${String(started.error)}`);
+    assert.equal(started.signal, null, `child was signalled: ${String(started.signal)}`);
+    assert.equal(started.status, 1, `expected a refusal exit, got ${String(started.status)}`);
     assert.match(started.stderr, /merge-executor startup refused:/u, `stderr was ${JSON.stringify(started.stderr)}`);
   } finally {
     rmSync(scratch, { recursive: true, force: true });

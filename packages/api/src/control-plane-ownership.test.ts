@@ -480,11 +480,17 @@ const childDiagnostic = (tracked: TrackedChild): string => [
 const CHILD_WAIT_BUDGET_MS = 60_000;
 
 /** A child being terminated has already started, so only signal delivery, its
- *  own cleanup and reaping remain, which is why this is shorter than the wait
- *  above rather than equal to it. Escalation to SIGKILL keeps the same budget.
- *  It is still a loaded-host number: a graceful shutdown releases ownership and
- *  its lock before it exits, and that work queues behind the same saturation. */
-const CHILD_TERMINATION_BUDGET_MS = 30_000;
+ *  own cleanup and reaping remain. It is still a loaded-host number: a graceful
+ *  shutdown releases ownership and its lock before it exits, and that work
+ *  queues behind the same saturation.
+ *
+ *  It must also strictly contain the child's own cleanup budget, or this wait
+ *  expires while the child was still going to exit cleanly and reports a
+ *  timeout that is a fact about the host. The ownership probe's worst case is
+ *  release() plus DESCENDANT_EXIT_BUDGET_MS on SIGTERM plus the same again on
+ *  SIGKILL (control-plane-ownership-probe.ts) = 10s + 10s + release; 60s clears
+ *  that with room, so it matches CHILD_WAIT_BUDGET_MS rather than halving it. */
+const CHILD_TERMINATION_BUDGET_MS = 60_000;
 
 const isRunning = (child: ChildProcess): boolean => child.exitCode === null && child.signalCode === null;
 

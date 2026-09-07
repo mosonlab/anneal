@@ -330,7 +330,7 @@ exec "$REAL_GIT" "$@"
       encoding: "utf8",
       // Three real git pushes through a shim. Bounded so a wedged push still
       // fails the case, at the same budget as this file's siblings and sized for
-      // the loaded gate worker of 2026-09-06 (load1 20-55), not for an idle host.
+      // the loaded gate worker (CONTRIBUTING.md, "Test timing"), not for an idle host.
       timeout: 60_000,
       env: {
         ...FIXTURE_ENV,
@@ -1185,7 +1185,7 @@ test("the default worker capacity serializes gates from different repositories",
       // The `seq` loop above is what waits for the spawned run-gate.sh children
       // to announce themselves; this only bounds a harness that wedges, so it
       // matches this file's siblings and is sized for
-      // the loaded gate worker of 2026-09-06 (load1 20-55), not for an idle host.
+      // the loaded gate worker (CONTRIBUTING.md, "Test timing"), not for an idle host.
       timeout: 120_000,
       env: {
         ...FIXTURE_ENV,
@@ -1249,7 +1249,7 @@ test("worker capacity two admits exactly two gates and keeps concurrent logs dis
       // The `seq` loop above is what waits for the spawned run-gate.sh children
       // to announce themselves; this only bounds a harness that wedges, so it
       // matches this file's siblings and is sized for
-      // the loaded gate worker of 2026-09-06 (load1 20-55), not for an idle host.
+      // the loaded gate worker (CONTRIBUTING.md, "Test timing"), not for an idle host.
       timeout: 120_000,
       env: {
         ...FIXTURE_ENV,

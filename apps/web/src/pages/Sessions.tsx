@@ -287,7 +287,7 @@ const SessionDayGroupView = ({
 
 /** Long enough that typing a word costs one request rather than five, short
  *  enough that the list answers while the operator is still looking at the box. */
-export const SESSION_SEARCH_DEBOUNCE_MS = 300;
+const SESSION_SEARCH_DEBOUNCE_MS = 300;
 
 /** The roster only changes when an operator edits it, so it is read rarely and
  *  reused as the Agent filter's stable vocabulary. */

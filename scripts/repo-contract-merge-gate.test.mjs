@@ -93,7 +93,7 @@ const runWithExternalSignal = async (t, fixtureData, signal, status) => {
   child.stdout.on("data", (chunk) => { output += chunk; });
 
   // The readiness file comes from a real `bash merge-gate.sh` fixture, and the
-  // gate worker also carries the host's Runs: at the load1 20-55 this worker was
+  // gate worker also carries the host's Runs: at the load this worker was
   // observed at, a bash+git start alone can exceed 10s, so a one-second wait
   // charges startup to the signal under test. The deadline stays bounded — a
   // child that never becomes ready must fail here rather than hang the suite —

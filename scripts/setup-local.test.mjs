@@ -811,7 +811,7 @@ const beforePublish = () => {
   const sleeper = new Int32Array(new SharedArrayBuffer(4));
   // Both writers are separately spawned node processes; the barrier only has to
   // outlast the slower one's start-up. Bounded so a writer that never arrives
-  // throws below instead of hanging the suite, and sized for the loaded gate worker of 2026-09-06 (load1 20-55), not for an idle host.
+  // throws below instead of hanging the suite, and sized for the loaded gate worker, not for an idle host (CONTRIBUTING.md, "Test timing on the gate worker").
   const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     if (readdirSync(barrierDirectory).filter((name) => name.startsWith("ready-")).length >= 2) return;
@@ -1006,7 +1006,7 @@ test("a run killed between the write and the link leaves an ignored temporary fi
 
     // The writer is a spawned node process that must reach its pre-publication
     // window. Bounded so a writer that never gets there fails the assertion
-    // rather than hanging, and sized for the loaded gate worker of 2026-09-06 (load1 20-55), not for an idle host.
+    // rather than hanging, and sized for the loaded gate worker, not for an idle host (CONTRIBUTING.md, "Test timing on the gate worker").
     const deadline = Date.now() + 60_000;
     while (!existsSync(signalPath)) {
       assert.ok(Date.now() < deadline, "the writer never reached the pre-publication window");
