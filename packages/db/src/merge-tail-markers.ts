@@ -21,6 +21,9 @@ export const MERGE_TAIL_MARKER_SCAN = 20;
 
 export type MarkerKind = keyof typeof MERGE_TAIL_KIND;
 
+/** Marker families whose state is a control-plane fact, never agent input. */
+const TRUSTED_MARKER_KINDS = new Set<MarkerKind>(["train", "leaseContention"]);
+
 /**
  * A merge-tail marker with its persisted fields already narrowed. Callers read
  * these instead of re-deriving them from `metadata`: the `typeof x === "string"`
@@ -214,10 +217,10 @@ export const parseMergeTrainMarker = (
 
 /** Parse and qualify the complete queued payload for a detached train claim. */
 export const mergeTrainClaimMetadata = (
-  marker: Marker | MergeTrainMarker | null,
+  marker: Marker | null,
 ): MergeTrainClaimMetadata | null => {
   if (!marker || marker.kind !== "train") return null;
-  const parsed = "raw" in marker ? parseMergeTrainMarker(marker.raw) : { status: "ok" as const, marker };
+  const parsed = parseMergeTrainMarker(marker.raw);
   if (parsed.status === "invalid" || parsed.marker.state !== "queued"
     || !parsed.marker.baseSha || parsed.marker.width === null || !parsed.marker.candidates) return null;
   return {
@@ -242,10 +245,7 @@ const scan = async (tx: Tx, taskId: string, take?: number): Promise<Marker[]> =>
   });
   return rows.flatMap((row) => {
     const marker = markerFromMetadata(row.metadata);
-    // Train ownership is a control-plane fact. Other merge-tail markers keep
-    // their existing reader behavior because some are intentionally written by
-    // actors outside the control plane.
-    return marker && (marker.kind !== "train" || row.actorType === "control-plane") ? [marker] : [];
+    return marker && (!TRUSTED_MARKER_KINDS.has(marker.kind) || row.actorType === "control-plane") ? [marker] : [];
   });
 };
 
@@ -274,13 +274,10 @@ export const readLatestMarker = async (
   tx: Tx,
   taskId: string,
   kind: MarkerKind,
-  actorType?: "control-plane",
 ): Promise<Marker | null> => {
-  const actorFilter = kind === "train"
+  const actorFilter = TRUSTED_MARKER_KINDS.has(kind)
     ? { actorType: "control-plane" as const }
-    : actorType === undefined
-      ? {}
-      : { actorType };
+    : {};
   const row = await tx.taskActivity.findFirst({
     where: {
       taskId,

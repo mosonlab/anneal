@@ -1,7 +1,6 @@
 import {
   ACTIVE_RUN_STATUSES,
   MERGE_TAIL_KIND,
-  MERGE_TAIL_SCHEMA_VERSION,
   MERGE_TRAIN_OUTPUT_KIND,
   MergeRecoveryStatus,
   MergeLeaseEventState,
@@ -13,6 +12,7 @@ import {
   isMergeReadinessStep,
   parseMergeTrainRecord,
   parseRegressionVerdict,
+  recordLeaseDeferral,
   isGatedMergeReadinessTask,
   requireMergeGateAuthorization,
   writeMarker,
@@ -26,7 +26,7 @@ import { evaluateReadiness, READINESS_READ_BUDGET_MS, type ReadinessDecision } f
 import type { WithMergeLease, ReleaseMergeLease, HeldLeaseOutcome } from "./merge-lease.js";
 import type { MergeLeaseHolder } from "../../../scripts/merge-lease-adapter.mjs";
 import type { ReadinessSettlement } from "./readiness-settlement.js";
-import type { ClaimedReadiness, ReadinessCandidate, ReadinessRead, ReadinessTickResult } from "./merge-readiness-worker.js";
+import type { ClaimedReadiness, ReadinessCandidate, ReadinessDiscovery, ReadinessRead, ReadinessTickResult } from "./merge-readiness-worker.js";
 import { reserveMergeTrainTask, enqueueMergeTrainTask, mergeTrainTaskDescription } from "./merge-train-task.js";
 import { stopMergeTail } from "./merge-tail-actions.js";
 import { noticeMergeTrainAbort, settleMergeTrainFailure } from "./merge-train-repair.js";
@@ -65,6 +65,7 @@ export const trainRecordBindingFailure = (
 type ReadyRead = ClaimedReadiness & { input: Extract<ClaimedReadiness["input"], { stage: "ready" }> };
 type TrainHooks = {
   candidates(db: PrismaClient, pageSize: number): AsyncGenerator<ReadinessCandidate>;
+  discover(db: PrismaClient, task: ReadinessCandidate, now: Date): Promise<ReadinessDiscovery>;
   read(db: PrismaClient, task: ReadinessCandidate, now: Date): Promise<ReadinessRead>;
   authorize(read: ClaimedReadiness, decision: Extract<ReadinessDecision, { kind: "authorize" }>, train: TrainAuthorization): ReadinessSettlement;
   single(db: PrismaClient, read: ClaimedReadiness, decision: ReadinessDecision, result: ReadinessTickResult,
@@ -101,32 +102,51 @@ const noteTrainLeaseUnavailable = async (
   tx: Prisma.TransactionClient, train: PendingTrain,
   state: "contended" | "unreachable", detail: string, now: Date,
 ): Promise<void> => {
-  const open = await readLatestMarker(tx, train.taskId, "leaseContention", "control-plane");
-  if (open?.state === state && open.raw.detail === detail) return;
+  const open = await readLatestMarker(tx, train.taskId, "leaseContention");
   const body = state === "contended"
     ? `Merge train ${train.taskId} is waiting for the repository merge Lease: ${detail}`
     : `Merge train ${train.taskId} could not reach the merge Lease: ${detail}`;
-  await writeMarker(tx, train.taskId, "leaseContention", { actorType: "control-plane", body,
-    metadata: { state, trainTaskId: train.taskId, detail,
-      firstObservedAt: (open && open.state !== "resolved" && typeof open.raw.firstObservedAt === "string"
-        ? open.raw.firstObservedAt
-        : now.toISOString()) } });
+  const firstContendedAt = open && open.state !== "resolved" && typeof open.raw.firstContendedAt === "string"
+    ? open.raw.firstContendedAt
+    : now.toISOString();
+  if (!(open?.state === state && open.raw.detail === detail)) {
+    await writeMarker(tx, train.taskId, "leaseContention", { actorType: "control-plane", body,
+      metadata: { state, trainTaskId: train.taskId, detail, firstContendedAt, firstObservedAt: firstContendedAt } });
+  }
   for (const candidate of train.candidates) {
-    await tx.taskActivity.create({ data: { taskId: candidate.taskId, actorType: "control-plane", body,
-      metadata: { kind: MERGE_TAIL_KIND.leaseContention, schemaVersion: MERGE_TAIL_SCHEMA_VERSION,
-        state, trainTaskId: train.taskId, detail } } });
+    const candidateOpen = await readLatestMarker(tx, candidate.taskId, "leaseContention");
+    // An already-alerted chain episode remains the authoritative projection;
+    // the train's episode will still be visible on its own card.
+    if (candidateOpen?.state === "alerted") continue;
+    if (candidateOpen?.state === state && candidateOpen.raw.detail === detail) continue;
+    const candidateFirstContendedAt = candidateOpen && candidateOpen.state !== "resolved"
+      && typeof candidateOpen.raw.firstContendedAt === "string"
+      ? candidateOpen.raw.firstContendedAt
+      : now.toISOString();
+    await writeMarker(tx, candidate.taskId, "leaseContention", { actorType: "control-plane", body,
+      metadata: { state, trainTaskId: train.taskId, detail, firstContendedAt: candidateFirstContendedAt } });
   }
 };
 
 /** Any answer other than another refusal ends the episode. */
 const clearTrainLeaseUnavailable = async (
-  tx: Prisma.TransactionClient, train: PendingTrain,
+  tx: Prisma.TransactionClient, train: PendingTrain, now: Date,
 ): Promise<void> => {
-  const open = await readLatestMarker(tx, train.taskId, "leaseContention", "control-plane");
-  if (!open || open.state === "resolved") return;
-  await writeMarker(tx, train.taskId, "leaseContention", { actorType: "control-plane",
-    body: `Merge train ${train.taskId} took the repository merge Lease`,
-    metadata: { state: "resolved", trainTaskId: train.taskId } });
+  const open = await readLatestMarker(tx, train.taskId, "leaseContention");
+  if (open && open.state !== "resolved") {
+    await writeMarker(tx, train.taskId, "leaseContention", { actorType: "control-plane",
+      body: `Merge train ${train.taskId} took the repository merge Lease`,
+      metadata: { state: "resolved", trainTaskId: train.taskId, resolvedAt: now.toISOString() } });
+  }
+  for (const candidate of train.candidates) {
+    const candidateOpen = await readLatestMarker(tx, candidate.taskId, "leaseContention");
+    if (!candidateOpen || candidateOpen.state === "resolved") continue;
+    await writeMarker(tx, candidate.taskId, "leaseContention", { actorType: "control-plane",
+      body: `Merge train ${train.taskId} took the repository merge Lease`,
+      metadata: { state: "resolved", trainTaskId: train.taskId, resolvedAt: now.toISOString(),
+        ...(typeof candidateOpen.raw.firstContendedAt === "string"
+          ? { firstContendedAt: candidateOpen.raw.firstContendedAt } : {}) } });
+  }
 };
 
 const holderDetail = (holder: MergeLeaseHolder | null | undefined): string => holder
@@ -145,7 +165,7 @@ const withTrainLease = async <T>(
   await db.$transaction(async (mutexTx) => {
     if (!await tryRepositoryMutex(mutexTx, train.repoId)) return;
     // Use a fresh read after acquisition, not the outer transaction's snapshot.
-    const marker = await readLatestMarker(db, train.taskId, "train", "control-plane");
+    const marker = await readLatestMarker(db, train.taskId, "train");
     if (marker?.state !== "queued" && marker?.state !== "acquiring") return;
     let failed = false;
     let failure: unknown;
@@ -168,7 +188,7 @@ const withTrainLease = async <T>(
       await noteTrainLeaseUnavailable(mutexTx, train, "unreachable", leased.detail, now);
       return;
     }
-    await clearTrainLeaseUnavailable(mutexTx, train);
+    await clearTrainLeaseUnavailable(mutexTx, train, now);
   }, { ...serializable, timeout: 300_000 });
 };
 
@@ -224,7 +244,7 @@ export const pendingMergeTrains = async (db: PrismaClient | Prisma.TransactionCl
   }, select: { id: true, projectId: true, repoId: true }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
   const pending: PendingTrain[] = [];
   for (const task of tasks) {
-    const marker = await readLatestMarker(db, task.id, "train", "control-plane");
+    const marker = await readLatestMarker(db, task.id, "train");
     if (marker?.state !== "queued" && marker?.state !== "acquiring") continue;
     const parsed = parseMergeTrainMarker(marker.raw);
     if (parsed.status !== "ok" || parsed.marker.trainTaskId !== task.id || !task.repoId || !parsed.marker.regressionTaskId
@@ -243,15 +263,23 @@ const finishTrainMarker = async (
   train: PendingTrain,
   state: "settled" | "aborted",
   summary: string,
+  now: Date,
 ): Promise<void> => {
   await writeMarker(tx, train.taskId, "train", { actorType: "control-plane", body: summary,
     metadata: { state, trainTaskId: train.taskId, regressionTaskId: train.regressionTaskId,
       baseSha: train.baseSha, width: train.width, candidates: train.candidates, reason: summary } });
+  // The terminal state and the release obligation commit together. If the
+  // process exits after this transaction but before the external release,
+  // reconciliation can retry this exact holder without replaying the train.
+  await recordLeaseDeferral(tx, {
+    target: { projectId: train.projectId, chainId: train.candidates[0]!.chainId },
+    taskId: train.regressionTaskId,
+    failureDetail: `Merge train ${train.taskId} reached ${state}; lease release awaits confirmation`,
+    at: now,
+  });
   // A settled train is finished automation, not review work: closing it here
   // keeps a completed card off the operator's board, while an aborted train
-  // keeps its diagnostic REVIEW state and reason. A failed release is recorded
-  // by `withMergeLease`'s own deferral path; writing release intent here would
-  // open a second unresolved lease event that a confirmed release never settles.
+  // keeps its diagnostic REVIEW state and reason.
   await tx.task.update({ where: { id: train.taskId }, data: {
     description: `${mergeTrainTaskDescription(train)}\n\nSettlement:\n${summary}`,
     ...(state === "aborted"
@@ -276,7 +304,7 @@ const abortTrain = async (
   db: PrismaClient, train: PendingTrain, reason: string, now: Date,
 ): Promise<boolean> => db.$transaction(async (tx) => {
   await lockCandidates(tx, train.candidates);
-  const current = await readLatestMarker(tx, train.taskId, "train", "control-plane");
+  const current = await readLatestMarker(tx, train.taskId, "train");
   if (current?.state !== "queued" && current?.state !== "acquiring") return false;
   for (const [index, candidate] of train.candidates.entries()) {
     await tx.task.updateMany({ where: { id: candidate.taskId, status: { in: [TaskStatus.TODO, TaskStatus.DOING] } },
@@ -284,7 +312,7 @@ const abortTrain = async (
     await noticeMergeTrainAbort(tx, { readinessTaskId: candidate.taskId, trainTaskId: train.taskId, reason, now });
     await candidateSettlementMarker(tx, train, index + 1, "aborted", reason);
   }
-  await finishTrainMarker(tx, train, "aborted", reason);
+  await finishTrainMarker(tx, train, "aborted", reason, now);
   return true;
 }, serializable);
 
@@ -348,9 +376,9 @@ const enqueueReservedTrain = async (
     await db.$transaction(async (tx) => {
       await lockCandidates(tx, train.candidates);
       await tx.$queryRaw`SELECT "id" FROM "Repo" WHERE "id" = ${train.repoId} FOR UPDATE`;
-      if ((await readLatestMarker(tx, train.taskId, "train", "control-plane"))?.state !== "acquiring") return;
+      if ((await readLatestMarker(tx, train.taskId, "train"))?.state !== "acquiring") return;
       const unresolved = await tx.mergeLeaseEvent.findFirst({ where: {
-        state: { in: [MergeLeaseEventState.RELEASE_DEFERRED, MergeLeaseEventState.HANDOFF_PENDING] },
+        state: MergeLeaseEventState.RELEASE_DEFERRED,
         owningTask: { repoId: train.repoId },
       }, select: { id: true } });
       if (unresolved) throw new Error("Merge train reservation has unresolved lease cleanup");
@@ -383,7 +411,7 @@ const enqueueReservedTrain = async (
  */
 const firstGateRefusal = async (
   tx: Prisma.TransactionClient, reads: ReadyRead[],
-  decisions: Array<Extract<ReadinessDecision, { kind: "authorize" }>>, passCount: number,
+  decisions: ReadinessDecision[], passCount: number,
 ): Promise<{ index: number; reason: string } | null> => {
   for (let index = 0; index < Math.min(passCount, reads.length); index += 1) {
     const read = reads[index]!;
@@ -392,9 +420,13 @@ const firstGateRefusal = async (
       templateStep: { select: { stepIndex: true, outputKind: true, taskTemplate: { select: { name: true } } } },
     } });
     if (!isGatedMergeReadinessTask(current)) continue;
+    const decision = decisions[index];
+    if (!decision || decision.kind !== "authorize") {
+      throw new Error(`Merge train second read refused passing candidate ${read.readiness.id}: ${decision?.kind ?? "missing decision"}`);
+    }
     try {
       await requireMergeGateAuthorization(tx, { taskId: read.readiness.id,
-        headSha: decisions[index]!.evidence.headSha, baseSha: decisions[index]!.evidence.baseSha });
+        headSha: decision.evidence.headSha, baseSha: decision.evidence.baseSha });
     } catch (error: unknown) {
       if (!(error instanceof MergeGateAuthorizationError)) throw error;
       return { index, reason: error.message };
@@ -441,13 +473,17 @@ const settleTrain = async (
     const record = parsed.record;
     const bindingFailure = trainRecordBindingFailure(record, train, await liveBase(reader, reads[0]!));
     if (bindingFailure) throw new Error(bindingFailure);
-    const decisions: Array<Extract<ReadinessDecision, { kind: "authorize" }>> = [];
-    for (const read of reads) {
+    const decisions: ReadinessDecision[] = [];
+    for (const [index, read] of reads.entries()) {
       const decision = await evaluateReadiness(reader, { ...read.input,
         regression: { ...read.input.regression, baseHeadSha: record.baseSha },
         train: { baseSha: record.baseSha, candidateHeadSha: read.input.regression.headSha },
       });
-      if (decision.kind !== "authorize") {
+      // A refusal in the gated cumulative prefix invalidates that prefix and
+      // aborts the train. A trailing candidate is not part of the published
+      // prefix: leave it ready for the next train and preserve the passing
+      // prefix that was already recorded by the runtime.
+      if (decision.kind !== "authorize" && index < record.contiguousPassCount) {
         throw new Error(`Merge train second read refused ${read.readiness.id}: ${decision.kind}${"reason" in decision ? `: ${decision.reason}` : "evidence" in decision ? `: ${decision.evidence}` : ""}`);
       }
       decisions.push(decision);
@@ -457,7 +493,7 @@ const settleTrain = async (
     }
     const counts = await db.$transaction(async (tx) => {
       await lockCandidates(tx, train.candidates);
-      if ((await readLatestMarker(tx, train.taskId, "train", "control-plane"))?.state !== "queued") return { authorized: 0, stopped: 0 };
+      if ((await readLatestMarker(tx, train.taskId, "train"))?.state !== "queued") return { authorized: 0, stopped: 0 };
       for (const read of reads) {
         if (!await evidenceStillMatches(tx, read)) throw new Error(`Merge train candidate ${read.readiness.id} evidence changed during settlement`);
       }
@@ -476,8 +512,16 @@ const settleTrain = async (
       for (const [index, read] of reads.entries()) {
         const prefix = record.prefixes[index];
         let settlement = "ready";
+        const decision = decisions[index];
+        const refused = !decision || decision.kind !== "authorize";
+        const refusalReason = refused
+          ? `Merge train second read returned ${decision?.kind ?? "no decision"}${decision && "reason" in decision ? `: ${decision.reason}` : decision && "evidence" in decision ? `: ${decision.evidence}` : ""}`
+          : undefined;
         if (index < authorizedCount && passing && prefix) {
-          const authorization = hooks.authorize(read, decisions[index]!, {
+          if (!decision || decision.kind !== "authorize") {
+            throw new Error(`Merge train second read refused passing candidate ${read.readiness.id}: ${decision?.kind ?? "missing decision"}`);
+          }
+          const authorization = hooks.authorize(read, decision, {
             publishHead: passing.prefixOid, predecessorOid: prefix.predecessorOid,
             ref: passing.ref, position: index + 1, trainTaskId: train.taskId,
           });
@@ -505,14 +549,14 @@ const settleTrain = async (
           // no longer publishes: its verdict says nothing about the candidate
           // and returns it to `ready` rather than charging a repair budget.
           const truncated = gateRefusal !== null && index > gateRefusal.index;
-          const blocked = truncated
+          const blocked = refused || truncated
             ? undefined
             : record.blocked.find((candidate) => candidate.taskId === read.readiness.id);
-          const firstFail = !truncated && prefix?.verdict === "fail" && !failed;
+          const firstFail = !refused && !truncated && prefix?.verdict === "fail" && !failed;
           if (firstFail) failed = true;
-          settlement = blocked ? "blocked" : firstFail ? "repairing" : "ready";
+          settlement = refused ? "ready" : blocked ? "blocked" : firstFail ? "repairing" : "ready";
           const transition = await read.claim.settle(tx, { kind: "finish", at: now, apply: async (client) => {
-            if (blocked || firstFail) {
+            if (!refused && (blocked || firstFail)) {
               const failureSettlement = await settleMergeTrainFailure(client, {
                 readinessTaskId: read.readiness.id, regressionTaskId: read.regression.id,
                 headSha: read.input.regression.headSha, predecessorOid: prefix?.predecessorOid ?? record.prefixes.at(-1)?.prefixOid ?? record.baseSha,
@@ -529,13 +573,17 @@ const settleTrain = async (
           } });
           if (!transition.settled) throw new Error(`Merge train readiness claim lost for ${read.readiness.id}`);
         }
-        const verdict = prefix?.verdict ?? (record.blocked.some((entry) => entry.taskId === read.readiness.id) ? "blocked" : "skipped");
+        const verdict = decision && decision.kind !== "authorize"
+          ? "no-verdict"
+          : prefix?.verdict ?? (record.blocked.some((entry) => entry.taskId === read.readiness.id) ? "blocked" : "skipped");
         await candidateSettlementMarker(tx, train, index + 1, settlement,
-          record.blocked.find((entry) => entry.taskId === read.readiness.id)?.reason,
+          decision && decision.kind !== "authorize"
+            ? refusalReason
+            : record.blocked.find((entry) => entry.taskId === read.readiness.id)?.reason,
           { verdict, ...(prefix ? { predecessorOid: prefix.predecessorOid } : {}) });
         summaries.push(`${index + 1}. ${read.readiness.id}: ${verdict} → ${settlement}`);
       }
-      await finishTrainMarker(tx, train, "settled", summaries.join("\n"));
+      await finishTrainMarker(tx, train, "settled", summaries.join("\n"), now);
       return { authorized: authorizedCount, stopped };
     }, serializable);
     result.authorized += counts.authorized;
@@ -559,13 +607,14 @@ export const mergeTrainReadinessTick = async (
   const result: ReadinessTickResult = { claimed: 0, authorized: 0, requeued: 0, stopped: 0 };
   const pending = existingPending ?? await pendingMergeTrains(db);
   const unresolvedLeases = await db.mergeLeaseEvent.findMany({
-    where: { state: { in: [MergeLeaseEventState.RELEASE_DEFERRED, MergeLeaseEventState.HANDOFF_PENDING] } },
+    where: { state: width > 0
+      ? MergeLeaseEventState.RELEASE_DEFERRED
+      : { in: [MergeLeaseEventState.RELEASE_DEFERRED, MergeLeaseEventState.HANDOFF_PENDING] } },
     select: { state: true, owningTask: { select: { id: true, repoId: true } } },
   });
-  // A train holding the Lease is the only thing that suppresses a repository's
-  // single-candidate decisions. An unresolved handoff is the ordinary steady
-  // state after any authorization, so it excludes the repository from *new
-  // train formation* only, exactly as ADR-0004 scopes it.
+  // A deferred release represents unresolved cleanup from an earlier holder and
+  // fences a new generation. A routine HANDOFF_PENDING event is not a train
+  // formation precondition; it is settled by its queued Run consumer.
   const busyRepos = new Set(pending.map((train) => train.repoId));
   const unresolvedLeaseRepos = new Set(
     unresolvedLeases.flatMap((event) => event.owningTask.repoId ? [event.owningTask.repoId] : []),
@@ -603,6 +652,143 @@ export const mergeTrainReadinessTick = async (
   // settling. A claim left behind parks its candidate for the claim lease.
   const claimed: ClaimedReadiness[] = [];
   try {
+    if (width > 0) {
+      type DiscoveredCandidate = { candidate: ReadinessCandidate; discovery: ReadinessDiscovery };
+      const groups = new Map<string, DiscoveredCandidate[]>();
+      const fallback: DiscoveredCandidate[] = [];
+      for await (const candidate of hooks.candidates(db, Math.max(limit * 20, 100))) {
+        if (!isMergeReadinessStep(candidate.templateStep)) continue;
+        if ((candidate.repoId && busyRepos.has(candidate.repoId)) || await excludedRecovery(db, candidate.id)) continue;
+        const discovery = await hooks.discover(db, candidate, now);
+        const entry = { candidate, discovery };
+        if (discovery.input.stage === "ready" && candidate.repoId && discovery.input.target.resolved) {
+          const group = groups.get(candidate.repoId) ?? [];
+          group.push(entry);
+          groups.set(candidate.repoId, group);
+        } else {
+          fallback.push(entry);
+        }
+      }
+
+      // Discovery is deliberately unbounded by the mutation budget. The
+      // generator still pages, but every ready PASS is present before any
+      // repository chooses its FIFO prefix.
+      const orderedGroups = [...groups.entries()].map(([repoId, group]) => {
+        group.sort((left, right) => left.discovery.evidenceCreatedAt!.getTime() - right.discovery.evidenceCreatedAt!.getTime()
+          || left.candidate.id.localeCompare(right.candidate.id));
+        return { repoId, group };
+      }).sort((left, right) => left.group[0]!.discovery.evidenceCreatedAt!.getTime()
+        - right.group[0]!.discovery.evidenceCreatedAt!.getTime() || left.repoId.localeCompare(right.repoId));
+      const claimedCandidate = async (candidate: ReadinessCandidate): Promise<ClaimedReadiness | null> => {
+        if (result.claimed >= limit) return null;
+        const read = await hooks.read(db, candidate, now);
+        if (!read.claimed) return null;
+        result.claimed += 1;
+        claimed.push(read);
+        return read;
+      };
+
+      for (const { repoId, group } of orderedGroups) {
+        if (result.claimed >= limit) break;
+        const selectedEntries = group.slice(0, Math.min(width, limit - result.claimed));
+        const selected: ReadyRead[] = [];
+        for (const entry of selectedEntries) {
+          const read = await claimedCandidate(entry.candidate);
+          if (!read) continue;
+          if (read.input.stage !== "ready" || !read.readiness.repoId || !read.input.target.resolved) {
+            await single(read, await evaluateReadiness(reader, read.input));
+            continue;
+          }
+          selected.push(read as ReadyRead);
+        }
+        if (selected.length === 0) continue;
+
+        const first = selected[0]!;
+        let baseSha: string;
+        try { baseSha = await liveBase(reader, first); }
+        catch (error: unknown) {
+          await db.$transaction((tx) => first.claim.settle(tx, { kind: "keep", apply: async (client) => client.taskActivity.create({ data: {
+            taskId: first.readiness.id, actorType: "control-plane",
+            body: `Merge train formation deferred: ${error instanceof Error ? error.message : String(error)}`,
+          } }) }), serializable);
+          continue;
+        }
+        if (unresolvedLeaseRepos.has(repoId)) {
+          for (const read of selected) await single(read, await evaluateReadiness(reader, read.input));
+          continue;
+        }
+        if (selected.length === 1 && first.input.regression.baseHeadSha === baseSha) {
+          await single(first, await evaluateReadiness(reader, first.input));
+          continue;
+        }
+        const candidates = selected.map((read) => ({ taskId: read.readiness.id, chainId: read.readiness.chainId!,
+          headSha: read.input.regression.headSha, branch: read.regression.runs[0]?.branch ?? "" }));
+        if (candidates.some((candidate) => !candidate.chainId || !candidate.branch)) {
+          for (const read of selected) await single(read, {
+            kind: "stop", condition: "merge-train-branch-unavailable", evidence: "Merge train candidate chain branch is unavailable",
+          });
+          continue;
+        }
+        let claimsHeld = true;
+        for (const read of selected) if (!await read.claim.renew()) claimsHeld = false;
+        if (!claimsHeld) continue;
+        const target = { projectId: first.readiness.projectId, chainId: candidates[0]!.chainId };
+        let reservation: PendingTrain | null = null;
+        try {
+          reservation = await db.$transaction(async (tx) => {
+            if (!await tryRepositoryMutex(tx, repoId)) return null;
+            await lockCandidates(tx, candidates);
+            await tx.$queryRaw`SELECT "id" FROM "Repo" WHERE "id" = ${repoId} FOR UPDATE`;
+            if ((await pendingMergeTrains(tx)).some((train) => train.repoId === repoId)) return null;
+            const unresolved = await tx.mergeLeaseEvent.findFirst({ where: {
+              state: MergeLeaseEventState.RELEASE_DEFERRED,
+              owningTask: { repoId },
+            }, select: { id: true } });
+            if (unresolved) return null;
+            for (const read of selected) {
+              if (!await evidenceStillMatches(tx, read)) throw new Error(`Merge train candidate ${read.readiness.id} changed before reservation`);
+              const held = await read.claim.settle(tx, { kind: "keep", apply: async () => true });
+              if (!held.settled) throw new Error(`Merge train candidate ${read.readiness.id} claim lost before reservation`);
+            }
+            const task = await reserveMergeTrainTask(tx, {
+              regressionTaskId: first.regression.id, baseSha, width, candidates, now,
+            });
+            for (const read of selected) {
+              const transitioned = await read.claim.settle(tx, { kind: "finish", at: now, apply: async (client) => {
+                await client.task.update({ where: { id: read.readiness.id }, data: { status: TaskStatus.TODO, failureReason: null } });
+                return { value: undefined, ownership: "released" };
+              } });
+              if (!transitioned.settled) throw new Error(`Merge train candidate ${read.readiness.id} claim lost at reservation`);
+            }
+            return { taskId: task.taskId, state: "acquiring" as const, regressionTaskId: first.regression.id,
+              projectId: first.readiness.projectId, repoId, baseSha, width, candidates };
+          }, serializable);
+        } catch (error: unknown) {
+          const reason = `Merge train reservation failed: ${error instanceof Error ? error.message : String(error)}`;
+          for (const read of selected) await single(read, {
+            kind: "stop", condition: "merge-train-reservation-failed", evidence: reason,
+          });
+        }
+        if (reservation) {
+          const train = reservation;
+          await withTrainLease(db, lease, target, train, now, async () => {
+            const outcome = await enqueueReservedTrain(db, reader, train, now, hooks);
+            return { value: outcome, leaseOutcome: outcome === "waiting" ? { kind: "continue" } : { kind: "stop", taskId: first.regression.id } };
+          });
+        }
+      }
+
+      // Non-ready candidates still receive the existing single-candidate
+      // handling, but only after ready evidence has had the opportunity to form
+      // its FIFO train. This keeps the claim budget from hiding a later peer.
+      for (const { candidate } of fallback) {
+        if (result.claimed >= limit) break;
+        const read = await claimedCandidate(candidate);
+        if (!read) continue;
+        await single(read, await evaluateReadiness(reader, read.input));
+      }
+      return result;
+    }
     for await (const candidate of hooks.candidates(db, Math.max(limit * 20, 100))) {
       // The caller's claim budget bounds this loop exactly as it bounds the
       // single-candidate tick; a formed train is bounded by `width` instead.
@@ -666,7 +852,7 @@ export const mergeTrainReadinessTick = async (
           await tx.$queryRaw`SELECT "id" FROM "Repo" WHERE "id" = ${first.readiness.repoId} FOR UPDATE`;
           if ((await pendingMergeTrains(tx)).some((train) => train.repoId === first.readiness.repoId)) return null;
           const unresolved = await tx.mergeLeaseEvent.findFirst({ where: {
-            state: { in: [MergeLeaseEventState.RELEASE_DEFERRED, MergeLeaseEventState.HANDOFF_PENDING] },
+            state: MergeLeaseEventState.RELEASE_DEFERRED,
             owningTask: { repoId: first.readiness.repoId },
           }, select: { id: true } });
           if (unresolved) return null;

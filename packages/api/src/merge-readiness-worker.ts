@@ -467,6 +467,13 @@ export type ClaimedReadiness = {
 
 export type ReadinessRead = ClaimedReadiness | { claimed: false; input: ReadinessInput };
 
+/** Unclaimed facts used by the train path to order all eligible evidence before
+ * its claim/work budget is applied. */
+export type ReadinessDiscovery = {
+  input: ReadinessInput;
+  evidenceCreatedAt: Date | null;
+};
+
 const decisionContext = (readiness: ReadinessCandidate, now: Date) => ({
   readiness: {
     id: readiness.id,
@@ -476,6 +483,56 @@ const decisionContext = (readiness: ReadinessCandidate, now: Date) => ({
   },
   now,
 });
+
+const discoverReadiness = async (
+  db: PrismaClient,
+  readiness: ReadinessCandidate,
+  now: Date,
+): Promise<ReadinessDiscovery> => {
+  const context = decisionContext(readiness, now);
+  try {
+    const regression = await db.task.findFirst({
+      where: {
+        projectId: readiness.projectId,
+        chainId: readiness.chainId,
+        templateId: readiness.templateId,
+        templateStep: { outputKind: { in: [...REGRESSION_VERIFICATION_OUTPUT_KINDS] } },
+      },
+      include: READINESS_REGRESSION_INCLUDE,
+    });
+    if (!regression || regression.status !== TaskStatus.DONE) {
+      return { input: { ...context, stage: "regression-pending" }, evidenceCreatedAt: null };
+    }
+    if (!regression.stepOutput) {
+      return { input: { ...context, stage: "missing-regression-evidence" }, evidenceCreatedAt: null };
+    }
+    const verdict = parseRegressionVerdict(regression.stepOutput.body, regression.stepOutput.kind);
+    if (verdict.status !== "ok" || verdict.verdict.outcome !== "pass"
+      || regression.stepOutput.commitSha !== verdict.verdict.headSha) {
+      return { input: { ...context, stage: "invalid-regression-evidence" }, evidenceCreatedAt: null };
+    }
+    const target = await db.$transaction((tx) => resolveChainTarget(tx, readiness));
+    return {
+      input: {
+        ...context,
+        stage: "ready",
+        regression: {
+          headSha: verdict.verdict.headSha,
+          baseHeadSha: verdict.verdict.baseHeadSha,
+        },
+        target,
+        defaultBranch: readiness.repo?.defaultBranch ?? "main",
+      },
+      evidenceCreatedAt: regression.stepOutput.createdAt,
+    };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      input: { ...context, stage: "read-failed", failure: { kind: "unexpected", message } },
+      evidenceCreatedAt: null,
+    };
+  }
+};
 
 const readReadiness = async (
   db: PrismaClient,
@@ -1086,6 +1143,7 @@ export const readinessTick = async (
   if (width > 0 || pendingTrains?.length) {
     return mergeTrainReadinessTick(db, reader, now, { width, limit }, releaseChainLease, runWithMergeLease, {
       candidates: readinessCandidates,
+      discover: discoverReadiness,
       read: readReadiness,
       authorize: authorizeReadinessSettlement,
       single: (database, read, decision, result, release, lease, pullRequests) =>

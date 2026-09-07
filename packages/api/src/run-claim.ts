@@ -1132,7 +1132,7 @@ export const claimRun = async (
       // input; settled and aborted markers intentionally disappear from the
       // claim so a stale card can never run the tool again.
       const mergeTrain = candidate.task.chainId === null && candidate.task.templateStep === null
-        ? mergeTrainClaimMetadata(await readLatestMarker(tx, candidate.task.id, "train", "control-plane"))
+        ? mergeTrainClaimMetadata(await readLatestMarker(tx, candidate.task.id, "train"))
         : null;
       return {
         outcome: "claimed" as const,

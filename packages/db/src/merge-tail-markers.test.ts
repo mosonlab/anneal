@@ -259,9 +259,22 @@ test("train ownership reads select only control-plane markers", async () => {
     observed = input;
     return null;
   } } } as unknown as Prisma.TransactionClient;
-  assert.equal(await readLatestMarker(tx, "train-1", "train", "control-plane"), null);
+  assert.equal(await readLatestMarker(tx, "train-1", "train"), null);
   assert.deepEqual((observed as { where: unknown }).where, {
     taskId: "train-1", actorType: "control-plane", metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.train },
+  });
+});
+
+test("lease-contention reads select only control-plane markers", async () => {
+  let observed: unknown;
+  const tx = { taskActivity: { findFirst: async (input: unknown) => {
+    observed = input;
+    return null;
+  } } } as unknown as Prisma.TransactionClient;
+  assert.equal(await readLatestMarker(tx, "readiness-1", "leaseContention"), null);
+  assert.deepEqual((observed as { where: unknown }).where, {
+    taskId: "readiness-1", actorType: "control-plane",
+    metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseContention },
   });
 });
 
@@ -284,14 +297,14 @@ for (const forgedState of ["settled", "aborted"] as const) {
       taskActivity: {
         findFirst: async (input: { where: Record<string, unknown> }) => {
           observed = input;
-          const row = rows.find((candidate) => (
+          const row = rows.filter((candidate) => (
             input.where.actorType === undefined || candidate.actorType === input.where.actorType
-          ));
+          )).at(-1);
           return row ? { metadata: row.metadata } : null;
         },
       },
     } as unknown as Prisma.TransactionClient;
-    assert.equal((await readLatestMarker(latestTx, "train-1", "train"))?.state, "queued");
+    assert.equal((await readLatestMarker(latestTx, "train-1", "train"))?.state, forgedState);
     assert.equal(observed?.where.actorType, "control-plane");
   });
 }

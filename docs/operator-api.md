@@ -1509,9 +1509,10 @@ The worker first reserves a detached train in `REVIEW` with a `mergeTail.train`
 marker in `acquiring` state and no Run. This has no Approval gate. It enqueues
 the sole Run and changes the markers to `queued` only under the Merge Lease.
 Reservations and queued trains drain even after the width is changed to zero.
-A release that fails is recorded once in the deferred-release ledger by the
-Merge Lease helper itself and finished by restart reconciliation; settlement
-adds no second release intent.
+A terminal train settlement records one deferred-release obligation in the same
+transaction as its terminal marker. A confirmed release settles that obligation;
+restart reconciliation consumes it if the process exits before release, without
+replaying authorization or releasing a newer lease generation.
 
 When `MERGE_TRAIN_WIDTH` is greater than zero, Merge readiness collects ready
 Chain candidates per Repo. A candidate must have a valid exact-head
@@ -1556,9 +1557,10 @@ validation, the second-read checks, and authorization settlement. A failed
 acquire defers the tick and is named: a contended or unreachable acquisition
 writes a `mergeTail.leaseContention` marker on the train Task and one activity
 entry per candidate. While a train holds the Lease, single-candidate readiness
-for that Repo is deferred; an unresolved Lease handoff or deferred release
-excludes the Repo from forming a *new* train only, and its candidates continue
-on the single-candidate path. The Lease is released after the last
+for that Repo is deferred; an unresolved deferred release excludes the Repo
+from forming a *new* train only, and its candidates continue on the
+single-candidate path. A routine `HANDOFF_PENDING` event does not block new
+train formation. The Lease is released after the last
 authorization or on every failure path. Merge executor publication occurs
 after the handoff and is outside this Lease. A train Run that is lost or ends
 without a stored `merge-train-v1` record releases the Lease, marks the train

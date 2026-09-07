@@ -73,13 +73,15 @@ If the train Run ends without a stored `merge-train-v1` record, or the Run is
 lost, the control plane releases the Lease, writes a `mergeTail.train` marker
 with `state: "aborted"` and the named reason on every candidate, and returns
 the candidates to `ready` for a later tick. The detached Task is not retried.
-A release that fails is recorded once by `withMergeLease`'s own deferred-release
-path, which restart reconciliation finishes; settlement does not write a second
-release intent that a confirmed release would leave open. Unresolved lease
-handoffs or releases exclude the repository from new train formation only:
-candidates in that repository still settle through the single-candidate path,
-which serializes on the Merge Lease itself. Every Run-opening path refuses
-a second Run for the detached train, including platform lease-loss refunds.
+Terminal settlement records one deferred-release obligation in the same
+transaction as the terminal train marker. A confirmed external release settles
+that obligation; if the process exits first, restart reconciliation consumes it
+without replaying authorization or releasing a newer lease generation. An
+unresolved deferred release excludes the repository from new train formation
+only: candidates in that repository still settle through the single-candidate
+path, which serializes on the Merge Lease itself. A routine `HANDOFF_PENDING`
+event does not block train formation. Every Run-opening path refuses a second
+Run for the detached train, including platform lease-loss refunds.
 
 ## Authorization contract
 

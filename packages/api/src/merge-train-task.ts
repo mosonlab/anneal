@@ -188,7 +188,7 @@ export const reserveMergeTrainTask = async (
 export const enqueueMergeTrainTask = async (
   tx: DbTx, taskId: string, now: Date,
 ): Promise<{ runId: string }> => {
-  const marker = await readLatestMarker(tx, taskId, "train", "control-plane");
+  const marker = await readLatestMarker(tx, taskId, "train");
   const parsed = parseMergeTrainMarker(marker?.raw);
   if (parsed.status !== "ok" || parsed.marker.state !== "acquiring" || !parsed.marker.candidates) {
     throw new Error(`Merge train ${taskId} has no acquiring reservation`);

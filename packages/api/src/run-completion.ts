@@ -858,7 +858,7 @@ export const completeRun = async (
     // train. Read the control plane's latest state independently of the recent
     // activity window so session chatter cannot hide an existing settlement.
     const trainMarker = run.task && !run.task.templateId && !run.task.chainId
-      ? await readLatestMarker(tx, run.task.id, "train", "control-plane")
+      ? await readLatestMarker(tx, run.task.id, "train")
       : null;
     const mergeTrainSettled = Boolean(run.task
       && trainMarker?.raw.trainTaskId === run.task.id
