@@ -13,6 +13,7 @@ import {
   integratorBindingRefusal,
   INTEGRATOR_OUTPUT_KIND,
   isMergeReadinessStep,
+  isRegressionVerificationOutputKind,
   isPinnedBaseCommitError,
   LEGACY_ALL_PRIOR_OUTPUTS,
   MERGE_TAIL_KIND,
@@ -1164,10 +1165,9 @@ export const claimRun = async (
       const mergeTrain = candidate.task.chainId === null && candidate.task.templateStep === null
         ? mergeTrainClaimMetadata(await readLatestMarker(tx, candidate.task.id, "train"))
         : null;
-      const regressionRecoveryContext = await regressionRecoveryContextForClaim(tx, {
-        taskId: candidate.task.id,
-        runId: run.id,
-      });
+      const regressionRecoveryContext = isRegressionVerificationOutputKind(candidate.task.templateStep?.outputKind)
+        ? await regressionRecoveryContextForClaim(tx, { taskId: candidate.task.id, runId: run.id })
+        : null;
       return {
         outcome: "claimed" as const,
         claim: {
