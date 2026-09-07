@@ -24,7 +24,7 @@ import {
   Prisma,
 } from "@anneal/db";
 import type { PrismaClient } from "@anneal/db";
-import type { Session as SessionContract } from "@anneal/db/board-contract";
+import type { Session as SessionContract, SessionDetail as SessionDetailContract } from "@anneal/db/board-contract";
 import { parseSessionListFilters } from "@anneal/db/session-filter-contract";
 import type { SerializesTo } from "@anneal/db/wire-serialization";
 import { z } from "zod";
@@ -42,6 +42,7 @@ import { grantAdmits, type FileOperation, type GrantLike } from "../files/grants
 import { NotFoundError } from "../files/store.js";
 import { FAILURE_REASON_LIMIT, failureReasonText } from "../failure-reason.js";
 import { InboxRunFenceRefusal, suspendForInbox } from "../inbox.js";
+import { baselineKey, readRunBaselines } from "../run-baseline.js";
 import {
   cancelBoundRevalidationRun,
   isRevalidationStep,
@@ -56,6 +57,8 @@ import {
   type RunFence,
   withFencedRun,
 } from "../run-fence.js";
+import { runMetrics } from "../run-metrics.js";
+import { readRunMetricEvents } from "../run-metric-events.js";
 import { sessionListWhere } from "../session-list-query.js";
 import {
   FILE_WRITE_LIMIT,
@@ -191,6 +194,7 @@ const cancelRunInput = z.object({
  * projection must JSON-serialize to, so every `satisfies` below proves the
  * whole wire claim rather than the native half of it. */
 type SessionResponse = SerializesTo<SessionContract<Date, Prisma.Decimal>, SessionContract>;
+type SessionDetailResponse = SerializesTo<SessionDetailContract<Date, Prisma.Decimal>, SessionDetailContract>;
 
 export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => void {
   const { db, releaseChainLease, appendFencedActivity } = deps;
@@ -559,6 +563,7 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
       task: {
         select: {
           id: true, name: true,
+          templateStepId: true,
           // The chain the Sessions list filters on, and the template step that
           // is the only lossless proof of an instantiated chain's name.
           chainId: true,
@@ -577,6 +582,11 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
           repo: { select: { id: true, name: true, remoteUrl: true } },
         },
       },
+    } as const;
+
+    const sessionDetailInclude = {
+      ...sessionInclude,
+      run: { select: { ...sessionInclude.run.select, readyAt: true, status: true, endedAt: true } },
     } as const;
 
     type MergeOutcomeSubject = {
@@ -656,11 +666,28 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
     app.get("/sessions/:sessionId", async (context) => {
       const session = await db.session.findUnique({
         where: { id: id.parse(context.req.param("sessionId")) },
-        include: sessionInclude,
+        include: sessionDetailInclude,
       });
       if (session === null) return context.json({ error: "Session not found" }, 404);
+      const { toolEventsBySession, ttftEventsBySession } = await readRunMetricEvents(db, [session.id]);
+      const stepKey = session.task?.templateStepId === null || session.task?.templateStepId === undefined
+        ? null
+        : { projectId: session.projectId, templateStepId: session.task.templateStepId };
+      const baselines = await readRunBaselines(db, stepKey === null ? [] : [stepKey]);
+      const baseline = stepKey === null ? null : baselines.get(baselineKey(stepKey)) ?? null;
+      const metrics = session.run === null ? null : runMetrics({
+        run: session.run,
+        session,
+        toolEvents: toolEventsBySession.get(session.id) ?? [],
+        ttftEvents: ttftEventsBySession.get(session.id) ?? [],
+        baseline,
+      });
       const row = withMergeOutcome(session);
-      return context.json(chainIdentityFrom([row])(row) satisfies SessionResponse);
+      return context.json({
+        ...chainIdentityFrom([row])(row),
+        metrics,
+        baseline,
+      } satisfies SessionDetailResponse);
     });
 
     app.post("/runs/:runId/cancel", async (context) => {

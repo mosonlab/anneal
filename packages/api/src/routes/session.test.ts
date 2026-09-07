@@ -700,6 +700,115 @@ test("GET /sessions projects chain identity onto every row", async () => {
   });
 });
 
+test("GET /sessions/:sessionId carries task-detail metrics while list rows stay metric-free", async () => {
+  await withTokens(async () => {
+    const readyAt = new Date("2026-09-01T10:00:00.000Z");
+    const startedAt = new Date("2026-09-01T10:00:20.000Z");
+    const endedAt = new Date("2026-09-01T10:02:00.000Z");
+    const row = {
+      ...sessionFixture("metrics", "2026-09-01T10:00:00.000Z", {
+        taskName: "Chain Alpha: Implement the filters", chainId: "chain-alpha", stepName: "Implement the filters",
+        runner: "CLAUDE", executionStatus: "SUCCEEDED",
+      }),
+      provisionedAt: new Date("2026-09-01T10:00:05.000Z"),
+      startedAt,
+      endedAt,
+      cleanupStartedAt: null,
+      cleanupEndedAt: null,
+      resumeAttempt: 0,
+      inputTokens: 1_000,
+      cachedInputTokens: 600,
+      cacheCreationInputTokens: 150,
+      outputTokens: 400,
+      costUsd: "6.0000",
+      terminationReason: "provider completed",
+      exitCode: 0,
+      signal: null,
+      task: {
+        ...sessionFixture("metrics", "2026-09-01T10:00:00.000Z", {
+          taskName: "Chain Alpha: Implement the filters", chainId: "chain-alpha", stepName: "Implement the filters",
+        }).task!,
+        templateStepId: "step-1",
+      },
+      run: {
+        id: "run-metrics", runNumber: 2, model: "claude-opus-5", branch: "feat/alpha",
+        readyAt, status: "SUCCEEDED", endedAt,
+        pullRequestUrl: null, workspacePath: null,
+        repo: { id: "repo-1", name: "repo", remoteUrl: "https://example.test/repo" },
+      },
+    };
+    const metricEvents = [
+      {
+        type: "TOOL_STARTED", at: new Date("2026-09-01T10:00:30.000Z"), toolCallId: "tool-1",
+        payload: { type: "tool_use", name: "Bash" },
+      },
+      {
+        type: "TOOL_COMPLETED", at: new Date("2026-09-01T10:00:40.000Z"), toolCallId: "tool-1",
+        payload: { type: "tool_result", is_error: false },
+      },
+      { type: "MODEL_COMPLETED", at: endedAt, toolCallId: null, payload: { type: "message_end", message: { role: "assistant" }, anneal: { ttftMs: 20 } } },
+    ];
+    const rawQueries: Array<{ sql?: string }> = [];
+    const database = {
+      session: {
+        findUnique: async () => row,
+        findMany: async (args: { include: { run: { select: Record<string, unknown> } } }) => [{
+          ...row,
+          run: Object.fromEntries(Object.entries(row.run).filter(([key]) => key in args.include.run.select)),
+        }],
+      },
+      task: {
+        findMany: async () => [{
+          id: row.task!.id, projectId: row.projectId, name: row.task!.name,
+          chainId: row.task!.chainId, templateStep: row.task!.templateStep,
+        }],
+      },
+      $queryRaw: async (query: { sql?: string }) => {
+        rawQueries.push(query);
+        if (query.sql?.includes("percentile_cont")) {
+          return [{
+            projectId: row.projectId, templateStepId: "step-1", sampleSize: 8,
+            costSampleSize: 8, costP50: 3, costP90: 5,
+            durationSampleSize: 8, durationP50: 50_000, durationP90: 80_000,
+          }];
+        }
+        return metricEvents.map((event) => ({ ...event, sessionId: row.id }));
+      },
+    } as unknown as PrismaClient;
+    const app = createApp(database);
+
+    const detailResponse = await app.request("/sessions/metrics", { headers: { Authorization: "Bearer operator-unit-token" } });
+    assert.equal(detailResponse.status, 200);
+    const detail = await detailResponse.json() as { metrics: Record<string, unknown>; baseline: unknown };
+    assert.deepEqual(Object.keys(detail.metrics).sort(), [
+      "modelActiveIsUpperBound", "modelActiveMs", "outputTokensPerSecond", "phases",
+      "termination", "tokens", "tools", "ttft", "vsBaseline",
+    ]);
+    assert.deepEqual((detail.metrics.ttft), { p50Ms: 20, p90Ms: 20, samples: 1 });
+    assert.deepEqual(detail.metrics.vsBaseline, { costRatio: 2, durationRatio: 2 });
+    assert.deepEqual(detail.baseline, {
+      sampleSize: 8,
+      costUsd: { sampleSize: 8, p50: 3, p90: 5 },
+      durationMs: { sampleSize: 8, p50: 50_000, p90: 80_000 },
+    });
+    assert.deepEqual(detail.metrics.phases, {
+      queuedMs: 5_000, provisioningMs: 15_000, executingMs: 100_000, inboxWaitMs: 0, cleanupMs: null,
+    });
+
+    const listResponse = await app.request("/sessions?projectId=p", { headers: { Authorization: "Bearer operator-unit-token" } });
+    assert.equal(listResponse.status, 200);
+    const list = await listResponse.json() as Array<Record<string, unknown>>;
+    assert.equal(list.length, 1);
+    assert.equal("metrics" in list[0]!, false);
+    assert.deepEqual(Object.keys(list[0]!.run as object).sort(), [
+      "branch", "id", "model", "pullRequestUrl", "repo", "runNumber", "workspacePath",
+    ]);
+    // The detail uses one event projection and one baseline aggregate. The list
+    // reuses its existing findMany/include query and performs neither read.
+    assert.equal(rawQueries.length, 2);
+  });
+});
+
 test("GET /sessions/:sessionId 404s cleanly and carries the repo remote URL", async () => {
   await withTokens(async () => {
     const calls: Array<Record<string, unknown>> = [];
@@ -722,6 +831,7 @@ test("GET /sessions/:sessionId derives a chain name only when one row proves it"
     const detail = async (task: SessionFixture["task"]) => {
       const app = createApp({
         session: { findUnique: async () => ({ ...row, task }) },
+        $queryRaw: async () => [],
       } as unknown as PrismaClient);
       const response = await app.request("/sessions/s1", { headers: { Authorization: "Bearer operator-unit-token" } });
       assert.equal(response.status, 200);
