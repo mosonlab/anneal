@@ -18,6 +18,7 @@ import {
   recordIntegratorStop,
   TaskStatus,
 } from "@anneal/db";
+import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
 import { classifyCandidate } from "./base-drift-recovery-decision.js";
 import {
@@ -27,6 +28,7 @@ import {
 } from "./merge-base-drift-worker.js";
 import { handleRegressionCompletion } from "./merge-tail-actions.js";
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
+import { claimRun } from "./run-claim.js";
 import {
   withMergeLease,
   type MergeLeaseAcquirer,
@@ -594,6 +596,67 @@ test("operator recovery repair reentry carries a direct Regression rerun through
   assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({
     where: { id: seeded.aggregateId },
   })).status, "AWAITING_AUTHORIZATION");
+});
+
+test("a fresh base-drift recovery claim carries its pre-recovery Regression output snapshot", async () => {
+  const seeded = await seedStopped("canonical-direct", "recovery-claim-context");
+  const priorBody = JSON.stringify({
+    schemaVersion: 2,
+    outcome: "pass",
+    headSha: HEAD,
+    baseHeadSha: BASE,
+    gateVerdict: "PASS",
+    gateProof: `MERGE GATE: PASS ${HEAD}`,
+  });
+  await db.taskStepOutput.upsert({
+    where: { taskId: seeded.gateTask.id },
+    create: {
+      taskId: seeded.gateTask.id,
+      runId: seeded.gateRun.id,
+      kind: "regression-verification-v2",
+      body: priorBody,
+      commitSha: HEAD,
+    },
+    update: {
+      runId: seeded.gateRun.id,
+      kind: "regression-verification-v2",
+      body: priorBody,
+      commitSha: HEAD,
+    },
+  });
+
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  });
+  const recoveryRunId = aggregate.recoveryRunId;
+  assert.ok(recoveryRunId);
+  assert.equal(await db.taskStepOutput.findUnique({ where: { taskId: seeded.gateTask.id } }), null);
+
+  const claimed = await claimRun(db, {
+    body: {
+      runnerId: "recovery-context-runner",
+      leaseSeconds: 60,
+      contractVersion: RUN_COMPLETION_CONTRACT_VERSION,
+    },
+    claimantClass: "runner",
+    now: new Date(),
+    specificationReader: null,
+  });
+  assert.ok(claimed && "run" in claimed, JSON.stringify(claimed));
+  assert.equal(claimed.run.id, recoveryRunId);
+  assert.deepEqual(claimed.regressionRecoveryContext, {
+    state: "queued",
+    currentBaseSha: BASE_2,
+    authorizedHeadSha: HEAD,
+    recoveryRunId,
+    priorOutput: {
+      runId: seeded.gateRun.id,
+      kind: "regression-verification-v2",
+      body: priorBody,
+      commitSha: HEAD,
+    },
+  });
 });
 
 test("operator recovery repair reentry carries the Documentation hop and surfaces a fresh second FAIL", async () => {

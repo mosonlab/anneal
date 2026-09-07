@@ -40,6 +40,7 @@ export const RUNNER_DEFINITIONS: Readonly<Record<RunnerKind, AdapterDeclaration>
 const COMMON_PROTECTED_SECRET_ENVIRONMENT = [
   "GIT_CONFIG_GLOBAL", "AGENTOS_GATE_SERVER", "AGENTOS_GATE_PRIMARY_SERVER", "AGENTOS_GATE_FALLBACK_SERVER",
   "AGENTOS_GATE_ALLOW_LOCAL", "AGENTOS_GATE_LOCAL_SLOTS", "AGENTOS_GATE_PRIMARY_SLOTS",
+  "AGENTOS_REGRESSION_RECOVERY_CONTEXT",
   "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
 ] as const;
 
@@ -53,6 +54,18 @@ const toolManifest = (claim: ClaimedTask): string[] => [
   RUNNER_DEFINITIONS[claim.runner].toolIntroduction,
   ...manifestLines(),
 ];
+
+const recoveryPromptSection = (claim: ClaimedTask): string[] => {
+  const context = claim.regressionRecoveryContext;
+  if (!context) return [];
+  return [
+    "",
+    "Platform-pinned base-drift recovery instruction:",
+    `- Recovery Run ${context.recoveryRunId} is queued for base ${context.currentBaseSha} and authorized head ${context.authorizedHeadSha}.`,
+    "- Run regression-verification.sh prepare first. If it reports `REGRESSION PREPARE: semantic-reused`, the persisted prior Run is an exact-head semantic PASS: skip the semantic model recheck and invoke regression-verification.sh finalize immediately.",
+    "- finalize always runs the Merge gate. If prepare reports `ready`, or finalize reports semantic-stale with exit 77, perform the full semantic recheck required by the Regression task before finalizing.",
+  ];
+};
 
 export const buildPrompt = (claim: ClaimedTask): string => [
   claim.agent.foundationalPrompt,
@@ -146,6 +159,7 @@ export const buildPrompt = (claim: ClaimedTask): string => [
     ]),
     `- Repair task output (${claim.regressionRepairHandoff.repair.outputKind}):\n${claim.regressionRepairHandoff.repair.outputBody}`,
   ] : []),
+  ...recoveryPromptSection(claim),
 ].join("\n");
 
 /** Runner-owned `git -c` overrides, expressed as the environment form so they
@@ -162,7 +176,7 @@ const gitConfigOverrides = (entries: readonly (readonly [string, string])[]): No
 export const buildChildEnvironment = (
   config: Pick<RunnerConfig, "path" | "home" | "apiUrl" | "runAsPrefix" | "workspaceRoot" | "hostProofSlots">
     & Partial<Pick<RunnerConfig, "proxyEnvironment" | "gateServer" | "gateFallbackServer" | "gateLocalSlots" | "gatePrimarySlots">>,
-  claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner" | "agent" | "task">,
+  claim: Pick<ClaimedTask, "secrets" | "sessionToken" | "fencingToken" | "run" | "runner" | "agent" | "task" | "regressionRecoveryContext">,
   scratch: AgentScratch,
   workspacePath: string,
   commitHooksPath?: string,
@@ -191,6 +205,7 @@ export const buildChildEnvironment = (
     !PROTECTED_SECRET_ENVIRONMENT.has(name)
     && !name.startsWith("GIT_CONFIG_")
     && !["GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL"].includes(name)));
+  const recoveryContext = regressionStep ? claim.regressionRecoveryContext : null;
   return {
     ...taskSecrets,
     // The runner owns all three paths/counts and sets them after task Secrets.
@@ -220,6 +235,9 @@ export const buildChildEnvironment = (
     ...(regressionStep ? {
       AGENTOS_CHAIN_ID: claim.task.chainId!,
       AGENTOS_PULL_REQUEST_BASE: claim.run.pullRequestBase,
+    } : {}),
+    ...(recoveryContext ? {
+      AGENTOS_REGRESSION_RECOVERY_CONTEXT: JSON.stringify(recoveryContext),
     } : {}),
     ...RUNNER_DEFINITIONS[claim.runner].childEnvironment(claim, scratch),
     RUNNER_WORKSPACE_ROOT: scratch.workspaceRoot,

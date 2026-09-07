@@ -299,12 +299,14 @@ const FAIL_GATE_PROOF = /^MERGE GATE: FAIL \(.+\)$/u;
 
 type RegressionVerdictSchemaVersion = typeof MERGE_TAIL_SCHEMA_VERSION | typeof REGRESSION_VERIFICATION_SCHEMA_VERSION;
 
+type ReusedSemanticVerdict = { semanticVerdict?: "reused"; semanticSourceRunId?: string };
+
 export type RegressionVerdict =
   | { schemaVersion: typeof MERGE_TAIL_SCHEMA_VERSION; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS" }
-  | { schemaVersion: typeof REGRESSION_VERIFICATION_SCHEMA_VERSION; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS"; gateProof: string }
+  | ({ schemaVersion: typeof REGRESSION_VERIFICATION_SCHEMA_VERSION; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS"; gateProof: string } & ReusedSemanticVerdict)
   | { schemaVersion: RegressionVerdictSchemaVersion; outcome: "review-fail"; headSha: string; baseHeadSha: string; summary: string }
   | { schemaVersion: typeof MERGE_TAIL_SCHEMA_VERSION; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; summary: string; gateFailureExcerpt?: string }
-  | { schemaVersion: typeof REGRESSION_VERIFICATION_SCHEMA_VERSION; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; gateProof: string; summary: string; gateFailureExcerpt?: string }
+  | ({ schemaVersion: typeof REGRESSION_VERIFICATION_SCHEMA_VERSION; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; gateProof: string; summary: string; gateFailureExcerpt?: string } & ReusedSemanticVerdict)
   | { schemaVersion: RegressionVerdictSchemaVersion; outcome: "refresh-conflict"; headSha: string; baseHeadSha: string; summary: string };
 
 export type RegressionRepairHandoff = {
@@ -358,6 +360,14 @@ export const parseRegressionVerdict = (
   }
   if (typeof value.headSha !== "string" || !SHA.test(value.headSha)) return { status: "invalid", reason: "invalid regression headSha" };
   if (typeof value.baseHeadSha !== "string" || !SHA.test(value.baseHeadSha)) return { status: "invalid", reason: "invalid regression baseHeadSha" };
+  if (Object.hasOwn(value, "semanticVerdict") || Object.hasOwn(value, "semanticSourceRunId")) {
+    if (value.schemaVersion !== REGRESSION_VERIFICATION_SCHEMA_VERSION
+      || (value.outcome !== "pass" && value.outcome !== "gate-fail")
+      || value.semanticVerdict !== "reused"
+      || typeof value.semanticSourceRunId !== "string" || value.semanticSourceRunId.trim().length === 0) {
+      return { status: "invalid", reason: "invalid regression reused semantic verdict provenance" };
+    }
+  }
   if (value.outcome === "pass" && value.gateVerdict === "PASS") {
     if (value.schemaVersion === REGRESSION_VERIFICATION_SCHEMA_VERSION) {
       const proof = typeof value.gateProof === "string" ? PASS_GATE_PROOF.exec(value.gateProof) : null;
