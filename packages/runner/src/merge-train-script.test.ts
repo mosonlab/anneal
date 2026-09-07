@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { createServer, type Server } from "node:http";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { type AddressInfo } from "node:net";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -46,22 +44,13 @@ type Fixture = {
   gateLog: string;
   gateScript: string;
   env: NodeJS.ProcessEnv;
-  outputRequests: Array<{ path: string; body: Record<string, unknown> }>;
-  server: Server;
+  handoff: () => Record<string, unknown> | null;
   candidate: (taskId: string, branch: string, files: Record<string, string>, start?: string) => Candidate;
   ref: (oid: string) => string;
   cleanup: () => Promise<void>;
 };
 
-const listen = async (server: Server): Promise<number> => {
-  await new Promise<void>((resolveListen, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => resolveListen());
-  });
-  return (server.address() as AddressInfo).port;
-};
-
-const makeFixture = async (outputStatus = 200): Promise<Fixture> => {
+const makeFixture = async (): Promise<Fixture> => {
   const root = mkdtempSync(join(tmpdir(), "agentos-merge-train-runtime-"));
   const origin = join(root, "origin.git");
   const seed = join(root, "seed");
@@ -128,6 +117,19 @@ if (behavior === "delayed-pass") {
 } else if (behavior === "fail-index-2" && index === 2) {
   console.log("MERGE GATE: FAIL (fixture failure)");
   process.exit(1);
+} else if (behavior === "noisy-fail" || behavior === "noisy-pass") {
+  console.log("run-gate: failure excerpt (last 200 lines per failing step)");
+  for (let line = 0; line < 200; line += 1) console.log("noise ".repeat(12) + line);
+  if (behavior === "noisy-pass") {
+    console.log("MERGE GATE: PASS " + oid);
+    process.exit(0);
+  }
+  console.log("MERGE GATE: FAIL (fixture failure)");
+  process.exit(1);
+} else if (behavior === "block-cleanup") {
+  fs.chmodSync(require("node:path").dirname(process.cwd()), 0o500);
+  console.log("MERGE GATE: PASS " + oid);
+  process.exit(0);
 } else if (behavior === "wrong-pass") {
   console.log("MERGE GATE: PASS " + "0".repeat(40));
   process.exit(0);
@@ -139,20 +141,7 @@ if (behavior === "delayed-pass") {
 }
 `);
 
-  const outputRequests: Array<{ path: string; body: Record<string, unknown> }> = [];
-  const server = createServer((request, response) => {
-    assert.equal(request.method, "PUT");
-    assert.equal(request.headers.authorization, "Bearer session-merge-train-fixture");
-    let body = "";
-    request.setEncoding("utf8");
-    request.on("data", (chunk) => { body += chunk; });
-    request.on("end", () => {
-      outputRequests.push({ path: request.url ?? "", body: JSON.parse(body) as Record<string, unknown> });
-      response.writeHead(outputStatus, { "content-type": "application/json" });
-      response.end("{}\n");
-    });
-  });
-  const port = await listen(server);
+  const handoffPath = join(workspace, ".agentos", "merge-train-output.json");
 
   const candidate = (taskId: string, branch: string, files: Record<string, string>, start = baseSha): Candidate => {
     const checkout = join(root, `candidate-${branch.replaceAll("/", "-")}`);
@@ -172,13 +161,14 @@ if (behavior === "delayed-pass") {
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    PATH: `${join(root, "bin")}:${process.env.PATH ?? ""}`,
-    AGENTOS_API_URL: `http://127.0.0.1:${port}`,
+    // The mechanical handoff needs no session or fencing credentials, and the
+    // gate is the one supported override rather than anything found on PATH.
+    AGENTOS_API_URL: undefined,
+    AGENTOS_SESSION_TOKEN: undefined,
+    AGENTOS_FENCING_TOKEN: undefined,
+    MERGE_TRAIN_GATE_DISPATCH: gateScript,
     AGENTOS_RUN_ID: "run-merge-train-fixture",
-    AGENTOS_SESSION_TOKEN: "session-merge-train-fixture",
-    AGENTOS_FENCING_TOKEN: "fence-merge-train-fixture",
     AGENTOS_WORKSPACE_PATH: workspace,
-    AGENTOS_PULL_REQUEST_BASE: "main",
     RUNNER_WORKSPACE_ROOT: join(root, "runner-workspaces"),
     MERGE_TRAIN_FIXTURE_GATE_LOG: gateLog,
     MERGE_TRAIN_FIXTURE_BASE: baseSha,
@@ -195,12 +185,23 @@ if (behavior === "delayed-pass") {
     gateLog,
     gateScript,
     env,
-    outputRequests,
-    server,
+    handoff: () => {
+      try {
+        statSync(handoffPath);
+      } catch {
+        return null;
+      }
+      return JSON.parse(readFileSync(handoffPath, "utf8")) as Record<string, unknown>;
+    },
     candidate,
     ref: (oid) => `refs/anneal/train/${oid}`,
     cleanup: async () => {
-      await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+      // A cleanup-failure fixture leaves a read-only scratch directory behind.
+      try {
+        execFileSync("chmod", ["-R", "u+rwX", root]);
+      } catch {
+        // Nothing to restore.
+      }
       rmSync(root, { recursive: true, force: true });
     },
   };
@@ -257,12 +258,14 @@ test("runtime merge train builds and gates three cumulative prefixes", async () 
     assert.deepEqual(record.prefixes.map((prefix: any) => prefix.verdict), ["pass", "pass", "pass"]);
     assert.deepEqual(record.blocked, []);
     assert.deepEqual(record.skipped, []);
-    assert.equal(fixture.outputRequests.length, 1);
-    assert.equal(fixture.outputRequests[0]!.path, "/session/runs/run-merge-train-fixture/output");
-    assert.equal(fixture.outputRequests[0]!.body.kind, "merge-train-v1");
-    assert.equal(fixture.outputRequests[0]!.body.fencingToken, "fence-merge-train-fixture");
-    assert.deepEqual(JSON.parse(fixture.outputRequests[0]!.body.body as string), record);
-    assert.equal(fixture.outputRequests[0]!.body.commitSha, git(fixture.workspace, "rev-parse", "HEAD"));
+    const handoff = fixture.handoff();
+    assert.ok(handoff, "the tool writes a mechanical output handoff");
+    assert.equal(handoff.schemaVersion, 1);
+    assert.equal(handoff.runId, "run-merge-train-fixture");
+    assert.equal(handoff.kind, "merge-train-v1");
+    assert.deepEqual(JSON.parse(handoff.body as string), record);
+    assert.equal(handoff.commitSha, git(fixture.workspace, "rev-parse", "HEAD"));
+    assert.equal(statSync(join(fixture.workspace, ".agentos", "merge-train-output.json")).mode & 0o777, 0o600);
     for (const prefix of record.prefixes) {
       assert.equal(git(fixture.workspace, "ls-remote", "origin", prefix.ref).split("\t")[0], prefix.prefixOid);
       const parents = git(fixture.workspace, "show", "-s", "--format=%P", prefix.prefixOid).split(" ");
@@ -359,8 +362,8 @@ test("a stale base is refused with exit two before any train ref is written", as
     const result = await runTool(fixture, trainInput(fixture, [candidate]));
     assert.equal(result.status, 2);
     assert.match(result.stderr, /base-stale/u);
-    assert.equal(git(fixture.workspace, "ls-remote", "origin", "refs/anneal/train"), "");
-    assert.equal(fixture.outputRequests.length, 0);
+    assert.equal(git(fixture.origin, "for-each-ref", "refs/anneal/train/"), "");
+    assert.equal(fixture.handoff(), null);
   } finally {
     await fixture.cleanup();
   }
@@ -408,8 +411,8 @@ test("malformed candidate count is refused before any network output", async () 
     const result = await runTool(fixture, trainInput(fixture, [first, second], 1));
     assert.equal(result.status, 2);
     assert.match(result.stderr, /candidate-count-exceeds-width/u);
-    assert.equal(fixture.outputRequests.length, 0);
-    assert.equal(git(fixture.workspace, "ls-remote", "origin", "refs/anneal/train"), "");
+    assert.equal(fixture.handoff(), null);
+    assert.equal(git(fixture.origin, "for-each-ref", "refs/anneal/train/"), "");
   } finally {
     await fixture.cleanup();
   }
@@ -430,8 +433,8 @@ test("a candidate whose origin branch moved is refused with exit two", async () 
     const result = await runTool(fixture, trainInput(fixture, [candidate]));
     assert.equal(result.status, 2);
     assert.match(result.stderr, /candidate-tip-mismatch/u);
-    assert.equal(fixture.outputRequests.length, 0);
-    assert.equal(git(fixture.workspace, "ls-remote", "origin", "refs/anneal/train"), "");
+    assert.equal(fixture.handoff(), null);
+    assert.equal(git(fixture.origin, "for-each-ref", "refs/anneal/train/"), "");
   } finally {
     await fixture.cleanup();
   }
@@ -497,15 +500,59 @@ test("built prefixes dispatch concurrently within the configured width", async (
 });
 
 test("output persistence failure is a named failure and prints no successful record", async () => {
-  const fixture = await makeFixture(503);
+  const fixture = await makeFixture();
   try {
     const candidate = fixture.candidate("task-1", "chain-1", { "a.txt": "a\n" });
+    // An unwritable handoff target is the failure this tool can still name.
+    mkdirSync(join(fixture.workspace, ".agentos", "merge-train-output.json"), { recursive: true });
     const result = await runTool(fixture, trainInput(fixture, [candidate]));
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /output-persist-failed: API returned HTTP 503/u);
+    assert.match(result.stderr, /output-persist-failed/u);
     assert.equal(result.stdout, "");
-    assert.equal(fixture.outputRequests.length, 1);
     assert.equal(git(fixture.workspace, "worktree", "list", "--porcelain").match(/^worktree /gmu)?.length, 1);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("a gate excerpt larger than the budget still carries its verdict line", async () => {
+  for (const behavior of ["noisy-fail", "noisy-pass"]) {
+    const fixture = await makeFixture();
+    try {
+      const candidate = fixture.candidate("task-1", "chain-1", { "a.txt": "a\n" });
+      const result = await runTool(fixture, trainInput(fixture, [candidate]), {
+        MERGE_TRAIN_FIXTURE_GATE_BEHAVIOR: behavior,
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const record = recordOf(result);
+      assert.equal(parseMergeTrainRecord(JSON.stringify(record)).status, "ok");
+      const prefix = record.prefixes[0];
+      assert.ok(Buffer.byteLength(prefix.gateExcerpt as string, "utf8") <= 4000);
+      if (behavior === "noisy-fail") {
+        assert.equal(prefix.verdict, "fail");
+        assert.match(prefix.gateExcerpt, /MERGE GATE: FAIL \(fixture failure\)/u);
+      } else {
+        assert.equal(prefix.verdict, "pass");
+        assert.ok((prefix.gateExcerpt as string).split("\n").includes(`MERGE GATE: PASS ${prefix.prefixOid}`));
+      }
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("a workspace cleanup failure is reported without discarding the persisted record", async () => {
+  const fixture = await makeFixture();
+  try {
+    const candidate = fixture.candidate("task-1", "chain-1", { "a.txt": "a\n" });
+    const result = await runTool(fixture, trainInput(fixture, [candidate]), {
+      MERGE_TRAIN_FIXTURE_GATE_BEHAVIOR: "block-cleanup",
+    });
+    assert.equal(result.status, 0);
+    assert.match(result.stderr, /workspace-cleanup-failed/u);
+    const record = JSON.parse(result.stdout) as Record<string, any>;
+    assert.equal(record.contiguousPassCount, 1);
+    assert.deepEqual(JSON.parse(fixture.handoff()!.body as string), record);
   } finally {
     await fixture.cleanup();
   }
@@ -519,7 +566,7 @@ test("malformed Git branch names are refused with exit two before writes", async
     assert.equal(result.status, 2);
     assert.match(result.stderr, /malformed-input/u);
     assert.equal(git(fixture.origin, "for-each-ref", "refs/anneal/train/"), "");
-    assert.equal(fixture.outputRequests.length, 0);
+    assert.equal(fixture.handoff(), null);
   } finally {
     await fixture.cleanup();
   }

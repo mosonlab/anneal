@@ -316,6 +316,15 @@ const nonEmptyString = (value: unknown): value is string => (
 );
 
 /**
+ * A prefix is only ever `pass` when the gate printed `MERGE GATE: PASS
+ * <prefixOid>` exactly, so the record has to carry that line, bound to that
+ * prefix, as a standalone line of its gate excerpt. Without it the parser would
+ * hand the control plane a proofless authorization to merge.
+ */
+const carriesGatePassProof = (gateExcerpt: string, prefixOid: string): boolean =>
+  gateExcerpt.split(/\r?\n/u).includes(`MERGE GATE: PASS ${prefixOid}`);
+
+/**
  * Parse the persisted output of the runtime merge-train tool. The control
  * plane treats this record as an authorization input, so the parser validates
  * both its wire shape and the relationships the tool promises between fields.
@@ -365,6 +374,9 @@ export const parseMergeTrainRecord = (
       return fail("invalid merge train prefix verdict");
     }
     if (typeof prefix.gateExcerpt !== "string") return fail("invalid merge train gateExcerpt");
+    if (prefix.verdict === "pass" && !carriesGatePassProof(prefix.gateExcerpt, prefix.prefixOid)) {
+      return fail("merge train pass prefix carries no gate PASS proof for its prefixOid");
+    }
     prefixes.push({
       index: prefix.index,
       taskId: prefix.taskId,

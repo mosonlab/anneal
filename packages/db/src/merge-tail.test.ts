@@ -247,6 +247,34 @@ test("merge train records are versioned and validate the contiguous passing pref
   assert.equal(parseMergeTrainRecord(JSON.stringify({ ...record, skipped: ["task-3"] })).status, "invalid");
   assert.equal(parseMergeTrainRecord(JSON.stringify({ ...record, blocked: [blocked], skipped: ["task-3", "task-4"] })).status, "invalid");
   assert.equal(parseMergeTrainRecord(JSON.stringify({ ...record, blocked: [blocked, blocked] })).status, "invalid");
+
+  // A pass is an authorization input, so it is only ever accepted with the
+  // gate's own proof line for that exact prefix.
+  for (const gateExcerpt of [
+    "",
+    "MERGE GATE: PASS",
+    `MERGE GATE: PASS ${"e".repeat(40)}`,
+    `noise MERGE GATE: PASS ${"c".repeat(40)}`,
+    `MERGE GATE: PASS ${"c".repeat(40)} suffix`,
+  ]) {
+    assert.equal(parseMergeTrainRecord(JSON.stringify({
+      ...record,
+      prefixes: [{ ...record.prefixes[0], gateExcerpt }],
+    })).status, "invalid", gateExcerpt);
+  }
+  assert.equal(parseMergeTrainRecord(JSON.stringify({
+    ...record,
+    prefixes: [{
+      ...record.prefixes[0],
+      gateExcerpt: `run-gate: noise\nMERGE GATE: PASS ${"c".repeat(40)}\n`,
+    }],
+  })).status, "ok");
+  // A non-pass prefix carries diagnostics, not proof, so no proof is required.
+  assert.equal(parseMergeTrainRecord(JSON.stringify({
+    ...record,
+    prefixes: [{ ...record.prefixes[0], verdict: "no-verdict", gateExcerpt: "GATE NOT RUN" }],
+    contiguousPassCount: 0,
+  })).status, "ok");
 });
 
 test("readiness role is mechanical across template generations and ordinals", () => {
