@@ -568,3 +568,50 @@ test("a null updateRefs payload retains the uncertain merge identity", async () 
     mergeCommitSha: mergeCommit,
   });
 });
+
+const MERGE_SHA = "c".repeat(40);
+
+const comparison = (overrides: Record<string, unknown> = {}): string => JSON.stringify({
+  status: "behind",
+  base_commit: { sha: MERGE_SHA, parents: [{ sha: "b".repeat(40) }, { sha: "a".repeat(40) }] },
+  merge_base_commit: { sha: MERGE_SHA },
+  ...overrides,
+});
+
+test("the landed commit read reports the commit's parents and its reachability from the base ref", async () => {
+  const { client, requests } = clientWith([{ status: 200, body: comparison() }]);
+  assert.deepEqual(await client.readLandedCommit(reference, MERGE_SHA), {
+    status: "ok",
+    parents: ["b".repeat(40), "a".repeat(40)],
+    reachableFromMain: true,
+  });
+  assert.equal(requests[0]!.method, "GET");
+  assert.equal(requests[0]!.url, `https://api.github.test/repos/owner/name/compare/${MERGE_SHA}...master`);
+  assert.equal(requests[0]!.url.includes(TOKEN), false);
+});
+
+test("a commit the base ref does not contain is read as unreachable, not as an error", async () => {
+  const { client } = clientWith([{ status: 200, body: comparison({ merge_base_commit: { sha: "9".repeat(40) } }) }]);
+  assert.deepEqual(await client.readLandedCommit(reference, MERGE_SHA), {
+    status: "ok",
+    parents: ["b".repeat(40), "a".repeat(40)],
+    reachableFromMain: false,
+  });
+});
+
+test("an unreadable comparison is an error, never a confirmation", async () => {
+  const cases: Array<[string, { status: number; body: string }]> = [
+    ["a lost response", { status: 500, body: "boom" }],
+    ["a refused response", { status: 404, body: "Not Found" }],
+    ["a body that is not JSON", { status: 200, body: "<html>" }],
+    ["a comparison about another commit", { status: 200, body: comparison({ base_commit: { sha: "9".repeat(40), parents: [] } }) }],
+    ["a base commit without parents", { status: 200, body: comparison({ base_commit: { sha: MERGE_SHA } }) }],
+    ["a parent without a sha", { status: 200, body: comparison({ base_commit: { sha: MERGE_SHA, parents: [{ url: "x" }] } }) }],
+    ["no merge base", { status: 200, body: comparison({ merge_base_commit: null }) }],
+  ];
+  for (const [label, response] of cases) {
+    const { client } = clientWith([response]);
+    const result = await client.readLandedCommit(reference, MERGE_SHA);
+    assert.equal(result.status, "error", label);
+  }
+});

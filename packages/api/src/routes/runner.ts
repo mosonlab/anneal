@@ -1,7 +1,19 @@
 import { RunnerKind } from "@anneal/db";
+import {
+  SESSION_EVENTS_REQUEST_MAX_BYTES,
+  SESSION_EVENTS_REQUEST_TOO_LARGE_CODE,
+} from "@anneal/db/session-event-limits";
 import { z } from "zod";
 
-import { fence, id, readJson, refusal, refusalJson } from "./support.js";
+import {
+  fence,
+  id,
+  PayloadTooLargeError,
+  readBoundedJson,
+  readJson,
+  refusal,
+  refusalJson,
+} from "./support.js";
 import type { RouteApp, RouteDeps } from "./support.js";
 import { FAILURE_REASON_LIMIT, failureReasonText } from "../failure-reason.js";
 import { recordRunnerBackendReport } from "../runner-backend-health.js";
@@ -17,6 +29,7 @@ import {
   heartbeatRun,
   leaseIndependentCleanupInput,
   mechanicalStartInput,
+  oversizedEventRefusal,
   publicationInput,
   publishRun,
   recordRunCleanup,
@@ -243,9 +256,26 @@ export const registerRunnerRoutes = (
     return "message" in result ? refusalJson(context, result) : context.json(result);
   });
 
+  // The one route whose body a remote process sizes, and the largest writer in
+  // the database. Both caps are refused before any database work: the whole
+  // body while it streams, then the single event that exceeds the per-event cap
+  // — named by index, so the runner drops that event and resends the rest
+  // instead of retrying a batch that can never be accepted.
   app.post("/runner/runs/:runId/events", async (context) => {
     const runId = id.parse(context.req.param("runId"));
-    const body = await readJson(context.req.raw, eventsInput);
+    let body;
+    try {
+      body = await readBoundedJson(context.req.raw, eventsInput, SESSION_EVENTS_REQUEST_MAX_BYTES);
+    } catch (error) {
+      if (!(error instanceof PayloadTooLargeError)) throw error;
+      return refusalJson(context, refusal(
+        "events-request-too-large",
+        `Session event request body exceeds the ${SESSION_EVENTS_REQUEST_MAX_BYTES} byte cap`,
+        { code: SESSION_EVENTS_REQUEST_TOO_LARGE_CODE, limitBytes: SESSION_EVENTS_REQUEST_MAX_BYTES },
+      ));
+    }
+    const oversized = oversizedEventRefusal(body.events);
+    if (oversized) return refusalJson(context, oversized);
     const result = await appendRunEvents(db, { runId, body });
     return "message" in result ? refusalJson(context, result) : context.json(result);
   });

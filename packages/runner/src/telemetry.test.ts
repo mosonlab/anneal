@@ -89,7 +89,7 @@ test("a control-plane call that connects but never answers fails instead of hold
   try {
     const started = Date.now();
     await assert.rejects(
-      openRunSession(config, claim).heartbeat({ processAlive: true, lastProgressEventAt: null, inFlightTool: null }),
+      openRunSession(config, claim).heartbeat({ processAlive: true, lastProgressEventAt: null, inFlightTool: null, eventQueueBytes: 0 }),
       /timed out after 300ms/,
     );
     // The ceiling itself is asserted above, in the rejection message. This wall
