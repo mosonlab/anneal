@@ -76,6 +76,10 @@ test("merge-tail repair slot refuses a foreign or archived Agent", () => {
     "staffing_profile_agent_not_found",
   );
   assert.equal(
+    mergeTailRepairAgentRefusal(active.id, agents, { projectId: "other-project" })?.code,
+    "staffing_profile_agent_not_found",
+  );
+  assert.equal(
     mergeTailRepairAgentRefusal(archived.id, agents, { projectId: "project-1" })?.code,
     "staffing_profile_agent_archived",
   );

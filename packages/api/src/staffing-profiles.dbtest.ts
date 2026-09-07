@@ -507,6 +507,13 @@ test("the merge-tail repair slot round-trips, checks its Repo grant and refuses 
       permissions: "GIT_WRITE",
     },
   });
+  const preservedAcrossRepos = await call("PUT", `/staffing-profiles/${created.body.profile.id}`, {
+    name: "Repair slot still selected",
+    entries: minimalEntries(fixture),
+  });
+  assert.equal(preservedAcrossRepos.status, 200, JSON.stringify(preservedAcrossRepos.body));
+  assert.equal(preservedAcrossRepos.body.profile.mergeTailRepairAgentId, fixture.repairAgent.id);
+
   const ambiguous = await createProfile(fixture, {
     name: "Ambiguous repair slot",
     entries: minimalEntries(fixture),
@@ -543,6 +550,15 @@ test("the merge-tail repair slot round-trips, checks its Repo grant and refuses 
   });
   assert.equal(missingGrant.status, 422, JSON.stringify(missingGrant.body));
   assert.equal(missingGrant.body.code, "staffing_profile_missing_repo_grant");
+
+  const foreign = await call("PUT", `/staffing-profiles/${created.body.profile.id}`, {
+    name: "Repair slot foreign refusal",
+    entries: minimalEntries(fixture),
+    mergeTailRepairAgentId: fixture.foreignAgent.id,
+    repoId: fixture.repo.id,
+  });
+  assert.equal(foreign.status, 422, JSON.stringify(foreign.body));
+  assert.equal(foreign.body.code, "staffing_profile_agent_not_found");
 
   const archived = await call("PUT", `/staffing-profiles/${created.body.profile.id}`, {
     name: "Repair slot archived refusal",
