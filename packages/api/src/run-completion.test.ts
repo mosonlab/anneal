@@ -662,3 +662,19 @@ test("completeRun applies and caps EXECUTE model-capacity refunds", async () => 
     assert.ok(harness.activities.some(({ metadata }) => metadata?.capReached === true));
   }
 });
+
+test("a retryable detached repair whose retry is refused keeps ordinary task failure settlement", async () => {
+  const harness = statefulCompletionHarness({ opensPullRequest: false });
+  harness.activities.push({ taskId: "task-refunds", actorType: "control-plane", body: "Repair opened",
+    metadata: { kind: "mergeTail.repairAttempt", schemaVersion: 1, state: "opened",
+      regressionTaskId: "parent-regression", repairTaskId: "task-refunds", repairKind: "gate-fix",
+      headSha: baseSha, baseHeadSha: "6".repeat(40) },
+  });
+  const closed = await harness.complete({
+    runNumber: 1, maxRunsPerTask: 2, budgetGrants: 0, outcome: fetchFailureOutcome(),
+  });
+  assert.equal(closed.status, RunStatus.FAILED);
+  assert.ok(harness.activities.some(({ body }) => /retry.*refused/iu.test(body)), "the archived assignee refuses the retry");
+  assert.equal(harness.taskUpdates.at(-1)?.status, "REVIEW");
+  assert.equal(harness.activities.some(({ metadata }) => metadata?.kind === "mergeTail.stop"), false);
+});

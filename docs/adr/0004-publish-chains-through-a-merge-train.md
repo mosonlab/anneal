@@ -104,7 +104,10 @@ one-based candidate position, and `trainTaskId` identifies the detached Task.
 The existing per-candidate Approval gate still applies before its
 authorization is written, and it is refused per candidate rather than per
 train: an unapproved candidate truncates the authorized prefix at its own
-position.
+position. The operator authorization must match the candidate's original
+Regression evidence head and base, including its current gate request. The
+train independently validates the moved publication base; drift alone does
+not invalidate an operator decision on unchanged candidate evidence.
 
 All state changes use the same serializable transactions and Chain locks as
 the existing merge tail. The record's base and candidate heads are checked

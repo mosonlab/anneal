@@ -254,7 +254,14 @@ export const pendingMergeTrains = async (db: PrismaClient | Prisma.TransactionCl
     const parsed = parseMergeTrainMarker(marker.raw);
     if (parsed.status !== "ok" || parsed.marker.trainTaskId !== task.id || !task.repoId || !parsed.marker.regressionTaskId
       || !parsed.marker.baseSha || !parsed.marker.width || !parsed.marker.candidates) {
-      throw new Error(`Merge train ${task.id} has malformed durable ownership metadata`);
+      // Keep the diagnostic on the affected card without allowing corrupt
+      // ownership to stop readiness for every repository. Do not invent a
+      // lease holder or a release obligation from metadata we cannot trust.
+      const body = `Merge train ${task.id} has malformed durable ownership metadata; ownership requires operator repair`;
+      if (!await db.taskActivity.findFirst({ where: { taskId: task.id, actorType: "control-plane", body } })) {
+        await db.taskActivity.create({ data: { taskId: task.id, actorType: "control-plane", body } });
+      }
+      continue;
     }
     pending.push({ taskId: task.id, state: marker.state, projectId: task.projectId, repoId: task.repoId,
       regressionTaskId: parsed.marker.regressionTaskId, baseSha: parsed.marker.baseSha, width: parsed.marker.width,
@@ -410,7 +417,8 @@ const enqueueReservedTrain = async (
 
 /**
  * The first candidate inside the passing prefix whose Approval gate has no
- * operator authorization bound to the head and base this settlement verified.
+ * operator authorization bound to its original Regression evidence. The train
+ * supplies the new publication base; it does not replace the operator's binding.
  * Read-only: it asks the same question `authorizeReadinessSettlement` asks, so
  * the answer can truncate the prefix before any authorization is written.
  */
@@ -431,7 +439,7 @@ const firstGateRefusal = async (
     }
     try {
       await requireMergeGateAuthorization(tx, { taskId: read.readiness.id,
-        headSha: decision.evidence.headSha, baseSha: decision.evidence.baseSha });
+        headSha: read.input.regression.headSha, baseSha: read.input.regression.baseHeadSha });
     } catch (error: unknown) {
       if (!(error instanceof MergeGateAuthorizationError)) throw error;
       return { index, reason: error.message };
@@ -484,11 +492,11 @@ const settleTrain = async (
         regression: { ...read.input.regression, baseHeadSha: record.baseSha },
         train: { baseSha: record.baseSha, candidateHeadSha: read.input.regression.headSha },
       });
-      // A refusal in the gated cumulative prefix invalidates that prefix and
-      // aborts the train. A trailing candidate is not part of the published
-      // prefix: leave it ready for the next train and preserve the passing
-      // prefix that was already recorded by the runtime.
-      if (decision.kind !== "authorize" && index < record.contiguousPassCount) {
+      // A stale base observed anywhere invalidates the whole record. Other
+      // refusals abort only inside the passing prefix: candidate-local trailing
+      // refusals leave that candidate ready without discarding its peers.
+      if ((decision.kind === "requeue-regression" && decision.condition === "train-base-stale")
+        || (decision.kind !== "authorize" && index < record.contiguousPassCount)) {
         throw new Error(`Merge train second read refused ${read.readiness.id}: ${decision.kind}${"reason" in decision ? `: ${decision.reason}` : "evidence" in decision ? `: ${decision.evidence}` : ""}`);
       }
       decisions.push(decision);
@@ -674,7 +682,6 @@ export const mergeTrainReadinessTick = async (
       await hooks.single(db, read, decision, result, release, lease, reader);
     }, { ...serializable, timeout: 300_000 });
   };
-  const groups = new Map<string, ReadyRead[]>();
   // Every claim this tick takes is released here, including the ones handed to
   // `single`, whose repository-mutex and pending-train arms return without
   // settling. A claim left behind parks its candidate for the claim lease.
@@ -745,7 +752,9 @@ export const mergeTrainReadinessTick = async (
           for (const read of selected) await single(read, await evaluateReadiness(reader, read.input));
           continue;
         }
-        if (selected.length === 1 && first.input.regression.baseHeadSha === baseSha) {
+        // Formation depends on all eligible peers, before width and claim
+        // budget bound membership. Even a width-one prefix is still a train.
+        if (group.length === 1 && first.input.regression.baseHeadSha === baseSha) {
           await single(first, await evaluateReadiness(reader, first.input));
           continue;
         }
@@ -827,94 +836,7 @@ export const mergeTrainReadinessTick = async (
       if (!read.claimed) continue;
       result.claimed += 1;
       claimed.push(read);
-      if (read.input.stage !== "ready" || !candidate.repoId || !read.input.target.resolved) {
-        await single(read, await evaluateReadiness(reader, read.input));
-        continue;
-      }
-      const group = groups.get(candidate.repoId) ?? [];
-      group.push(read as ReadyRead);
-      groups.set(candidate.repoId, group);
-    }
-    for (const [repoId, group] of groups) {
-      // FIFO by when the Regression evidence was persisted, which is the row's
-      // creation: `updatedAt` moves on any later re-upsert of the same verdict.
-      group.sort((left, right) => left.regression.stepOutput!.createdAt.getTime() - right.regression.stepOutput!.createdAt.getTime()
-        || left.readiness.id.localeCompare(right.readiness.id));
-      const first = group[0]!;
-      let baseSha: string;
-      try { baseSha = await liveBase(reader, first); }
-      catch (error: unknown) {
-        // Remote read failures are named even though no train/lease exists yet.
-        await db.$transaction((tx) => first.claim.settle(tx, { kind: "keep", apply: async (client) => client.taskActivity.create({ data: {
-          taskId: first.readiness.id, actorType: "control-plane",
-          body: `Merge train formation deferred: ${error instanceof Error ? error.message : String(error)}`,
-        } }) }), serializable);
-        continue;
-      }
-      if (width === 0 || unresolvedLeaseRepos.has(repoId)) {
-        for (const read of group) await single(read, await evaluateReadiness(reader, read.input));
-        continue;
-      }
-      if (group.length === 1 && first.input.regression.baseHeadSha === baseSha) {
-        await single(first, await evaluateReadiness(reader, first.input));
-        continue;
-      }
-      const selected = group.slice(0, width);
-      const candidates = selected.map((read) => ({ taskId: read.readiness.id, chainId: read.readiness.chainId!,
-        headSha: read.input.regression.headSha, branch: read.regression.runs[0]?.branch ?? "" }));
-      if (candidates.some((candidate) => !candidate.chainId || !candidate.branch)) {
-        for (const read of selected) await single(read, {
-          kind: "stop", condition: "merge-train-branch-unavailable", evidence: "Merge train candidate chain branch is unavailable",
-        });
-        continue;
-      }
-      let claimsHeld = true;
-      for (const read of selected) if (!await read.claim.renew()) claimsHeld = false;
-      if (!claimsHeld) continue;
-      const target = { projectId: first.readiness.projectId, chainId: candidates[0]!.chainId };
-      let reservation: PendingTrain | null = null;
-      try {
-        reservation = await db.$transaction(async (tx) => {
-          if (!await tryRepositoryMutex(tx, first.readiness.repoId!)) return null;
-          await lockCandidates(tx, candidates);
-          await tx.$queryRaw`SELECT "id" FROM "Repo" WHERE "id" = ${first.readiness.repoId} FOR UPDATE`;
-          if ((await pendingMergeTrains(tx)).some((train) => train.repoId === first.readiness.repoId)) return null;
-          const unresolved = await tx.mergeLeaseEvent.findFirst({ where: {
-            state: MergeLeaseEventState.RELEASE_DEFERRED,
-            owningTask: { repoId: first.readiness.repoId },
-          }, select: { id: true } });
-          if (unresolved) return null;
-          for (const read of selected) {
-            if (!await evidenceStillMatches(tx, read)) throw new Error(`Merge train candidate ${read.readiness.id} changed before reservation`);
-            const held = await read.claim.settle(tx, { kind: "keep", apply: async () => true });
-            if (!held.settled) throw new Error(`Merge train candidate ${read.readiness.id} claim lost before reservation`);
-          }
-          const task = await reserveMergeTrainTask(tx, {
-            regressionTaskId: first.regression.id, baseSha, width, candidates, now,
-          });
-          for (const read of selected) {
-            const transitioned = await read.claim.settle(tx, { kind: "finish", at: now, apply: async (client) => {
-              await client.task.update({ where: { id: read.readiness.id }, data: { status: TaskStatus.TODO, failureReason: null } });
-              return { value: undefined, ownership: "released" };
-            } });
-            if (!transitioned.settled) throw new Error(`Merge train candidate ${read.readiness.id} claim lost at reservation`);
-          }
-          return { taskId: task.taskId, state: "acquiring" as const, regressionTaskId: first.regression.id,
-            projectId: first.readiness.projectId, repoId: first.readiness.repoId!, baseSha, width, candidates };
-        }, serializable);
-      } catch (error: unknown) {
-        const reason = `Merge train reservation failed: ${error instanceof Error ? error.message : String(error)}`;
-        for (const read of selected) await single(read, {
-          kind: "stop", condition: "merge-train-reservation-failed", evidence: reason,
-        });
-      }
-      if (reservation) {
-        const train = reservation;
-        await withTrainLease(db, lease, target, train, now, async () => {
-          const outcome = await enqueueReservedTrain(db, reader, train, now, hooks);
-          return { value: outcome, leaseOutcome: outcome === "waiting" ? { kind: "continue" } : { kind: "stop", taskId: first.regression.id } };
-        });
-      }
+      await single(read, await evaluateReadiness(reader, read.input));
     }
   } finally {
     for (const read of claimed) await releaseClaim(db, read);

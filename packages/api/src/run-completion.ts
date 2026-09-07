@@ -785,10 +785,10 @@ export const completeRun = async (
       && (durableNegativeRegressionVerdict || !(retryable && run.runNumber < budgetCeiling));
     const documentationStepSucceeded = succeeded
       && isDocumentationStep(run.task?.templateStep);
-    // A detached Task reads its repair markers in either outcome. Train
-    // settlement is read separately below from control-plane activity.
+    // Train settlement is read separately below from control-plane activity;
+    // it does not widen repair marker reads for retryable detached failures.
     const tailMarkers = run.task && (failureIsFinal
-      || (!run.task.templateId && !run.task.chainId))
+      || (succeeded && !run.task.templateId && !run.task.chainId))
       ? await readMarkers(tx, run.task.id)
       : [];
     const succeededMarkers = succeeded ? tailMarkers : [];

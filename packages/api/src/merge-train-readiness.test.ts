@@ -9,7 +9,7 @@ import {
 } from "@anneal/db";
 import type { PullRequestReader } from "./github-read.js";
 import type { WithMergeLease } from "./merge-lease.js";
-import { mergeTrainReadinessTick, trainRecordBindingFailure } from "./merge-train-readiness.js";
+import { mergeTrainReadinessTick, pendingMergeTrains, trainRecordBindingFailure } from "./merge-train-readiness.js";
 
 const base = "a".repeat(40);
 const head = "b".repeat(40);
@@ -38,7 +38,10 @@ test("train qualification refuses reordered, duplicate, and foreign record entri
   assert.equal(trainRecordBindingFailure({ ...record, blocked: [{ taskId: second.taskId, chainId: second.chainId, candidateHeadSha: head, reason: "conflict" }] }, intent, base), null);
 });
 
-test("a queued train waits for an offline executor and proceeds when it returns", async () => {
+for (const staleTrailingBase of [false, true]) {
+  test(staleTrailingBase
+    ? "a base move observed only by the trailing failed candidate aborts every authorization"
+    : "a queued train waits for an offline executor and proceeds when it returns", async () => {
   const now = new Date("2026-09-07T12:00:00.000Z");
   const projectId = "project-1";
   const repoId = "repo-1";
@@ -46,6 +49,7 @@ test("a queued train waits for an offline executor and proceeds when it returns"
     { taskId: "readiness-1", chainId: "11111111-1111-4111-8111-111111111111", headSha: "d".repeat(40), branch: "feat/one" },
     { taskId: "readiness-2", chainId: "22222222-2222-4222-8222-222222222222", headSha: "e".repeat(40), branch: "feat/two" },
   ];
+  if (staleTrailingBase) candidates.push({ taskId: "readiness-3", chainId: "33333333-3333-4333-8333-333333333333", headSha: "f".repeat(40), branch: "feat/three" });
   const regressionByReadiness = new Map(candidates.map((candidate, index) => [candidate.taskId, {
     id: `regression-${index + 1}`,
     projectId,
@@ -86,7 +90,7 @@ test("a queued train waits for an offline executor and proceeds when it returns"
     const body = JSON.stringify({
       schemaVersion: 1,
       baseSha: base,
-      width: 2,
+      width: staleTrailingBase ? 3 : 2,
       contiguousPassCount: 2,
       prefixes: candidates.map((candidate, index) => ({
         index: index + 1,
@@ -96,8 +100,8 @@ test("a queued train waits for an offline executor and proceeds when it returns"
         predecessorOid: index === 0 ? base : `${index}`.repeat(40),
         prefixOid: `${index + 1}`.repeat(40),
         ref: `refs/anneal/train/${`${index + 1}`.repeat(40)}`,
-        verdict: "pass",
-        gateExcerpt: `MERGE GATE: PASS ${`${index + 1}`.repeat(40)}`,
+        verdict: index === 2 ? "fail" : "pass",
+        gateExcerpt: index === 2 ? "MERGE GATE: FAIL" : `MERGE GATE: PASS ${`${index + 1}`.repeat(40)}`,
       })),
       blocked: [],
       skipped: [],
@@ -196,7 +200,7 @@ test("a queued train waits for an offline executor and proceeds when it returns"
       const candidate = candidates[prNumber - 1]!;
       return {
         repository: "acme/widgets", number: prNumber, state: "OPEN", isDraft: false, merged: false,
-        mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", baseRefName: "main", baseSha: base,
+        mergeable: "MERGEABLE", mergeStateStatus: "CLEAN", baseRefName: "main", baseSha: staleTrailingBase && prNumber === 3 ? "9".repeat(40) : base,
         headRefOid: candidate.headSha, autoMergeRequest: null, mergeQueueEntry: null,
         repositoryMergeQueue: null, mergedBy: null, mergeCommit: null, requiredCheckNames: [],
         checkContexts: [], headCommitOid: candidate.headSha, readAt: now.toISOString(),
@@ -241,7 +245,7 @@ test("a queued train waits for an offline executor and proceeds when it returns"
   };
   const authorizationIds: string[] = [];
   const offlineIds: string[] = [];
-  let executorOnline = false;
+  let executorOnline = staleTrailingBase;
   const hooks = {
     candidates: async function* () {},
     discover: async () => { throw new Error("formation is not part of this unit fixture"); },
@@ -287,7 +291,7 @@ test("a queued train waits for an offline executor and proceeds when it returns"
     projectId,
     repoId,
     baseSha: base,
-    width: 2,
+    width: staleTrailingBase ? 3 : 2,
     candidates,
   }) as NonNullable<Parameters<typeof mergeTrainReadinessTick>[7]>[number];
 
@@ -297,11 +301,20 @@ test("a queued train waits for an offline executor and proceeds when it returns"
       actorType: "control-plane",
       body: "Merge lease acquired; train Run queued",
       metadata: { schemaVersion: 1, kind: "mergeTail.train", state: "queued", trainTaskId: taskId,
-        regressionTaskId: regressionByReadiness.get(candidates[0]!.taskId)!.id, baseSha: base, width: 2, candidates },
+        regressionTaskId: regressionByReadiness.get(candidates[0]!.taskId)!.id, baseSha: base, width: staleTrailingBase ? 3 : 2, candidates },
     } });
   }
 
   const offlineResult = await mergeTrainReadinessTick(db, reader, now, { width: 2, limit: 2 }, async () => {}, lease, hooks, [pendingFor("train-offline")]);
+  if (staleTrailingBase) {
+    assert.equal(offlineResult.authorized, 0);
+    assert.deepEqual(authorizationIds, []);
+    assert.deepEqual(releasedTargets, [candidates[0]!.chainId]);
+    for (const candidate of candidates) {
+      assert.equal(markerFor(candidate.taskId, "mergeTail.train")?.metadata.state, "aborted");
+    }
+    return;
+  }
   assert.deepEqual(offlineResult, { claimed: 2, authorized: 0, requeued: 2, stopped: 0 });
   assert.deepEqual(authorizationIds, [], "an offline executor cannot receive a train authorization");
   assert.deepEqual(offlineIds, ["readiness-1:merge-executor-1", "readiness-2:merge-executor-1"]);
@@ -321,4 +334,73 @@ test("a queued train waits for an offline executor and proceeds when it returns"
   assert.deepEqual(authorizationIds, ["readiness-1", "readiness-2"], "the next train proceeds when the executor is back");
   assert.deepEqual(releasedTargets, [candidates[0]!.chainId, candidates[0]!.chainId]);
   assert.deepEqual(candidates.map((candidate) => offlineMarkers.get(candidate.taskId)?.metadata.episodeClosed), [true, true]);
+  });
+}
+
+test("a disabled train drain gives every unrelated candidate its single decision despite reader failures", async () => {
+  const seen: string[] = [];
+  const now = new Date();
+  const templateStep = { stepIndex: 6, outputKind: "merge-authorization", taskTemplate: { name: "direct-engineer-workflow" } };
+  const rows = ["ready-a", "ready-b"].map((id) => ({ id, repoId: "other-repo", templateStep }));
+  const tx = {
+    $queryRaw: async () => [{ held: true }],
+    task: { findMany: async () => [], update: async () => ({}) },
+    taskActivity: { findFirst: async () => ({ metadata: { kind: "mergeTail.train", state: "queued" } }), create: async () => ({}) },
+  } as unknown as Prisma.TransactionClient;
+  const db = {
+    ...tx,
+    $transaction: async <T>(fn: (client: Prisma.TransactionClient) => Promise<T>) => fn(tx),
+    task: { ...tx.task, findUnique: async () => ({ status: TaskStatus.DOING, runs: [{ status: RunStatus.RUNNING }] }) },
+    mergeLeaseEvent: { findMany: async () => [] },
+    mergeRecoveryAttempt: { findFirst: async () => null },
+  } as unknown as import("@anneal/db").PrismaClient;
+  const hooks = {
+    candidates: async function* () { yield* rows; },
+    read: async (_db: unknown, task: { id: string }) => ({
+      claimed: true,
+      readiness: { id: task.id, repoId: "other-repo" },
+      regression: { stepOutput: { createdAt: now } },
+      input: { stage: "ready", now, regression: { headSha: head, baseHeadSha: base },
+        target: { resolved: true, repository: "acme/widgets", prNumber: 1 }, defaultBranch: "main" },
+      claim: { settle: async (_tx: unknown, transition: { apply: (client: Prisma.TransactionClient) => Promise<unknown> }) => transition.apply(tx) },
+    }),
+    single: async (_db: unknown, read: { readiness: { id: string } }, decision: { kind: string }) => {
+      assert.equal(decision.kind, "stop");
+      seen.push(read.readiness.id);
+    },
+  } as unknown as Parameters<typeof mergeTrainReadinessTick>[6];
+  let remoteReads = 0;
+  const reader = { readPullRequest: async () => { remoteReads += 1; throw new Error("GitHub unavailable"); }, compareCommits: async () => { throw new Error("unexpected comparison"); } } as unknown as PullRequestReader;
+  const lease: WithMergeLease = async (_target, fn) => ({ outcome: "ran", value: (await fn()).value });
+  await mergeTrainReadinessTick(db, reader, now, { width: 0, limit: 5 }, async () => {}, lease, hooks, [{
+    taskId: "pending", state: "queued", regressionTaskId: "regression", projectId: "project", repoId: "busy-repo",
+    baseSha: base, width: 1, candidates: [candidate],
+  }]);
+  assert.deepEqual(seen, ["ready-a", "ready-b"]);
+  assert.equal(remoteReads, 2, "only each candidate's existing decision reads GitHub");
+});
+
+test("malformed train ownership is reported once and does not hide another repository's pending train", async () => {
+  const diagnostics: Array<{ taskId: string; actorType: string; body: string }> = [];
+  const valid = { schemaVersion: 1, kind: "mergeTail.train", state: "queued", trainTaskId: "valid",
+    regressionTaskId: "regression", baseSha: base, width: 1, candidates: [{ ...candidate, chainId: "11111111-1111-4111-8111-111111111111" }] };
+  const db = {
+    task: { findMany: async () => [
+      { id: "malformed", projectId: "project", repoId: "broken-repo" },
+      { id: "valid", projectId: "project", repoId: "healthy-repo" },
+    ] },
+    taskActivity: {
+      findFirst: async ({ where }: { where: { taskId: string; body?: string } }) => where.body
+        ? diagnostics.find((row) => row.taskId === where.taskId && row.body === where.body) ?? null
+        : { metadata: where.taskId === "valid" ? valid : { ...valid, trainTaskId: "malformed", width: 0 } },
+      create: async ({ data }: { data: typeof diagnostics[number] }) => { diagnostics.push(data); return data; },
+    },
+  } as unknown as import("@anneal/db").PrismaClient;
+  for (let tick = 0; tick < 2; tick += 1) {
+    assert.deepEqual((await pendingMergeTrains(db)).map((train) => train.taskId), ["valid"]);
+  }
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0]!.taskId, "malformed");
+  assert.equal(diagnostics[0]!.actorType, "control-plane");
+  assert.match(diagnostics[0]!.body, /malformed durable ownership metadata/);
 });

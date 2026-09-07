@@ -889,14 +889,15 @@ const authorizeReadinessSettlement = (
         },
       });
       // A gated readiness task may be released only by an operator decision
-      // bound to the exact head/base this worker just re-verified. The check is
-      // inside the settlement transaction so a stale approval cannot race the
+      // bound to the exact Regression evidence. A train independently verifies
+      // its publication base; ordinary settlement keeps the second-read binding.
+      // The check is inside the transaction so a stale approval cannot race the
       // status transition or manufacture a mechanical authorization path.
       if (isGatedMergeReadinessTask(currentReadiness)) {
         await requireMergeGateAuthorization(tx, {
           taskId: readiness.id,
-          headSha: decision.evidence.headSha,
-          baseSha: decision.evidence.baseSha,
+          headSha: train && read.input.stage === "ready" ? read.input.regression.headSha : decision.evidence.headSha,
+          baseSha: train && read.input.stage === "ready" ? read.input.regression.baseHeadSha : decision.evidence.baseSha,
         });
       }
       await tx.task.update({

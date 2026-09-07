@@ -1584,6 +1584,9 @@ in order with the `train` object described under `merge-authorization`. The
 per-candidate Approval gate is refused per candidate: an unapproved candidate
 stops on its own gate refusal, only the positions before it are authorized
 against the truncated prefix, and the positions after it return to `ready`.
+The operator authorization remains bound to the candidate's original Regression
+evidence head and base and current gate request. The train separately verifies
+the live publication base, so drift alone does not invalidate that approval.
 Train authorization also checks the runner registry inside the settlement
 transaction. When all configured merge executors are offline, no candidate is
 authorized: every candidate returns to `ready` with the existing
