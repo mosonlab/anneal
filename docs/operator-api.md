@@ -2984,7 +2984,11 @@ the executor runner ids it checked. The next tick asks again.
 An offline observation does not change the ordinary outcome of `skip` or
 `defer` decisions.
 
-That wait is bounded by the 15 minutes after which the registry forgets a
+The executor-offline requeue (`metadata.state = "requeued-executor-offline"`)
+is its own settlement: it requeues only readiness, opens no new Run, and
+spends neither the `leaseLossRefunds` cap nor a Regression repair budget.
+
+The executor-offline wait is bounded by the 15 minutes after which the registry forgets a
 daemon altogether, and it is measured per outage: the wait starts at the first
 skipped authorization of the outage the chain is currently in, not at the first
 one this task ever recorded. An outage ends when readiness observes it ending --
@@ -3003,6 +3007,11 @@ follows the ordinary authorization path against the current base. The re-arm
 itself opens no new Regression Run and never bypasses
 the exact `(headSha, baseHeadSha)` check; existing base-drift requeue handling
 applies if the base has moved.
+
+As a manual fallback to automatic re-arm, an operator who will not wait for
+the executor to return can call `POST /tasks/:taskId/retry` on the Regression
+task (the readiness task has no Run to retry). That call opens a new
+Regression Run at full rerun cost.
 
 The operator's evidence-renewal path applies the same executor allowlist check
 before writing its `purpose: "confirmation"` authorization. During an outage
