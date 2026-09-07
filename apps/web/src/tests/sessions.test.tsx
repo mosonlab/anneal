@@ -330,18 +330,19 @@ test("expanding a session row loads shared diagnostics and renders its null stat
     termination: { reason: "completed", exitCode: 0, signal: null },
     vsBaseline: { costRatio: null, durationRatio: null },
   };
+  const terminalSession = session({ executionStatus: "SUCCEEDED", endedAt: "2026-08-16T00:02:00.000Z" });
   let release!: () => void;
-  const pending = new Promise<Response>((resolve) => { release = () => resolve(Response.json({ ...session(), metrics })); });
+  const pending = new Promise<Response>((resolve) => { release = () => resolve(Response.json({ ...terminalSession, metrics })); });
   let nullMetrics = false;
   const fetchHarness = installFetchFunction(async (input) => {
     const path = String(input);
     assert.match(path, /\/sessions\/session-1/u);
     if (!nullMetrics) return pending;
-    return Response.json({ ...session(), metrics: null });
+    return Response.json({ ...terminalSession, metrics: null });
   });
   const root = createRoot(container);
   try {
-    await act(async () => { root.render(<LocaleProvider initialLocale="en"><SessionRow session={session()} /></LocaleProvider>); });
+    await act(async () => { root.render(<LocaleProvider initialLocale="en"><SessionRow session={terminalSession} /></LocaleProvider>); });
     assert.equal(fetchHarness.requests.length, 0, "the list row does not read detail metrics while collapsed");
 
     const toggle = dom.window.document.querySelector<HTMLButtonElement>("[data-session-row-toggle]");
@@ -354,6 +355,9 @@ test("expanding a session row loads shared diagnostics and renders its null stat
     assert.ok(container.querySelector("[data-run-diagnostics]"), container.innerHTML);
     assert.match(container.textContent ?? "", /Time to first token/u);
     assert.match(container.textContent ?? "", /250ms/u);
+
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2_700)); });
+    assert.equal(fetchHarness.requests.length, 1, "expanded terminal rows do not poll diagnostics");
 
     nullMetrics = true;
     await click(dom, toggle);

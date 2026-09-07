@@ -746,13 +746,16 @@ test("GET /sessions/:sessionId carries task-detail metrics while list rows stay 
         type: "TOOL_COMPLETED", at: new Date("2026-09-01T10:00:40.000Z"), toolCallId: "tool-1",
         payload: { type: "tool_result", is_error: false },
       },
-      { type: "MODEL_COMPLETED", at: endedAt, toolCallId: null, payload: { anneal: { ttftMs: 20 } } },
+      { type: "MODEL_COMPLETED", at: endedAt, toolCallId: null, payload: { type: "message_end", message: { role: "assistant" }, anneal: { ttftMs: 20 } } },
     ];
     const rawQueries: Array<{ sql?: string }> = [];
     const database = {
       session: {
         findUnique: async () => row,
-        findMany: async () => [row],
+        findMany: async (args: { include: { run: { select: Record<string, unknown> } } }) => [{
+          ...row,
+          run: Object.fromEntries(Object.entries(row.run).filter(([key]) => key in args.include.run.select)),
+        }],
       },
       task: {
         findMany: async () => [{
@@ -769,7 +772,7 @@ test("GET /sessions/:sessionId carries task-detail metrics while list rows stay 
             durationSampleSize: 8, durationP50: 50_000, durationP90: 80_000,
           }];
         }
-        return metricEvents;
+        return metricEvents.map((event) => ({ ...event, sessionId: row.id }));
       },
     } as unknown as PrismaClient;
     const app = createApp(database);
@@ -797,6 +800,9 @@ test("GET /sessions/:sessionId carries task-detail metrics while list rows stay 
     const list = await listResponse.json() as Array<Record<string, unknown>>;
     assert.equal(list.length, 1);
     assert.equal("metrics" in list[0]!, false);
+    assert.deepEqual(Object.keys(list[0]!.run as object).sort(), [
+      "branch", "id", "model", "pullRequestUrl", "repo", "runNumber", "workspacePath",
+    ]);
     // The detail uses one event projection and one baseline aggregate. The list
     // reuses its existing findMany/include query and performs neither read.
     assert.equal(rawQueries.length, 2);

@@ -24,8 +24,7 @@ import {
   Prisma,
 } from "@anneal/db";
 import type { PrismaClient } from "@anneal/db";
-import type { Session as SessionContract } from "@anneal/db/board-contract";
-import type { RunBaseline, RunMetrics } from "@anneal/db/board-contract";
+import type { Session as SessionContract, SessionDetail as SessionDetailContract } from "@anneal/db/board-contract";
 import { parseSessionListFilters } from "@anneal/db/session-filter-contract";
 import type { SerializesTo } from "@anneal/db/wire-serialization";
 import { z } from "zod";
@@ -58,13 +57,8 @@ import {
   type RunFence,
   withFencedRun,
 } from "../run-fence.js";
-import {
-  runMetrics,
-  TOOL_METRIC_EVENT_TYPES,
-  TTFT_METRIC_EVENT_TYPES,
-  type RunMetricsToolEvent,
-  type RunMetricsTtftEvent,
-} from "../run-metrics.js";
+import { runMetrics } from "../run-metrics.js";
+import { readRunMetricEvents } from "../run-metric-events.js";
 import { sessionListWhere } from "../session-list-query.js";
 import {
   FILE_WRITE_LIMIT,
@@ -200,50 +194,7 @@ const cancelRunInput = z.object({
  * projection must JSON-serialize to, so every `satisfies` below proves the
  * whole wire claim rather than the native half of it. */
 type SessionResponse = SerializesTo<SessionContract<Date, Prisma.Decimal>, SessionContract>;
-type SessionDetailContract<DateTime = string, DecimalValue = string> = SessionContract<DateTime, DecimalValue> & {
-  metrics: RunMetrics | null;
-  baseline: RunBaseline | null;
-};
 type SessionDetailResponse = SerializesTo<SessionDetailContract<Date, Prisma.Decimal>, SessionDetailContract>;
-
-type SessionMetricEvent = {
-  type: string;
-  at: Date;
-  toolCallId: string | null;
-  payload: unknown;
-};
-
-/** Read only the provider fields the shared diagnostics calculator needs. The
- * full event payload can contain a provider response or tool output measured in
- * megabytes, so it must never be loaded into a session-detail response. */
-const readSessionMetricEvents = async (db: PrismaClient, sessionId: string): Promise<SessionMetricEvent[]> => db.$queryRaw<SessionMetricEvent[]>(Prisma.sql`
-  SELECT "type", "at", "toolCallId",
-    jsonb_build_object(
-      'type', CASE WHEN jsonb_typeof("payload"->'type') = 'string' THEN "payload"->'type' END,
-      'name', CASE WHEN jsonb_typeof("payload"->'name') = 'string' THEN "payload"->'name' END,
-      'toolName', CASE WHEN jsonb_typeof("payload"->'toolName') = 'string' THEN "payload"->'toolName' END,
-      'is_error', CASE WHEN jsonb_typeof("payload"->'is_error') = 'boolean' THEN "payload"->'is_error' END,
-      'isError', CASE WHEN jsonb_typeof("payload"->'isError') = 'boolean' THEN "payload"->'isError' END,
-      'exit_code', CASE WHEN jsonb_typeof("payload"->'exit_code') = 'number' THEN "payload"->'exit_code' END,
-      'error', CASE WHEN "payload"->'error' IS NOT NULL AND "payload"->'error' <> 'null'::jsonb THEN true END,
-      'anneal', CASE WHEN jsonb_typeof("payload"->'anneal') = 'object' THEN jsonb_build_object(
-        'ttftMs', CASE WHEN jsonb_typeof("payload"->'anneal'->'ttftMs') = 'number'
-          THEN "payload"->'anneal'->'ttftMs' END
-      ) END
-    ) AS "payload"
-  FROM "SessionEvent"
-  WHERE "sessionId" = ${sessionId}
-    AND ("type"::text IN (${Prisma.join([...TOOL_METRIC_EVENT_TYPES])}) OR (
-        ("type"::text = 'MODEL_DELTA' AND (
-          "payload"->>'type' = 'assistant'
-          OR ("payload"->>'type' = 'item.completed' AND "payload"->'item'->>'type' = 'agent_message')
-        ))
-        OR ("type"::text = 'MODEL_COMPLETED'
-          AND "payload"->>'type' = 'message_end'
-          AND "payload"->'message'->>'role' = 'assistant')
-    ))
-  ORDER BY "seq" ASC
-`);
 
 export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => void {
   const { db, releaseChainLease, appendFencedActivity } = deps;
@@ -626,12 +577,16 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
       run: {
         select: {
           id: true, runNumber: true, model: true, branch: true,
-          readyAt: true, status: true, endedAt: true,
           pullRequestUrl: true, workspacePath: true,
           // remoteUrl is what turns the detail page's Branch field into a link.
           repo: { select: { id: true, name: true, remoteUrl: true } },
         },
       },
+    } as const;
+
+    const sessionDetailInclude = {
+      ...sessionInclude,
+      run: { select: { ...sessionInclude.run.select, readyAt: true, status: true, endedAt: true } },
     } as const;
 
     type MergeOutcomeSubject = {
@@ -711,19 +666,10 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
     app.get("/sessions/:sessionId", async (context) => {
       const session = await db.session.findUnique({
         where: { id: id.parse(context.req.param("sessionId")) },
-        include: sessionInclude,
+        include: sessionDetailInclude,
       });
       if (session === null) return context.json({ error: "Session not found" }, 404);
-      const metricEvents = await readSessionMetricEvents(db, session.id);
-      const toolEvents: RunMetricsToolEvent[] = [];
-      const ttftEvents: RunMetricsTtftEvent[] = [];
-      for (const event of metricEvents) {
-        if ((TOOL_METRIC_EVENT_TYPES as readonly string[]).includes(event.type)) {
-          toolEvents.push(event);
-        } else if ((TTFT_METRIC_EVENT_TYPES as readonly string[]).includes(event.type)) {
-          ttftEvents.push(event);
-        }
-      }
+      const { toolEventsBySession, ttftEventsBySession } = await readRunMetricEvents(db, [session.id]);
       const stepKey = session.task?.templateStepId === null || session.task?.templateStepId === undefined
         ? null
         : { projectId: session.projectId, templateStepId: session.task.templateStepId };
@@ -732,8 +678,8 @@ export function registerSessionRoutes(app: RouteApp, deps: RouteDeps): () => voi
       const metrics = session.run === null ? null : runMetrics({
         run: session.run,
         session,
-        toolEvents,
-        ttftEvents,
+        toolEvents: toolEventsBySession.get(session.id) ?? [],
+        ttftEvents: ttftEventsBySession.get(session.id) ?? [],
         baseline,
       });
       const row = withMergeOutcome(session);

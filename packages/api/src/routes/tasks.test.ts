@@ -295,9 +295,13 @@ const taskDetailDatabase = (
     // never be selected into the metrics input.
     assert.match(query.sql, /jsonb_build_object/u);
     assert.doesNotMatch(query.sql, /SELECT[\s\S]*?,\s*"payload"\s*(?:,|FROM)/u);
+    assert.match(query.sql, /"payload"->>'type' = 'assistant'/u);
+    assert.match(query.sql, /"payload"->>'type' = 'item.completed' AND "payload"->'item'->>'type' = 'agent_message'/u);
+    assert.match(query.sql, /"type"::text = 'MODEL_COMPLETED'\s+AND "payload"->>'type' = 'message_end'\s+AND "payload"->'message'->>'role' = 'assistant'/u);
     const keys = [...query.sql.matchAll(/'([^']+)',/gu)].map((match) => match[1]!);
     assert.deepEqual(keys, ["type", "name", "toolName", "is_error", "isError", "exit_code", "error", "anneal", "ttftMs"]);
     return (events.rows ?? []).flatMap((row) => {
+      if (!query.values.includes(row.sessionId)) return [];
       const payload = row.payload as Record<string, unknown>;
       const item = payload.item as Record<string, unknown> | undefined;
       const message = payload.message as Record<string, unknown> | undefined;
@@ -1572,5 +1576,44 @@ test("task detail computes TTFT from completion rows and excludes non-completion
     assert.match(metricQuery.sql!, /WHERE[\s\S]*OR[\s\S]*'item.completed'[\s\S]*'message_end'/u);
     assert.doesNotMatch(metricQuery.sql!, /'completion'/u);
     assert.doesNotMatch(metricQuery.sql!, /PROVIDER_RAW/u);
+  });
+});
+
+
+test("session and task detail return identical complete diagnostics for the same runs", async () => {
+  await withTokens(async () => {
+    const task = baselineTask();
+    const runs = task.runs as Array<Record<string, unknown>>;
+    const queries: SessionEventQuery[] = [];
+    const database = taskDetailDatabase(task, {
+      rows: [...DIAGNOSTICS_TOOL_EVENTS, ...TTFT_EVENTS], queries, baselines: [baselineRow()],
+    });
+    Object.assign(database, { session: {
+      findUnique: async ({ where }: { where: { id: string } }) => {
+        const run = runs.find((run) => (run.session as { id: string }).id === where.id)!;
+        return { ...(run.session as object), projectId: task.projectId, runId: run.id, run, task };
+      },
+    } });
+    const app = createApp(database);
+    const headers = { Authorization: "Bearer operator-unit-token" };
+    const taskResponse = await app.request("/tasks/task-1", { headers });
+    assert.equal(taskResponse.status, 200);
+    const taskDetail = await taskResponse.json() as {
+      baseline: unknown;
+      runs: Array<{ session: { id: string }; metrics: { ttft: unknown; vsBaseline: unknown; phases: { cleanupMs: unknown } } }>;
+    };
+    for (const run of taskDetail.runs) {
+      const response = await app.request(`/sessions/${run.session.id}`, { headers });
+      assert.equal(response.status, 200);
+      const detail = await response.json() as { metrics: unknown; baseline: unknown };
+      assert.deepEqual(detail.metrics, run.metrics);
+      assert.deepEqual(detail.baseline, taskDetail.baseline);
+      assert.equal(run.metrics.phases.cleanupMs, null);
+    }
+    assert.deepEqual(taskDetail.runs[0]!.metrics.ttft, { p50Ms: 20, p90Ms: 28, samples: 3 });
+    assert.deepEqual(taskDetail.runs[0]!.metrics.vsBaseline, { costRatio: 2, durationRatio: 2 });
+    assert.equal(taskDetail.runs[1]!.metrics.ttft, null);
+    assert.deepEqual(taskDetail.runs[1]!.metrics.vsBaseline, { costRatio: null, durationRatio: 2 });
+    assert.equal(queries.filter((query) => query.sql?.includes('FROM "SessionEvent"')).length, 3);
   });
 });

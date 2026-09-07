@@ -137,7 +137,6 @@ export const StartabilityChecklist = ({ verdict, hasRuns }: { verdict: TaskStart
   );
 };
 
-export { RunDiagnostics } from "../components/run-diagnostics";
 
 export const RunRow = ({ run, remoteUrl, baseline, expanded, onToggle }: { run: Run; remoteUrl: string | null | undefined; baseline: RunBaseline | null | undefined; expanded: boolean; onToggle: () => void }): ReactNode => {
   const t = useT();
