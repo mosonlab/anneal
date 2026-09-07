@@ -2507,6 +2507,27 @@ publication matching the Run's resolved target ref, including when an intervenin
 Run was cancelled without publishing. A different target ref does not receive
 that salvage evidence. Runs that did not salvage omit `salvageParentSha`.
 
+Before a review or fix candidate is claimed, the control plane re-reads the
+specification from the repository. A read that fails transiently defers the
+queued Run at 15s, 30s, then 60s instead of failing it, and the deferral window
+depends on what failed. A window whose every failure was a per-attempt deadline
+hit — a read that is slow, not broken — is extended to a ceiling of 1800000ms
+(30 minutes); any other transient failure in the window keeps the ordinary
+budget of 300000ms (5 minutes) and its `spec-transcription-unreadable` parking
+reason, whose message names the window the episode actually ran alongside that
+budget. Only a per-attempt deadline that this read observed counts as a deadline
+hit; an abort raised by the repository reader itself is an ordinary transient.
+The first deferral that outlives the 5-minute budget opens exactly one
+deduplicated Inbox notice per Task, and none of the later ones do. That notice
+is deduplicated for the Task's lifetime and is never reopened, so a Task that
+meets this condition again after an operator retry raises no second notice;
+parking still announces itself once per Run. At the
+30-minute ceiling the Task is parked in Backlog with the distinct reason
+`spec-read-deadline-exceeded`, whose message names the deadline, the number of
+deferred attempts, and the elapsed window rather than reporting the
+specification as unreadable. Both ceilings are source constants, not
+configuration.
+
 The machine-only `POST /runner/tasks/claim` request may include the optional
 `servedKinds` array of exact `RunnerKind` names. Omitting `servedKinds` means
 the runner serves every kind; when it is declared, the control plane offers
