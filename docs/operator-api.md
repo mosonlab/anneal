@@ -1044,11 +1044,12 @@ exactly `refs/anneal/train/<publishHead>`, and `position` is a positive,
 control plane supplies this object; it is consumed by the merge executor when
 it publishes and replays a cumulative prefix.
 
-When `MERGE_TRAIN_WIDTH` is enabled, `publishHead` is the prefix OID at the
-candidate's passing position and `predecessorOid` is that prefix's exact
-predecessor. Only the longest contiguous passing prefix is authorized. The
-per-candidate Approval gate still applies before each output is written; the
-executor publishes the authorized prefix after readiness releases the Lease.
+When `MERGE_TRAIN_WIDTH` is enabled, `publishHead` is the final contiguous
+passing prefix OID at `contiguousPassCount` for every authorized candidate,
+and `predecessorOid` is that candidate's own prefix predecessor. Only the
+longest contiguous passing prefix is authorized. The per-candidate Approval
+gate still applies before each output is written; the executor publishes the
+authorized prefix after readiness releases the Lease.
 
 ### GET `/projects/:projectId/task-templates`
 
@@ -1556,14 +1557,16 @@ in order with the `train` object described under `merge-authorization`.
 
 Train settlement does not start a per-Chain base-drift Regression re-run. The
 first failing prefix enters the existing gate-fix repair path with the
-candidate head and its predecessor prefix OID as `baseHeadSha`; a `no-verdict`
-prefix and every `skipped` candidate return to `ready` unchanged; and a
-`blocked` candidate enters the existing refresh-conflict recovery stop with
-the recorded reason. A `fail`, `blocked`, or aborted train writes one existing
-Inbox stop notice for each affected candidate. Initial Regression semantic
-verification remains part of the candidate evidence, but it is deliberately
-not repeated after a base move while train readiness is enabled; the cumulative
-Merge gate and readiness second read provide the train's fresh checks.
+candidate head and its predecessor prefix OID as `baseHeadSha`; the existing
+shared Regression completion and repair-task handler preserves the repair
+budget and task shape. A `no-verdict` prefix and every `skipped` candidate
+return to `ready` unchanged; and a `blocked` candidate enters the existing
+refresh-conflict recovery stop with the recorded reason. A `fail`, `blocked`,
+or aborted train writes one existing Inbox stop notice for each affected
+candidate. Initial Regression semantic verification remains part of the
+candidate evidence, but it is deliberately not repeated after a base move
+while train readiness is enabled; the cumulative Merge gate and readiness
+second read provide the train's fresh checks.
 
 ### GET `/tasks`
 

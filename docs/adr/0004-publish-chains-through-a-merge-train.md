@@ -49,9 +49,9 @@ enqueued. A failed acquire defers the tick using the same behavior as
 single-candidate readiness for that repository is deferred. The Lease remains
 held across the train Run, record validation, the second-read checks, and the
 serializable settlement and authorization transactions. It is released after
-the last authorization is written or on every failure path. Merge executor's
-publication of the authorized prefix happens after that handoff and is outside
-this Lease, as it is for the single-candidate path.
+all train authorization outputs are written or on every failure path. Merge
+executor's publication of the authorized prefix happens after that handoff and
+is outside this Lease.
 
 If the train Run ends without a stored `merge-train-v1` record, or the Run is
 lost, the control plane releases the Lease, writes a `mergeTail.train` marker
@@ -74,10 +74,11 @@ released.
 For positions `1` through `contiguousPassCount`, readiness writes
 `merge-authorization` outputs in order and hands each one to merge execution.
 Each output carries a `train` object whose `publishHead` is the cumulative
-prefix OID at the passing position, `predecessorOid` is that candidate's own
-prefix predecessor, `ref` is `refs/anneal/train/<publishHead>`, `position` is
-the one-based candidate position, and `trainTaskId` identifies the detached
-Task. The existing per-candidate Approval gate still applies before its
+prefix OID at `contiguousPassCount` (the final authorized prefix) for every
+authorized candidate, `predecessorOid` is that candidate's own prefix
+predecessor, `ref` is `refs/anneal/train/<publishHead>`, `position` is the
+one-based candidate position, and `trainTaskId` identifies the detached Task.
+The existing per-candidate Approval gate still applies before its
 authorization is written.
 
 All state changes use the same serializable transactions and Chain locks as
@@ -93,14 +94,15 @@ settlement. Only the longest contiguous PASS prefix is authorized.
 | Record position or event | Settlement |
 | --- | --- |
 | `pass` within `contiguousPassCount` | Authorize the candidate in order with its `train` object. |
-| First `fail` prefix | Enter the existing `gate-fix` repair path through `enterRepair`, with `headSha` set to the candidate head and `baseHeadSha` set to that prefix's predecessor OID; charge the existing repair budget. |
+| First `fail` prefix | Enter the existing `gate-fix` repair path, with `headSha` set to the candidate head and `baseHeadSha` set to that prefix's predecessor OID; charge the existing repair budget. |
 | `no-verdict` prefix | Return that candidate to `ready` unchanged for a later train. |
 | Every `skipped` candidate | Return the candidate to `ready` unchanged for a later train. |
 | `blocked` candidate | Enter the existing refresh-conflict recovery stop with the recorded reason. |
 | Missing record or lost train Run | Abort the train, release the Lease, mark every candidate `aborted`, and return the candidates to `ready`. |
 
 None of these train settlements invokes `requeueRegressionSettlement` for
-base drift. In particular, a gate-fix repair uses the cumulative prefix's
+base drift. In particular, the existing shared Regression completion and
+repair-task handler opens a gate-fix repair using the cumulative prefix's
 predecessor as its base and retains the existing repair budget and task shape.
 
 ## Semantic verification trade-off
