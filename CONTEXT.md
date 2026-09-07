@@ -60,15 +60,23 @@ materialized spec, slices, and decisions. Stripped from the mainline at merge;
 the chain branch keeps it.
 
 **Blind review**:
-The two independent review passes (separate models, one fully isolated from
-prior step attachments) pinned to the same implementation range. The isolated
-pass is optional and a project may omit it. Their findings go to a single
-**Disposition**.
+The **Blind code review** step (optional in Direct and Full Assurance,
+required in the PR workflow: `04-code-review-opus-blind.md`,
+`07-code-review-opus-blind.md`, and `03-code-review-opus-blind.md`, respectively),
+run by a separate model over the complete integrated implementation diff using immutable
+`implementationBaseSha` and `implementationHeadSha` in the platform-pinned
+claim metadata. It is fully isolated from predecessor and sibling review
+evidence, persists an immutable `blind-findings` report, and does not adjudicate
+findings, write a report file, or commit changes.
 
 **Disposition**:
-The per-finding ruling made by the review-fix step, with no adjudication step
-between the reviews and it: each finding is adopted and fixed, rejected with a
-reason, or merged into another finding. No finding is dropped silently.
+The per-finding ruling made by the **Apply review fixes** step in Direct,
+Full Assurance, and the PR workflow (`05-apply-review-fixes.md`,
+`08-apply-review-fixes.md`, and `04-apply-review-fixes.md`, respectively) across
+every present review report: exactly one `ADOPTED`,
+`REJECTED`, or `MERGED` disposition per finding id, each with a reason. Every
+adopted finding is applied completely and committed; no adjudication step
+stands between the reviews and this step, and no finding is dropped silently.
 
 **Approval gate**:
 A chain step that halts until the operator approves its persisted output

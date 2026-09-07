@@ -1,16 +1,30 @@
 import {
+  attemptRunBirth,
   closeIntegratorQuestions,
   enqueueTaskRun,
+  MERGE_RECOVERY_CLASS_SETTLE,
+  MERGE_RECOVERY_RETRY_CLASS_ENUM,
   MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
+  openRun,
   Prisma,
   TaskStatus,
   transitionMergeRecovery,
   writeMarker,
   type MergeRecoveryAttempt,
+  type MergeRecoveryClassSettleState,
   type MergeRecoveryTransitionData,
   type RecoveryContext,
 } from "@anneal/db";
+
+import {
+  formatElapsed,
+  type RetryBudgetDecision,
+  type RetryClass,
+} from "./base-drift-recovery-decision.js";
+
+type RetryBudgetRetry = Extract<RetryBudgetDecision, { kind: "retry" }>;
+type RetryBudgetCeiling = Extract<RetryBudgetDecision, { kind: "ineligible" }>;
 
 type DbTx = Prisma.TransactionClient;
 
@@ -186,6 +200,28 @@ const stopNotice = async (
   }, update: {} });
 };
 
+/** A platform requeue must persist a named park if Run birth is refused. */
+export const requeueMergeTailRun = async (tx: DbTx, taskId: string, now: Date) => {
+  const attempt = await attemptRunBirth(tx, (client) => openRun(client, taskId, {
+    kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1,
+  }));
+  if (attempt.outcome === "refused") {
+    const { refusal } = attempt;
+    if (refusal.disposition !== "held") {
+      await tx.task.update({
+        where: { id: taskId },
+        data: { status: TaskStatus.REVIEW, failureReason: refusal.message },
+      });
+    }
+    await tx.taskActivity.create({ data: {
+      taskId, actorType: "control-plane",
+      body: `Merge-tail target was not queued: ${refusal.message}`,
+      metadata: { refusal: refusal.code },
+    } });
+  }
+  return attempt;
+};
+
 export const enterRepair = async (
   tx: DbTx,
   input: {
@@ -194,7 +230,7 @@ export const enterRepair = async (
     now: Date;
     readinessRequeue?: { staleBaseSha: string; reason: string };
   },
-): Promise<{ recoveryRunId: string }> => {
+): Promise<{ recoveryRunId: string } | null> => {
   const context = await requireRecoveryRepairIdentity(tx, input.aggregateId);
   const aggregate = await tx.mergeRecoveryAttempt.findUniqueOrThrow({
     where: { id: input.aggregateId },
@@ -228,12 +264,21 @@ export const enterRepair = async (
       },
     });
   }
-  const run = await enqueueTaskRun(
-    tx,
-    context.regressionTaskId,
-    input.now,
-    requeue ? { budgetGrant: 1 } : {},
-  );
+  const attempt = requeue ? await requeueMergeTailRun(tx, context.regressionTaskId, input.now) : null;
+  if (attempt && attempt.outcome !== "opened") {
+    if (attempt.outcome === "refused" && attempt.refusal.disposition !== "held") {
+      await transitionMergeRecovery(tx, input.aggregateId, MergeRecoveryStatus.BLOCKED_DOWNSTREAM, {
+        failureReason: attempt.refusal.message, endedAt: input.now,
+      });
+      for (const taskId of [context.readinessTaskId, context.integratorTaskId]) {
+        await tx.task.update({ where: { id: taskId }, data: {
+          status: TaskStatus.REVIEW, failureReason: attempt.refusal.message,
+        } });
+      }
+    }
+    return null;
+  }
+  const run = attempt?.run ?? await enqueueTaskRun(tx, context.regressionTaskId, input.now);
   await transitionMergeRecovery(tx, input.aggregateId, MergeRecoveryStatus.REPAIRING, {
     recoveryRunId: run.id,
     currentBaseSha: input.currentBaseSha,
@@ -391,6 +436,23 @@ export const reopenAfterHeadAdoption = async (
   return true;
 };
 
+/**
+ * The state name a settle records, and the family its stop notice dedupes on.
+ * A class ceiling takes its name from the same entry that owns its durable
+ * refusal code, so the two cannot drift apart.
+ */
+export const recoveryClassSettleState = (retryClass: RetryClass): MergeRecoveryClassSettleState => (
+  MERGE_RECOVERY_CLASS_SETTLE[MERGE_RECOVERY_RETRY_CLASS_ENUM[retryClass]].state
+);
+
+export type RecoverySettleState = "ineligible" | "exhausted" | MergeRecoveryClassSettleState;
+
+/**
+ * A recovery's terminal settle. `revalidations` generations the stop notice
+ * and the operator question: after a `re-validate`, the same class can settle
+ * again, and reusing the first key would deduplicate that second ceiling into
+ * silence.
+ */
 export const exhaust = async (
   tx: DbTx,
   input: {
@@ -400,7 +462,8 @@ export const exhaust = async (
     reason: string;
     at: Date;
     attempt: number;
-    state: "ineligible" | "exhausted";
+    state: RecoverySettleState;
+    revalidations?: number;
     recoveryData: MergeRecoveryTransitionData;
     markerMetadata: Record<string, unknown>;
   },
@@ -412,7 +475,9 @@ export const exhaust = async (
   });
   const body = input.state === "ineligible"
     ? `Automatic pre-merge base-drift recovery refused: ${input.reason}`
-    : `Automatic pre-merge base-drift recovery exhausted at attempt ${String(input.attempt)}`;
+    : input.state === "exhausted"
+      ? `Automatic pre-merge base-drift recovery exhausted at attempt ${String(input.attempt)}`
+      : `Automatic pre-merge base-drift recovery settled on ${input.state}: ${input.reason}`;
   await tx.task.update({ where: { id: input.integratorTaskId }, data: {
     status: TaskStatus.REVIEW,
     failureReason: input.state === "ineligible"
@@ -430,7 +495,8 @@ export const exhaust = async (
       reason: input.reason,
     },
   });
-  const dedupeKey = `merge-base-drift-recovery:${input.state}:${input.sourceStopId}`;
+  const generation = input.revalidations ? `:r${String(input.revalidations)}` : "";
+  const dedupeKey = `merge-base-drift-recovery:${input.state}:${input.sourceStopId}${generation}`;
   await stopNotice(tx, {
     taskId: input.integratorTaskId,
     body: `Automatic pre-merge base-drift recovery ${input.state} for stop ${input.sourceStopId}: ${input.reason}. No regression run or re-authorization was created.`,
@@ -438,33 +504,110 @@ export const exhaust = async (
   });
 };
 
-export const recordValidationRetry = async (
+type RetryCounterFields = {
+  attempts: "waitingAttempts" | "transportAttempts" | "validationAttempts";
+  firstAt: "waitingFirstAt" | "transportFirstAt" | "validationFirstAt";
+};
+
+const RETRY_COUNTER_FIELDS: Record<RetryClass, RetryCounterFields> = {
+  waiting: { attempts: "waitingAttempts", firstAt: "waitingFirstAt" },
+  transport: { attempts: "transportAttempts", firstAt: "transportFirstAt" },
+  validation: { attempts: "validationAttempts", firstAt: "validationFirstAt" },
+};
+
+/**
+ * Records one deferred classification against its own class, holds the next
+ * tick until the backoff expires, and states the whole accounting in the
+ * recovery activity: which class, its counter, how long that class has been
+ * failing, and when the recovery is eligible again. A class transition is
+ * named explicitly, because "waiting turned into transport" is exactly what an
+ * operator reading a stalled recovery needs to see.
+ */
+export const recordRecoveryRetry = async (
   tx: DbTx,
   input: {
-    aggregateId: string;
+    attempt: MergeRecoveryAttempt;
     integratorTaskId: string;
     sourceStopId: string;
-    classificationAttempt: number;
-    maxAttempts: number;
-    reason: string;
+    decision: RetryBudgetRetry;
+    maxValidationAttempts: number;
   },
-): Promise<void> => {
-  await tx.mergeRecoveryAttempt.update({
-    where: { id: input.aggregateId },
-    data: { validationAttempts: input.classificationAttempt, failureReason: input.reason },
+): Promise<MergeRecoveryAttempt> => {
+  const { decision } = input;
+  const fields = RETRY_COUNTER_FIELDS[decision.retryClass];
+  const previousClass = input.attempt.lastRetryClass;
+  const nextClass = MERGE_RECOVERY_RETRY_CLASS_ENUM[decision.retryClass];
+  const updated = await tx.mergeRecoveryAttempt.update({
+    where: { id: input.attempt.id },
+    data: {
+      [fields.attempts]: decision.classAttempt,
+      [fields.firstAt]: decision.firstFailedAt,
+      nextEligibleAt: decision.nextEligibleAt,
+      lastRetryClass: nextClass,
+      failureReason: decision.reason,
+    },
   });
+  const budget = decision.retryClass === "validation"
+    ? `${String(decision.classAttempt)}/${String(input.maxValidationAttempts)}`
+    : String(decision.classAttempt);
+  const classChanged = previousClass !== null && previousClass !== nextClass;
   await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", {
     actorType: "control-plane",
-    body: `Automatic pre-merge base-drift classification deferred (${String(input.classificationAttempt)}/${String(input.maxAttempts)}): ${input.reason}`,
+    body: `Automatic pre-merge base-drift classification deferred as ${decision.retryClass}`
+      + ` (attempt ${budget}, ${formatElapsed(decision.elapsedMs)} in class,`
+      + ` ${decision.nextEligibleAt ? `next eligible ${decision.nextEligibleAt.toISOString()}` : "eligible now"})`
+      + `: ${decision.reason}`,
     metadata: {
       state: "classification-retry",
       integratorTaskId: input.integratorTaskId,
       sourceStopId: input.sourceStopId,
-      classificationAttempt: input.classificationAttempt,
-      reason: input.reason,
+      retryClass: decision.retryClass,
+      previousRetryClass: previousClass,
+      classChanged,
+      classAttempt: decision.classAttempt,
+      classElapsedMs: decision.elapsedMs,
+      nextEligibleAt: decision.nextEligibleAt?.toISOString() ?? null,
+      waitingAttempts: updated.waitingAttempts,
+      transportAttempts: updated.transportAttempts,
+      validationAttempts: updated.validationAttempts,
+      maxValidationAttempts: input.maxValidationAttempts,
+      reason: decision.reason,
+    },
+  });
+  return updated;
+};
+
+/**
+ * The failure that crossed a class ceiling, persisted before the settle that
+ * it caused. Without this the terminal failure would be the one classification
+ * never written down, and the refusal text ("30 classification failures") would
+ * outrun the counter the attempt actually carries. The backoff is cleared: a
+ * settled attempt has no next tick to hold.
+ */
+export const recordRecoveryClassCeiling = async (
+  tx: DbTx,
+  input: { attempt: MergeRecoveryAttempt; decision: RetryBudgetCeiling },
+): Promise<MergeRecoveryAttempt> => {
+  const { decision } = input;
+  const fields = RETRY_COUNTER_FIELDS[decision.retryClass];
+  return tx.mergeRecoveryAttempt.update({
+    where: { id: input.attempt.id },
+    data: {
+      [fields.attempts]: decision.classAttempt,
+      [fields.firstAt]: decision.firstFailedAt,
+      nextEligibleAt: null,
+      lastRetryClass: MERGE_RECOVERY_RETRY_CLASS_ENUM[decision.retryClass],
     },
   });
 };
+
+/** The counters a settle states, so its activity and the attempt agree. */
+export const recoveryClassCounters = (attempt: MergeRecoveryAttempt): Record<string, unknown> => ({
+  waitingAttempts: attempt.waitingAttempts,
+  transportAttempts: attempt.transportAttempts,
+  validationAttempts: attempt.validationAttempts,
+  nextEligibleAt: attempt.nextEligibleAt?.toISOString() ?? null,
+});
 
 export const retireLegacyRefusal = async (
   tx: DbTx,

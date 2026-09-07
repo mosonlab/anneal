@@ -34,9 +34,10 @@ makes the whole tree reachable rather than just the member's own shell.
 
 How wide each group runs is derived from a stated share of the host, not from
 the core count. `run-gate.sh` exports `AGENTOS_GATE_HOST_SHARE` as the worker's
-slot count, so on the two-slot desktop each gate sizes itself for half the
-machine and two concurrent gates still add up to one host. A gate invoked by
-hand states no share and takes half the machine. Do not restore a per-phase fan-out in
+`host-share` setting, which defaults to its slot count, so on the two-slot
+desktop each gate sizes itself for half the machine and two concurrent gates
+still add up to one host. A gate invoked by hand states no share and takes half
+the machine. Do not restore a per-phase fan-out in
 `run-gate.sh`: `7886fad` set `AGENTOS_DBTEST_CONCURRENCY` there, `merge-gate.sh`
 recomputed that same variable moments later, and the bound silently never took
 effect while both logs claimed it had.
@@ -179,6 +180,17 @@ lifetime. If an SSH connection drops while its remote process survives, that
 process keeps its worker slot and a later invocation waits instead of exceeding
 the configured capacity.
 
+That wait is bounded. `run-gate.sh` gives up after `SLOT_WAIT_MINUTES` (default
+20) with `GATE NOT RUN: worker slot wait exceeded <n> minutes` and exit `76`, so
+the dispatcher takes the same commit to its fallback worker. The bound exists
+because the dispatcher's own `--timeout-minutes` cannot interrupt an attempt
+that has already reached the worker: a dispatcher counting two slots on a worker
+whose `worker-capacity` says one produced an ssh session that simply never
+returned. The dispatcher also reads the capacity the worker states in its own
+output and logs `gate-dispatch: warning — the primary worker reports
+worker-capacity N but this dispatcher configures M primary slot(s)` when they
+disagree. That warning changes nothing on its own; it names the drift.
+
 Local slots are accounted per runner account: the account that owns
 `AGENTOS_RUNNER_HOME` owns the shared slot directory at
 `$AGENTOS_RUNNER_HOME/.cache/gate-dispatch/`. On a host with one account and
@@ -221,9 +233,9 @@ always arrive together.
 | `0` | `MERGE GATE: PASS <oid>` | yes |
 | `1` | `MERGE GATE: FAIL (<step>)` | yes |
 | `2` | usage error | no gate ran |
-| `3` | `MERGE GATE: NOT AUTHORITATIVE` | yes |
+| `3` | `MERGE GATE: NOT AUTHORITATIVE` — the run was asked to leave state behind (`--keep-postgres`), or every step passed and the host then failed to finish tearing the run down (`cleanup: ...`) | yes |
 | `75` | `GATE DISPATCH: NO SLOT` — every slot stayed busy until the timeout | no gate ran |
-| `76` | `GATE NOT RUN: <reason>` — no configured worker produced a verdict, or a precondition failed: a mirror push failed, a slot lock could not be operated, origin was unreadable, the baseline is absent, the toolchain is incomplete, a step was stopped from outside before it could be judged, or `merge-gate.sh` died without printing a verdict | no gate ran |
+| `76` | `GATE NOT RUN: <reason>` — no configured worker produced a verdict, or a precondition failed: a mirror push failed, a slot lock could not be operated, origin was unreadable, the baseline is absent, the toolchain is incomplete, **the docker preflight found no `docker` or no reachable daemon**, **the wait for a worker execution slot exceeded `SLOT_WAIT_MINUTES`**, a step was stopped from outside before it could be judged, or `merge-gate.sh` died without printing a verdict | no gate ran |
 | `130` / `143` | interrupted — `merge-gate.sh` prints `GATE NOT RUN: <reason>` and exits under the signal that stopped it | no gate ran |
 | `128+N` | the gate process died on signal N without a verdict; `137` is `SIGKILL`, which is almost always the OOM killer | no gate ran |
 | `255` | ssh transport failure from direct `remote-gate.sh`; the dispatcher consumes this and tries its fallback | no gate ran |
@@ -232,6 +244,18 @@ always arrive together.
 `75`, `76`, `128+N` and `255` are errands, not judgements: re-dispatch after
 fixing what the message names. An automation that treats them as FAIL blocks
 merges on network weather and, worse, teaches people to ignore FAILs.
+
+That line is drawn by who the failure is about, not by where it happened. A
+missing `--expect-head` match, a dirty worktree, a baseline that is not in the
+repository: those are about this commit and this invocation, so they are `1`.
+A host with no `docker` binary or no reachable daemon is about the machine, so
+it is `76` and the dispatcher takes the same commit to its next worker — the
+preflight reported `1` until 2026-09-06, and a dispatcher that read it as a
+judgement published `MERGE GATE: FAIL (docker preflight)` for a commit no gate
+had run a step against. A cleanup that fails after every step passed is the
+same kind of fact about the host, but the run did test the commit and cannot
+promise its container is gone, so it is `3`: not a FAIL, and not authority for
+a merge either.
 
 `75` and `76` are not interchangeable. `75` means at least one slot existed that
 could have been taken and stayed busy for the whole timeout — a queue, so
@@ -409,6 +433,25 @@ the file to the exact value `2` for step 5 and retain it only if that acceptance
 passes. `run-gate.sh` refuses every other value and never creates a third slot.
 Removing the file returns the worker to one slot.
 
+`~/gate/host-share` is the other half of that decision and a different question:
+capacity is how many gates run at once, share is how much of the machine each
+one sizes itself for. An absent file means the worker's capacity, which is what
+`run-gate.sh` used before the file existed, so an existing worker's sizing is
+unchanged and a capacity raised later still halves the machine by itself.
+`provision.sh` writes the file only on a worker that has already stated a
+capacity, and never overwrites one; on a fresh box it deliberately leaves the
+file absent rather than freezing a share the operator has not chosen.
+**A worker that shares its host with runners must set it to at least `2`**:
+`gate-self` runs one gate at a time beside sixteen runners, and at capacity one
+an unstated share handed that gate the whole machine.
+
+The share must be **at least the capacity**, because that is the arithmetic of
+`N` concurrent gates adding up to one host: `run-gate.sh` refuses a share below
+the capacity with `GATE NOT RUN` rather than over-subscribing the box, so
+`worker-capacity=2` with `host-share=1` never runs. Above that floor any whole
+number is accepted — raise the share when the box is shared, not when a single
+gate feels slow.
+
 **2. Push the exact gate inputs (local).** The first push creates
 `~/gate/<repo>/mirror.git` and installs `run-gate.sh` beside it.
 
@@ -459,7 +502,9 @@ lines in the PR.
 **5. Capacity-two acceptance.** This is required only for a host proposed for
 two slots. Use one fixed full-profile commit and a warm build cache. Record
 three single runs, then five rounds with two `remote-gate.sh` processes started
-together. Sample host CPU, memory availability and memory pressure during each
+together. Set `~/gate/host-share` to at least `2` for the acceptance and keep it
+there while the capacity is two — a share below the capacity is refused, and a
+share equal to it is what makes two overlapping gates add up to one host. Sample host CPU, memory availability and memory pressure during each
 round. Keep `worker-capacity=2` only when all ten overlapping gates pass, none
 times out or leaks a database/worktree, there is no OOM or sustained memory
 pressure, and the median two-gate batch finishes at least 15 percent sooner
@@ -499,14 +544,14 @@ whichever usable local or remote slot frees runs there.
 The database step runs one file per lane, each with a database of its own and
 its own subdirectory of the roots the gate exports. The lane count is not read
 from the CPU count here: `run-gate.sh` exports only `AGENTOS_GATE_HOST_SHARE`,
-the worker's configured slot count, and `merge-gate.sh` derives every parallel
-width in the run from `availableParallelism() / AGENTOS_GATE_HOST_SHARE`. A
-worker permits one gate by default or two only when `~/gate/worker-capacity`
-contains `2`, so on the 14-vCPU desktop worker a capacity-two gate gets 7 unit
-and 7 database lanes and two of them add up to the host, while a hand-run gate
-with no stated share defaults to half the host. Deriving both from the one
-number is what keeps that invariant true; do not fix a width independently of
-the share.
+the worker's `host-share` setting, and `merge-gate.sh` derives every parallel
+width in the run from `availableParallelism() / AGENTOS_GATE_HOST_SHARE`. That
+setting defaults to the worker's capacity, so on the 14-vCPU desktop worker a
+capacity-two gate gets 7 unit and 7 database lanes and two of them add up to the
+host, while a hand-run gate with no stated share defaults to half the host. A
+worker whose host also runs runners states a larger share than its capacity and
+gets correspondingly fewer lanes. Deriving every width from the one number is
+what keeps that invariant true; do not fix a width independently of the share.
 `AGENTOS_DBTEST_CONCURRENCY` lowers the file concurrency on other paths and
 `AGENTOS_DBTEST_PROVISION=0` puts the step back on one shared schema, serial.
 
@@ -536,6 +581,31 @@ ssh fallback-worker 'ls -la ~/gate/<repo>/worktrees'
 ssh fallback-worker 'rm -rf ~/gate/<repo>/worktrees/gate-<oid>-<stamp>-<pid> && git -C ~/gate/<repo>/mirror.git worktree prune'
 ```
 
+**A PostgreSQL container is still running long after its gate ended** — that is
+the case `run-gate.sh` reaps at the start of every run, and it should not need
+you. `merge-gate.sh` labels each container with the pid of the gate that started
+it and the worktree that gate ran in, and its EXIT trap deletes it; an OOM kill,
+a SIGKILL or a power cut skips the trap, and `--rm` only deletes a container
+that stops. The next run on that worker removes such a container when **both**
+the pid is gone and the worktree is gone, and logs the removal with both. It
+leaves alone — and says so — a container whose gate is still running, one whose
+worktree is still on disk, and one carrying no gate labels at all, because
+deleting the database out from under a running gate is the one failure this must
+never have. An unlabelled container is therefore yours to remove by hand.
+
+The reaper runs on gate workers only, after the worktree sweep in the same run,
+so a container whose gate the kernel killed is removed by the run that reclaims
+its worktree. A gate that ran in the dispatcher's **local slot** is never
+reaped: it runs in the persistent checkout rather than a throwaway worktree, so
+the worktree the label names never disappears and the reaper — which only ever
+runs on a worker — never sees it. On the dispatching machine, remove such a
+container by hand with the same two commands, without the `ssh`:
+
+```sh
+docker ps --filter name=agentos-merge-gate- --format "{{.Names}}\t{{.RunningFor}}"
+docker rm -f <name>
+```
+
 **`GATE DISPATCH: NO SLOT` keeps recurring** — the configured slots are
 systemically full. That is a capacity signal, not an error to retry harder:
 either stagger the merges, or repeat the same-commit overlap acceptance before
@@ -552,9 +622,12 @@ was not written by this script and is cleared by hand, again only once no gate
 is running; and a message about not being able to write a lock means the slot
 directory itself is read-only or full. Re-dispatch after clearing.
 
-**`docker: permission denied` / `the docker daemon is not reachable`** — the
-account is not in the `docker` group yet, or its session predates the change.
-Log out, log back in, re-run `provision.sh`.
+**`docker: permission denied` / `the docker daemon on this host is not
+reachable`** — the account is not in the `docker` group yet, or its session
+predates the change. Log out, log back in, re-run `provision.sh`. The gate
+reports this as `GATE NOT RUN:` and `76`, never as a FAIL: the daemon says
+nothing about the commit, so the dispatcher takes the same commit to its next
+worker rather than publishing a verdict no step formed.
 
 **A pull or an `npm ci` hangs** — a registry mirror has stopped serving. Check
 `/etc/docker/daemon.json` (`registry-mirrors`) and `~/.npmrc` (`registry`). The
@@ -624,6 +697,7 @@ must be reported with its verdict.
 The local machine carries only the slot lock files in the directory named by the
 dispatcher's startup line; they are inert when nothing runs. To return a
 capacity-two worker to one slot, remove `~/gate/worker-capacity` after its gates
-finish. To retire one repository from the worker, delete `~/gate/<repo>` on it;
+finish; `~/gate/host-share` is independent of it and keeps whatever share the
+operator stated. To retire one repository from the worker, delete `~/gate/<repo>` on it;
 to decommission the worker, delete `~/gate`.
 Gating locally is, and remains, `bash scripts/merge-gate.sh`.

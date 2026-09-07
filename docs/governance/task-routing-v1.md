@@ -77,31 +77,53 @@ belongs in Full Assurance, not in assignee escalation.
 
 ## Implementation assignee routing
 
-Keep the template's default implementation assignee. Use `senior-dev-astra-medium` only
-for persisted data, a
-defense-list path (merge gate, gate worker, migrations, or merge
-automation), or uncertain classification. Use `senior-dev-sol-high` for that same
-work only when named explicitly because the Astra model is unavailable;
-it is never a default. Use `senior-dev-opus-medium` when the operator names it to
-spend Claude capacity on the implementation instead of Codex capacity; it is
-never a default either. Use `frontend-dev-opus-medium` for work primarily
-consisting of a new or redesigned web page or UI surface, and
-`frontend-dev-opus-high` for that same work when the operator names it because
-the frontend work is harder; it is never a default. The defense-list rule
-wins when both apply. The review-fix step keeps its template assignee
-`senior-dev-astra-low` on every route; routing does not move it.
+The `default route` is `senior-dev-luna-max`. A brief with
+mechanical Acceptance stays on that default regardless of which directory it
+touches. Escalate on **hazard**, never on path. Write
+`Route: implementation=senior-dev-astra-medium - <hazard>` only when the
+acceptance suite cannot witness the failure even when the brief states it:
+concurrency, transaction boundaries, lock or lease windows, or cross-module
+contract migrations; also use it when the change alters what the merge gate,
+merge automation, or a migration does. Deleting dead code is never a hazard.
 
-A backlog card needing a non-default implementation assignee includes this
-machine-readable line in its description:
-  `Route: implementation=<agent-name>`.
-Direct-template instantiation consumes the line, resolves the named Agent in
-the project, applies the existing override safety checks, and assigns the
-implementation step. `stepOverrides` is a separate API mechanism; supplying
-both for the direct implementation step is refused. A well-formed route line
-on another template refuses instantiation with
-`implementation_route_template_unsupported`; remove the line or use
-`stepOverrides`. Other templates do not interpret malformed Route-looking
-prose.
+Use `senior-dev-sol-high` for that same hazardous work only when the Astra
+model is unavailable; it is never a default. Use
+`senior-dev-opus-medium`, or `senior-dev-opus-high` for that same work at the
+higher effort, when the operator names it to spend Claude capacity
+on the implementation instead of Codex capacity; neither is ever a default.
+Use `frontend-dev-opus-medium` for work primarily consisting of a new or
+redesigned web page or UI surface, and `frontend-dev-opus-high` for that same
+work when the operator names it because the frontend work is harder; it is
+never a default. The review-fix step keeps its template
+assignee `senior-dev-astra-low` on every route; implementation routing does not
+move it.
+
+Routing assessments use `default route` or `hazard: <which>`, with the latter
+naming the hazard under the criteria above.
+
+A non-default implementation route is selected in a backlog card or direct
+instantiation description with a machine-readable line. Its grammar is exactly
+one of these line forms:
+
+  `Route: implementation=<agent>`
+  `Route: implementation=<agent> - <reason>`
+
+The optional suffix uses the exact separator ` - `; `<agent>` is the Agent
+name, at most 80 characters with no leading or trailing whitespace, and
+`<reason>` is non-empty when the suffix is present. A `Route:`
+near-miss on the direct template is refused with
+`implementation_route_malformed`. A well-formed Route line on a template
+that does not consume implementation routes is refused with
+`implementation_route_template_unsupported`; the template's default is never
+silently used. Other templates do not interpret malformed Route-looking prose.
+
+The Route line and an explicit `stepOverrides` `assigneeAgentId` for the
+implementation step are mutually exclusive; supplying both is refused with
+`implementation_route_conflicts_with_step_override`. An include-only override
+does not conflict, and a selected staffing profile does not conflict: the
+Route wins for that implementation step. The existing override checks still
+apply to the routed Agent; if its identity changes before instantiation,
+`implementation_route_agent_renamed` is returned.
 
 ## Critical classification
 
@@ -214,7 +236,8 @@ own. The board holds either the card or its chain, never both.
   its `Route:` line. Chain ordering passes `afterTaskId` (the predecessor
   chain's final task) to the instantiate endpoint; the bound chain dispatches
   when the predecessor completes. `afterTaskId` cannot combine with
-  `autoStart`, and each predecessor task accepts one successor.
+  `autoStart`. One predecessor task accepts several bound successor chains,
+  so a wave that fans out from one delivered chain need not be serialised.
 - Before every instantiation, classify the new chain against every in-flight
   or co-dispatched chain and select exactly one dependency outcome. Parallel is
   the default. Bind with `afterTaskId` only for a true dependency; serialize by
@@ -223,10 +246,11 @@ own. The board holds either the card or its chain, never both.
      must be deployed before this chain can be verified. Bind with
      `afterTaskId` and record `Depends on: <chain> — <what is consumed or why deploy-first>` in the instantiate description or card activity log. A
      mention of the other chain, a shared document, or an adjacent feature on
-     the same surface is independent. Binding is one-way: the bound chain's
-     first step refuses manual start until the predecessor is `DONE`, and only
-     deleting the bound chain releases it (see the instantiate route in
-     `docs/operator-api.md`).
+     the same surface is independent. Binding is one-way and one hop deep:
+     the bound chain's first step refuses manual start until the predecessor
+     is `DONE`, and only deleting that bound chain releases its own binding —
+     the predecessor's other successors stay bound (see the instantiate route
+     in `docs/operator-api.md`).
   2. Heavy overlap: no dependency, but both chains rewrite the same code area.
      Weigh expected refresh-conflict repair cost against serial wall-clock
      loss; either choice is valid, and a serial choice records its reason.

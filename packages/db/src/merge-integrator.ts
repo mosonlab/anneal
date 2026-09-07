@@ -25,25 +25,17 @@ export const MERGE_INTEGRATOR_KIND = {
   result: "mergeIntegrator.result",
 } as const;
 
-export type MergeIntegratorKind = (typeof MERGE_INTEGRATOR_KIND)[keyof typeof MERGE_INTEGRATOR_KIND];
-
 export const MERGE_INTEGRATOR_SCHEMA_VERSION = 1;
 
 /** v1.1 pins exactly one merge method (SPEC D4). */
 export const AUTHORIZED_MERGE_METHOD = "merge";
 
 /**
- * These ordinals describe persisted graph topology. Step role recognition no
- * longer depends on them because outputKind is unique within every canonical
- * template generation.
+ * These ordinals describe persisted graph topology. Step role recognition uses
+ * stepRole(); a chain's own persisted template steps supply its topology.
  */
 export const INTEGRATOR_STEP_INDEX = 12;
 export const DIRECT_INTEGRATOR_STEP_INDEX = 7;
-/** The regression-first thirteen-step graph put the integrator one node later; that ordinal is frozen with the renamed row. */
-export const LEGACY_REGRESSION_FIRST_INTEGRATOR_STEP_INDEX = 13;
-/** The adjudication-era graphs carried one extra node before the integrator; those ordinals are frozen with the renamed rows. */
-export const LEGACY_PRE_ADJUDICATION_INTEGRATOR_STEP_INDEX = 13;
-export const LEGACY_PRE_ADJUDICATION_DIRECT_INTEGRATOR_STEP_INDEX = 8;
 export const LEGACY_INTEGRATOR_STEP_INDEX = 12;
 export const LEGACY_DIRECT_INTEGRATOR_STEP_INDEX = 7;
 export const INTEGRATOR_OUTPUT_KIND = "merge-result";
@@ -72,7 +64,7 @@ export const isIntegratorStep = isCanonicalIntegratorStep;
 /**
  * Bidirectional: the sentinel Agent may bind only the integrator step, and the
  * integrator step may bind only the sentinel Agent. One direction alone leaves
- * a hole — the sentinel dispatchable as an ordinary model agent, or step 12
+ * a hole — the sentinel dispatchable as an ordinary model agent, or the integrator step
  * executable by a real LLM.
  */
 export const integratorBindingValid = (
@@ -553,6 +545,7 @@ export type Disposition =
   | "terminal-abandoned"
   | "refresh-requested"
   | "repair-requested"
+  | "revalidation-requested"
   | "nonterminal";
 
 export const TERMINAL_DISPOSITIONS: Disposition[] = ["terminal-done", "terminal-abandoned"];
@@ -566,7 +559,8 @@ export type StopChoice =
   | "revert"
   | "accept-foreign-merge"
   | "flag-incident"
-  | "open-repair";
+  | "open-repair"
+  | "re-validate";
 
 const RESUMABLE: StopChoice[] = ["re-authorize", "abandon"];
 
@@ -603,6 +597,23 @@ export const STOP_CHOICES: Record<StopCondition, StopChoice[]> = {
 /** The choices the `flag-incident` follow-up question offers — the later exits C3 promised. */
 export const FOLLOW_UP_CHOICES: StopChoice[] = ["accept-foreign-merge", "abandon"];
 
+/**
+ * The wider offering a base-drift recovery opens when one retry class crossed
+ * its own ceiling rather than the candidate being ineligible. Only a ceiling
+ * has counters to reset, so `re-validate` is offered there and nowhere else;
+ * an ordinary refusal keeps the abandon-only card above.
+ */
+export const BASE_DRIFT_CLASS_CEILING_CHOICES: StopChoice[] = ["re-validate", "abandon"];
+
+/**
+ * Every choice a condition can be answered with, which for base drift is wider
+ * than the default offering: the recovery decides per settle which card to
+ * open, and the answer transaction must accept whichever it opened.
+ */
+const ANSWERABLE_CHOICES: Partial<Record<StopCondition, StopChoice[]>> = {
+  "base-drift": [...BASE_DRIFT_CLASS_CEILING_CHOICES, ...STOP_CHOICES["base-drift"]],
+};
+
 const DISPOSITION_OF: Record<StopChoice, Disposition> = {
   accept: "terminal-done",
   revert: "terminal-done",
@@ -610,6 +621,7 @@ const DISPOSITION_OF: Record<StopChoice, Disposition> = {
   abandon: "terminal-abandoned",
   "re-authorize": "refresh-requested",
   "open-repair": "repair-requested",
+  "re-validate": "revalidation-requested",
   "flag-incident": "nonterminal",
 };
 
@@ -623,7 +635,7 @@ export const isStopChoice = (value: unknown): value is StopChoice =>
  */
 export const dispositionFor = (condition: StopCondition, choice: string): Disposition | null => {
   if (!isStopChoice(choice)) return null;
-  if (!STOP_CHOICES[condition].includes(choice)) return null;
+  if (!(ANSWERABLE_CHOICES[condition] ?? STOP_CHOICES[condition]).includes(choice)) return null;
   return DISPOSITION_OF[choice];
 };
 
@@ -641,6 +653,7 @@ export const CHOICE_LABELS: Record<StopChoice, string> = {
   "accept-foreign-merge": "接受他人已完成的合并",
   "flag-incident": "标记为事故，暂不结案",
   "open-repair": "开始修复合并目标",
+  "re-validate": "重新校验（重置该类计数，继续自动恢复）",
 };
 
 export const stopChoicePayload = (choices: StopChoice[]): Array<{ id: string; label: string }> =>
@@ -662,7 +675,10 @@ export const parseStopAnswerMetadata = (metadata: unknown): StopAnswerRecord | n
   if (!isStopCondition(value.condition)) return null;
   if (!isStopChoice(value.choice)) return null;
   const disposition = value.disposition;
-  const known: Disposition[] = ["terminal-done", "terminal-abandoned", "refresh-requested", "repair-requested", "nonterminal"];
+  const known: Disposition[] = [
+    "terminal-done", "terminal-abandoned", "refresh-requested", "repair-requested",
+    "revalidation-requested", "nonterminal",
+  ];
   if (typeof disposition !== "string" || !known.includes(disposition as Disposition)) return null;
   return { stopId: value.stopId, condition: value.condition, choice: value.choice, disposition: disposition as Disposition };
 };

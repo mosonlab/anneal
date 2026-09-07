@@ -46,6 +46,7 @@ export class DeploymentAttempt {
     const migration = this.fact("migration");
     const publication = this.fact("publication");
     const verification = this.fact("serviceVerification");
+    const quietWindowWait = this.fact("quietWindowWait");
     return {
       targetCommit: revisions?.to ?? this.targetCommit,
       ...(preparedRelease?.buildStamp ? { activatedBuildStamp: preparedRelease.buildStamp } : {}),
@@ -65,7 +66,21 @@ export class DeploymentAttempt {
       ...(publication?.releaseIdentity ? { releaseIdentity: publication.releaseIdentity } : {}),
       ...(publication?.pointerTransition ? { pointerTransition: publication.pointerTransition } : {}),
       ...(verification?.activatedBuildStamp ? { activatedBuildStamp: verification.activatedBuildStamp } : {}),
+      ...(verification ? {
+        serviceVerification: {
+          unitsChecked: verification.unitsChecked,
+          runnersRegistered: verification.runnerIds,
+          observationWindowMs: verification.observationWindowMs,
+          observedForMs: verification.observedForMs,
+        },
+      } : {}),
+      ...(quietWindowWait ? {
+        quietWindowWaitSeconds: quietWindowWait.waitSeconds,
+        quietWindowWaitPolls: quietWindowWait.polls,
+        quietWindowWaitPeakBlockingRuns: quietWindowWait.peakBlockingRuns,
+      } : {}),
       ...(this.fact("rollbackPointerOutcome") ? { rollbackPointerOutcome: this.fact("rollbackPointerOutcome") } : {}),
+      ...(this.fact("supersededEscalation") ? { supersededEscalation: this.fact("supersededEscalation") } : {}),
       ...metadata,
     };
   }

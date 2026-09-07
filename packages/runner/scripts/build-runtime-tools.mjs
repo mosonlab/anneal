@@ -4,20 +4,15 @@ import * as nodeFs from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { RUNTIME_TOOL_FILES, expectedDirectoryEntries } from "../../../scripts/deploy/runtime-tool-inventory.mjs";
+
 /**
- * These are the only scripts that cross from the repository into an Anneal
- * Run.  Keep the source paths explicit: a broad copy would make an unrelated
- * gate-worker helper part of the runner's release contract by accident.
+ * The inventory itself is declared in `scripts/deploy/`, the one directory
+ * every release builder has always copied into an artifact, so the release
+ * verifier can read it without importing across into this package. This module
+ * re-exports it, keeping the build's import surface unchanged.
  */
-export const RUNTIME_TOOL_FILES = Object.freeze([
-  Object.freeze({ source: "packages/runner/runtime-tools/git-credential-runner.sh", destination: "git-credential-runner.sh" }),
-  Object.freeze({ source: "packages/runner/runtime-tools/regression-verification.sh", destination: "regression-verification.sh" }),
-  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/gate-dispatch.sh", destination: "gate-worker/gate-dispatch.sh" }),
-  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/lib.sh", destination: "gate-worker/lib.sh" }),
-  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/mirror-push.sh", destination: "gate-worker/mirror-push.sh" }),
-  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/remote-gate.sh", destination: "gate-worker/remote-gate.sh" }),
-  Object.freeze({ source: "packages/runner/runtime-tools/gate-worker/run-gate.sh", destination: "gate-worker/run-gate.sh" }),
-]);
+export { RUNTIME_TOOL_FILES, expectedDirectoryEntries };
 
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const defaultRepositoryRoot = resolve(scriptDirectory, "../../..");
@@ -51,15 +46,10 @@ const directory = (filesystem, path, label) => {
   return status;
 };
 
-const expectedDirectoryEntries = new Map([
-  ["", ["gate-worker", "git-credential-runner.sh", "regression-verification.sh"]],
-  ["gate-worker", ["gate-dispatch.sh", "lib.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"]],
-]);
-
 const assertGeneratedTree = (filesystem, outputRoot, sourceRoot) => {
   directory(filesystem, outputRoot, "generated-root");
 
-  for (const [relativeDirectory, names] of expectedDirectoryEntries) {
+  for (const [relativeDirectory, names] of expectedDirectoryEntries()) {
     const current = relativeDirectory === "" ? outputRoot : join(outputRoot, relativeDirectory);
     if (relativeDirectory !== "") directory(filesystem, current, `generated-${relativeDirectory}`);
     const entries = filesystem.readdirSync(current, { withFileTypes: true })
@@ -131,7 +121,9 @@ export const buildRuntimeTools = ({
   let stageRoot;
   try {
     stageRoot = filesystem.mkdtempSync(join(distRoot, ".runtime-tools-stage-"));
-    filesystem.mkdirSync(join(stageRoot, "gate-worker"), { recursive: false, mode: 0o755 });
+    for (const relativeDirectory of expectedDirectoryEntries().keys()) {
+      if (relativeDirectory) filesystem.mkdirSync(join(stageRoot, relativeDirectory), { recursive: true, mode: 0o755 });
+    }
     for (const { source, destination } of RUNTIME_TOOL_FILES) {
       const sourcePath = resolve(sourceRoot, source);
       const destinationPath = join(stageRoot, destination);

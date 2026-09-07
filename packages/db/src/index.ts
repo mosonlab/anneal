@@ -25,6 +25,7 @@ export * from "./gate-slot.js";
 export * from "./merge-gate.js";
 export * from "./gate-toggle.js";
 export * from "./merge-tail-markers.js";
+export * from "./merge-recovery-revalidate.js";
 export * from "./merge-lease-ledger.js";
 export {
   CHAIN_STRUCTURE_LOCK_CLASS,
@@ -78,6 +79,9 @@ export {
   isIntegratorStoppedError,
   isPinnedBaseCommitError,
   isWorkflowRefusalError,
+  LEASE_LOSS_REFUND_CAP,
+  leaseLossRefundAvailable,
+  leaseLossRefundDecision,
   nativeImplementationSubagentRunConfig,
   openRun,
   pinnedImplementationRange,
@@ -98,10 +102,12 @@ export {
   agentArchiveBlocker,
 } from "./chain-activation.js";
 export {
+  GATE_ATTESTATION_BASE_MISMATCH,
   type MergeAuthorizationResult,
   MergeEvidenceError,
   isMergeEvidenceError,
   produceMergeAuthorization,
+  recordMergeEvidenceRefusal,
 } from "./merge-authorization.js";
 export {
   APPROVAL_GATE_FEEDBACK_METADATA_FIELD,
@@ -113,11 +119,7 @@ export {
   applyInboxDecisionTx,
 } from "./inbox-decision.js";
 export * from "./usage.js";
-export * from "./session-cache-backfill.js";
-export * from "./merge-stop-question-backfill.js";
-export * from "./post-delivery-disconnect-audit.js";
 export * from "./cost.js";
-export * from "./task-source.js";
 export * from "./failure-envelope.js";
 export * from "./run-outcome.js";
 export * from "./run-output-evidence.js";

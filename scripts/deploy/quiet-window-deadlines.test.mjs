@@ -21,6 +21,10 @@ import {
   deployBarrierTimeoutMsForRole,
   waitForQuietWithWatchdog,
   waitForEscalationClear,
+  blockingRunCountsByRunner,
+  DEFAULT_QUIET_WINDOW_WAIT_BUDGET_MS,
+  QUIET_WINDOW_WAIT_ALERT_INTERVAL_MS,
+  quietWindowWaitBudgetMs,
 } from "./quiet-window-deadlines.mjs";
 import { createDeployInterruption } from "./quiet-window-interrupt.mjs";
 
@@ -163,7 +167,183 @@ test("the barrier watchdog starts before the post-lock blocking-runs query", asy
     wait: async () => undefined,
   });
   assert.deepEqual(calls, ["query-before-lock", "acquire-barrier", "start-watchdog", "query-after-lock"]);
-  assert.deepEqual(result, { barrier, watchdog });
+  assert.equal(result.barrier, barrier);
+  assert.equal(result.watchdog, watchdog);
+});
+
+/** One quiet-window wait driven by a fixed clock: every poll advances the
+ * clock by `stepMs` and the wait ends once `blockedPolls` polls have passed. */
+const drivenWait = async ({ blockedPolls, stepMs, waitBudgetMs, alertIntervalMs, runs, deliver }) => {
+  let clock = 0;
+  let polls = 0;
+  const holds = [];
+  const alerts = [];
+  const barrier = { release: async () => undefined };
+  const outcome = await waitForQuietWithWatchdog({
+    blockingRuns: async () => (polls < blockedPolls ? runs : []),
+    acquireBarrier: async () => barrier,
+    startWatchdog: async () => ({ release: async () => undefined }),
+    // Each poll ends on a macrotask, so an alert dispatched beside the loop
+    // has settled before the next poll decides whether to alert again.
+    wait: async () => {
+      polls += 1;
+      clock += stepMs;
+      await new Promise((accept) => { setImmediate(accept); });
+    },
+    now: () => clock,
+    ...(waitBudgetMs === undefined ? {} : { waitBudgetMs }),
+    ...(alertIntervalMs === undefined ? {} : { alertIntervalMs }),
+    onWaitBudgetExceeded: (event) => {
+      alerts.push(event);
+      return deliver?.(alerts.length);
+    },
+    onBlockingRuns: (blocking, progress) => holds.push({ blocking: blocking.length, ...progress }),
+  });
+  // The alert that a completed over-budget wait raises is dispatched as the
+  // loop returns; let it land before the caller reads it.
+  await new Promise((accept) => { setImmediate(accept); });
+  return { outcome, holds, alerts };
+};
+
+const RUNS = [
+  { id: "run-1", status: "running", runnerId: "mac-runner-1" },
+  { id: "run-2", status: "claimed", runnerId: "mac-runner-1" },
+  { id: "run-3", status: "running", runnerId: "vm-control-plane" },
+];
+
+test("blocking Runs are counted by the runner that owns them", () => {
+  assert.deepEqual(blockingRunCountsByRunner(RUNS), { "mac-runner-1": 2, "vm-control-plane": 1 });
+  assert.deepEqual(blockingRunCountsByRunner([{ id: "run-4", status: "running", runnerId: null }]), { unassigned: 1 });
+  assert.deepEqual(blockingRunCountsByRunner([]), {});
+});
+
+test("runner ids that name Object prototype members are counted as data", () => {
+  const counts = blockingRunCountsByRunner([
+    { id: "run-1", runnerId: "toString" },
+    { id: "run-2", runnerId: "toString" },
+    { id: "run-3", runnerId: "constructor" },
+    { id: "run-4", runnerId: "__proto__" },
+  ]);
+  assert.deepEqual(counts, Object.fromEntries([["toString", 2], ["constructor", 1], ["__proto__", 1]]));
+  // The map survives the JSON boundary the ledger writes it through.
+  assert.deepEqual(JSON.parse(JSON.stringify(counts)), counts);
+});
+
+test("the wait budget defaults to 45 minutes and is environment-overridable", () => {
+  assert.equal(DEFAULT_QUIET_WINDOW_WAIT_BUDGET_MS, 45 * 60 * 1_000);
+  assert.equal(quietWindowWaitBudgetMs({}), DEFAULT_QUIET_WINDOW_WAIT_BUDGET_MS);
+  assert.equal(quietWindowWaitBudgetMs({ QUIET_WINDOW_WAIT_BUDGET_MINUTES: "" }), DEFAULT_QUIET_WINDOW_WAIT_BUDGET_MS);
+  assert.equal(quietWindowWaitBudgetMs({ QUIET_WINDOW_WAIT_BUDGET_MINUTES: "90" }), 90 * 60 * 1_000);
+  for (const invalid of ["0", "-5", "45.5", "abc", "10000"]) {
+    assert.throws(
+      () => quietWindowWaitBudgetMs({ QUIET_WINDOW_WAIT_BUDGET_MINUTES: invalid }),
+      (error) => error instanceof DeployFailure && error.reason === "environment-invalid",
+    );
+  }
+});
+
+test("a wait crossing its budget alerts once with the blocking Runs by runner", async () => {
+  const { outcome, alerts } = await drivenWait({
+    blockedPolls: 50,
+    stepMs: 60_000,
+    runs: RUNS,
+  });
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].elapsedSeconds, 45 * 60);
+  assert.equal(alerts[0].budgetMs, DEFAULT_QUIET_WINDOW_WAIT_BUDGET_MS);
+  assert.equal(alerts[0].blockingRuns, 3);
+  assert.deepEqual(alerts[0].blockingRunsByRunner, { "mac-runner-1": 2, "vm-control-plane": 1 });
+  // The alert never ends the wait: the barrier is still acquired afterwards.
+  assert.ok(outcome.barrier);
+  assert.equal(outcome.quietWindowWait.polls, 51);
+  assert.equal(outcome.quietWindowWait.peakBlockingRuns, 3);
+});
+
+test("a second budget crossing within the alert interval does not re-notify", async () => {
+  const withinTheHour = await drivenWait({
+    blockedPolls: 80,
+    stepMs: 60_000,
+    runs: RUNS,
+  });
+  // 80 minutes of waiting crosses the budget 35 times but stays inside one hour
+  // of the first alert.
+  assert.equal(withinTheHour.alerts.length, 1);
+  const pastTheHour = await drivenWait({
+    blockedPolls: 120,
+    stepMs: 60_000,
+    runs: RUNS,
+  });
+  assert.equal(pastTheHour.alerts.length, 2);
+  assert.equal(
+    pastTheHour.alerts[1].elapsedMs - pastTheHour.alerts[0].elapsedMs,
+    QUIET_WINDOW_WAIT_ALERT_INTERVAL_MS,
+  );
+});
+
+test("a window that opens after the budget still alerts before the wait returns", async () => {
+  // Every blocked poll lands under the budget; the first quiet poll is the one
+  // that reaches it, so only the success path can report the crossing.
+  const { outcome, alerts } = await drivenWait({
+    blockedPolls: 45,
+    stepMs: 60_000,
+    runs: RUNS,
+  });
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].elapsedSeconds, 45 * 60);
+  assert.equal(alerts[0].blockingRuns, 0);
+  assert.deepEqual(alerts[0].blockingRunsByRunner, {});
+  assert.equal(outcome.quietWindowWait.waitSeconds, 45 * 60);
+  assert.equal(outcome.quietWindowWait.polls, 46);
+});
+
+test("an undelivered alert does not consume the alert interval", async () => {
+  const { alerts } = await drivenWait({
+    blockedPolls: 50,
+    stepMs: 60_000,
+    runs: RUNS,
+    // The first delivery fails; the wait retries it on the next poll rather
+    // than staying silent for the rest of the hour.
+    deliver: (attempt) => (attempt === 1 ? Promise.reject(new Error("inbox-unreachable")) : { delivered: true }),
+  });
+  assert.equal(alerts.length, 2);
+  assert.equal(alerts[0].elapsedSeconds, 45 * 60);
+  assert.equal(alerts[1].elapsedSeconds, 46 * 60);
+});
+
+test("an alert that never settles does not stop the wait", async () => {
+  let clock = 0;
+  let polls = 0;
+  const barrier = { release: async () => undefined };
+  let dispatched = 0;
+  const outcome = await waitForQuietWithWatchdog({
+    blockingRuns: async () => (polls < 50 ? RUNS : []),
+    acquireBarrier: async () => barrier,
+    startWatchdog: async () => ({ release: async () => undefined }),
+    wait: async () => { polls += 1; clock += 60_000; },
+    now: () => clock,
+    onWaitBudgetExceeded: () => {
+      dispatched += 1;
+      return new Promise(() => undefined);
+    },
+  });
+  assert.equal(dispatched, 1);
+  assert.equal(outcome.barrier, barrier);
+  assert.equal(outcome.quietWindowWait.waitSeconds, 50 * 60);
+});
+
+test("a wait under budget alerts nobody and still measures itself", async () => {
+  const { outcome, alerts, holds } = await drivenWait({
+    blockedPolls: 3,
+    stepMs: 60_000,
+    runs: RUNS,
+  });
+  assert.deepEqual(alerts, []);
+  assert.deepEqual(outcome.quietWindowWait, { waitSeconds: 180, polls: 4, peakBlockingRuns: 3 });
+  assert.deepEqual(holds.map(({ blocking, elapsedSeconds }) => ({ blocking, elapsedSeconds })), [
+    { blocking: 3, elapsedSeconds: 0 },
+    { blocking: 3, elapsedSeconds: 60 },
+    { blocking: 3, elapsedSeconds: 120 },
+  ]);
 });
 
 test("ordinary step timeout escalates, notifies, fails, and releases the barrier", async () => {

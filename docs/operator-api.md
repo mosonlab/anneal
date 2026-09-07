@@ -111,6 +111,8 @@ curl "$BASE_URL/files/content?path=README.md" -H "Authorization: Bearer $OPERATO
 
 ### PUT `/files/content`
 
+Writing a file creates any missing parent directories within the Files Root.
+
 - Required parameters: raw request body containing the file bytes.
 - Optional query: `path` (empty path targets the Files Root and is normally
   rejected by the underlying file operation).
@@ -118,26 +120,6 @@ curl "$BASE_URL/files/content?path=README.md" -H "Authorization: Bearer $OPERATO
 ```sh
 curl -X PUT "$BASE_URL/files/content?path=notes/today.md" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" --data-binary @notes/today.md
-```
-
-### POST `/files/mkdir`
-
-- Required JSON field: `path`.
-
-```sh
-curl -X POST "$BASE_URL/files/mkdir" \
-  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"path":"notes"}'
-```
-
-### POST `/files/move`
-
-- Required JSON fields: `from`, `to`.
-
-```sh
-curl -X POST "$BASE_URL/files/move" \
-  -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
-  -d '{"from":"draft.md","to":"archive/draft.md"}'
 ```
 
 ### DELETE `/files`
@@ -1232,19 +1214,20 @@ curl -X PATCH "$BASE_URL/task-templates/$TEMPLATE_ID" \
   template. If both supplied keys address missing slots, the specification
   refusal is reported first. No task is created for either refusal. Unknown
   fields inside `gates` are rejected by the strict request schema.
-- A machine-readable `Route: implementation=<agent>` line (optionally followed
-  by ` - <reason>`) in `description` is consumed only by
-  `direct-engineer-workflow`. Any other
-  template returns `400 Bad Request` with code
-  `implementation_route_template_unsupported` instead of silently using its
-  configured assignee; remove the line or use `stepOverrides` to assign that
-  template. On `direct-engineer-workflow`, a route-shaped line that does not
-  match the grammar returns `implementation_route_malformed`. Other templates
-  do not parse malformed Route-looking prose. The Route line conflicts with an
-  explicit `stepOverrides` assignee for the implementation step, never with the
-  selected staffing profile, which it simply outranks for that step.
-- An `afterTaskId` binding is released only by `DELETE /tasks/:taskId/chain`
-  on the bound chain; archiving the bound chain does not release it.
+- Implementation route grammar, escalation, and `stepOverrides` interaction
+  are owned by [Implementation assignee routing](governance/task-routing-v1.md#implementation-assignee-routing).
+  Route-related refusal codes are `implementation_route_malformed`,
+  `implementation_route_template_unsupported`,
+  `implementation_route_conflicts_with_step_override`, and
+  `implementation_route_agent_renamed`; `step_override_agent_not_found` is
+  returned when the routed Agent name cannot be resolved in the project.
+- One predecessor task accepts several bound successor chains: binding a
+  second chain to a predecessor that already has one is accepted, and the
+  predecessor records one `Chain <id> bound to predecessor <name>` activity per
+  binding. The binding stays one-way and one hop deep. An `afterTaskId` binding
+  is released only by `DELETE /tasks/:taskId/chain` on that bound chain, which
+  leaves the predecessor's other successors bound; archiving a bound chain does
+  not release it.
 
 ```sh
 curl -X POST "$BASE_URL/projects/$PROJECT_ID/task-templates/$TEMPLATE_ID/instantiate" \
@@ -1503,7 +1486,13 @@ The `board` view is a compact card projection. It includes `createdAt` for
 stable queue ordering, `assigneeType` so a human-owned task can be
 distinguished from an agent task whose agent assignment is missing, and
 `budgetRemaining`, the same run-budget verdict `GET /tasks/:taskId` and
-`GET /tasks/:taskId/startability` report.
+`GET /tasks/:taskId/startability` report. It also includes
+`leaseLossRefunds`: how many attempts the platform has refunded this task
+because it lost a Run — a lease declared LOST by reconciliation, a claim
+invalidated by a late salvage publication, a merge-tail requeue — as opposed to
+attempts its agent spent. It is bounded at three per task; at the bound the
+platform stops requeueing and parks the task for an operator, so a card showing
+`3` is one loss away from `REVIEW`. See "Lost-Run reconciliation" below.
 For a Chain member, the first emitted member also carries the
 `chainAggregate` projection. Its `activation.state` is one of
 `parked-unactivated`, `waiting-on-predecessor`, `running`, `idle`, `held`, or
@@ -1566,12 +1555,62 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
   reports in its checklist: whether the task's configured budget plus the
   grants its Runs carry still leaves an attempt. `POST /tasks/:taskId/retry`
   refuses with `409 Conflict` and `Run budget exhausted` when it is `false`;
-  raise `maxSessionsPerTask` through `PATCH /tasks/:taskId` to lift it.
+  raise `maxSessionsPerTask` through `PATCH /tasks/:taskId` to lift it. It is a
+  separate verdict from the board's `leaseLossRefunds`: a task can have budget
+  left and still be out of platform refunds.
 - `editableBrief` is the prompt text a caller may rewrite through `PATCH
   /tasks/:taskId` with `description`, already extracted: the brief alone for a
   Chain step that authors one, the whole stored description for an ordinary
   task, and `null` for a readiness or integrator step, whose prompt the
   platform owns, or for a description whose brief fence cannot be parsed.
+- Each returned Run carries `metrics`: read-time diagnostics derived from the
+  Run row, its Session row and that session's tool events. Nothing in it is
+  persisted, and `null` always means *unknown* — never zero, and never safe to
+  render as zero.
+  - `metrics.phases` splits the run's wall clock in milliseconds:
+    `queuedMs` (Run `readyAt` to Session `provisionedAt`), `provisioningMs`
+    (`provisionedAt` to `startedAt`), `executingMs` (`startedAt` to `endedAt`,
+    or to now while the run is still executing), `inboxWaitMs` and `cleanupMs`
+    (`cleanupStartedAt` to `cleanupEndedAt`). Each is `null` when either
+    bounding timestamp is missing. `inboxWaitMs` is `0` only when the session
+    demonstrably never waited on the Inbox; when a wait is known to have
+    happened — the session is `WAITING_INBOX`, or it resumed at least once —
+    the stored data marks that it happened without bounding it, so the value is
+    `null` rather than a guess.
+  - `metrics.tokens` reports the canonical input split, where `input` already
+    includes both cache subsets: `input`, `cachedRead`, `cacheWrite`,
+    `uncachedInput`, `output` and `cacheHitRatio` (`cachedRead / input`, a
+    fraction in `[0, 1]`). `uncachedInput` and `cacheHitRatio` are `null` when
+    a component is missing or the split is internally inconsistent; the raw
+    reported columns still appear. A valid zero-input split yields
+    `uncachedInput = 0` and `cacheHitRatio = null`.
+  - `metrics.tools` reports `calls`, `failed`, `unclassified`, `totalToolMs`
+    and `byName` (the five busiest tool names, most calls
+    first, each with `calls` and `failed`). Calls are paired by `toolCallId`.
+    A completion whose payload states no readable outcome counts in
+    `unclassified` and never as a success. A start with no completion, or a
+    completion with no start, still counts in `calls` with an unknown duration
+    which makes `totalToolMs` a lower bound. Unpaired starts do not count in
+    `unclassified`. Missing IDs never establish a pairing. `totalToolMs` is the
+    union of paired intervals, so parallel calls count wall time only once.
+    One query across all run sessions selects only tool start/completion events,
+    projecting names and outcome markers into `payload` in SQL; tool output
+    bodies are never loaded for metrics. Provider discriminators and outcome
+    marker types must match: Claude `tool_result.is_error`, PI
+    `tool_execution_end.isError`, and Codex `command_execution.exit_code`
+    (numeric, with any non-null item-level `error` taking precedence as failure).
+    A Codex status alone cannot establish an outcome.
+  - `metrics.modelActiveMs` is `executingMs` less tool time and Inbox wait,
+    clamped at `0`, and `null` when `executingMs` is unknown. An unknown
+    subtrahend is subtracted as `0`, which can only overstate the remainder:
+    `metrics.modelActiveIsUpperBound` is `true` in exactly that case.
+  - `metrics.outputTokensPerSecond` is `output / (modelActiveMs / 1000)`. It is
+    an **effective session-average rate** over model-active time — not a
+    provider peak rate — and is `null` when `output` is unknown or
+    `modelActiveMs` is unknown or `0`. When `modelActiveIsUpperBound` is true,
+    the duration is an upper bound (≤) and this rate is a lower bound (≥).
+  - `metrics.termination` carries the Session's own account of how the run
+    ended: `reason`, `exitCode` and `signal`.
 
 ```sh
 curl "$BASE_URL/tasks/$TASK_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -1613,7 +1652,9 @@ curl "$BASE_URL/tasks/$TASK_ID/chain" -H "Authorization: Bearer $OPERATOR_TOKEN"
 - Required path parameter: `taskId`, naming either a direct Chain member or a
   detached merge-tail repair task bound to the Chain by its repair marker.
 - Deletes every Task in the project-scoped Chain, including its marker-bound
-  repair tasks, atomically.
+  repair tasks, atomically. When the deleted Chain was bound by `afterTaskId`,
+  this releases that binding only; every other chain bound to the same
+  predecessor stays bound.
 - Refusals: `404 Not Found` when the Task does not exist; `409 Conflict` when
   the Task belongs to no Chain, any Chain member has an active Run, or a member
   has retained Run/Session history. Active Run and retained-history refusals
@@ -1737,11 +1778,100 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/chain/resume" \
     unavailable, lacks the repository grant, or the detached repair task cannot
     resolve the Chain repository, position, and shared branch.
 
+  This route also carries `merge_tail_repair_binding_mismatch`, but a request
+  cannot provoke it: the route repairs the recovery's own `recoveryRunId`, so
+  the repair it creates is bound by construction. The code exists so the repair
+  creation both entrypoints share fails loud and classified — rather than
+  creating an unsettleable repair — if this route ever stops deriving its source
+  Run from the aggregate. The automatic tail is the reachable open-time refusal
+  site.
+
 ```sh
 curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/repair" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
   -d '{"requestId":"reenter-recovery-repair-001","reason":"Fix the regression found during base-drift recovery"}'
 ```
+
+### Settling a chain whose repair cannot bind
+
+Two merge-tail mechanisms can overlap on one Chain: a base-drift recovery
+aggregate bound to its own recovery Run, and an ordinary `gate-fix` or
+`review-fix` repair opened against a different Regression Run. A repair whose
+Chain recovery names another Run can never be settled, so the platform refuses
+it rather than handing an agent work it cannot report.
+
+- At open, both repair entrypoints refuse. The automatic tail parks the
+  regression task in `REVIEW` with a `failureReason` beginning
+  `merge-tail-repair-binding-mismatch:` and writes the ordinary
+  `Autonomous merge tail stopped:` Inbox notice; `POST
+  /tasks/:taskId/merge-tail/repair` answers `409 Conflict` with code
+  `merge_tail_repair_binding_mismatch`. No repair task is created either way.
+- At settlement — a repair opened before the overlap appeared, or one whose
+  aggregate moved while it ran — the completion is rejected rather than failing
+  the Run. `POST /runner/runs/:runId/complete` answers `409 Conflict` with the
+  same reason and a `recoveryId`, `boundRecoveryRunId`, `boundSourceRunId` and
+  `repairedRunId`. This
+  is not an internal error and not an external Run failure: the Run stays
+  terminal and carries the reason in its `failureReason`, the repair task parks
+  in `REVIEW` with it, and the repair's own commit stays on the shared branch.
+- Either way the overlap is recorded as a control-plane TaskActivity on the
+  regression task whose `metadata.kind` is `mergeTailRepair.bindingMismatch`,
+  carrying `recoveryId`, `boundRecoveryRunId`, `boundSourceRunId`,
+  `repairedRunId` and `phase` (`open` or `settlement`). `boundRecoveryRunId` is
+  the Run the recovery is bound to — the aggregate's `recoveryRunId`, the value
+  the invariant compares — while `boundSourceRunId` is the aggregate's column of
+  that name, the Run the recovery was opened from. Read it with `GET
+  /tasks/:taskId/activity`; it names both mechanisms without reading the API
+  journal.
+
+The exit is the reentry route, not another Run of the stranded repair.
+`PATCH /tasks/:taskId` can move the parked repair task's status, but that
+settles nothing: it does not rebind the recovery, reopen the tail, or produce a
+Run that can settle it, and re-running the stranded card reproduces the same
+unbindable completion. `POST /tasks/:taskId/merge-tail/repair` instead opens a
+*new* repair card bound to the recovery's own `recoveryRunId`, with its own Run
+budget — so it works even when the stranded repair task's `maxSessionsPerTask`
+is already spent, and nothing needs `PATCH /tasks/:taskId` to raise a budget.
+
+1. Read the binding-mismatch activity and the parked repair task, and confirm
+   which mechanism owns the Chain.
+
+   ```sh
+   curl "$BASE_URL/tasks/$REGRESSION_TASK_ID/activity" \
+     -H "Authorization: Bearer $OPERATOR_TOKEN" | \
+     jq '[.[] | select(.metadata.kind == "mergeTailRepair.bindingMismatch")]'
+   ```
+
+2. A settlement rejection parks the recovery in `BLOCKED_DOWNSTREAM` with the
+   regression, readiness, and integrator tasks in `REVIEW`, which is exactly
+   the state the reentry route reopens. Call it on the regression task; it
+   charges the existing repair budget and opens a correctly bound repair.
+
+   The rejection parks that state only when no tail task still has an active
+   Run. When the recovery that took the Chain over is still running, the
+   rejection records the activity and the notice and leaves that recovery
+   alone — it is the mechanism that owns the Chain, and it settles the tail on
+   its own. Nothing further is needed unless it, too, stops.
+
+   ```sh
+   curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/repair" \
+     -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
+     -d '{"requestId":"settle-unbindable-repair-001","reason":"Recovery and gate-fix repair overlapped on this chain"}'
+   ```
+
+3. If that route refuses — `merge_tail_repair_not_blocked` for a terminal or
+   incomplete aggregate, `merge_tail_repair_verdict_missing` when the stored
+   regression output is no longer the recovery Run's, or
+   `merge_tail_repair_budget_exhausted` — the Chain has no automatic exit left.
+   Carry the delivered branch forward with steps (b) to (e) of
+   [Recovering a merge tail stopped after its repair
+   budget](#recovering-a-merge-tail-stopped-after-its-repair-budget); the
+   repair's commit is already published on the shared branch, so its work is
+   preserved by the successor Chain's first Change.
+
+Whether a Chain should be allowed to run base-drift recovery and a gate-fix
+repair at the same time is not decided here. This refusal names the overlap and
+stops before spending a Run on work the platform would not accept.
 
 ### Recovering a merge tail stopped after its repair budget
 
@@ -1771,6 +1901,60 @@ for a semantic regression stop, or
 for a merge gate stop. A `PATCH /tasks/:taskId` request that supplies `status`
 is refused with `Chain task statuses are controlled by chain execution`. Both
 refusals are expected behaviour; do not use them to reopen the old Chain.
+
+#### Base-drift classification retry classes and `re-validate`
+
+Automatic pre-merge base-drift recovery accounts a classification tick that did
+not conclude against one of three classes, and only one of them is budgeted by
+count:
+
+- `waiting` — the Chain's own Run is still active, so the recovery is not
+  classified yet. Bounded by six hours since the first wait, never by count.
+- `transport` — the server-side repository read failed. Bounded by thirty
+  minutes since the first failed read, never by count.
+- `validation` — a classification ran against real facts and could not
+  conclude. Bounded by both `MAX_BASE_DRIFT_VALIDATION_ATTEMPTS` (30) failures
+  and thirty minutes since the first of them, so a burst inside one incident
+  cannot exhaust it.
+
+`waiting` and `transport` hold the next tick on a per-attempt backoff that
+doubles from the worker's two-second tick to a sixty-second cap, stored on the
+attempt as `nextEligibleAt`; `validation` takes no hold and stays eligible at
+the next tick. Each deferral writes a `baseDriftRecovery` activity in state
+`classification-retry` naming the class, its counter, the elapsed time in that
+class, and the next eligible time (`null` for `validation`); a class change is
+recorded there as well.
+
+A read that reached the repository and returned no usable ancestry comparison
+is `transport`, not `validation`: the candidate was never classified, so its
+counted budget does not pay for the upstream's silence.
+
+Crossing a ceiling settles the attempt as `FAILED` with a `refusalCode` naming
+the class, and the `failureReason` states the class and the elapsed time. The
+settle records the failure that crossed the ceiling before it settles, so the
+attempt's counters and the refusal text state the same number of failures, and
+the settle activity carries all three counters:
+
+- `waiting-ceiling` — `waiting-ceiling reached: the chain stayed active for <elapsed> (limit 6h00m); last classification: <reason>`
+- `transport-ceiling` — `transport-ceiling reached: repository reads failed for <elapsed> (limit 30m); last read failure: <reason>`
+- `validation-budget` — `validation-budget exhausted: <n> classification failures over <elapsed> (limit 30 attempts spanning 30m); last classification: <reason>`
+
+A class-ceiling settle opens a stop question offering `re-validate` alongside
+`abandon`, and writes a stop notice keyed
+`merge-base-drift-recovery:<state>:<stopId>` (with an `:r<n>` suffix after the
+n-th `re-validate`). Every base-drift recovery settle — a class ceiling, an
+ordinary ineligibility, or the automatic recovery limit — carries that same
+`:r<n>` generation on its stop question key `merge-stop:<stopId>:r<n>`, so a
+recovery that settles again after a `re-validate` always opens a fresh,
+answerable card instead of deduplicating against the answered one. Answer it
+through
+`POST /inbox/messages/:messageId/decision` with `decision: "re-validate"`. That
+answer resets the counters of the settled class and no other, clears the
+backoff and the refusal, returns the attempt to `VALIDATING`, and records a
+`class-revalidated` activity. The recovery resumes on the same attempt; no
+successor Chain is required. Every other base-drift refusal keeps its
+abandon-only card, because there is no class counter for `re-validate` to
+reset.
 
 #### Re-entering after a base-drift recovery FAIL
 
@@ -1864,6 +2048,12 @@ must follow [Continuing from a delivered branch](BRIEF-TEMPLATE.md#continuing-fr
 
 ### PATCH `/tasks/:taskId`
 
+Approving merge evidence with a base different from the persisted gate
+attestation returns `409 Conflict` with `gate-attestation-base-mismatch`.
+The approval card stays open, no authorization is written, and a durable
+TaskActivity records both bases and the refusal on the readiness task. Inbox
+approval and evidence renewal preserve the same refusal evidence.
+
 - Required path parameter: `taskId`.
 - Required JSON: at least one task field, `status`, or `failureReason`.
   Patchable task fields are `name`, `description`, `workingDirectory`, `repoId`,
@@ -1945,7 +2135,9 @@ curl -X POST "$BASE_URL/tasks/$TASK_ID/retry" -H "Authorization: Bearer $OPERATO
 
 - Required path parameter: `taskId`.
 - Refusals: `409 Conflict` when the task is the first step of a chain bound by
-  `afterTaskId` and the predecessor task is not `DONE`.
+  `afterTaskId` and the predecessor task is not `DONE`. Each chain bound to a
+  predecessor is admitted on its own: once the predecessor is `DONE` every one
+  of them becomes startable, and starting one does not start or refuse another.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$TASK_ID/start" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -2062,6 +2254,65 @@ curl -X PUT "$BASE_URL/tasks/$TASK_ID/output" \
 curl -X POST "$BASE_URL/tasks/$TASK_ID/merge-target" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
   -d '{"prNumber":42}'
+```
+
+## Merge lease
+
+### GET `/merge-lease`
+
+- Required parameters: none.
+
+```sh
+curl "$BASE_URL/merge-lease" -H "Authorization: Bearer $OPERATOR_TOKEN"
+```
+
+Operator-scoped and read-only; runner, merge-executor and session credentials
+are refused with 403 before origin or the ledger is read. It runs
+`scripts/merge-lease.sh status`, which writes nothing to
+origin, and reads the merge Lease ledger. It never acquires, releases or steals:
+breaking a lease is a human decision made at the script with
+`scripts/merge-lease.sh steal --human --reason "..."`, which is also the only
+way to skip the 45-minute machine threshold.
+
+Response fields:
+
+- `checkedAt` — when the API finished reading origin. `ageSeconds` is measured
+  from this same instant, so neither under-reports the time the read took.
+- `holder` — the lease standing on `refs/merge-lease/holder`, or `null` when no
+  lease is held. It carries `holder` (`user@host`), `task`, `reason`,
+  `acquiredAt`, `ageSeconds` (whole seconds from `acquiredAt` to `checkedAt`,
+  `null` when `acquiredAt` is not a time), and `sha` (the lease blob on origin).
+  `task`, `reason` and `sha` may be `null`.
+- `unavailable` — why the holder could not be read, or `null`. `holder` and
+  `unavailable` are never both set; the ledger is still returned when origin
+  could not be reached, because that history is what an operator needs when the
+  remote is the broken part.
+- `events` — the 20 most recent `MergeLeaseEvent` rows, newest first. `state` is
+  one of `HANDOFF_PENDING`, `RELEASE_DEFERRED`, `CONTENDED`, `RELEASED`, or
+  `INVALID`. A `CONTENDED` row is an observation rather than a lifecycle: a
+  chain that could not take the lease for longer than
+  `MERGE_LEASE_CONTENTION_ALERT_MINUTES` (default 30), recorded with the holder
+  that was in the way in `failureDetail`, that holder's `acquiredAt`, and
+  `settledAt` at the moment it was alerted. Each uninterrupted episode of
+  contention is recorded and alerted once; a tick that takes the lease, cannot
+  reach origin, or settles before reaching for the lease ends the episode, and
+  the next contention starts a new window. Contention is never stolen
+  automatically.
+
+```json
+{
+  "checkedAt": "2026-09-06T12:00:00.000Z",
+  "holder": {
+    "holder": "runner@executor",
+    "task": "chain-42",
+    "reason": "chain merge tail chain-42",
+    "acquiredAt": "2026-09-06T11:00:00.000Z",
+    "ageSeconds": 3600,
+    "sha": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c"
+  },
+  "unavailable": null,
+  "events": []
+}
 ```
 
 ## Inbox
@@ -2218,6 +2469,27 @@ publication matching the Run's resolved target ref, including when an intervenin
 Run was cancelled without publishing. A different target ref does not receive
 that salvage evidence. Runs that did not salvage omit `salvageParentSha`.
 
+Before a review or fix candidate is claimed, the control plane re-reads the
+specification from the repository. A read that fails transiently defers the
+queued Run at 15s, 30s, then 60s instead of failing it, and the deferral window
+depends on what failed. A window whose every failure was a per-attempt deadline
+hit — a read that is slow, not broken — is extended to a ceiling of 1800000ms
+(30 minutes); any other transient failure in the window keeps the ordinary
+budget of 300000ms (5 minutes) and its `spec-transcription-unreadable` parking
+reason, whose message names the window the episode actually ran alongside that
+budget. Only a per-attempt deadline that this read observed counts as a deadline
+hit; an abort raised by the repository reader itself is an ordinary transient.
+The first deferral that outlives the 5-minute budget opens exactly one
+deduplicated Inbox notice per Task, and none of the later ones do. That notice
+is deduplicated for the Task's lifetime and is never reopened, so a Task that
+meets this condition again after an operator retry raises no second notice;
+parking still announces itself once per Run. At the
+30-minute ceiling the Task is parked in Backlog with the distinct reason
+`spec-read-deadline-exceeded`, whose message names the deadline, the number of
+deferred attempts, and the elapsed window rather than reporting the
+specification as unreadable. Both ceilings are source constants, not
+configuration.
+
 The machine-only `POST /runner/tasks/claim` request may include the optional
 `servedKinds` array of exact `RunnerKind` names. Omitting `servedKinds` means
 the runner serves every kind; when it is declared, the control plane offers
@@ -2242,11 +2514,49 @@ Task. A later matching mechanical claim closes all open mismatch alerts.
 ### GET `/sessions`
 
 - Required parameters: none.
-- Optional query: `projectId`, `limit` (1–200, default `50`), and `before` (an
-  ISO date cursor).
+- Optional scope: `projectId`, `limit` (1–200, default `50`), and `before` (an
+  ISO date cursor, exclusive, on `requestedAt`).
+- Optional filters: `status`, `agentId`, `runner`, `taskId`, `chainId`,
+  `since`, `until`, and `q`.
+
+Every named filter narrows the list further: the filters combine with each
+other, with `projectId`, and with the `before` cursor by AND, and `limit` still
+caps the page. `since` and `until` are ISO timestamps read against
+`requestedAt`, inclusive at both ends, and share that column with the cursor.
+`agentId`, `taskId` and `chainId` are exact ids; `chainId` matches the chain of
+the session's Task. `runner` is an exact `RunnerKind`.
+
+`status` is a lifecycle bucket, not a persisted execution status. It accepts
+`live` (`REQUESTED`, `PROVISIONING`, `RUNNING`, `WAITING_INBOX`), `done`
+(`SUCCEEDED`), `failed` (`FAILED`, `TIMED_OUT`, `LOST`), and `cancelled`
+(`CANCELLED`). Every execution status belongs to exactly one bucket.
+
+`q` is a case-insensitive substring search over human-authored text only: the
+Task name, the Run branch, and the session's `failureReason`. A row matching
+any of the three is returned. It never searches ids or event payloads, so an id
+is addressed through `taskId`, `chainId` or `agentId` rather than through `q`. `%`, `_`, and backslash are matched literally.
+
+`since` and `until` require a valid ISO calendar timestamp with time and a
+`Z` or numeric timezone offset; parseable prose and overflowing dates refuse.
+
+A request naming no filter answers exactly what it answered before the filters
+existed. A present-but-unusable filter is refused rather than ignored, so a
+narrowed list never silently widens; a present-but-empty value (`status=`) is
+unusable for the same reason. Each refusal is `400 Bad Request` with a body
+carrying `error` and `code`: `session-filter-status-invalid`,
+`session-filter-agent-id-invalid`, `session-filter-runner-invalid`,
+`session-filter-task-id-invalid`, `session-filter-chain-id-invalid`,
+`session-filter-since-invalid`, `session-filter-until-invalid`, and
+`session-filter-q-invalid`. An unparseable `before` remains tolerated: the
+cursor is dropped, and the request is not refused.
+
+Each returned session carries its Task as `{ id, name, chainId, chainName }`.
+`chainId` is the persisted chain and is what `chainId` filters on; `chainName`
+is display-only and is `null` whenever the returned rows cannot prove a name.
 
 ```sh
-curl "$BASE_URL/sessions?projectId=$PROJECT_ID&limit=50" -H "Authorization: Bearer $OPERATOR_TOKEN"
+curl "$BASE_URL/sessions?projectId=$PROJECT_ID&status=failed&runner=CODEX&since=2026-08-01T00:00:00Z&q=gate&limit=50" \
+  -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
 
 ### GET `/sessions/:sessionId`
@@ -2315,3 +2625,31 @@ refund is preserved. After fixing the cause of the rejected completion, recover
 by calling `POST /tasks/:taskId/retry`; the new Run does not require increasing
 `maxSessionsPerTask`. Mechanical Runs without that rejection record and agent
 Runs continue through the normal lost-Run retry path.
+
+That retry path is bounded and spaced. Each lost lease refunds the attempt it
+cost, and each refund raises the ceiling it is measured against, so the run
+budget alone can never end a pure lease-loss sequence. A task may therefore have
+at most three attempts refunded this way — counted on the Run as
+`leaseLossRefunds`, projected on the board card of the same name, and shared
+with the other platform-caused refunds (late-salvage claim invalidation, and the
+merge-tail requeue). Each replacement is queued with the completion path's
+exponential delay derived from that count (30s, then 60s, then 120s) rather than
+immediately, so a runner host that is down is given time to come back.
+
+At the bound nothing is requeued: the Task moves to `REVIEW` with
+`failureReason` beginning `Lease-loss retry refused: Lease-loss refunds
+exhausted`, an Inbox message, and a TaskActivity carrying
+`metadata.refusal = "lease-loss-refunds-exhausted"`. The refused refund is not
+granted, so the Task's recorded budget is what it was before the loss. Recover
+by raising `maxSessionsPerTask` through `PATCH /tasks/:taskId` and calling
+`POST /tasks/:taskId/retry`; an operator retry is not a platform refund, so it
+neither spends one nor resets the count, and a later lease loss on the retried
+Run is refused the same way. A late-salvage claim invalidation at the bound
+behaves the same: the stale claim is still revoked, because its clone base is
+wrong, but nothing replaces it and the Task is parked with the same reason.
+
+Readiness requeues that exhaust this shared bound also park the Regression and
+readiness Tasks in `REVIEW`, with a TaskActivity on Regression carrying
+`metadata.refusal = "lease-loss-refunds-exhausted"`. A recovery readiness requeue
+also parks its integrator and marks the recovery `BLOCKED_DOWNSTREAM`. The
+refund reason is preserved even when the ordinary run budget is also exhausted.

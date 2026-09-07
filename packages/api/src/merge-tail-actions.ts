@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import {
+  ACTIVE_RUN_STATUSES,
   asJsonObject,
   errorForOpenRunRefusal,
   findCanonicalAgent,
@@ -10,6 +11,8 @@ import {
   MAX_MERGE_TAIL_REPAIR_ATTEMPTS,
   MERGE_TAIL_KIND,
   MERGE_TAIL_SCHEMA_VERSION,
+  type MergeRecoveryAttempt,
+  mergeRecoveryTransitionAllowed,
   MergeRecoveryStatus,
   type Marker,
   openRun,
@@ -27,7 +30,13 @@ import {
 import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js";
 import { canonicalOutputRefusal } from "./canonical-task-output.js";
 import type { LeaseOutcome } from "./merge-lease.js";
-import { awaitAuthorization, blockDownstream, exhaust } from "./merge-tail-state.js";
+import type { RetryClass } from "./base-drift-recovery-decision.js";
+import {
+  awaitAuthorization,
+  blockDownstream,
+  exhaust,
+  recoveryClassSettleState,
+} from "./merge-tail-state.js";
 
 /**
  * The autonomous merge tail's own actions: the base-drift recovery aggregate,
@@ -248,27 +257,251 @@ export const baseDriftRecoveryContext = async (
   return recoveryContext(row);
 };
 
-/** Resolves whether a genuine repair completion belongs to an active recovery.
- * No aggregate means this is an ordinary merge-tail repair. Once an aggregate
- * exists, incomplete or stale identity is a state-machine fault, not an
- * ordinary repair fallback. */
+/** The name every binding-mismatch reason carries, so one grep finds the state
+ *  on a Task, on a Run, in an activity feed and in a completion response. */
+export const MERGE_TAIL_REPAIR_BINDING_MISMATCH = "merge-tail-repair-binding-mismatch";
+
+/** The TaskActivity kind that makes two overlapping merge-tail mechanisms
+ *  visible on the Regression task without reading the API journal. */
+export const MERGE_TAIL_REPAIR_BINDING_MISMATCH_KIND = "mergeTailRepair.bindingMismatch";
+
+/**
+ * A repair the platform cannot settle: the chain's recovery aggregate does not
+ * name the Run being repaired. It carries the three ids that identify the
+ * overlap — the recovery, the Run it is bound to, and the Run repaired — plus
+ * the recovery context needed to park the tail, when the aggregate still has a
+ * complete one.
+ */
+export type RepairBindingMismatch = {
+  reason: string;
+  recoveryId: string;
+  /** The Run the recovery is bound to: the aggregate's `recoveryRunId` column,
+   *  which is the value this invariant compares. */
+  boundRecoveryRunId: string | null;
+  /** The Run the recovery was opened from: the aggregate's own
+   *  `boundSourceRunId` column. This invariant does not compare it, and it
+   *  holds a different Run — it is recorded so one activity names both
+   *  mechanisms' Runs, and so a reader joining against the column of that name
+   *  gets the column's own value. */
+  boundSourceRunId: string | null;
+  repairedRunId: string;
+  /** Present only for a complete aggregate that may still be blocked for
+   *  operator reentry; a mismatch found on an incomplete or already-terminal
+   *  aggregate carries none and stops at the notice. */
+  blockable: RecoveryContext | null;
+};
+
+/** Whether a genuine repair completion belongs to an active recovery. No
+ * aggregate means this is an ordinary merge-tail repair. Once an aggregate
+ * exists, incomplete or stale identity is a state the platform produced and
+ * must classify: it used to throw a bare `Error` out of `completeRun`'s
+ * transaction, which answered the runner 500 and stranded a repair that had
+ * already committed its work. */
+export type RepairRecoveryBinding =
+  | { case: "ordinary" }
+  | { case: "recovery"; recoverySourceRunId: string }
+  | { case: "mismatch"; mismatch: RepairBindingMismatch };
+
+const latestRecoveryAttempt = (
+  tx: DbTx,
+  regressionTaskId: string,
+): Promise<MergeRecoveryAttempt | null> => tx.mergeRecoveryAttempt.findFirst({
+  where: { regressionTaskId },
+  orderBy: [{ attempt: "desc" }, { id: "desc" }],
+});
+
+const bindingMismatch = (
+  row: MergeRecoveryAttempt,
+  repairedRunId: string,
+  reason: string,
+): RepairBindingMismatch => {
+  const recovery = recoveryContext(row);
+  return {
+    reason: `${MERGE_TAIL_REPAIR_BINDING_MISMATCH}: ${reason}`,
+    recoveryId: row.id,
+    boundRecoveryRunId: row.recoveryRunId,
+    boundSourceRunId: row.boundSourceRunId,
+    repairedRunId,
+    blockable: recovery
+      && mergeRecoveryTransitionAllowed(row.status, MergeRecoveryStatus.BLOCKED_DOWNSTREAM)
+      ? recovery
+      : null,
+  };
+};
+
 export const activeRepairRecoverySourceRun = async (
   tx: DbTx,
   input: { regressionTaskId: string; sourceRunId: string },
-): Promise<string | null> => {
-  const row = await tx.mergeRecoveryAttempt.findFirst({
-    where: { regressionTaskId: input.regressionTaskId },
-    orderBy: [{ attempt: "desc" }, { id: "desc" }],
-  });
-  if (!row) return null;
+): Promise<RepairRecoveryBinding> => {
+  const row = await latestRecoveryAttempt(tx, input.regressionTaskId);
+  if (!row) return { case: "ordinary" };
   const recovery = recoveryContext(row);
   if (row.status !== MergeRecoveryStatus.REPAIRING || !recovery) {
-    throw new Error(`Merge recovery ${row.id} is not a complete REPAIRING aggregate`);
+    return {
+      case: "mismatch",
+      mismatch: bindingMismatch(
+        row,
+        input.sourceRunId,
+        `merge recovery ${row.id} is ${row.status} with ${recovery ? "complete" : "incomplete"} identity,`
+          + ` not a REPAIRING aggregate that can settle repaired Run ${input.sourceRunId}`,
+      ),
+    };
   }
   if (recovery.recoveryRunId !== input.sourceRunId) {
-    throw new Error(`Merge recovery ${row.id} is not bound to repaired Run ${input.sourceRunId}`);
+    return {
+      case: "mismatch",
+      mismatch: bindingMismatch(
+        row,
+        input.sourceRunId,
+        `merge recovery ${row.id} is bound to recovery Run ${recovery.recoveryRunId},`
+          + ` not to repaired Run ${input.sourceRunId}`,
+      ),
+    };
   }
-  return recovery.recoveryRunId;
+  return { case: "recovery", recoverySourceRunId: recovery.recoveryRunId };
+};
+
+/**
+ * The same question asked when a repair is opened rather than when it settles.
+ *
+ * Only the binding is checked here, not the aggregate's phase: the operator
+ * reentry route creates its repair while the aggregate is still
+ * `BLOCKED_DOWNSTREAM` and moves it to `REPAIRING` afterwards, so requiring the
+ * settlement phase would refuse the one repair that is legitimately bound.
+ */
+export const repairBindingMismatchAtOpen = async (
+  tx: DbTx,
+  input: { regressionTaskId: string; sourceRunId: string },
+): Promise<RepairBindingMismatch | null> => {
+  const row = await latestRecoveryAttempt(tx, input.regressionTaskId);
+  if (!row || row.recoveryRunId === input.sourceRunId) return null;
+  return bindingMismatch(
+    row,
+    input.sourceRunId,
+    `merge recovery ${row.id} is bound to recovery Run ${row.recoveryRunId ?? "(none)"},`
+      + ` not to the Run ${input.sourceRunId} this repair would repair`,
+  );
+};
+
+/** Record the overlap on the Regression task, carrying all three ids. */
+export const recordRepairBindingMismatch = async (
+  tx: DbTx,
+  input: {
+    regressionTaskId: string;
+    mismatch: RepairBindingMismatch;
+    phase: "open" | "settlement";
+    repairTaskId?: string;
+  },
+): Promise<void> => {
+  await tx.taskActivity.create({ data: {
+    taskId: input.regressionTaskId,
+    actorType: "control-plane",
+    body: input.phase === "open"
+      ? `Merge-tail repair refused at open: ${input.mismatch.reason}`
+      : `Merge-tail repair completion rejected: ${input.mismatch.reason}`,
+    metadata: {
+      kind: MERGE_TAIL_REPAIR_BINDING_MISMATCH_KIND,
+      schemaVersion: MERGE_TAIL_SCHEMA_VERSION,
+      phase: input.phase,
+      reason: input.mismatch.reason,
+      recoveryId: input.mismatch.recoveryId,
+      boundRecoveryRunId: input.mismatch.boundRecoveryRunId,
+      boundSourceRunId: input.mismatch.boundSourceRunId,
+      repairedRunId: input.mismatch.repairedRunId,
+      ...(input.repairTaskId ? { repairTaskId: input.repairTaskId } : {}),
+    },
+  } });
+};
+
+/**
+ * Settle a repair completion the platform cannot bind.
+ *
+ * The repair's own work is committed and its `repairResult` marker is already
+ * written; what cannot happen is the recovery-bound activation of the merge-tail
+ * target. So the repair Task parks with the named reason rather than being
+ * retried or counted as an external failure, the overlap is recorded on the
+ * Regression task, and — when the aggregate can still take it — the recovery is
+ * parked `BLOCKED_DOWNSTREAM`, which is the state `POST
+ * /tasks/:taskId/merge-tail/repair` reopens with a correctly bound repair card.
+ */
+export const stopUnboundRepair = async (
+  tx: DbTx,
+  input: {
+    runId: string;
+    repairTaskId: string;
+    repairTaskStatus?: TaskStatus;
+    regressionTaskId: string;
+    /** The Documentation Step `settleMergeTailCompletion` already re-opened for
+     *  this repair, when the repair target's chain owns one. */
+    documentationTaskId?: string | null;
+    mismatch: RepairBindingMismatch;
+    run: { agentId: string; sessionId: string; completedAt: Date };
+  },
+): Promise<void> => {
+  // The Run stays terminal — its work is real and published — and carries why
+  // its completion was rejected, so the reason survives on the row a runner and
+  // an operator both read.
+  await tx.run.update({
+    where: { id: input.runId },
+    data: { failureReason: input.mismatch.reason },
+  });
+  await tx.task.updateMany({
+    where: {
+      id: input.repairTaskId,
+      ...(input.repairTaskStatus ? { status: input.repairTaskStatus } : {}),
+    },
+    data: { status: TaskStatus.REVIEW, failureReason: input.mismatch.reason },
+  });
+  // The rejected repair does not get to leave its chain's Documentation Step
+  // re-opened: `settleMergeTailCompletion` put it back to TODO for a repair the
+  // platform is now refusing to settle.
+  if (input.documentationTaskId && input.documentationTaskId !== input.regressionTaskId) {
+    await tx.task.update({
+      where: { id: input.documentationTaskId },
+      data: { status: TaskStatus.REVIEW, failureReason: input.mismatch.reason },
+    });
+  }
+  await recordRepairBindingMismatch(tx, {
+    regressionTaskId: input.regressionTaskId,
+    mismatch: input.mismatch,
+    phase: "settlement",
+    repairTaskId: input.repairTaskId,
+  });
+  // Park the tail only when this repair is the last thing running on it. A
+  // mismatch is usually a newer recovery that took the chain over while the
+  // repair ran, and that mechanism owns its own live Run: blocking it would
+  // stop a healthy recovery, and it would also withhold the documented exit,
+  // because the reentry route refuses `merge_tail_repair_active_run` while any
+  // tail task still has an active Run. The stop notice is written either way,
+  // so the overlap always reaches an operator.
+  const blockable = input.mismatch.blockable;
+  const tailTaskIds = blockable
+    ? [blockable.regressionTaskId, blockable.readinessTaskId, blockable.integratorTaskId]
+    : [input.regressionTaskId];
+  const tailHasActiveRun = await tx.run.count({
+    where: { taskId: { in: tailTaskIds }, status: { in: ACTIVE_RUN_STATUSES } },
+  }) > 0;
+  if (blockable && !tailHasActiveRun) {
+    await blockDownstream(tx, {
+      recovery: blockable,
+      phase: "regression",
+      reason: input.mismatch.reason,
+      at: input.run.completedAt,
+    });
+    return;
+  }
+  if (!tailHasActiveRun) {
+    await tx.task.update({
+      where: { id: input.regressionTaskId },
+      data: { status: TaskStatus.REVIEW, failureReason: input.mismatch.reason },
+    });
+  }
+  await openMergeTailStopNotice(tx, {
+    taskId: input.regressionTaskId,
+    agentId: input.run.agentId,
+    sessionId: input.run.sessionId,
+    reason: input.mismatch.reason,
+  });
 };
 
 type RecoveryStopData = Prisma.MergeRecoveryAttemptUpdateManyMutationInput;
@@ -299,6 +532,10 @@ export type StopMergeTailInput =
     reason: string;
     at: Date;
     attempt: number;
+    /** Set when a retry class crossed its own ceiling rather than the
+     *  candidate being ineligible; it names the settle and its refusal. */
+    retryClass?: RetryClass;
+    revalidations?: number;
     recoveryData: RecoveryStopData;
     markerMetadata: Record<string, unknown>;
   }
@@ -429,7 +666,9 @@ export async function stopMergeTail(
     return;
   }
 
-  const state = input.phase === "recovery-validation" ? "ineligible" : "exhausted";
+  const state = input.retryClass
+    ? recoveryClassSettleState(input.retryClass)
+    : input.phase === "recovery-validation" ? "ineligible" : "exhausted";
   await exhaust(tx, {
     aggregateId: input.aggregateId,
     integratorTaskId: input.integratorTaskId,
@@ -438,6 +677,7 @@ export async function stopMergeTail(
     at: input.at,
     attempt: input.attempt,
     state,
+    ...(input.revalidations ? { revalidations: input.revalidations } : {}),
     recoveryData: input.recoveryData,
     markerMetadata: input.markerMetadata,
   });
@@ -612,13 +852,29 @@ export const createMergeTailRepairTask = async (
     gateFailureExcerpt?: string;
     now: Date;
   },
-): Promise<{ taskId: string } | { refusal: string }> => {
+): Promise<{ taskId: string } | { refusal: string; bindingMismatch?: RepairBindingMismatch }> => {
   const { regressionTask } = input;
   if (
     !regressionTask.repoId || !regressionTask.chainId || regressionTask.chainIndex === null
     || !regressionTask.templateId || !input.sourceRun.branch
   ) {
     return { refusal: "repair task cannot resolve its chain position, repository, and shared branch" };
+  }
+  // Checked here rather than only at settlement. A repair whose recovery names
+  // another Run cannot be reported when it finishes, and the agent it is handed
+  // to commits its work before finding that out, so the refusal belongs at the
+  // moment the card would be created.
+  const mismatch = await repairBindingMismatchAtOpen(tx, {
+    regressionTaskId: regressionTask.id,
+    sourceRunId: input.sourceRun.id,
+  });
+  if (mismatch) {
+    await recordRepairBindingMismatch(tx, {
+      regressionTaskId: regressionTask.id,
+      mismatch,
+      phase: "open",
+    });
+    return { refusal: mismatch.reason, bindingMismatch: mismatch };
   }
   // Addressed by id or by canonical role, never by the editable name: an
   // operator may rename the canonical resolver, and the repair still belongs

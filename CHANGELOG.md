@@ -9,12 +9,20 @@ written.
 
 ## Unreleased
 
+- Retired the `POST /files/mkdir` and `POST /files/move` routes and their
+  underlying store operations.
 - Removed `POST /inbox/messages/:messageId/supersede`;
   `POST /inbox/messages/:messageId/close` is now the only Inbox route whose sole
   purpose is closing a message. Archiving a task still closes its open merge-tail
   stop notices, and an approval decision still closes the gate's sibling cards.
 - The retired `goal-5a0` authorization-marker harness and root
   `test:dependency-gate` script are removed.
+- Removed the completed one-shot database backfill and post-delivery audit
+  CLIs and their root aliases; upgrades from pre-backfill versions are not
+  supported. The unused root `db:export-goal-lineage` and
+  `db:verify-goal-execution` aliases are also removed; both commands remain
+  available as `npm run db:export-goal-lineage -w @anneal/db -- <output-path>`
+  and `npm run db:verify-goal-execution -w @anneal/db`.
 
 ## v0.8.0 — Developer Preview 8
 

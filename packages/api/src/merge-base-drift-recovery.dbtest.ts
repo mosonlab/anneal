@@ -6,6 +6,7 @@ import {
   AssigneeType,
   AUTHORIZED_MERGE_METHOD,
   activateRecoveryIntegratorSuccessor,
+  applyInboxDecisionTx,
   authorizationMetadata,
   MERGE_INTEGRATOR_KIND,
   MergeRecoveryRefusalCode,
@@ -18,7 +19,11 @@ import {
 } from "@anneal/db";
 
 import { classifyCandidate } from "./base-drift-recovery-decision.js";
-import { baseDriftRecoveryTick, readCandidateFacts } from "./merge-base-drift-worker.js";
+import {
+  baseDriftRecoveryTick,
+  readCandidateFacts,
+  recordRecoveryClassificationRetry,
+} from "./merge-base-drift-worker.js";
 import { handleRegressionCompletion } from "./merge-tail-actions.js";
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import {
@@ -843,5 +848,338 @@ test("the aggregate rejects a duplicate source-stop attempt identity", async () 
       attempt: 1,
     } }),
     (error: unknown) => error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Retry classes: waiting, transport and validation are accounted separately,
+// and only validation spends the counted budget.
+// ---------------------------------------------------------------------------
+
+const T0 = new Date("2026-09-01T00:00:00.000Z");
+const at = (milliseconds: number): Date => new Date(T0.getTime() + milliseconds);
+
+const failingReader = (): PullRequestReader => ({
+  readPullRequest: async () => { throw new Error("upstream unavailable"); },
+  compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+});
+
+const attemptFor = async (integratorTaskId: string) => db.mergeRecoveryAttempt.findFirstOrThrow({
+  where: { integratorTaskId },
+});
+
+const recoveryMarkers = async (integratorTaskId: string, state: string) => (
+  (await readMarkers(db, integratorTaskId)).filter((marker) => (
+    marker.kind === "baseDriftRecovery" && marker.state === state
+  ))
+);
+
+const stopIdOf = async (integratorTaskId: string): Promise<string> => (
+  await db.taskActivity.findFirstOrThrow({
+    where: { taskId: integratorTaskId, metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.result } },
+    orderBy: { createdAt: "desc" },
+  })
+).id;
+
+const stopCard = async (integratorTaskId: string) => db.inboxMessage.findFirstOrThrow({
+  where: { taskId: integratorTaskId, kind: "MULTIPLE_CHOICE" },
+  orderBy: { createdAt: "desc" },
+});
+
+test("a chain that stays active is waited on, never counted against the validation budget", async () => {
+  const seeded = await seedStopped("canonical-direct", "retry-class-waiting");
+  // A sibling Run of the same chain is exactly the `chain-active` input: the
+  // recovery is not refused, it is simply not classified yet.
+  await db.run.create({ data: {
+    projectId: seeded.project.id,
+    taskId: seeded.gateTask.id,
+    agentId: seeded.agent.id,
+    repoId: seeded.repo.id,
+    runNumber: 99,
+    dedupeKey: `task:${seeded.gateTask.id}:run:99`,
+    runner: "CLAUDE",
+    model: "claude",
+    promptHash: "sibling",
+    status: "RUNNING",
+    opensPullRequest: false,
+    maxRunsPerTask: 5,
+    targetBranch: "master",
+  } });
+  const integratorTaskId = seeded.integratorTask!.id;
+
+  const holds: number[] = [];
+  for (let tick = 0; tick < 40; tick += 1) {
+    // Each tick lands well past the previous hold, so all forty are recorded.
+    const now = at(tick * 61_000);
+    await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)), now);
+    const attempt = await attemptFor(integratorTaskId);
+    holds.push(attempt.nextEligibleAt!.getTime() - now.getTime());
+  }
+
+  const attempt = await attemptFor(integratorTaskId);
+  assert.equal(attempt.status, "VALIDATING", "forty waits never exhaust the recovery");
+  assert.equal(attempt.waitingAttempts, 40);
+  assert.equal(attempt.validationAttempts, 0, "waiting spends no validation budget");
+  assert.equal(attempt.transportAttempts, 0);
+  assert.equal(attempt.lastRetryClass, "WAITING");
+  assert.equal(attempt.refusalCode, null);
+  // The hold doubles from one worker tick and stops at the minute cap.
+  assert.deepEqual(holds.slice(0, 6), [2_000, 4_000, 8_000, 16_000, 32_000, 60_000]);
+  assert.ok(holds.slice(5).every((hold) => hold === 60_000), "the backoff grows to the cap and stays there");
+  assert.equal(await db.inboxMessage.count({ where: { taskId: integratorTaskId, kind: "MULTIPLE_CHOICE" } }), 0);
+
+  // Within one hold the recovery is not classified again at all.
+  const before = await attemptFor(integratorTaskId);
+  await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)), at(39 * 61_000 + 1_000));
+  const held = await attemptFor(integratorTaskId);
+  assert.equal(held.waitingAttempts, before.waitingAttempts, "a held backoff records nothing");
+  assert.equal(held.updatedAt.getTime(), before.updatedAt.getTime());
+
+  const retries = await recoveryMarkers(integratorTaskId, "classification-retry");
+  assert.ok(retries.length > 0);
+  assert.equal(retries[0]!.raw.retryClass, "waiting");
+  assert.equal(retries[0]!.raw.validationAttempts, 0);
+  assert.ok(typeof retries[0]!.raw.nextEligibleAt === "string");
+  assert.match(retries[0]!.raw.reason as string, /active foreign run/u);
+});
+
+test("a waiting ceiling settles under its own refusal, names its class, and re-validate reopens it", async () => {
+  const seeded = await seedStopped("canonical-direct", "retry-class-waiting-ceiling");
+  const integratorTaskId = seeded.integratorTask!.id;
+  await db.run.create({ data: {
+    projectId: seeded.project.id,
+    taskId: seeded.gateTask.id,
+    agentId: seeded.agent.id,
+    repoId: seeded.repo.id,
+    runNumber: 99,
+    dedupeKey: `task:${seeded.gateTask.id}:run:99`,
+    runner: "CLAUDE",
+    model: "claude",
+    promptHash: "sibling",
+    status: "RUNNING",
+    opensPullRequest: false,
+    maxRunsPerTask: 5,
+    targetBranch: "master",
+  } });
+
+  // The first wait starts the class clock; six hours later the same wait is
+  // all the recovery has ever seen, and that is this class's whole budget.
+  await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)), T0);
+  const waiting = await attemptFor(integratorTaskId);
+  assert.equal(waiting.waitingFirstAt!.getTime(), T0.getTime());
+  await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)), at(6 * 60 * 60_000));
+
+  const settled = await attemptFor(integratorTaskId);
+  assert.equal(settled.status, "FAILED");
+  assert.equal(settled.refusalCode, MergeRecoveryRefusalCode.WAITING_CEILING);
+  assert.match(
+    settled.failureReason!,
+    /^waiting-ceiling reached: the chain stayed active for 6h00m \(limit 6h00m\)/u,
+  );
+  // The failure that crossed the ceiling is accounted, not lost to the settle.
+  assert.equal(settled.waitingAttempts, 2);
+  assert.equal(settled.validationAttempts, 0, "waiting never spends the counted budget");
+  assert.equal(settled.nextEligibleAt, null, "a settled attempt holds no next tick");
+
+  const ceilingMarker = (await recoveryMarkers(integratorTaskId, "waiting-ceiling"))[0];
+  assert.ok(ceilingMarker, "the settle names its class in the recovery activity");
+  assert.equal(ceilingMarker.raw.retryClass, "waiting");
+  assert.equal(ceilingMarker.raw.waitingAttempts, 2, "the activity states the counters the attempt carries");
+  assert.equal(ceilingMarker.raw.validationAttempts, 0);
+  assert.equal(ceilingMarker.raw.nextEligibleAt, null);
+  assert.match(ceilingMarker.raw.reason as string, /waiting-ceiling reached/u);
+  const task = await db.task.findUniqueOrThrow({ where: { id: integratorTaskId } });
+  assert.equal(task.status, "REVIEW");
+  assert.match(task.failureReason!, /^waiting-ceiling reached/u);
+
+  const card = await stopCard(integratorTaskId);
+  assert.equal(card.status, "OPEN");
+  assert.deepEqual(
+    (card.choices as Array<{ id: string }>).map((choice) => choice.id),
+    ["re-validate", "abandon"],
+  );
+
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: card.id, externalEventId: "evt-waiting-re-validate", decision: "re-validate",
+  }));
+  const reopened = await attemptFor(integratorTaskId);
+  assert.equal(reopened.status, "VALIDATING");
+  assert.equal(reopened.waitingAttempts, 0, "re-validate resets the class it settled on");
+  assert.equal(reopened.waitingFirstAt, null);
+  assert.equal(reopened.refusalCode, null);
+  assert.equal(reopened.revalidations, 1);
+  const revalidated = (await recoveryMarkers(integratorTaskId, "class-revalidated"))[0];
+  assert.ok(revalidated);
+  assert.equal(revalidated.raw.retryClass, "waiting", "the activity spells the class as every other one does");
+  assert.match(
+    (await db.task.findUniqueOrThrow({ where: { id: integratorTaskId } })).failureReason!,
+    /after its waiting ceiling was reset$/u,
+  );
+});
+
+test("a transport ceiling settles under its own refusal, and re-validate resumes the same recovery", async () => {
+  const seeded = await seedStopped("canonical-direct", "retry-class-transport");
+  const integratorTaskId = seeded.integratorTask!.id;
+
+  await baseDriftRecoveryTick(db, failingReader(), T0);
+  const held = await attemptFor(integratorTaskId);
+  assert.equal(held.status, "VALIDATING");
+  assert.equal(held.transportAttempts, 1);
+  assert.equal(held.validationAttempts, 0, "an unreadable repository is not a failed validation");
+  assert.equal(held.lastRetryClass, "TRANSPORT");
+  assert.equal(held.transportFirstAt!.getTime(), T0.getTime());
+
+  // Half an hour of failed reads is this class's whole budget.
+  const settledAt = at(30 * 60_000);
+  await baseDriftRecoveryTick(db, failingReader(), settledAt);
+  const settled = await attemptFor(integratorTaskId);
+  assert.equal(settled.status, "FAILED");
+  assert.equal(settled.refusalCode, MergeRecoveryRefusalCode.TRANSPORT_CEILING);
+  assert.match(settled.failureReason!, /^transport-ceiling reached: repository reads failed for 30m/u);
+  // The read failure that crossed the ceiling is accounted, not lost to the settle.
+  assert.equal(settled.transportAttempts, 2);
+  assert.equal(settled.validationAttempts, 0);
+  assert.equal(settled.nextEligibleAt, null, "a settled attempt holds no next tick");
+
+  const ceilingMarker = (await recoveryMarkers(integratorTaskId, "transport-ceiling"))[0];
+  assert.ok(ceilingMarker, "the settle names its class in the recovery activity");
+  assert.equal(ceilingMarker.raw.retryClass, "transport");
+  assert.equal(ceilingMarker.raw.transportAttempts, 2, "the activity states the counters the attempt carries");
+  assert.equal(ceilingMarker.raw.validationAttempts, 0);
+  assert.equal(ceilingMarker.raw.nextEligibleAt, null);
+  assert.match(ceilingMarker.raw.reason as string, /transport-ceiling reached/u);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: integratorTaskId } })).status, "REVIEW");
+
+  const card = await stopCard(integratorTaskId);
+  assert.deepEqual(
+    (card.choices as Array<{ id: string }>).map((choice) => choice.id),
+    ["re-validate", "abandon"],
+    "a class ceiling offers the resume as well as abandoning",
+  );
+
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: card.id, externalEventId: "evt-re-validate", decision: "re-validate",
+  }));
+  const reopened = await attemptFor(integratorTaskId);
+  assert.equal(reopened.status, "VALIDATING");
+  assert.equal(reopened.transportAttempts, 0, "re-validate resets the class it settled on");
+  assert.equal(reopened.transportFirstAt, null);
+  assert.equal(reopened.nextEligibleAt, null);
+  assert.equal(reopened.refusalCode, null);
+  assert.equal(reopened.failureReason, null);
+  assert.equal(reopened.revalidations, 1);
+  assert.equal(reopened.attempt, held.attempt, "the same recovery resumes; no chain is re-instantiated");
+  const revalidated = (await recoveryMarkers(integratorTaskId, "class-revalidated"))[0];
+  assert.ok(revalidated);
+  assert.equal(revalidated.raw.retryClass, "transport", "the activity spells the class as every other one does");
+  assert.match(
+    (await db.task.findUniqueOrThrow({ where: { id: integratorTaskId } })).failureReason!,
+    /after its transport ceiling was reset$/u,
+  );
+
+  // The resumed recovery classifies normally against a healthy reader.
+  const tick = await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)), at(31 * 60_000));
+  assert.equal(tick.recovered, 1);
+  assert.equal((await attemptFor(integratorTaskId)).status, "REPAIRING");
+});
+
+test("validation failures exhaust on count and elapsed time together, and settle under their own refusal", async () => {
+  const burst = await seedStopped("canonical-direct", "retry-class-validation-burst");
+  const burstTaskId = burst.integratorTask!.id;
+  const burstStopId = await stopIdOf(burstTaskId);
+  const failure = {
+    kind: "retry" as const,
+    retryClass: "validation" as const,
+    reason: "authorized-base ancestry facts are incomplete",
+  };
+  for (let index = 0; index < 30; index += 1) {
+    const outcome = await recordRecoveryClassificationRetry(
+      db, burstTaskId, burstStopId, failure, at(index * 10_000),
+    );
+    assert.equal(outcome, "retryable", `failure ${String(index + 1)} inside one incident holds the recovery`);
+  }
+  const burstAttempt = await attemptFor(burstTaskId);
+  assert.equal(burstAttempt.status, "VALIDATING", "thirty failures inside five minutes are one incident");
+  assert.equal(burstAttempt.validationAttempts, 30);
+  assert.equal(burstAttempt.refusalCode, null);
+  assert.equal(burstAttempt.nextEligibleAt, null, "a validation failure takes no backoff");
+
+  const spread = await seedStopped("canonical-direct", "retry-class-validation-spread");
+  const spreadTaskId = spread.integratorTask!.id;
+  const spreadStopId = await stopIdOf(spreadTaskId);
+  const outcomes: string[] = [];
+  for (let index = 0; index < 30; index += 1) {
+    outcomes.push(await recordRecoveryClassificationRetry(
+      db, spreadTaskId, spreadStopId, failure, at(index * 65_000),
+    ));
+  }
+  assert.deepEqual(outcomes.slice(0, 29), Array.from({ length: 29 }, () => "retryable"));
+  assert.equal(outcomes[29], "ineligible", "the same thirty failures over half an hour do exhaust");
+
+  const spreadAttempt = await attemptFor(spreadTaskId);
+  assert.equal(spreadAttempt.status, "FAILED");
+  assert.equal(spreadAttempt.refusalCode, MergeRecoveryRefusalCode.VALIDATION_BUDGET);
+  assert.match(spreadAttempt.failureReason!, /^validation-budget exhausted: 30 classification failures over 31m/u);
+  // The thirtieth failure — the one that exhausted the budget — is accounted,
+  // so the stored counter and the refusal text state the same number.
+  assert.equal(spreadAttempt.validationAttempts, 30);
+  assert.equal(spreadAttempt.nextEligibleAt, null);
+  const budgetMarker = (await recoveryMarkers(spreadTaskId, "validation-budget"))[0];
+  assert.ok(budgetMarker, "the settle names its class in the recovery activity");
+  assert.equal(budgetMarker.raw.retryClass, "validation");
+  assert.equal(budgetMarker.raw.validationAttempts, 30, "the activity states the counters the attempt carries");
+  assert.equal(budgetMarker.raw.nextEligibleAt, null);
+  assert.deepEqual(
+    ((await stopCard(spreadTaskId)).choices as Array<{ id: string }>).map((choice) => choice.id),
+    ["re-validate", "abandon"],
+  );
+});
+
+test("a settle after a re-validate opens a fresh answerable card instead of deduplicating into silence", async () => {
+  const seeded = await seedStopped("canonical-direct", "retry-class-settle-after-revalidate");
+  const integratorTaskId = seeded.integratorTask!.id;
+  const stopId = await stopIdOf(integratorTaskId);
+
+  await baseDriftRecoveryTick(db, failingReader(), T0);
+  await baseDriftRecoveryTick(db, failingReader(), at(30 * 60_000));
+  const ceilingCard = await stopCard(integratorTaskId);
+  assert.equal(ceilingCard.dedupeKey, `merge-stop:${stopId}`, "the first settle keeps the historical key");
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: ceilingCard.id, externalEventId: "evt-settle-again", decision: "re-validate",
+  }));
+  assert.equal(
+    (await db.inboxMessage.findUniqueOrThrow({ where: { id: ceilingCard.id } })).status,
+    "ANSWERED",
+  );
+
+  // The resumed recovery meets a pull request that closed underneath it: an
+  // ordinary ineligibility, not a class ceiling.
+  await baseDriftRecoveryTick(db, reader(snapshot(BASE_2, { state: "CLOSED" })), at(31 * 60_000));
+  const resettled = await attemptFor(integratorTaskId);
+  assert.equal(resettled.status, "FAILED");
+  assert.equal(resettled.refusalCode, null, "an ordinary ineligibility is not a class ceiling");
+  assert.match(resettled.failureReason!, /no longer an unmerged OPEN pull request/u);
+
+  const reopenedCard = await stopCard(integratorTaskId);
+  assert.notEqual(reopenedCard.id, ceilingCard.id, "the answered ceiling card does not absorb the second settle");
+  assert.equal(reopenedCard.dedupeKey, `merge-stop:${stopId}:r1`);
+  assert.equal(reopenedCard.status, "OPEN");
+  assert.deepEqual(
+    (reopenedCard.choices as Array<{ id: string }>).map((choice) => choice.id),
+    ["abandon"],
+    "an ordinary refusal keeps the abandon exit the operator needs",
+  );
+  // The stop notice generations with it, so the second settle is not silent.
+  assert.ok(await db.inboxMessage.findFirst({
+    where: { dedupeKey: `merge-base-drift-recovery:ineligible:${stopId}:r1` },
+  }));
+
+  // And the abandon exit actually answers.
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: reopenedCard.id, externalEventId: "evt-abandon", decision: "abandon",
+  }));
+  assert.equal(
+    (await db.inboxMessage.findUniqueOrThrow({ where: { id: reopenedCard.id } })).status,
+    "ANSWERED",
   );
 });

@@ -82,6 +82,12 @@ export const mergedSnapshot = (overrides: Partial<RepositorySnapshot["pullReques
     },
   });
 
+/** The window in which the ref update has landed but GitHub has not yet
+ *  projected it onto the pull request. */
+export const refLandedBeforeProjection = (): RepositorySnapshot => mergedSnapshot({
+  state: "OPEN", merged: false, mergedAt: null, mergedByLogin: null, mergeCommit: null,
+});
+
 export type TraceEntry = { call: string; detail?: Record<string, unknown> };
 
 export type FakeOptions = {

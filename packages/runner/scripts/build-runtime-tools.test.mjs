@@ -14,9 +14,9 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { buildRuntimeTools, RUNTIME_TOOL_FILES } from "./build-runtime-tools.mjs";
+import { buildRuntimeTools, RUNTIME_TOOL_FILES, expectedDirectoryEntries } from "./build-runtime-tools.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -174,4 +174,48 @@ test("generated scripts retain their source modes while the tree remains regular
   for (const path of inventory(context.outputRoot)) {
     assert.equal(lstatSync(join(context.outputRoot, path)).isFile(), true);
   }
+});
+
+test("buildRuntimeTools derives new nested directories from manifest destinations", async (t) => {
+  const context = fixture(t);
+  const scriptPath = join(context.root, "build-runtime-tools.mjs");
+  const destination = "additional/nested/tool.sh";
+  const source = RUNTIME_TOOL_FILES[0].source;
+  // The inventory is declared in scripts/deploy, so a copy of the build script
+  // gets a copy of the inventory beside it rather than the repository's.
+  const inventorySpecifier = "../../../scripts/deploy/runtime-tool-inventory.mjs";
+  const inventorySource = readFileSync(new URL(inventorySpecifier, import.meta.url), "utf8");
+  writeFileSync(join(context.root, "runtime-tool-inventory.mjs"), inventorySource.replace(
+    "export const RUNTIME_TOOL_FILES = Object.freeze([",
+    `export const RUNTIME_TOOL_FILES = Object.freeze([\n  Object.freeze(${JSON.stringify({ source, destination })}),`,
+  ));
+  const script = readFileSync(new URL("./build-runtime-tools.mjs", import.meta.url), "utf8");
+  writeFileSync(scriptPath, script.replaceAll(inventorySpecifier, "./runtime-tool-inventory.mjs"));
+  const target = await import(pathToFileURL(scriptPath).href);
+  target.buildRuntimeTools(context);
+  assert.deepEqual(inventory(context.outputRoot), [
+    ...RUNTIME_TOOL_FILES.map(({ destination }) => destination),
+    destination,
+  ].sort());
+  assert.deepEqual(
+    readFileSync(join(context.outputRoot, destination)),
+    readFileSync(join(context.repositoryRoot, source)),
+  );
+});
+
+test("directory inventory readers cannot widen later build allowlists", (t) => {
+  const context = fixture(t);
+  const entries = expectedDirectoryEntries();
+  entries.get("").add("unexpected.sh");
+  entries.set("unexpected-directory", new Set());
+  assert.equal(expectedDirectoryEntries().get("").has("unexpected.sh"), false);
+  assert.equal(expectedDirectoryEntries().has("unexpected-directory"), false);
+  const filesystem = {
+    ...nodeFs,
+    readdirSync: (path, options) => [
+      ...nodeFs.readdirSync(path, options),
+      { name: "unexpected.sh" },
+    ],
+  };
+  assert.throws(() => buildRuntimeTools({ ...context, filesystem }), /generated-tree-inventory-mismatch/u);
 });
