@@ -13,7 +13,7 @@ import { translate } from "../lib/i18n-core";
 import { isSessionUnseen, sessionSeenKey } from "../lib/session-list";
 import { storage } from "../lib/storage";
 import { TEXT_NODE_MAX_LINES, TOOL_OUTPUT_MAX_LINES } from "../lib/session-stream";
-import type { Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
+import type { RunMetrics, Session, SessionEvent, SessionExecutionStatus } from "../lib/types";
 import { installFetch, installFetchFunction } from "./dom-harness";
 
 // Radix chooses useLayoutEffect or useEffect when its module is first loaded.
@@ -313,6 +313,62 @@ test("a session row title falls back from Task to Goal to Session id", () => {
     task: null, taskId: null, goal: null, goalId: null,
   })} />);
   assert.match(id, />session-1</);
+});
+
+test("expanding a session row loads shared diagnostics and renders its null state", async () => {
+  const dom = jsdom();
+  const container = dom.window.document.querySelector("#root");
+  assert.ok(container);
+  const metrics: RunMetrics = {
+    phases: { queuedMs: 1_000, provisioningMs: 2_000, executingMs: 3_000, inboxWaitMs: 0, cleanupMs: 4_000 },
+    tokens: { input: 100, cachedRead: 10, cacheWrite: 5, uncachedInput: 85, output: 20, cacheHitRatio: 0.1 },
+    tools: { calls: 2, failed: 1, unclassified: 0, totalToolMs: 500, byName: [{ name: "Bash", calls: 2, failed: 1 }] },
+    ttft: { p50Ms: 250, p90Ms: 500, samples: 2 },
+    modelActiveMs: 2_500,
+    modelActiveIsUpperBound: false,
+    outputTokensPerSecond: 8,
+    termination: { reason: "completed", exitCode: 0, signal: null },
+    vsBaseline: { costRatio: null, durationRatio: null },
+  };
+  const terminalSession = session({ executionStatus: "SUCCEEDED", endedAt: "2026-08-16T00:02:00.000Z" });
+  let release!: () => void;
+  const pending = new Promise<Response>((resolve) => { release = () => resolve(Response.json({ ...terminalSession, metrics })); });
+  let nullMetrics = false;
+  const fetchHarness = installFetchFunction(async (input) => {
+    const path = String(input);
+    assert.match(path, /\/sessions\/session-1/u);
+    if (!nullMetrics) return pending;
+    return Response.json({ ...terminalSession, metrics: null });
+  });
+  const root = createRoot(container);
+  try {
+    await act(async () => { root.render(<LocaleProvider initialLocale="en"><SessionRow session={terminalSession} /></LocaleProvider>); });
+    assert.equal(fetchHarness.requests.length, 0, "the list row does not read detail metrics while collapsed");
+
+    const toggle = dom.window.document.querySelector<HTMLButtonElement>("[data-session-row-toggle]");
+    assert.ok(toggle, container.innerHTML);
+    await click(dom, toggle);
+    assert.match(container.textContent ?? "", /Loading…/u);
+    assert.equal(fetchHarness.requests.length, 1);
+    release();
+    await fetchHarness.settle();
+    assert.ok(container.querySelector("[data-run-diagnostics]"), container.innerHTML);
+    assert.match(container.textContent ?? "", /Time to first token/u);
+    assert.match(container.textContent ?? "", /250ms/u);
+
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2_700)); });
+    assert.equal(fetchHarness.requests.length, 1, "expanded terminal rows do not poll diagnostics");
+
+    nullMetrics = true;
+    await click(dom, toggle);
+    await click(dom, toggle);
+    await fetchHarness.settle();
+    assert.match(container.textContent ?? "", /No diagnostics recorded for this run\./u);
+  } finally {
+    await act(async () => root.unmount());
+    dom.window.close();
+    fetchHarness.dispose();
+  }
 });
 
 test("sessions are grouped by day, capped at five, and expandable in both locales", async () => {

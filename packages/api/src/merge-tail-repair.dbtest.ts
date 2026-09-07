@@ -1,3 +1,6 @@
+import { setTimeout as delay } from "node:timers/promises";
+import { createGitHubReader, type BranchAncestryReader } from "./github-read.js";
+import { READINESS_READ_BUDGET_MS } from "./readiness-decision.js";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -13,6 +16,7 @@ import {
   INTEGRATOR_TEMPLATE_NAME,
   MergeRecoveryStatus,
   PushStatus,
+  REGRESSION_VERIFICATION_OUTPUT_KIND,
   templateRolloverName,
   PrismaClient,
   TaskStatus,
@@ -293,6 +297,7 @@ const completeRepair = async (
   output: string,
   headSha: string | null = RESOLVED,
   runNumber = 1,
+  repositoryReader?: BranchAncestryReader,
 ) => {
   const run = await db.run.findFirstOrThrow({ where: { taskId: repairId, runNumber } });
   const repair = await db.task.findUniqueOrThrow({ where: { id: repairId } });
@@ -316,7 +321,7 @@ const completeRepair = async (
   const prior = process.env.RUNNER_TOKEN;
   process.env.RUNNER_TOKEN = "merge-tail-repair-token";
   try {
-    const response = await createApp(db).request(`/runner/runs/${run.id}/complete`, {
+    const response = await createApp(db, { repositoryReader }).request(`/runner/runs/${run.id}/complete`, {
       method: "POST",
       headers: { Authorization: "Bearer merge-tail-repair-token", "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -1835,3 +1840,288 @@ test("a rejected repair leaves a recovery that is still running alone", async ()
     where: { taskId: seeded.regression.id, body: { startsWith: "Autonomous merge tail stopped:" } },
   }), 1);
 });
+
+type ExternalRegressionOutcome = "review-fail" | "refresh-conflict" | "gate-fail" | "pass";
+
+const v2Verdict = (outcome: ExternalRegressionOutcome) => JSON.stringify(
+  outcome === "pass"
+    ? {
+      schemaVersion: 2,
+      outcome,
+      headSha: HEAD,
+      baseHeadSha: BASE,
+      gateVerdict: "PASS",
+      gateProof: `MERGE GATE: PASS ${HEAD}`,
+    }
+    : {
+      schemaVersion: 2,
+      outcome,
+      headSha: HEAD,
+      baseHeadSha: BASE,
+      summary: outcome === "review-fail" ? "MF-2 remains open" : "merge conflict",
+      ...(outcome === "gate-fail" ? { gateVerdict: "FAIL", gateProof: "MERGE GATE: FAIL (unit tests)" } : {}),
+    },
+);
+
+/** Complete a Regression Run after its v2 verdict is already durable, while
+ * the runner reports a non-retryable git delivery failure without a head. */
+const completeRegressionAfterExternalGitFailure = async (
+  seeded: Awaited<ReturnType<typeof seedRegression>>,
+  outcome: ExternalRegressionOutcome,
+  options: {
+    completionHead?: string | null;
+    recovery?: boolean;
+    failureMode?: "task-failed-git" | "transient-provider";
+  } = {},
+) => {
+  await db.taskTemplateStep.update({
+    where: { id: seeded.regression.templateStepId! },
+    data: { outputKind: REGRESSION_VERIFICATION_OUTPUT_KIND },
+  });
+  await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.DOING } });
+  const runnerId = `regression-external-${seeded.run.id}`;
+  const fencingToken = `regression-external-fence-${seeded.run.id}`;
+  await db.run.update({ where: { id: seeded.run.id }, data: {
+    status: "RUNNING",
+    runnerId,
+    fencingToken,
+    leaseExpiresAt: new Date(Date.now() + 60_000),
+    headSha: null,
+  } });
+  await db.session.update({ where: { id: seeded.session.id }, data: { executionStatus: "RUNNING" } });
+  await db.taskStepOutput.create({ data: {
+    taskId: seeded.regression.id,
+    runId: seeded.run.id,
+    kind: REGRESSION_VERIFICATION_OUTPUT_KIND,
+    body: v2Verdict(outcome),
+    commitSha: HEAD,
+  } });
+  if (options.recovery) await seedRecoveryBoundTo(seeded, seeded.run.id);
+
+  // Keep completion's lease release observable without invoking the host adapter.
+  const releasedChains: string[] = [];
+  const release: ReleaseMergeLease = async (target) => {
+    if (target) releasedChains.push(target.chainId);
+  };
+  const completion = await completeRun(db, {
+    runId: seeded.run.id,
+    body: {
+      runnerId,
+      fencingToken,
+      outcome: {
+        case: "provider-failure",
+        reason: options.failureMode === "transient-provider"
+          ? "provider stream dropped"
+          : "git delivery failed",
+        envelope: {
+          version: 1,
+          phase: options.failureMode === "transient-provider" ? "EXECUTE" : "DELIVER",
+          runnerClass: options.failureMode === "transient-provider" ? "TRANSIENT_PROVIDER" : "TASK_FAILED",
+          exitCode: options.failureMode === "transient-provider" ? 0 : 1,
+          signal: null,
+          terminationReason: null,
+          terminalEventSeen: false,
+          terminalSuccess: false,
+          agentExited: true,
+          providerError: options.failureMode === "transient-provider" ? "connection lost" : null,
+          stderrSummary: null,
+          stdoutSummary: options.failureMode === "transient-provider" ? null : "git push failed",
+          timedOut: false,
+          transient: false,
+          timeoutMs: null,
+        },
+      },
+      exitCode: 1,
+      branch: BRANCH,
+      pushedBranch: null,
+      pushStatus: PushStatus.FAILED,
+      cleanupStatus: CleanupStatus.SUCCEEDED,
+      workspaceRetained: false,
+      headSha: options.completionHead ?? null,
+    },
+    claimantClass: "runner",
+  }, release);
+  assert.ok("taskId" in completion, JSON.stringify(completion));
+  assert.deepEqual(releasedChains, [seeded.regression.chainId]);
+  return {
+    completion,
+    run: await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } }),
+    task: await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } }),
+  };
+};
+
+test("a task-failed git delivery preserves review-fail and queues repair at the persisted head", async () => {
+  const seeded = await seedRegression();
+  const settled = await completeRegressionAfterExternalGitFailure(seeded, "review-fail");
+
+  assert.equal(settled.run.status, "FAILED");
+  assert.equal(settled.run.failureClass, "TASK_FAILED");
+  assert.equal(settled.run.failureReason, "git delivery failed");
+  assert.equal(settled.run.headSha, HEAD);
+  assert.equal(settled.task.status, TaskStatus.REVIEW);
+  assert.equal(settled.completion.retryCreated, false);
+
+  const activity = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.regression.id,
+    actorType: "runner",
+    body: { contains: "negative Regression verdict" },
+  } });
+  const activityMetadata = asJsonObject(activity.metadata);
+  assert.equal(activityMetadata?.failureReason, "git delivery failed");
+  assert.equal(activityMetadata?.headSha, HEAD);
+
+  const repair = await db.task.findFirstOrThrow({ where: {
+    projectId: seeded.project.id,
+    name: "Autonomous merge tail: review-fix",
+  } });
+  const attempt = latestMarker(await readMarkers(db, seeded.regression.id), "repairAttempt");
+  assert.equal(attempt?.repairKind, "review-fix");
+  assert.equal(attempt?.headSha, HEAD);
+  assert.equal(attempt?.baseHeadSha, BASE);
+  assert.equal(attempt?.raw.sourceRunId, seeded.run.id);
+  assert.equal((await db.run.findFirstOrThrow({ where: { taskId: repair.id, runNumber: 1 } })).status, "QUEUED");
+});
+
+test("a task-failed git delivery preserves refresh-conflict and queues its resolver at the persisted head", async () => {
+  const seeded = await seedRegression();
+  const settled = await completeRegressionAfterExternalGitFailure(seeded, "refresh-conflict");
+
+  assert.equal(settled.run.status, "FAILED");
+  assert.equal(settled.run.failureClass, "TASK_FAILED");
+  assert.equal(settled.run.headSha, HEAD);
+  assert.equal(settled.task.status, TaskStatus.REVIEW);
+  assert.equal(settled.completion.retryCreated, false);
+
+  const repair = await db.task.findFirstOrThrow({ where: {
+    projectId: seeded.project.id,
+    name: "Autonomous merge tail: refresh-conflict",
+  } });
+  const attempt = latestMarker(await readMarkers(db, seeded.regression.id), "repairAttempt");
+  assert.equal(attempt?.repairKind, "refresh-conflict");
+  assert.equal(attempt?.headSha, HEAD);
+  assert.equal(attempt?.baseHeadSha, BASE);
+  assert.equal(attempt?.raw.sourceRunId, seeded.run.id);
+  assert.equal((await db.run.findFirstOrThrow({ where: { taskId: repair.id, runNumber: 1 } })).status, "QUEUED");
+});
+
+test("an external failure in a recovery Run stops recovery with the persisted semantic reason", async () => {
+  const seeded = await seedRegression();
+  await completeRegressionAfterExternalGitFailure(seeded, "review-fail", { recovery: true });
+
+  const recovery = await db.mergeRecoveryAttempt.findFirstOrThrow({ where: { regressionTaskId: seeded.regression.id } });
+  assert.equal(recovery.status, MergeRecoveryStatus.BLOCKED_DOWNSTREAM);
+  assert.match(recovery.failureReason ?? "", /semantic regression FAIL at a{40} against b{40}: MF-2 remains open/u);
+  assert.equal(await db.task.count({ where: {
+    projectId: seeded.project.id,
+    name: { startsWith: "Autonomous merge tail:" },
+  } }), 0);
+  const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+  assert.equal(regression.status, TaskStatus.REVIEW);
+  assert.match(regression.failureReason ?? "", /Automatic base-drift recovery 1 stopped at regression: semantic regression FAIL/u);
+});
+
+test("a transient provider drop preserves review-fail instead of queueing a retry", async () => {
+  const seeded = await seedRegression();
+  const settled = await completeRegressionAfterExternalGitFailure(seeded, "review-fail", {
+    failureMode: "transient-provider",
+  });
+
+  assert.equal(settled.run.status, "FAILED");
+  assert.equal(settled.run.failureClass, "TRANSIENT_PROVIDER");
+  assert.equal(settled.run.retryable, true);
+  assert.equal(settled.completion.retryCreated, false);
+  const repair = await db.task.findFirstOrThrow({ where: {
+    projectId: seeded.project.id,
+    name: "Autonomous merge tail: review-fix",
+  } });
+  const attempt = latestMarker(await readMarkers(db, seeded.regression.id), "repairAttempt");
+  assert.equal(attempt?.headSha, HEAD);
+  assert.equal(attempt?.raw.sourceRunId, seeded.run.id);
+  assert.equal((await db.run.findFirstOrThrow({ where: { taskId: repair.id, runNumber: 1 } })).status, "QUEUED");
+});
+
+test("a persisted PASS does not advance after an external git failure", async () => {
+  const seeded = await seedRegression();
+  const settled = await completeRegressionAfterExternalGitFailure(seeded, "pass", { completionHead: HEAD });
+
+  assert.equal(settled.run.status, "FAILED");
+  assert.equal(settled.run.failureClass, "TASK_FAILED");
+  assert.equal(settled.run.headSha, HEAD);
+  assert.equal(settled.task.status, TaskStatus.REVIEW);
+  assert.equal(settled.completion.retryCreated, false);
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), 1);
+  assert.equal(await db.task.count({ where: {
+    projectId: seeded.project.id,
+    name: { startsWith: "Autonomous merge tail:" },
+  } }), 0);
+  assert.equal(await db.task.count({ where: { templateStepId: seeded.readinessStep.id } }), 0);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 0);
+});
+
+test("a persisted gate-fail keeps ordinary external git failure settlement", async () => {
+  const seeded = await seedRegression();
+  const settled = await completeRegressionAfterExternalGitFailure(seeded, "gate-fail");
+
+  assert.equal(settled.run.status, "FAILED");
+  assert.equal(settled.run.failureClass, "TASK_FAILED");
+  assert.equal(settled.run.headSha, null);
+  assert.equal(settled.task.status, TaskStatus.REVIEW);
+  assert.equal(await db.task.count({ where: {
+    projectId: seeded.project.id,
+    name: { startsWith: "Autonomous merge tail:" },
+  } }), 0);
+  assert.equal(await db.task.count({ where: { templateStepId: seeded.readinessStep.id } }), 0);
+});
+
+for (const scenario of ["adopt", "no-push", "wrong-base", "slow-adopt", "read-timeout"] as const) {
+  test(`refresh-conflict malformed result uses repository ancestry: ${scenario}`, async () => {
+    const seeded = await exercise("refresh-conflict");
+    const repair = await repairFor(seeded, "refresh-conflict");
+    const head = scenario === "no-push" ? HEAD : RESOLVED;
+    const adopts = scenario === "adopt" || scenario === "slow-adopt";
+    const reads: string[] = [];
+    const repositoryReader = createGitHubReader("test-token", async (input, init) => {
+      const url = String(input);
+      reads.push(url);
+      if (url.endsWith(`/git/ref/heads/${BRANCH}`)) {
+        // Both exceed Prisma's default 5s transaction timeout. The timeout
+        // case honors the real shared repository deadline, not a fake clock.
+        if (scenario === "slow-adopt") await delay(5_500, undefined, { signal: init?.signal ?? undefined });
+        if (scenario === "read-timeout") await delay(READINESS_READ_BUDGET_MS + 5_000, undefined, { signal: init?.signal ?? undefined });
+        return Response.json({ object: { type: "commit", sha: head } });
+      }
+      assert.ok(url.endsWith(`/compare/${HEAD}...${head}`) || url.endsWith(`/compare/${BASE}...${head}`), url);
+      const missingBase = !adopts && url.endsWith(`/compare/${BASE}...${head}`);
+      return Response.json({ status: missingBase ? "diverged" : head === HEAD ? "identical" : "ahead", behind_by: missingBase ? 1 : 0, files: [] });
+    });
+    // Deliberately omit the delivered head too: the repository is the evidence.
+    await completeRepair(seeded, repair.id, "resolved it", null, 1, repositoryReader);
+    assert.equal(reads.length, scenario === "read-timeout" ? 1 : 3);
+    assert.equal((await db.run.findFirstOrThrow({ where: { taskId: repair.id } })).status, "SUCCEEDED");
+    const regression = await db.task.findUniqueOrThrow({ where: { id: seeded.regression.id } });
+    const result = latestMarker(await readMarkerHistory(db, seeded.regression.id), "repairResult");
+    const activity = await db.taskActivity.findFirstOrThrow({ where: {
+      taskId: repair.id,
+      metadata: { path: ["kind"], equals: "mergeTail.resolverRepositoryFallback" },
+    } });
+    assert.match(activity.body, /fallback/u);
+    assert.equal(asJsonObject(activity.metadata)?.rejectedKey, "body");
+    if (scenario === "read-timeout") assert.match(activity.body, /read failed: GitHub read aborted at its deadline/u);
+    if (adopts) {
+      assert.equal(result?.resolvedHeadSha, head);
+      assert.equal(result?.state, null);
+      assert.match(activity.body, /adopted/u);
+      assert.notEqual(regression.status, TaskStatus.REVIEW);
+      assert.equal(await db.inboxMessage.count({ where: { taskId: regression.id } }), 0);
+      const claimed = await claimNext();
+      assert.equal(claimed.status, 200);
+      const body = claimed.body as { regressionRepairHandoff: { repair: { resolvedHeadSha: string } } };
+      assert.equal(body.regressionRepairHandoff.repair.resolvedHeadSha, head);
+    } else {
+      assert.equal(regression.status, TaskStatus.REVIEW);
+      assert.match(regression.failureReason ?? "", /invalid output/u);
+      assert.equal(result?.state, "invalid-output");
+      assert.equal(await db.inboxMessage.count({ where: { taskId: regression.id } }), 1);
+    }
+  });
+}

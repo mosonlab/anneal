@@ -339,6 +339,7 @@ export type TransactionLeaseOutcome<T> = {
 export type CommitWithLeaseOutcomeOptions = {
   release?: ReleaseMergeLease | undefined;
   isolationLevel?: Prisma.TransactionIsolationLevel;
+  timeout?: number;
 };
 
 type CommittedLeaseOutcome<T> = {
@@ -458,7 +459,10 @@ export const commitWithLeaseOutcome = async <T>(
       value: result.value,
       settlement: await settleLease(tx, result.leaseOutcome),
     };
-  }, options.isolationLevel ? { isolationLevel: options.isolationLevel } : undefined);
+  }, {
+    ...(options.isolationLevel ? { isolationLevel: options.isolationLevel } : {}),
+    ...(options.timeout !== undefined ? { timeout: options.timeout } : {}),
+  });
   if (committed === null) return null;
   await releaseCommittedLeaseOutcomes(db, [committed], options.release ?? releaseMergeLease, false);
   return committed.value;

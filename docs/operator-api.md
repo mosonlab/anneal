@@ -240,6 +240,14 @@ curl -X DELETE "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERA
   metadata cannot classify priced spend. Unknown cache splits are counted and
   excluded from cache metrics; unpriced chain runs never receive a fabricated
   cost.
+- For Claude, `FINAL_OUTPUT` events with the same provider `session_id` are
+  session-cumulative: `total_cost_usd` and `modelUsage` are the running totals,
+  so the latest event supplies that provider session's cost and model tokens.
+  Events with different `session_id` values are separate sessions and their
+  latest totals are added. The top-level `usage` block remains per invocation.
+  Session usage recomputation from stored events applies the same rule and is
+  idempotent: repeating it without new events leaves the derived totals
+  unchanged.
 
 ```sh
 curl "$BASE_URL/projects/$PROJECT_ID/costs?days=1&tz=America%2FLos_Angeles" \
@@ -2012,6 +2020,44 @@ curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/repair" \
   -d '{"requestId":"reenter-recovery-repair-001","reason":"Fix the regression found during base-drift recovery"}'
 ```
 
+#### Automatic refresh-conflict repair settlement
+
+An automatic `refresh-conflict` repair normally supplies a `resolvedHeadSha`
+from the resolver's versioned output. If that output is malformed or a
+resolved output is missing `resolvedHeadSha`, settlement reads the current
+Chain branch head from the repository once before deciding whether to refuse
+the repair. The merge tail adopts that head only when repository ancestry
+checks verify that it is a descendant of
+both the repair marker's `headSha` (the starting head) and `baseHeadSha` (the
+target base). It then continues recovery with that verified head, preserving
+a resolved merge commit that the resolver pushed even when its result payload
+was malformed.
+
+Adoption rebinds the repair Run's `headSha` and the repair task's
+`TaskStepOutput.commitSha` to the repository-verified head. The Regression
+handoff requires both durable bindings to match the resolved head. Existing
+output text is preserved; if no output exists, settlement creates an empty
+body using the repair Step's output kind (or `result` for a detached repair).
+These bindings record control-plane repository evidence, not a new runner
+publication report.
+
+The repository reads share a 20-second deadline within a completion
+transaction budget of 60 seconds, leaving time to persist a timeout refusal
+and its activity. Completion holds the Run row lock while checking ancestry.
+
+The fallback is recorded as a `TaskActivity` on the repair task. The
+activity names the fallback, the rejected result key (for example `body` or
+`resolvedHeadSha`), and the adopted head. Inspect it with
+`GET /tasks/:taskId/activity`. When the fallback cannot adopt a head, the
+`repairResult` history continues to carry the invalid-output reason and
+`rejectedKey` on the repair and Regression tasks.
+
+If the repository read fails, the read error is recorded and the repair fails
+as the existing invalid-output path does. A branch head that is not descended
+from both expected heads is also refused; no unverified head is adopted. The
+existing refusals for stale `startHeadSha` or `targetHeadSha` bindings and for
+an explicit resolver `unable` outcome are unchanged.
+
 ### POST `/tasks/:taskId/merge-tail/rerun`
 
 - Required path parameter: `taskId`, naming the Chain's Regression
@@ -2073,6 +2119,57 @@ curl -X POST "$BASE_URL/tasks/$REGRESSION_TASK_ID/merge-tail/rerun" \
   -H "Authorization: Bearer $OPERATOR_TOKEN" -H "Content-Type: application/json" \
   -d '{"requestId":"rerun-recovery-gate-001","reason":"The failing test is outside this branch and timed out under host load"}'
 ```
+
+### Regression verdict precedence after an external Run failure
+
+A Regression verification Run can persist its `regression-verification-v2`
+output and then fail for an external reason: for example, a task-failed Git
+operation during target refresh or WIP salvage, or a provider stream failure.
+Completion qualifies the persisted semantic result before deciding whether to
+retry or settle the Task as an ordinary external failure. This ordering
+preserves the result the Run already authored.
+Only persisted v2 `review-fail` and `refresh-conflict` results receive this new
+external-failure precedence; `gate-fail` and a Run with no such output
+keep the existing external-failure path, including the legacy protocol-error
+handling.
+
+The persisted result is control-plane evidence only when all of these bindings
+hold:
+
+- the `TaskStepOutput` belongs to the same Run (`runId`),
+- its body is valid `regression-verification-v2` JSON and its authored commit
+  is present, and
+- the verdict's `headSha`, the output's `commitSha`, and the Run's exact head
+  agree.
+
+When completion has no `headSha`, this external-failure path uses the output's
+authored `commitSha` as the persisted head for validation. A repair then binds
+to that head, so the operator does not need to carry the branch forward manually. A result from another Run, a
+malformed body, a missing authored commit, or a mismatched head is refused and
+does not control the Chain. Run text and `TaskActivity` rows never synthesize a
+verdict.
+
+For a validated negative result, the merge tail uses the persisted semantic
+outcome even though the Run itself records an external failure. `review-fail`
+queues the normal `review-fix` repair and `refresh-conflict` queues the
+`refresh-conflict` repair, both against the persisted head and its recorded
+base. The external failure remains visible as a diagnostic
+`TaskActivity` on the Regression task; inspect it with
+`GET /tasks/:taskId/activity`. It is diagnostic history, not a replacement for
+the persisted verdict and not another source of semantic authority.
+
+Inside a base-drift recovery Run, the same validation and precedence apply,
+but the settlement is the recovery stop carrying the persisted verdict's
+reason. It does not open an automatic repair from the failed Run. The recovery
+attempt and its existing Regression, Merge readiness, and merge-integrator
+tasks remain in the documented recovery-stop state, so the recovery ceiling
+and `POST /tasks/:taskId/merge-tail/repair` re-entry rules continue to apply.
+
+A persisted `pass` is excluded from this failed-completion rule. An external
+failure after a PASS never advances the Chain or creates a repair on the basis
+of that PASS. Advancement uses the ordinary successful-completion path, with
+the exact head named by completion and a persisted gate verdict for that same
+head.
 
 ### Settling a chain whose repair cannot bind
 
@@ -3191,6 +3288,13 @@ curl "$BASE_URL/sessions?projectId=$PROJECT_ID&status=failed&runner=CODEX&since=
 ### GET `/sessions/:sessionId`
 
 - Required path parameter: `sessionId`.
+- The returned session carries `metrics` for its Run. It has the same shape
+  and null semantics as the per-Run `metrics` documented under
+  [GET `/tasks/:taskId`](#get-taskstaskid), including `ttft` and `vsBaseline`; see that definition for
+  the field meanings. The response also carries the same task-level `baseline`
+  used by that definition so the shared diagnostics block can show its
+  percentiles. The `/sessions` list does not compute or return these derived
+  fields.
 
 ```sh
 curl "$BASE_URL/sessions/$SESSION_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"

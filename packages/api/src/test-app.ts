@@ -1,3 +1,4 @@
+import type { BranchAncestryReader } from "./github-read.js";
 import { readdirSync, readFileSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 
@@ -77,6 +78,7 @@ const assertRootIsDisposable = (root: string): string => {
  */
 export const createApp = (db: PrismaClient, options: {
   workspaceRoot?: string;
+  repositoryReader?: BranchAncestryReader | undefined;
   onboardingRepositoryPreflight?: typeof preflightOnboardingRepository;
   repositoryPreflight?: RepositoryPreflight;
   projectBootstrapLoaders?: Partial<ProjectBootstrapLoaders>;
@@ -104,6 +106,7 @@ export const createApp = (db: PrismaClient, options: {
     // answer a lease-free origin gives.
     readMergeLeaseHolder: options.readMergeLeaseHolder ?? (async () => ({ outcome: "none" })),
     specificationReader: options.specificationReader ?? null,
+    repositoryReader: options.repositoryReader,
   });
 };
 

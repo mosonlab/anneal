@@ -298,6 +298,12 @@ export type Session<DateTime = string, DecimalValue = string> = {
   } | null;
 };
 
+/** Session detail adds the same diagnostics and baseline as task detail. */
+export type SessionDetail<DateTime = string, DecimalValue = string> = Session<DateTime, DecimalValue> & {
+  metrics: RunMetrics | null;
+  baseline: RunBaseline | null;
+};
+
 /* Per-run diagnostics derived at read time from the Run row, its Session row
  * and that session's tool events. Nothing here is persisted, and `null` always
  * means "unknown": it is never rendered as zero. */
