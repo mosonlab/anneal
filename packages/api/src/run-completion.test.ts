@@ -234,7 +234,10 @@ type RecordedActivity = { taskId: string; actorType?: string; body: string; meta
 type MetadataClause = { metadata?: { path?: unknown; equals?: unknown } };
 type HarnessRun = Record<string, unknown> & { id: string; fencingToken: string };
 
-const statefulCompletionHarness = (taskOverrides: Record<string, unknown> = {}) => {
+const statefulCompletionHarness = (
+  taskOverrides: Record<string, unknown> = {},
+  persistedOutput: Record<string, unknown> | null = null,
+) => {
   const activities: RecordedActivity[] = [];
   const closedRuns = new Map<string, Record<string, unknown>>();
   const taskUpdates: Record<string, unknown>[] = [];
@@ -281,7 +284,7 @@ const statefulCompletionHarness = (taskOverrides: Record<string, unknown> = {}) 
       findUnique: async () => ({ ...task, runs: [{ ...currentRun, task: undefined, session: undefined }] }),
       findUniqueOrThrow: async () => ({ ...task, runs: [{ ...currentRun, task: undefined, session: undefined }] }),
     },
-    taskStepOutput: { findUnique: async () => null },
+    taskStepOutput: { findUnique: async () => persistedOutput },
     taskActivity: {
       findMany: async ({ where, take }: { where: { taskId: string }; take?: number }) => activities
         .filter((activity) => activity.taskId === where.taskId).reverse().slice(0, take),
@@ -308,19 +311,23 @@ const statefulCompletionHarness = (taskOverrides: Record<string, unknown> = {}) 
     budgetGrants,
     outcome,
     templateStep = null,
+    headSha,
+    runHeadSha,
   }: {
     runNumber: number;
     maxRunsPerTask: number;
     budgetGrants: number;
     outcome: RunOutcome;
     templateStep?: Record<string, unknown> | null;
+    headSha?: string;
+    runHeadSha?: string;
   }) => {
     task.templateStep = templateStep;
     currentRun = {
       id: `run-${runNumber}`, projectId: task.projectId, taskId: task.id, goalId: null,
       agentId: task.assigneeAgentId, repoId: task.repoId, runNumber, maxRunsPerTask, budgetGrants,
       runner: "CODEX", model: "gpt-5.6-sol:high", targetBranch: "main", branch: "feat/refunds",
-      pushedBranch: null, baseSha: null, runnerId: "runner-1", fencingToken: `fence-${runNumber}`,
+      headSha: runHeadSha, pushedBranch: null, baseSha: null, runnerId: "runner-1", fencingToken: `fence-${runNumber}`,
       requiresCommit: false, opensPullRequest: task.opensPullRequest, codexServiceTier: "DEFAULT",
       subagentModel: null, subagentMaxConcurrent: null, promptHash: "hash",
       maxDurationMin: 120, stallTimeoutMin: 10, task: { ...task }, session: { id: `session-${runNumber}` },
@@ -333,6 +340,7 @@ const statefulCompletionHarness = (taskOverrides: Record<string, unknown> = {}) 
         runnerId: "runner-1",
         fencingToken: currentRun.fencingToken,
         outcome,
+        headSha,
         exitCode: outcome.case === "succeeded" ? 0 : 1,
         pushStatus: PushStatus.NOT_REQUESTED,
         cleanupStatus: CleanupStatus.SUCCEEDED,
@@ -678,3 +686,42 @@ test("a retryable detached repair whose retry is refused keeps ordinary task fai
   assert.equal(harness.taskUpdates.at(-1)?.status, "REVIEW");
   assert.equal(harness.activities.some(({ metadata }) => metadata?.kind === "mergeTail.stop"), false);
 });
+
+for (const outcome of ["review-fail", "refresh-conflict"]) {
+  for (const scenario of ["unreported", "reported", "foreign-run", "malformed", "stale-output", "reported-mismatch", "persisted-mismatch", "absent", "pass"] as const) {
+    test(`completeRun qualifies ${outcome} after external git failure: ${scenario}`, async () => {
+      const reason = "git fetch failed: gnutls_handshake() failed";
+      const otherHead = "7".repeat(40);
+      const accepted = scenario === "unreported" || scenario === "reported";
+      const reportedHead = scenario === "reported" ? baseSha : scenario === "reported-mismatch" ? otherHead : undefined;
+      const harness = statefulCompletionHarness({}, scenario === "absent" ? null : {
+        runId: scenario === "foreign-run" ? "other-run" : "run-1",
+        kind: "regression-verification-v2", commitSha: scenario === "stale-output" ? otherHead : baseSha,
+        body: scenario === "malformed" ? "invalid JSON" : JSON.stringify({
+          schemaVersion: 2, outcome: scenario === "pass" ? "pass" : outcome,
+          headSha: baseSha, baseHeadSha: "6".repeat(40), summary: "persisted reason",
+          ...(scenario === "pass" ? { gateVerdict: "PASS", gateProof: `MERGE GATE: PASS ${baseSha}` } : {}),
+        }),
+        metadata: null,
+      });
+      const closed = await harness.complete({
+        runNumber: 1, maxRunsPerTask: 1, budgetGrants: 0,
+        headSha: reportedHead,
+        runHeadSha: scenario === "persisted-mismatch" ? otherHead : undefined,
+        templateStep: { outputKind: "regression-verification-v2", requiresCommit: true, taskTemplate: { name: "direct-engineer-workflow" } },
+        outcome: {
+          case: "provider-failure", reason,
+          envelope: {
+            version: 1, phase: "DELIVER", agentExited: true, exitCode: 1, signal: null,
+            terminationReason: null, timedOut: false, timeoutMs: null, transient: false,
+            runnerClass: "TASK_FAILED", providerError: null, stderrSummary: null, stdoutSummary: reason,
+            terminalEventSeen: true, terminalSuccess: false,
+          },
+        },
+      });
+      assert.equal(closed.headSha, accepted ? baseSha : reportedHead ?? null);
+      assert.equal(closed.failureClass, FailureClass.TASK_FAILED);
+      assert.equal(harness.activities.some((activity) => activity.metadata?.failureReason === reason), accepted);
+    });
+}
+}

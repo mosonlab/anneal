@@ -249,7 +249,7 @@ const narrations: { name: string; facts: CompletionAdvancementFacts; expected: s
       outputRefusal: "refused",
       task: templateTask(),
     }),
-    expected: "Run 3 failed after publishing a negative Regression verdict; repair queued",
+    expected: "Run 3 failed after publishing a negative Regression verdict; merge tail settled on the persisted verdict",
   },
   {
     name: "a refused canonical output is named even when the merge tail settled the Task",
