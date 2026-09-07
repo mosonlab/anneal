@@ -738,7 +738,7 @@ test("a blocked train candidate enters the refresh-conflict stop with its record
     taskId: blocked.regression.id,
     body: { contains: "merge conflict" },
   } });
-  assert.match(stopNotice.body, /Autonomous merge tail stopped/u);
+  assert.match(stopNotice.body, /Autonomous merge readiness stopped/u);
   const marker = (await trainMarkersFor(blocked.readiness.id)).at(-1)!.metadata as Record<string, unknown>;
   assert.equal(marker.trainTaskId, train.id);
   assert.equal(marker.position, 2);
@@ -832,6 +832,7 @@ test("terminal train settlement leaves one release obligation that restart recon
 
     const releaseBeforeRestart: WithMergeLease = (target, fn, database) => withMergeLease(target, fn, database, {
       acquire: acquireChainLease,
+      now: () => new Date(TEST_NOW.getTime() + 1_000),
       release: async () => ({ outcome: "unreachable", detail: "process exited before confirming release" }),
     });
     await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, releaseBeforeRestart, () => []);
@@ -1041,7 +1042,7 @@ test("a trailing second-read refusal preserves the passing prefix and returns on
   const marker = (await trainMarkersFor(trailing.readiness.id)).at(-1)!.metadata as Record<string, unknown>;
   assert.equal(marker.outcome, "ready");
   assert.equal(marker.settlement, "no-verdict");
-  assert.match(String(marker.reason), /stale-head/u);
+  assert.match(String(marker.reason), /stale PASS head/u);
   assert.deepEqual(releasedChainIds, [seed.candidates[0]!.chainId]);
 });
 
@@ -1187,7 +1188,7 @@ test("the queued merge-train Run is claimed with the ordered candidate list", as
   });
 });
 
-test("a train settled while its Run is still active stays closed when that Run completes", async () => {
+test("a train settled while its Run is still active stays closed when that Run completes", async (t) => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
   await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
@@ -1214,6 +1215,8 @@ test("a train settled while its Run is still active stays closed when that Run c
   assert.equal(settled.authorized, 2);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: train.id } })).status, TaskStatus.DONE);
 
+  // Completion reads the wall clock; keep its fence within the claimed Lease.
+  t.mock.timers.enable({ apis: ["Date"], now: new Date(TEST_NOW.getTime() + 1_500) });
   const completed = await completeRun(db, {
     runId: claimed.run.id,
     body: {
@@ -1236,7 +1239,7 @@ test("a train settled while its Run is still active stays closed when that Run c
   assert.equal(afterCompletion.failureReason, null);
 });
 
-test("an aborted train keeps its review state when its still-active Run completes", async () => {
+test("an aborted train keeps its review state when its still-active Run completes", async (t) => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
   await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
@@ -1259,6 +1262,8 @@ test("an aborted train keeps its review state when its still-active Run complete
   const aborted = await db.task.findUniqueOrThrow({ where: { id: train.id } });
   assert.equal(aborted.status, TaskStatus.REVIEW);
 
+  // Completion reads the wall clock; keep its fence within the claimed Lease.
+  t.mock.timers.enable({ apis: ["Date"], now: new Date(TEST_NOW.getTime() + 1_500) });
   const completed = await completeRun(db, {
     runId: claimed.run.id,
     body: {
@@ -1353,8 +1358,18 @@ test("a contended merge Lease defers the train with a durable, operator-visible 
   }, contentionAlertAfterMs({ MERGE_LEASE_CONTENTION_ALERT_MINUTES: "30" }));
   assert.equal(alerted, "alerted");
   assert.equal(await db.inboxMessage.count({ where: { dedupeKey: { startsWith: "merge-lease-contention:" } } }), 1);
+  // The test-owned alert claim must finish before a later train tick can claim it.
+  const alertAt = new Date(TEST_NOW.getTime() + 31 * 60_000);
+  const finished = await db.$transaction((tx) => claim.settle(tx, {
+    kind: "finish", at: alertAt,
+    apply: async (client) => {
+      await client.task.update({ where: { id: candidate.readiness.id }, data: { status: TaskStatus.TODO } });
+      return { value: undefined, ownership: "released" };
+    },
+  }));
+  assert.equal(finished.settled, true);
   // The train itself is untouched and settles on a later tick.
-  const resumed = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 2_000), 5, releaseChainLease, runWithMergeLease, () => []);
+  const resumed = await readinessTick(db, readerFor(seed), new Date(alertAt.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   assert.equal(resumed.authorized, 2);
 });
 
@@ -1383,11 +1398,29 @@ test("a routine lease handoff does not block new train formation", async () => {
   const seed = await seedTrainCandidates(2);
   // A handoff belonging to another chain in this repository is the ordinary
   // steady state after any authorization; it must not darken readiness.
+  const otherTask = await db.task.create({ data: {
+    projectId: seed.project.id, repoId: seed.repo.id,
+    templateId: seed.candidates[0]!.integrator.templateId,
+    templateStepId: seed.candidates[0]!.integrator.templateStepId,
+    name: "Other chain merge", description: "Awaiting merge executor",
+    chainId: randomUUID(), chainIndex: 7, chainLayer: 7,
+    assigneeType: AssigneeType.AGENT,
+    assigneeAgentId: seed.candidates[0]!.integrator.assigneeAgentId!,
+    status: TaskStatus.TODO, targetBranch: "main",
+  } });
+  const handoffRun = await db.run.create({ data: {
+    projectId: seed.project.id, taskId: otherTask.id,
+    agentId: otherTask.assigneeAgentId!, repoId: seed.repo.id,
+    runNumber: 1, dedupeKey: `task:${otherTask.id}:run:1`,
+    runner: "CODEX", model: INTEGRATOR_SENTINEL_MODEL, promptHash: "handoff",
+    status: RunStatus.QUEUED, targetBranch: "main", readyAt: TEST_NOW,
+  } });
   await db.mergeLeaseEvent.create({ data: {
     projectId: seed.project.id,
-    chainId: randomUUID(),
+    chainId: otherTask.chainId!,
     state: MergeLeaseEventState.HANDOFF_PENDING,
-    owningTaskId: seed.candidates[1]!.regression.id,
+    owningTaskId: otherTask.id,
+    handedOffRunId: handoffRun.id,
     handedOffAt: TEST_NOW,
   } });
 
@@ -1540,6 +1573,7 @@ test("a train deferral preserves the open executor-offline episode", async () =>
     chainId: candidate.chainId,
     state: MergeLeaseEventState.RELEASE_DEFERRED,
     owningTaskId: candidate.regression.id,
+    deferredAt: TEST_NOW,
     failureDetail: "Release transport unavailable",
   } });
 
@@ -1604,6 +1638,11 @@ test("a gated candidate approved against its evidence base can publish through a
   const candidate = seed.candidates[0]!;
   await db.task.update({ where: { id: candidate.readiness.id }, data: { approvalGate: true } });
   const regressionRun = await db.run.findFirstOrThrow({ where: { taskId: candidate.regression.id } });
+  await db.session.create({ data: {
+    runId: regressionRun.id, projectId: seed.project.id,
+    agentId: regressionRun.agentId, taskId: candidate.regression.id,
+    runner: regressionRun.runner, executionStatus: "SUCCEEDED", cleanupStatus: CleanupStatus.SUCCEEDED,
+  } });
   await db.$transaction((tx) => advanceTemplateTask(tx, candidate.regression.id, regressionRun.id, null, TEST_NOW));
   const card = await db.inboxMessage.findFirstOrThrow({ where: { gateTaskId: candidate.readiness.id, status: "OPEN" } });
   await evidenceTick(db, readerFor(seed, { baseSha: evidenceBase }), new Date(TEST_NOW.getTime() + 100));
