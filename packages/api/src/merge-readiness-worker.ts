@@ -15,6 +15,7 @@ import {
   latestRecordedStop,
   MERGE_TAIL_KIND,
   parseRegressionVerdict,
+  readMarkerHistory,
   requireMergeGateAuthorization,
   REGRESSION_VERIFICATION_OUTPUT_KINDS,
   recoveryContext,
@@ -69,6 +70,26 @@ import {
 export const readinessPollIntervalMs = (): number => {
   const raw = Number(process.env.MERGE_READINESS_POLL_INTERVAL_MS);
   return Number.isFinite(raw) && raw >= 250 ? Math.floor(raw) : 2_000;
+};
+
+export const READINESS_EXCEPTION_REQUEUE_LIMIT = 3;
+
+/**
+ * How many times one readiness Step may be requeued after an evaluation
+ * exception before the tail stops. A misconfigured limit is not silently
+ * replaced by the default: an unusable bound would decide, unseen, whether a
+ * transient failure costs a retry or a manual delivery.
+ */
+export const readinessExceptionRequeueLimit = (): number => {
+  const raw = process.env.MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT;
+  if (raw === undefined || raw.trim() === "") return READINESS_EXCEPTION_REQUEUE_LIMIT;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    throw new Error(
+      `MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT must be a non-negative integer, got ${raw}`,
+    );
+  }
+  return parsed;
 };
 
 export { READINESS_READ_BUDGET_MS };
@@ -288,6 +309,67 @@ const stopReadinessSettlement = (
     return { ownership: "released", leaseOutcome: stopped.leaseOutcome };
   },
 });
+
+export const READINESS_EXCEPTION_REQUEUE_STATE = "requeued-exception";
+
+/**
+ * Returns the readiness Step to `TODO` after an evaluation exception so the
+ * next tick evaluates it again. The Step is the only row this touches: the
+ * Regression evidence it was about to authorize is still valid, and the marker
+ * is what the board shows for the retry.
+ */
+export const requeueReadinessExceptionSettlement = (
+  input: {
+    readinessTaskId: string;
+    regressionTaskId: string;
+    reason: string;
+    requeue: number;
+    limit: number;
+    recovery: RecoveryContext | null;
+    now: Date;
+  },
+): ReadinessSettlement => readinessSettlement("requeue", {
+  taskId: input.regressionTaskId,
+  at: input.now,
+  apply: async (tx) => {
+    await tx.task.update({
+      where: { id: input.readinessTaskId },
+      data: { status: TaskStatus.TODO, failureReason: null },
+    });
+    await writeMarker(tx, input.readinessTaskId, "readiness", {
+      actorType: "control-plane",
+      body: `Merge readiness requeued after evaluation exception ${String(input.requeue)}`
+        + ` of ${String(input.limit)}: ${input.reason}`,
+      metadata: {
+        state: READINESS_EXCEPTION_REQUEUE_STATE,
+        reason: input.reason,
+        requeue: input.requeue,
+        limit: input.limit,
+        recoveryAggregateId: input.recovery?.aggregateId ?? null,
+      },
+    });
+    return {
+      ownership: "released",
+      leaseOutcome: { kind: "stop", taskId: input.regressionTaskId },
+    };
+  },
+});
+
+/**
+ * Exception requeues already spent on this readiness Step, counted within the
+ * recovery attempt that owns them: a base-drift recovery is a fresh tail, and
+ * the requeues its predecessor spent are not charged to it.
+ */
+const spentExceptionRequeues = async (
+  db: PrismaClient,
+  readinessTaskId: string,
+  recovery: RecoveryContext | null,
+): Promise<number> => {
+  const markers = await db.$transaction((tx) => readMarkerHistory(tx, readinessTaskId));
+  return markers.filter((marker) => marker.kind === "readiness"
+    && marker.state === READINESS_EXCEPTION_REQUEUE_STATE
+    && (marker.raw.recoveryAggregateId ?? null) === (recovery?.aggregateId ?? null)).length;
+};
 
 export type ReadinessTickResult = { claimed: number; authorized: number; requeued: number; stopped: number };
 
@@ -879,6 +961,7 @@ export const readinessTick = async (
   runWithMergeLease: WithMergeLease,
 ): Promise<ReadinessTickResult> => {
   const result: ReadinessTickResult = { claimed: 0, authorized: 0, requeued: 0, stopped: 0 };
+  const exceptionRequeueLimit = readinessExceptionRequeueLimit();
   const pageSize = Math.max(limit * 20, 100);
   for await (const readiness of readinessCandidates(db, pageSize)) {
     if (result.claimed >= limit) break;
@@ -901,9 +984,19 @@ export const readinessTick = async (
     } catch (error: unknown) {
       if (error instanceof LeaseReleaseDeferralRecordError) throw error;
       const refusalCode = error instanceof MergeRecoveryRefusalError ? error.refusalCode : null;
-      const reason = `readiness evaluation failed: ${error instanceof Error ? error.message : String(error)}`;
+      const message = error instanceof Error ? error.message : String(error);
+      // A refusal is a decision and stops the tail on its first occurrence. An
+      // unexpected exception is not: the stop it would write carries no
+      // review-fail or gate-fail verdict, so `merge-tail/repair` refuses to
+      // re-enter it and only a manual delivery finishes the branch. A killed
+      // child or a restarted deploy therefore costs one requeue of the
+      // readiness Step, bounded so a permanent fault still reaches an operator.
+      const spent = refusalCode === null
+        ? await spentExceptionRequeues(db, readiness.id, read.recovery)
+        : 0;
+      const requeuing = refusalCode === null && spent < exceptionRequeueLimit;
       // Stopping the tail is not another refusal by the holder either, and the
-      // stop below releases the claim this write is fenced by.
+      // settlement below releases the claim this write is fenced by.
       await forgetContention(
         db,
         readiness.chainId ? { projectId: readiness.projectId, chainId: readiness.chainId } : null,
@@ -915,25 +1008,39 @@ export const readinessTick = async (
         kind: "pre-acquire",
         release: releaseChainLease,
       });
-      const stopped = await runner.apply(stopReadinessSettlement({
-        readinessTaskId: readiness.id,
-        regressionTaskId: read.regression.id,
-        reason,
-        recovery: read.recovery,
-        refusalCode,
-        now: new Date(),
-      }), read.claim);
-      if (stopped.kind === "acquire-lease") {
-        throw new Error("Readiness stop requested a Merge Lease");
+      const settlement = requeuing
+        ? requeueReadinessExceptionSettlement({
+          readinessTaskId: readiness.id,
+          regressionTaskId: read.regression.id,
+          reason: `readiness evaluation exception: ${message}`,
+          requeue: spent + 1,
+          limit: exceptionRequeueLimit,
+          recovery: read.recovery,
+          now: new Date(),
+        })
+        : stopReadinessSettlement({
+          readinessTaskId: readiness.id,
+          regressionTaskId: read.regression.id,
+          reason: spent === 0
+            ? `readiness evaluation failed: ${message}`
+            : `readiness evaluation failed after ${String(spent)} exception requeues: ${message}`,
+          recovery: read.recovery,
+          refusalCode,
+          now: new Date(),
+        });
+      const settled = await runner.apply(settlement, read.claim);
+      if (settled.kind === "acquire-lease") {
+        throw new Error(`Readiness ${settlement.kind} requested a Merge Lease`);
       }
-      if (stopped.outcome.value.applied) {
-        result.stopped += 1;
+      if (settled.outcome.value.applied) {
+        if (requeuing) result.requeued += 1;
+        else result.stopped += 1;
       }
       // A failed release/hold recording can happen after stopMergeTail has
       // already committed its state transition. A second stop then returns
       // false and must not turn that failure into a successful-looking tick.
       // Surface it to the worker caller so the missing evidence is observable.
-      if (!stopped.outcome.value.applied) throw error;
+      if (!settled.outcome.value.applied) throw error;
     }
   }
   return result;
@@ -943,6 +1050,9 @@ export const startReadinessWorker = (
   db: PrismaClient,
   reader: PullRequestReader,
 ): ReturnType<typeof setInterval> => {
+  // Read once here so a misconfigured bound fails the service at startup rather
+  // than inside the first tick that hits an exception.
+  readinessExceptionRequeueLimit();
   let inFlight = false;
   const timer = setInterval(() => {
     if (inFlight) return;

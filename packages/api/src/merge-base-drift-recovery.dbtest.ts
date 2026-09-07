@@ -724,6 +724,12 @@ test("readiness records and reopens a head-adoption refusal by code, independent
   const stopped = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } });
   assert.equal(stopped.status, "BLOCKED_DOWNSTREAM");
   assert.equal(stopped.refusalCode, MergeRecoveryRefusalCode.HEAD_ADOPTION_CONFLICT);
+  // A refusal carries a code and is a decision, so it stops on its first
+  // occurrence rather than spending an exception requeue.
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: seeded.readinessTask!.id,
+    metadata: { path: ["state"], equals: "requeued-exception" },
+  } }), 0);
   assert.equal(
     stopped.failureReason,
     "readiness evaluation failed: Recovery authorization could not adopt the verified regression head",

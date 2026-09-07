@@ -1848,6 +1848,31 @@ Whether a Chain should be allowed to run base-drift recovery and a gate-fix
 repair at the same time is not decided here. This refusal names the overlap and
 stops before spending a Run on work the platform would not accept.
 
+### Readiness evaluation exceptions
+
+An exception thrown while the merge readiness worker evaluates a Chain — a
+killed child process, a dropped connection, a service restart mid-tick — is not
+a verdict. The worker returns the readiness task to `TODO` and evaluates it
+again on a later tick, writing one `TaskActivity` on the readiness task whose
+`metadata.state` is `requeued-exception` and whose body reads
+`Merge readiness requeued after evaluation exception <n> of <limit>: readiness
+evaluation exception: <message>`. The Regression evidence and its Run are left
+alone, no stop notice is written, and the merge lease is released exactly as an
+ordinary readiness requeue releases it.
+
+The retry is bounded by `MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT` (default 3),
+read once per worker tick; a value that is not a non-negative integer fails the
+API service at startup. Once that many exception requeues have been spent on the
+same readiness task within the same recovery attempt, the next exception stops
+the tail as before, parking the regression and readiness tasks in `REVIEW` with
+`failureReason`
+`readiness evaluation failed after <n> exception requeues: <message>` and the
+matching `Autonomous merge readiness stopped:` Inbox notice.
+
+A deliberate refusal is not an exception: a recovery head-adoption refusal
+carries a refusal code and still stops the tail on its first occurrence with
+`readiness evaluation failed: <message>`.
+
 ### Recovering a merge tail stopped after its repair budget
 
 When a regression verdict fails after the automatic repair budget is exhausted,
