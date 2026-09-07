@@ -66,12 +66,11 @@ database lanes does not move it — 4, 6 and 8 lanes all landed within 3 seconds
 of each other over one fixed commit — because the waves saturate PostgreSQL and
 the CPU share together rather than running out of lanes. `NODE_COMPILE_CACHE`
 was measured and rejected: 80 seconds cold against 82 warm, for 77 MiB of cache.
-Use `scripts/gate-worker/bench-postgres.sh` and
-`scripts/gate-worker/bench-dbtest-concurrency.sh` when changing the database
-runner itself; each alternates its arms over one fixed commit so a tuning claim
-is not inferred from unrelated gate runs. The lane widths are overridable
-(`AGENTOS_GATE_UNIT_LANES`, `AGENTOS_GATE_DB_LANES`) for exactly that purpose; a
-gate never chooses them itself.
+That tuning direction is closed: the ceiling is work-bound, and the measurements
+behind it are recorded in operator records outside this repository. The lane
+widths stay overridable (`AGENTOS_GATE_UNIT_LANES`, `AGENTOS_GATE_DB_LANES`) so
+a measurement can hold one width fixed across runs that would otherwise differ;
+a gate never chooses them itself.
 
 `packages/db` and `packages/api` hand their database files to one pool rather
 than two waves. Dividing lanes between a five-file wave and a forty-two-file one
