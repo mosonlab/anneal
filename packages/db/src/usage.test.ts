@@ -154,3 +154,53 @@ test("sumSessionUsage leaves PI usage additive even with an incidental session_i
   assert.equal(total.outputTokens, 4);
   assert.equal(total.costUsd?.toString(), "2");
 });
+
+for (const modelUsage of [undefined, {}, { "claude-opus": { costUSD: 2 } }]) {
+  test(`sumSessionUsage retains later fallback tokens then replaces them with a cumulative snapshot (${JSON.stringify(modelUsage)})`, () => {
+    const events = [
+      {
+        ...claudeResult("provider-session", 1, 100, 10),
+        modelUsage: { "claude-opus": { inputTokens: 100, outputTokens: 10, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } },
+      },
+      {
+        type: "result",
+        session_id: "provider-session",
+        total_cost_usd: 2,
+        modelUsage,
+        usage: { input_tokens: 20, output_tokens: 2, cache_read_input_tokens: 5, cache_creation_input_tokens: 3 },
+      },
+    ];
+    const fallback = sumSessionUsage(events);
+    assert.equal(fallback.inputTokens, 128);
+    assert.equal(fallback.outputTokens, 12);
+    assert.equal(fallback.cachedInputTokens, 5);
+    assert.equal(fallback.cacheCreationInputTokens, 3);
+    assert.equal(fallback.costUsd?.toString(), "2");
+
+    const snapshot = claudeResult("provider-session", 3, 150, 15);
+    assert.deepEqual(sumSessionUsage([...events, snapshot]), extractUsage(snapshot));
+  });
+}
+
+test("sumSessionUsage groups Claude results when an unusable PI block does not claim them", () => {
+  const events = [1, 2].map((cost) => ({
+    ...claudeResult("provider-session", cost, cost * 100, cost * 10),
+    agentosPiUsage: {},
+  }));
+  assert.deepEqual(sumSessionUsage(events), extractUsage(events[1]));
+});
+
+for (const sessionId of [undefined, "", 123]) {
+  test(`sumSessionUsage diagnoses additive Claude results with unusable session_id (${JSON.stringify(sessionId)})`, (t) => {
+    const warn = t.mock.method(console, "warn", () => {});
+    const event = { ...claudeResult("unused", 1, 100, 10), session_id: sessionId };
+    const total = sumSessionUsage([event, event]);
+    assert.equal(total.inputTokens, 200);
+    assert.equal(total.outputTokens, 20);
+    assert.equal(total.costUsd?.toString(), "2");
+    assert.equal(warn.mock.callCount(), 2);
+    for (const call of warn.mock.calls) {
+      assert.match(String(call.arguments[0]), /Claude.*session_id.*additive/);
+    }
+  });
+}

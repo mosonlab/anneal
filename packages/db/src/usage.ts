@@ -99,12 +99,14 @@ const canonicalInputTokens = (uncached: number | null, cached: number | null): n
 /**
  * CLAUDE's terminal `result` carries a per-model breakdown under `modelUsage`,
  * keyed by model id, whose entries are camelCase — while the top-level `usage`
- * object is snake_case and describes ONE model, the primary one, repeated.
+ * object is snake_case and describes ONE model, the primary one.
  *
- * Verified against the real Claude captures transcribed in `usage.test.ts`: the
- * top-level `usage` equals `modelUsage["claude-opus-5"]` field for field, so
- * adding the two sources double-counts the primary model and reading only the
- * top-level one drops every secondary model. This branch is therefore
+ * In the single-invocation captures transcribed in `usage.test.ts`, top-level
+ * `usage` equals `modelUsage["claude-opus-5"]` field for field. On resume,
+ * `modelUsage` is session-cumulative while top-level `usage` remains per
+ * invocation; `sumSessionUsage` reconciles snapshots and later fallback usage.
+ * Adding both sources from one event double-counts the primary model, while
+ * reading only top-level usage drops secondary models. This branch is therefore
  * EXCLUSIVE, and the two vocabularies never share a key list.
  *
  * The returned input total is canonical: each model's provider-reported
@@ -250,6 +252,7 @@ export type ExtractedCacheSplit =
     };
 
 type DecodedUsage = {
+  providerSessionId: string | null;
   usage: SessionUsage;
   cacheSplit: ExtractedCacheSplit;
   /**
@@ -352,6 +355,7 @@ const decodeUsage = (payload: unknown, options: { strict?: boolean } = {}): Deco
       topLevelUsage: {},
       cumulativeModelUsage: null,
       cumulativeCostUsd: null,
+      providerSessionId: null,
     };
   }
   if (options.strict) validateProviderShapes(event);
@@ -367,7 +371,22 @@ const decodeUsage = (payload: unknown, options: { strict?: boolean } = {}): Deco
       topLevelUsage: {},
       cumulativeModelUsage: null,
       cumulativeCostUsd: null,
+      providerSessionId: null,
     };
+  }
+  // Classify only after the exclusive PI branch. Read the id from each event:
+  // one database Session can contain multiple conversations after a failed resume.
+  const isClaude = event.type === "result"
+    || Object.prototype.hasOwnProperty.call(event, "modelUsage")
+    || Object.prototype.hasOwnProperty.call(event, "total_cost_usd");
+  const providerSessionId = isClaude && typeof event.session_id === "string" && event.session_id.length > 0
+    ? event.session_id
+    : null;
+  if (providerSessionId === null && (
+    Object.prototype.hasOwnProperty.call(event, "modelUsage")
+    || Object.prototype.hasOwnProperty.call(event, "total_cost_usd")
+  )) {
+    console.warn("[usage] Claude cumulative usage has no usable session_id; retaining additive accounting");
   }
   const usage = asRecord(event.usage);
   const result: SessionUsage = {};
@@ -398,24 +417,15 @@ const decodeUsage = (payload: unknown, options: { strict?: boolean } = {}): Deco
   // not suppress valid top-level tokens, but its valid cost must still survive.
   // A reported terminal total remains authoritative when both sources exist.
   const cost = costAmount(event.total_cost_usd) ?? models?.costUsd ?? null;
+  const cumulativeModelUsage = hasModelTokens ? { ...result } : null;
   if (cost !== null) result.costUsd = cost;
-  let cumulativeModelUsage: SessionUsage | null = null;
-  if (hasModelTokens) {
-    cumulativeModelUsage = {};
-    if (models.inputTokens !== null) cumulativeModelUsage.inputTokens = models.inputTokens;
-    if (models.outputTokens !== null) cumulativeModelUsage.outputTokens = models.outputTokens;
-    if (models.cachedInputTokens !== null) cumulativeModelUsage.cachedInputTokens = models.cachedInputTokens;
-    if (models.cacheCreationInputTokens !== null) {
-      cumulativeModelUsage.cacheCreationInputTokens = models.cacheCreationInputTokens;
-    }
-  }
-  const cumulativeCostUsd = cost;
   return {
     usage: result,
     cacheSplit: cacheSplitFromUsage(result),
     topLevelUsage,
     cumulativeModelUsage,
-    cumulativeCostUsd,
+    cumulativeCostUsd: cost,
+    providerSessionId,
   };
 };
 
@@ -524,38 +534,12 @@ export const sumUsage = (usages: SessionUsage[]): SessionUsage => {
 };
 
 type ClaudeSessionUsage = {
-  /** The top-level `usage` block, which is per invocation. */
+  /** Per-invocation fallback tokens since the latest cumulative model snapshot. */
   topLevel: SessionUsage[];
   /** The latest cumulative model breakdown in event order, when present. */
   latestModelUsage: SessionUsage | null;
   /** The latest usable cumulative cost in event order, when present. */
   latestCostUsd: Prisma.Decimal | null;
-};
-
-/**
- * Return Claude's provider conversation id when a payload identifies one.
- * `session_id` is deliberately read from the payload rather than from the
- * database Session: one database Session can contain multiple provider
- * conversations after a failed resume and those conversations must add.
- */
-const providerSessionId = (payload: unknown): string | null => {
-  const event = asRecord(payload);
-  // Only Claude result-shaped payloads use `session_id` for the cumulative
-  // accounting described below. Keep an unrelated provider payload additive
-  // even if a future protocol happens to reuse that field.
-  if (
-    !event
-    || Object.prototype.hasOwnProperty.call(event, "agentosPiUsage")
-    || (
-      event.type !== "result"
-      && !Object.prototype.hasOwnProperty.call(event, "modelUsage")
-      && !Object.prototype.hasOwnProperty.call(event, "total_cost_usd")
-    )
-  ) {
-    return null;
-  }
-  const sessionId = event?.session_id;
-  return typeof sessionId === "string" && sessionId.length > 0 ? sessionId : null;
 };
 
 /**
@@ -565,8 +549,9 @@ const providerSessionId = (payload: unknown): string | null => {
  * the provider conversation identified by `session_id`; the latest usable
  * value for each is therefore selected once per provider conversation. The
  * top-level `usage` object remains per invocation. It is summed when a Claude
- * payload has no usable model breakdown (the same fallback used by
- * `extractUsage`). Payloads without a provider session id retain the original
+ * payload has no usable model breakdown after the latest cumulative snapshot
+ * (the same fallback used by `extractUsage`); a new snapshot replaces those
+ * earlier increments. Payloads without a provider session id retain the original
  * additive behavior used by Codex and PI.
  *
  * `payloads` must be in FINAL_OUTPUT sequence order. The recompute path reads
@@ -579,7 +564,7 @@ export const sumSessionUsage = (payloads: readonly unknown[]): SessionUsage => {
 
   for (const payload of payloads) {
     const decoded = decodeUsage(payload);
-    const sessionId = providerSessionId(payload);
+    const sessionId = decoded.providerSessionId;
     if (sessionId === null) {
       ungrouped.push(decoded.usage);
       continue;
@@ -590,16 +575,21 @@ export const sumSessionUsage = (payloads: readonly unknown[]): SessionUsage => {
       latestModelUsage: null,
       latestCostUsd: null,
     } satisfies ClaudeSessionUsage;
-    session.topLevel.push(decoded.topLevelUsage);
-    if (decoded.cumulativeModelUsage !== null) session.latestModelUsage = decoded.cumulativeModelUsage;
+    if (decoded.cumulativeModelUsage !== null) {
+      session.latestModelUsage = decoded.cumulativeModelUsage;
+      session.topLevel = [];
+    } else {
+      session.topLevel.push(decoded.topLevelUsage);
+    }
     if (decoded.cumulativeCostUsd !== null) session.latestCostUsd = decoded.cumulativeCostUsd;
     claudeSessions.set(sessionId, session);
   }
 
   for (const session of claudeSessions.values()) {
-    const usage = session.latestModelUsage === null
-      ? sumUsage(session.topLevel)
-      : { ...session.latestModelUsage };
+    const usage = sumUsage([
+      ...(session.latestModelUsage === null ? [] : [session.latestModelUsage]),
+      ...session.topLevel,
+    ]);
     if (session.latestCostUsd !== null) usage.costUsd = session.latestCostUsd;
     ungrouped.push(usage);
   }
