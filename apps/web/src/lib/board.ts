@@ -4,10 +4,6 @@ import { formatDateTime, formatT } from "./format";
 import { cronProse } from "./schedule";
 import type { BoardClaimRefusal, BoardLatestRun, BoardTask, ChainAggregate, RunStatus, TaskStatus } from "./types";
 
-// Keep the board helper's existing type export stable while the canonical
-// declaration lives in the shared wire contract.
-export type { BoardClaimRefusal } from "./types";
-
 /** The board's five columns, in the order they are read. Backlog is first: it is
  *  where work waits before it is queued, and the scheduler never picks anything
  *  out of it. */
@@ -318,10 +314,6 @@ export const STALLED_AFTER_MS = 5 * 60_000;
 /** Which baseline comparison the over-baseline badge fired on. */
 export type OverBaselineMetric = "cost" | "duration" | "both";
 
-export const claimRefusalFromRun = (
-  run: BoardLatestRun | null | undefined,
-): BoardClaimRefusal | null => run?.claimRefusal ?? null;
-
 /** One anomaly a card calls out on its newest run, with the figures its hover
  *  text names. */
 export type CardBadge =
@@ -334,7 +326,7 @@ export type CardBadge =
  *  cards. Presence is the server's explicit signal; absence is unknown and
  *  must never produce a warning. */
 export const claimRefusalBadge = (run: BoardLatestRun | null | undefined): CardBadge | null => {
-  const refusal = claimRefusalFromRun(run);
+  const refusal = run?.claimRefusal ?? null;
   return refusal === null ? null : { kind: "claim-refusal", ...refusal };
 };
 

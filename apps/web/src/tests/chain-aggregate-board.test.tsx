@@ -7,10 +7,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { ChainAggregateCard } from "../components/chain-aggregate-card";
 import { BoardColumn } from "../components/desktop-board";
 import { MobileTaskList } from "../components/mobile-task-list";
-import { COLUMNS, type BoardClaimRefusal, type BoardEntry, boardEntries, boardEntriesByStatus, countByStatus } from "../lib/board";
+import { COLUMNS, type BoardEntry, boardEntries, boardEntriesByStatus, countByStatus } from "../lib/board";
 import { LocaleProvider } from "../lib/i18n";
 import { translate } from "../lib/i18n-core";
-import type { BoardTask, ChainAggregate, TaskStatus } from "../lib/types";
+import type { BoardClaimRefusal, BoardTask, ChainAggregate, TaskStatus } from "../lib/types";
 import { useTaskStartConfirmation } from "../pages/Tasks";
 import { boardRun } from "./board-run";
 import { installDom, mountPage, reactDom } from "./dom-harness";
@@ -51,12 +51,10 @@ const AGGREGATE_REFUSAL: BoardClaimRefusal = {
   since: "2026-08-28T00:00:10.000Z",
 };
 
-/** Keep the aggregate fixture usable while the API child adds this optional
- * field to the shared BoardLatestRun contract. */
 const aggregateClaimRefusalRun = (executorVersion: number | null = AGGREGATE_REFUSAL.executorVersion): RunWithTier => ({
   ...runWithTier({ status: "QUEUED" }),
   claimRefusal: { ...AGGREGATE_REFUSAL, executorVersion },
-} as RunWithTier);
+});
 
 const activeRepairAggregate = (overrides: Partial<ChainAggregate> = {}): AggregateWithRepair => ({
   ...aggregate(overrides),

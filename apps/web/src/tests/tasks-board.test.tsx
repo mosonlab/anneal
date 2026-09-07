@@ -11,13 +11,13 @@ import { BOARD, BOARD_GRID, CARD_PAGE_SIZE, BoardArrows, BoardColumn, BoardNavig
 import { MobileTaskList } from "../components/mobile-task-list";
 import { PaginatedBoardEntries } from "../components/paginated-board-entries";
 import { cardModel, cardTime, cardTitle, TaskCard } from "../components/task-card";
-import { COLUMNS, STALLED_AFTER_MS, type BoardClaimRefusal, type BoardEntry, boardEntries, columnStep, countByStatus, heldChains, parkedChains, taskBoardEntry } from "../lib/board";
+import { COLUMNS, STALLED_AFTER_MS, type BoardEntry, boardEntries, columnStep, countByStatus, heldChains, parkedChains, taskBoardEntry } from "../lib/board";
 import { LocaleProvider } from "../lib/i18n";
 import { translate } from "../lib/i18n-core";
 import { ProjectProvider } from "../lib/project";
 import { storage } from "../lib/storage";
 import { BOARD_PAGE, ActivateAllDialog, ChainFilterControl, HoldAllDialog, TasksPage, activateAllNotice, archiveDoneNotice, holdAllNotice, moveAction, moveNotAllowedNotice, stableRows, startabilityRefusal, tasksForChain, useTaskStartConfirmation } from "../pages/Tasks";
-import type { BoardTask, ChainAggregate, ChainAggregateState, ChainProgress, TaskStartability, TaskStatus } from "../lib/types";
+import type { BoardClaimRefusal, BoardTask, ChainAggregate, ChainAggregateState, ChainProgress, TaskStartability, TaskStatus } from "../lib/types";
 import { boardRun } from "./board-run";
 import { type PageHarness, installDom, mountPage, reactDom } from "./dom-harness";
 
@@ -47,13 +47,10 @@ const CLAIM_REFUSAL: BoardClaimRefusal = {
   since: "2026-08-16T00:00:10.000Z",
 };
 
-/** The shared contract gains this optional field with the API projection. The
- * cast keeps this predecessor-based Web test runnable before that API slice is
- * integrated, while preserving the exact serialized fixture shape. */
 const claimRefusalRun = (executorVersion: number | null = CLAIM_REFUSAL.executorVersion): NonNullable<BoardTask["latestRun"]> => ({
   ...boardRun({ status: "QUEUED" }),
   claimRefusal: { ...CLAIM_REFUSAL, executorVersion },
-} as NonNullable<BoardTask["latestRun"]>);
+});
 
 const localizedCard = (locale: "en" | "zh", overrides: Partial<BoardTask> = {}): string => renderToStaticMarkup(
   <LocaleProvider initialLocale={locale}><TaskCard task={task(overrides)} actions={ACTIONS} /></LocaleProvider>,
@@ -851,6 +848,8 @@ test("a mechanical claim refusal is a red localized badge on cards and the phone
   const unversioned = cardAt({ latestRun: claimRefusalRun(null) });
   assert.match(unversioned, />executor unversioned ≠ API v2</u);
   assert.match(mobile("TODO", boardEntries([task({ latestRun: run })])), /executor v1 ≠ API v2/u);
+  assert.match(mobile("TODO", boardEntries([task({ latestRun: claimRefusalRun(null) })])), /executor unversioned ≠ API v2/u);
+  assert.doesNotMatch(mobile("TODO", boardEntries([task({ latestRun: boardRun({ status: "QUEUED" }) })])), /data-card-badge="claim-refusal"/u);
 
   // The existing absence rule remains intact: a queued Run without the
   // projected field is not accused of a contract mismatch.

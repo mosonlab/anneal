@@ -151,8 +151,8 @@ export type BoardRow = {
      *  permanently queued. */
     readyAt: Date;
     /** Read only to qualify a claim-refusal activity; it never reaches the
-     *  browser projection. Optional keeps pure board-card fixtures narrow. */
-    createdAt?: Date;
+     *  browser projection. Required so both selects must supply it. */
+    createdAt: Date;
     /** Run start, retained across all attempts for the Chain lead-time origin. */
     startedAt: Date | null;
     endedAt: Date | null;
@@ -1027,7 +1027,7 @@ const readClaimRefusals = async (
   const runCreatedAtByTask = new Map<string, Date>();
   for (const row of rows) {
     const run = row.runs?.[0];
-    if (run?.status !== "QUEUED" || !(run.createdAt instanceof Date) || Number.isNaN(run.createdAt.getTime())) continue;
+    if (run?.status !== "QUEUED") continue;
     if (!runCreatedAtByTask.has(row.id)) runCreatedAtByTask.set(row.id, run.createdAt);
   }
   if (runCreatedAtByTask.size === 0) return new Map();
@@ -1045,15 +1045,13 @@ const readClaimRefusals = async (
   for (const activity of activities) {
     if (refusals.has(activity.taskId)) continue;
     const runCreatedAt = runCreatedAtByTask.get(activity.taskId);
-    if (runCreatedAt === undefined || !(activity.createdAt instanceof Date) || Number.isNaN(activity.createdAt.getTime()) || activity.createdAt < runCreatedAt) continue;
+    if (runCreatedAt === undefined || activity.createdAt < runCreatedAt) continue;
     const metadata = activity.metadata;
     if (metadata === null || typeof metadata !== "object" || Array.isArray(metadata)) continue;
     const raw = metadata as Record<string, unknown>;
-    if (raw.code !== MECHANICAL_CONTRACT_MISMATCH_CODE
-      || typeof raw.apiVersion !== "number"
-      || !Number.isInteger(raw.apiVersion)
+    if (typeof raw.apiVersion !== "number"
       || (raw.executorVersion !== null
-        && (typeof raw.executorVersion !== "number" || !Number.isInteger(raw.executorVersion)))) continue;
+        && typeof raw.executorVersion !== "number")) continue;
     const executorVersion = raw.executorVersion === null ? null : raw.executorVersion as number;
     refusals.set(activity.taskId, {
       code: MECHANICAL_CONTRACT_MISMATCH_CODE,
