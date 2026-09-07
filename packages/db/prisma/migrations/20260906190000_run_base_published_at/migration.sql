@@ -1,0 +1,13 @@
+-- When a Run's provisioning base commit reached the repo remote.
+--
+-- `baseSha` is recorded when the workspace is provisioned, before anything is
+-- pushed, so a Run that dies before its push leaves a base commit that exists
+-- only in a workspace that is later discarded. Pinning a review, fix or
+-- regression range to such a commit strands the whole chain on the runner with
+-- `upload-pack: not our ref`. This column is written beside every publication
+-- ACK, so the pinned base can require published evidence.
+--
+-- Deliberately not backfilled: no row written before this release carries the
+-- evidence, and inventing it would assert publication the platform never
+-- observed. The selector reads a NULL marker through the Run's own outcome.
+ALTER TABLE "Run" ADD COLUMN "basePublishedAt" TIMESTAMP(3);

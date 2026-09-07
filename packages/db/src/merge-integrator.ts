@@ -253,9 +253,18 @@ export type DecisionBinding = {
   inboxMessageId: string;
 };
 
+export type TrainAuthorization = {
+  publishHead: string;
+  predecessorOid: string;
+  ref: string;
+  position: number;
+  trainTaskId: string;
+};
+
 export type AuthorizationPayload = MergeEvidence & {
   issuedAt: string;
   decision: DecisionBinding;
+  train?: TrainAuthorization;
 };
 
 export const authorizationMetadata = (payload: AuthorizationPayload): Record<string, unknown> => ({
@@ -298,6 +307,35 @@ export const parseAuthorizationMetadata = (metadata: unknown): AuthorizationPars
   if (typeof value.issuedAt !== "string" || Number.isNaN(Date.parse(value.issuedAt))) {
     return { status: "malformed", reason: "malformed issuedAt" };
   }
+  let train: TrainAuthorization | undefined;
+  if (value.train !== undefined) {
+    if (typeof value.train !== "object" || value.train === null || Array.isArray(value.train)) {
+      return { status: "malformed", reason: "malformed train publication descriptor" };
+    }
+    const descriptor = value.train as Record<string, unknown>;
+    if (typeof descriptor.publishHead !== "string" || !SHA_PATTERN.test(descriptor.publishHead)) {
+      return { status: "malformed", reason: "malformed train.publishHead" };
+    }
+    if (typeof descriptor.predecessorOid !== "string" || !SHA_PATTERN.test(descriptor.predecessorOid)) {
+      return { status: "malformed", reason: "malformed train.predecessorOid" };
+    }
+    if (descriptor.ref !== `refs/anneal/train/${descriptor.publishHead}`) {
+      return { status: "malformed", reason: "train.ref does not match train.publishHead" };
+    }
+    if (typeof descriptor.position !== "number" || !Number.isInteger(descriptor.position) || descriptor.position <= 0) {
+      return { status: "malformed", reason: "malformed train.position" };
+    }
+    if (typeof descriptor.trainTaskId !== "string" || descriptor.trainTaskId.length === 0) {
+      return { status: "malformed", reason: "missing train.trainTaskId" };
+    }
+    train = {
+      publishHead: descriptor.publishHead,
+      predecessorOid: descriptor.predecessorOid,
+      ref: descriptor.ref,
+      position: descriptor.position,
+      trainTaskId: descriptor.trainTaskId,
+    };
+  }
   // The evidence half is validated by the same parser that reads a card body,
   // so a payload and the block it was copied from cannot diverge in what counts
   // as well-formed.
@@ -316,17 +354,19 @@ export const parseAuthorizationMetadata = (metadata: unknown): AuthorizationPars
   if (evidence.status !== "ok") {
     return { status: "malformed", reason: evidence.status === "unparseable" ? evidence.reason : "missing evidence fields" };
   }
+  const payload: AuthorizationPayload = {
+    ...evidence.evidence,
+    issuedAt: value.issuedAt,
+    decision: {
+      channel: binding.channel,
+      inboxDecisionId: binding.inboxDecisionId,
+      inboxMessageId: binding.inboxMessageId,
+    },
+  };
+  if (train) payload.train = train;
   return {
     status: "ok",
-    payload: {
-      ...evidence.evidence,
-      issuedAt: value.issuedAt,
-      decision: {
-        channel: binding.channel,
-        inboxDecisionId: binding.inboxDecisionId,
-        inboxMessageId: binding.inboxMessageId,
-      },
-    },
+    payload,
   };
 };
 
@@ -483,6 +523,8 @@ export const STOP_CONDITIONS = [
   "unresolved-mergeability",
   "payload-mismatch",
   "changed-underneath-me",
+  "train-precondition-failed",
+  "train-publish-rejected",
   "target-unresolvable",
   "deferred-merge-machinery",
   "missing-or-malformed-result",
@@ -545,6 +587,8 @@ export const STOP_CHOICES: Record<StopCondition, StopChoice[]> = {
   "unresolved-mergeability": RESUMABLE,
   "payload-mismatch": RESUMABLE,
   "changed-underneath-me": ["accept-foreign-merge", "flag-incident"],
+  "train-precondition-failed": RESUMABLE,
+  "train-publish-rejected": RESUMABLE,
   "target-unresolvable": ["open-repair", "abandon"],
   "deferred-merge-machinery": RESUMABLE,
   "missing-or-malformed-result": RESUMABLE,
