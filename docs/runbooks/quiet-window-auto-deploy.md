@@ -727,8 +727,8 @@ target commit `to` first and its `reason` second:
   full target commit. The retry deadline and self-clear rules in this section
   own a qualifying marker end to end; the commit main points at does not change
   its answer, in either direction. A transient-looking reason on a marker with
-  any other `to` (missing, `unknown`, or a value that is neither) is host-scoped
-  instead: it spends no retry attempt and blocks every deploy.
+  any other `to` (missing, or neither a full commit oid nor `unknown`) is
+  host-scoped instead: it spends no retry attempt and blocks every deploy.
 - **commit-scoped** — any other reason on a marker whose `to` is a full commit
   oid: the failure was determined by that commit (its non-transport artifact
   build, its migration, or its verification). It blocks that commit and only
