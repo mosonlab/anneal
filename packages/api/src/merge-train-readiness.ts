@@ -158,6 +158,12 @@ export const pendingMergeTrains = async (db: PrismaClient | Prisma.TransactionCl
   const tasks = await db.task.findMany({ where: {
     chainId: null,
     activity: { some: { actorType: "control-plane", metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.train } } },
+    // Train cards are never retried. Exclude terminal histories in the query
+    // so an off-by-default worker does not reread every historical train.
+    NOT: { activity: { some: {
+      actorType: "control-plane", metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.train },
+      OR: [{ metadata: { path: ["state"], equals: "settled" } }, { metadata: { path: ["state"], equals: "aborted" } }],
+    } } },
   }, select: { id: true, projectId: true, repoId: true }, orderBy: [{ createdAt: "asc" }, { id: "asc" }] });
   const pending: PendingTrain[] = [];
   for (const task of tasks) {
