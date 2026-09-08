@@ -33,7 +33,7 @@ import { evidenceTick } from "./merge-evidence-worker.js";
 import { readinessTick } from "./merge-readiness-worker.js";
 import { claimRun } from "./run-claim.js";
 import { completeRun } from "./run-completion.js";
-import { contentionAlertAfterMs, noteLeaseContention } from "./merge-lease-contention.js";
+import { observeLeaseEpisode } from "./merge-lease-contention.js";
 import { claimReadinessStep } from "./readiness-claim.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
@@ -1391,14 +1391,14 @@ test("a contended merge Lease defers the train with a durable, operator-visible 
   const candidate = seed.candidates[0]!;
   const claim = await claimReadinessStep(db, candidate.readiness.id, new Date(TEST_NOW.getTime() + 2_000));
   assert.ok(claim);
-  const alerted = await noteLeaseContention(db, {
+  const alerted = await observeLeaseEpisode(db, claim, {
     target: { projectId: seed.project.id, chainId: candidate.chainId },
-    readinessTaskId: candidate.readiness.id,
+    taskId: candidate.readiness.id,
     holder: { holder: "another-chain", task: "task-9", reason: "chain merge tail", acquiredAt: TEST_NOW.toISOString(), sha: "e".repeat(40) },
     now: new Date(TEST_NOW.getTime() + 31 * 60_000),
-    claim,
-  }, contentionAlertAfterMs({ MERGE_LEASE_CONTENTION_ALERT_MINUTES: "30" }));
-  assert.equal(alerted, "alerted");
+    family: "lease-contention", answer: "contended",
+  });
+  assert.equal(alerted?.transition, "alerted");
   assert.equal(await db.inboxMessage.count({ where: { dedupeKey: { startsWith: "merge-lease-contention:" } } }), 1);
   // The test-owned alert claim must finish before a later train tick can claim it.
   const alertAt = new Date(TEST_NOW.getTime() + 31 * 60_000);
@@ -1604,7 +1604,7 @@ test("a train deferral closes the executor-offline episode when authorization is
   const seed = await seedTrainCandidates(1, { evidenceBaseSha: "9".repeat(40) });
   const candidate = seed.candidates[0]!;
   const episodeStartedAt = new Date(TEST_NOW.getTime() - 60_000).toISOString();
-  const marker = await db.taskActivity.create({ data: {
+  await db.taskActivity.create({ data: {
     taskId: candidate.readiness.id,
     actorType: "control-plane",
     body: "Merge readiness withheld its authorization: merge-executor-offline",
@@ -1625,7 +1625,10 @@ test("a train deferral closes the executor-offline episode when authorization is
   assert.equal(result.authorized, 0);
   assert.equal(result.requeued, 0, "base drift defers for a train without rerunning Regression");
   assert.equal(livenessReads, 0, "an unconfigured allowlist is unblocked without reading the registry");
-  const persisted = await db.taskActivity.findUniqueOrThrow({ where: { id: marker.id } });
+  const persisted = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: candidate.readiness.id,
+    metadata: { path: ["state"], equals: "requeued-executor-offline" },
+  }, orderBy: [{ createdAt: "desc" }, { id: "desc" }] });
   assert.equal((persisted.metadata as Record<string, unknown>).episodeStartedAt, episodeStartedAt);
   assert.equal((persisted.metadata as Record<string, unknown>).episodeClosed, true);
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.regression.id } })).status, TaskStatus.DONE);

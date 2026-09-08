@@ -4,14 +4,13 @@ import test from "node:test";
 import { TaskStatus, type PrismaClient } from "@anneal/db";
 
 import {
-  MERGE_EXECUTOR_OFFLINE_WAIT_MS,
   executorsBlockingAuthorization,
   READINESS_CLAIM_LEASE_MS,
   READINESS_READ_BUDGET_MS,
   startReadinessWorker,
 } from "./merge-readiness-worker.js";
 import { waitUntil } from "./worker-tick-wait.js";
-import { createRunnerRegistry, RUNNER_FORGET_MS } from "./runners.js";
+import { createRunnerRegistry } from "./runners.js";
 
 const withExecutorAllowlist = (runnerIds: string | undefined, body: () => void): void => {
   const previous = process.env.MERGE_EXECUTOR_RUNNER_IDS;
@@ -48,10 +47,6 @@ test("readiness reads merge executor liveness from the registry GET /runners rep
   withExecutorAllowlist(undefined, () => {
     assert.deepEqual(executorsBlockingAuthorization(() => []), []);
   });
-});
-
-test("the executor-offline wait reuses the window after which the registry forgets a daemon", () => {
-  assert.equal(MERGE_EXECUTOR_OFFLINE_WAIT_MS, RUNNER_FORGET_MS);
 });
 
 const wait = (milliseconds: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -274,29 +269,6 @@ test("closing an offline episode cannot mutate a marker after claim loss", async
   await closeExecutorOfflineEpisodeTx(tx as unknown as import("@anneal/db").Prisma.TransactionClient,
     "readiness", claim, "executor observed online");
   assert.equal(reads, 0);
-});
-
-test("a claimed live observation closes the episode once and records why", async () => {
-  const { closeExecutorOfflineEpisodeTx } = await import("./merge-readiness-worker.js");
-  const marker = { id: "offline", createdAt: new Date(), metadata: { episodeStartedAt: "2026-09-01T00:00:00.000Z" } as Record<string, unknown> };
-  const activities: string[] = [];
-  const tx = { taskActivity: {
-    findFirst: async () => marker,
-    update: async (input: { data: { metadata: Record<string, unknown> } }) => { marker.metadata = input.data.metadata; },
-    create: async (input: { data: { body: string } }) => { activities.push(input.data.body); },
-  } } as unknown as import("@anneal/db").Prisma.TransactionClient;
-  const claim = {
-    settle: async <T>(client: import("@anneal/db").Prisma.TransactionClient,
-      transition: import("./readiness-claim.js").ReadinessClaimTransition<T>) => {
-      assert.equal(transition.kind, "keep");
-      return { settled: true, claim: "retained", value: await transition.apply(client) };
-    },
-  } as unknown as import("./readiness-claim.js").ReadinessClaimHandle;
-  await closeExecutorOfflineEpisodeTx(tx, "readiness", claim, "executor observed online on a skipped tick");
-  await closeExecutorOfflineEpisodeTx(tx, "readiness", claim, "executor observed online on a skipped tick");
-  assert.equal(marker.metadata.episodeClosed, true);
-  assert.equal(activities.length, 1);
-  assert.match(activities[0]!, /executor observed online on a skipped tick/u);
 });
 
 for (const allowlist of ["", "merge-executor-1"]) {

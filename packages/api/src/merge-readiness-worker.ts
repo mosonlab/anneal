@@ -22,10 +22,8 @@ import {
   executorOfflineDetail,
   latestExecutorOfflineMarker,
   openEpisodeStart,
-  closeExecutorOfflineEpisodeTx as closeOfflineEpisodeTx,
   mergeExecutorsBlockingAuthorization,
   MERGE_EXECUTOR_OFFLINE_REASON,
-  MERGE_EXECUTOR_OFFLINE_STATE,
   MergeGateAuthorizationError,
   MERGE_TAIL_KIND,
   parseRegressionVerdict,
@@ -46,7 +44,7 @@ import { mergeTrainWidth } from "./startup-config.js";
 import { mergeTrainReadinessTick, pendingMergeTrains } from "./merge-train-readiness.js";
 
 import { lockTaskMutationRows } from "./task-write.js";
-import { RUNNER_FORGET_MS, type DaemonSnapshot } from "./runners.js";
+import { type DaemonSnapshot } from "./runners.js";
 import { openDefenseAuditNotice, stopMergeTail } from "./merge-tail-actions.js";
 import {
   adoptRecoveryHead,
@@ -72,8 +70,8 @@ import {
   type WithMergeLease,
 } from "./merge-lease.js";
 import type { MergeLeaseTarget } from "./merge-lease-hold.js";
-import { clearLeaseContention, noteLeaseContention } from "./merge-lease-contention.js";
-import type { MergeLeaseHolder } from "../../../scripts/merge-lease-adapter.mjs";
+import { observeLeaseEpisode } from "./merge-lease-contention.js";
+import { observeEpisode } from "./merge-tail-episode.js";
 import {
   claimReadinessStep,
   READINESS_CLAIM_LEASE_MS,
@@ -515,17 +513,7 @@ export const requeueRegressionSettlement = (
  */
 export type DaemonSnapshotReader = () => DaemonSnapshot[];
 
-const EXECUTOR_OFFLINE_STATE = MERGE_EXECUTOR_OFFLINE_STATE;
 export { MERGE_EXECUTOR_OFFLINE_REASON };
-
-/**
- * How long readiness waits at the door for a merge executor before the tail
- * stops. It is `RUNNER_FORGET_MS` because that is the existing ceiling on the
- * same liveness fact: past it the registry has forgotten the daemon entirely,
- * so this is no longer a restart to wait out. It is not a new configuration
- * surface, and the wait spends no regression repair budget: nothing is rerun.
- */
-export const MERGE_EXECUTOR_OFFLINE_WAIT_MS = RUNNER_FORGET_MS;
 
 /**
  * The configured merge executors when none of them is online, which is exactly
@@ -556,26 +544,12 @@ const executorOfflineRequeueSettlement = (
   input: {
     readinessTaskId: string;
     regressionTaskId: string;
-    executorRunnerIds: string[];
-    episodeStartedAt: Date;
     now: Date;
   },
 ): ReadinessSettlement => readinessSettlement("requeue", {
   taskId: input.regressionTaskId,
   at: input.now,
   apply: async (tx) => {
-    await tx.taskActivity.create({ data: {
-      taskId: input.readinessTaskId,
-      actorType: "control-plane",
-      body: `Merge readiness withheld its authorization: ${executorOfflineDetail(input.executorRunnerIds)}`,
-      metadata: {
-        kind: MERGE_TAIL_KIND.readiness,
-        state: EXECUTOR_OFFLINE_STATE,
-        reason: MERGE_EXECUTOR_OFFLINE_REASON,
-        executorRunnerIds: input.executorRunnerIds,
-        episodeStartedAt: input.episodeStartedAt.toISOString(),
-      },
-    } });
     await tx.task.update({
       where: { id: input.readinessTaskId },
       data: { status: TaskStatus.TODO, failureReason: null },
@@ -596,7 +570,8 @@ export const closeExecutorOfflineEpisodeTx = async (
 ): Promise<void> => {
   await claim.settle(tx, {
     kind: "keep",
-    apply: (client) => closeOfflineEpisodeTx(client, readinessTaskId, observation),
+    apply: (client) => observeEpisode(client, { taskId: readinessTaskId, family: "executor-offline",
+      answer: "resolved", now: new Date(), detail: observation }),
   });
 };
 
@@ -616,49 +591,54 @@ export const closeExecutorOfflineEpisode = async (
  * by the current outage; past the ceiling the tail parks in REVIEW naming the
  * outage, like every other readiness stop.
  */
-const executorOfflineSettlement = async (
-  db: Prisma.TransactionClient,
+const executorOfflineSettlement = (
   read: ClaimedReadiness,
   executorRunnerIds: string[],
-): Promise<ReadinessSettlement> => {
-  const { readiness, regression, recovery } = read;
-  const now = read.input.now;
-  const episodeStartedAt = openEpisodeStart(await latestExecutorOfflineMarker(db, readiness.id)) ?? now;
-  const waitedMs = now.getTime() - episodeStartedAt.getTime();
-  if (waitedMs >= MERGE_EXECUTOR_OFFLINE_WAIT_MS) {
-    await closeExecutorOfflineEpisodeTx(db, readiness.id, read.claim, "executor-offline ceiling reached");
-    return stopReadinessSettlement({
-      readinessTaskId: readiness.id,
-      regressionTaskId: regression.id,
-      reason: `${executorOfflineDetail(executorRunnerIds)} after ${Math.round(waitedMs / 60_000)} minutes`,
-      recovery,
-      refusalCode: null,
-      now,
+): ReadinessSettlement => ({
+  kind: "requeue",
+  taskId: read.regression.id,
+  body: async (tx, claim) => {
+    // Observation and the resulting stop/requeue commit together. A failed
+    // settlement cannot consume the episode's one alert transition.
+    const observation = await claim.settle(tx, {
+      kind: "keep",
+      apply: (client) => observeEpisode(client, { taskId: read.readiness.id,
+        family: "executor-offline", answer: "offline", now: read.input.now, executorRunnerIds,
+        detail: executorOfflineDetail(executorRunnerIds) }),
     });
-  }
-  return executorOfflineRequeueSettlement({
-    readinessTaskId: readiness.id,
-    regressionTaskId: regression.id,
-    executorRunnerIds,
-    episodeStartedAt,
-    now,
-  });
-};
+    if (!observation.settled) return { value: { applied: false },
+      leaseOutcome: heldLeaseOutcome(observation.ownership, read.regression.id) };
+    const stopped = observation.value.transition === "alerted";
+    const settlement = stopped ? stopReadinessSettlement({
+      readinessTaskId: read.readiness.id, regressionTaskId: read.regression.id,
+      reason: `${executorOfflineDetail(executorRunnerIds)} after ${Math.round(
+        (read.input.now.getTime() - observation.value.startedAt!.getTime()) / 60_000)} minutes`,
+      recovery: read.recovery, refusalCode: null, now: read.input.now,
+    }) : executorOfflineRequeueSettlement({
+      readinessTaskId: read.readiness.id, regressionTaskId: read.regression.id, now: read.input.now,
+    });
+    const applied = await settlement.body(tx, claim);
+    if (applied.value.applied && stopped) await observeEpisode(tx, {
+      taskId: read.readiness.id, family: "executor-offline", answer: "resolved", now: read.input.now,
+      detail: "readiness stopped for executor-offline ceiling",
+    });
+    return { ...applied, value: { ...applied.value, stopped } };
+  },
+});
 
 const settleExecutorOffline = async (
-  db: PrismaClient,
   read: ClaimedReadiness,
   executorRunnerIds: string[],
   result: ReadinessTickResult,
   runner: ReadinessSettlementRunner,
 ): Promise<Extract<ReadinessSettlementApplication, { kind: "settled" }>> => {
-  const settlement = await db.$transaction((tx) => executorOfflineSettlement(tx, read, executorRunnerIds));
+  const settlement = executorOfflineSettlement(read, executorRunnerIds);
   const application = await runner.apply(settlement, read.claim);
   if (application.kind === "acquire-lease") {
     throw new Error("Readiness executor-offline settlement requested a Merge Lease");
   }
   if (application.outcome.value.applied) {
-    if (settlement.kind === "stop") result.stopped += 1;
+    if (application.outcome.value.stopped) result.stopped += 1;
     else result.requeued += 1;
   }
   return application;
@@ -1188,52 +1168,6 @@ const applyReadinessDecision = async (
   });
 };
 
-/**
- * Contention bookkeeping is what the tick reports, not what it depends on: the
- * lease is held either way and this chain comes back on the next tick. A failed
- * write is said out loud here rather than raised, because the readiness catch
- * below stops the merge tail, and losing visibility of a contention must not
- * also stop the chain that reported it.
- */
-const recordContention = async (
-  db: PrismaClient,
-  input: {
-    target: MergeLeaseTarget | null;
-    readinessTaskId: string;
-    holder: MergeLeaseHolder | null;
-    now: Date;
-    claim: ReadinessClaimHandle;
-  },
-): Promise<void> => {
-  if (!input.target) return;
-  try {
-    await noteLeaseContention(db, {
-      target: input.target,
-      readinessTaskId: input.readinessTaskId,
-      holder: input.holder,
-      now: input.now,
-      claim: input.claim,
-    });
-  } catch (error: unknown) {
-    console.error(`Recording merge Lease contention for chain ${input.target.chainId} failed`, error);
-  }
-};
-
-const forgetContention = async (
-  db: PrismaClient,
-  target: MergeLeaseTarget | null,
-  readinessTaskId: string,
-  now: Date,
-  claim: ReadinessClaimHandle,
-): Promise<void> => {
-  if (!target) return;
-  try {
-    await clearLeaseContention(db, { target, readinessTaskId, now, claim });
-  } catch (error: unknown) {
-    console.error(`Clearing merge Lease contention for chain ${target.chainId} failed`, error);
-  }
-};
-
 const runReadinessDecision = async (
   db: PrismaClient,
   read: ClaimedReadiness,
@@ -1259,11 +1193,14 @@ const runReadinessDecision = async (
   // readiness while its executor is down. The check that decides is the one
   // under the Lease, below; this one only spares an outage the cost of taking
   // a Lease every tick, exactly as the pre-acquire read spares a base move one.
-  // Settling here also ends the contention episode below.
   const blockedExecutors = executorsBlockingAuthorization(daemons);
+  if (target && ((decision.kind === "authorize" && blockedExecutors.length > 0)
+    || decision.kind === "stop" || decision.kind === "requeue-regression")) {
+    await observeLeaseEpisode(db, claim, { taskId: readiness.id, target,
+      family: "lease-contention", answer: "resolved", now: read.input.now });
+  }
   if (decision.kind === "authorize" && blockedExecutors.length > 0) {
-    await forgetContention(db, target, readiness.id, read.input.now, claim);
-    await settleExecutorOffline(db, read, blockedExecutors, result, preAcquireRunner);
+    await settleExecutorOffline(read, blockedExecutors, result, preAcquireRunner);
     return;
   }
 
@@ -1272,15 +1209,6 @@ const runReadinessDecision = async (
   if (blockedExecutors.length === 0 || regressionWillRequeue || decision.kind === "stop") {
     await closeExecutorOfflineEpisode(db, readiness.id, claim,
       blockedExecutors.length === 0 ? "executor observed online" : `readiness ${decision.kind}`);
-  }
-
-  // The alert window measures continuous contention, so anything other than
-  // another refusal breaks the run. Only an authorization reaches for the
-  // Lease; a skip, deferral, requeue or stop settles before it and ends the
-  // episode here, while this Handle still owns the Step -- a settling
-  // transition clears the claim, and the fenced write would then be refused.
-  if (decision.kind !== "authorize") {
-    await forgetContention(db, target, readiness.id, read.input.now, claim);
   }
 
   const application = await applyReadinessDecision(
@@ -1305,7 +1233,8 @@ const runReadinessDecision = async (
     // episode, and it is recorded here rather than after the window closes:
     // the settlement below may be the terminal transition, which clears the
     // claim this write is fenced by.
-    await forgetContention(db, target, readiness.id, read.input.now, claim);
+    if (target) await observeLeaseEpisode(db, claim, { taskId: readiness.id, target,
+      family: "lease-contention", answer: "resolved", now: read.input.now });
 
     // Regression evidence is durable before this short Lease window. Repeat
     // the remote decision after acquisition so a base move between the first
@@ -1325,7 +1254,6 @@ const runReadinessDecision = async (
     }
     if (leasedDecision.kind === "authorize" && leasedBlockedExecutors.length > 0) {
       const settlement = await settleExecutorOffline(
-        db,
         read,
         leasedBlockedExecutors,
         result,
@@ -1352,20 +1280,11 @@ const runReadinessDecision = async (
       value,
     };
   }, db);
-  if (leased.outcome === "contended") {
-    await recordContention(db, {
-      target,
-      readinessTaskId: readiness.id,
-      holder: leased.holder ?? null,
-      now: read.input.now,
-      claim,
-    });
-    return;
-  }
-  if (leased.outcome === "unreachable") {
-    // An origin this tick could not reach is not another refusal by the holder,
-    // so it breaks the run of contended results the window counts.
-    await forgetContention(db, target, readiness.id, read.input.now, claim);
+  if (leased.outcome === "contended" || leased.outcome === "unreachable") {
+    if (target) await observeLeaseEpisode(db, claim, { taskId: readiness.id, target,
+      family: "lease-contention", answer: leased.outcome, now: read.input.now,
+      holder: leased.outcome === "contended" ? leased.holder ?? null : null });
+    if (leased.outcome === "contended") return;
     if (!leased.releaseDeferred) {
       await recordLeaseDeferral(db, {
         readinessTaskId: readiness.id,
@@ -1423,15 +1342,10 @@ const runReadinessDecisionSafely = async (
       ? 0
       : await spentExceptionRequeues(db, read.regression.id, read.recovery);
     const requeuing = !decided && spent < readinessExceptionRequeueLimit();
-    // Stopping the tail is not another refusal by the holder either, and the
-    // settlement below releases the claim this write is fenced by.
-    await forgetContention(
-      db,
-      readiness.chainId ? { projectId: readiness.projectId, chainId: readiness.chainId } : null,
-      readiness.id,
-      new Date(),
-      read.claim,
-    );
+    if (!requeuing && readiness.chainId) await observeLeaseEpisode(db, read.claim, {
+      taskId: readiness.id, target: { projectId: readiness.projectId, chainId: readiness.chainId },
+      family: "lease-contention", answer: "resolved", now: new Date(),
+    });
     if (!requeuing || executorsBlockingAuthorization(daemons).length === 0) {
       await closeExecutorOfflineEpisode(db, readiness.id, read.claim,
         requeuing ? "executor observed online after an exception" : "readiness exception stop");
@@ -1502,10 +1416,10 @@ export const readinessTick = async (
         blocking: () => executorsBlockingAuthorization(daemons),
         closeEpisode: (tx, read) => closeExecutorOfflineEpisodeTx(tx, read.readiness.id, read.claim, "executor observed online under the train Lease"),
         settleOffline: async (tx, read, executorRunnerIds) => {
-          const settlement = await executorOfflineSettlement(tx, read, executorRunnerIds);
+          const settlement = executorOfflineSettlement(read, executorRunnerIds);
           const applied = await settlement.body(tx, read.claim);
           if (!applied.value.applied) throw new Error(`Merge train readiness claim lost for ${read.readiness.id}`);
-          return settlement.kind === "stop" ? "stopped" : "ready";
+          return applied.value.stopped ? "stopped" : "ready";
         },
       },
       single: (database, read, decision, result, release, lease, pullRequests) =>
