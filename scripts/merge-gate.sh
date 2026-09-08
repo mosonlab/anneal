@@ -1227,7 +1227,6 @@ parallel_steps "dependencies and the install-free suites" \
   "frozen-record checker fixtures" node --test scripts/check-frozen-docs.test.mjs :: \
   "operator API handbook coverage" node --test scripts/operator-api-docs.test.mjs :: \
   "host proof slot fixtures" node --test scripts/host-proof-slot.test.mjs :: \
-  "delivery concurrency and gate worker fixtures" node --test scripts/gate-worker/gate-env.test.mjs scripts/gate-worker/gate-worker.test.mjs scripts/gate-worker/gate-dispatch.test.mjs scripts/merge-lease.test.mjs scripts/merge-train.test.mjs :: \
   "parallel-group fixtures" node --test scripts/merge-gate-parallel.test.mjs :: \
   "build layer fixtures" node --test scripts/build-layers.test.mjs
 
@@ -1252,7 +1251,12 @@ step "throwaway PostgreSQL is accepting connections" await_postgres
 # The migration needs the server and dependencies, not the build, so it belongs
 # in this group too. prisma resolves its schema from the working directory,
 # which is why it runs inside packages/db rather than at the repository root.
+# The delivery fixtures spend about thirty seconds exercising bounded waits.
+# They use isolated fixture repositories and need no dist output, so let those
+# waits overlap compilation instead of holding a finished npm ci at the first
+# barrier. Every fixture still runs once and must pass before the proof waves.
 parallel_steps "static analysis, build, and the suites that need no build output" \
+  "delivery concurrency and gate worker fixtures" node --test scripts/gate-worker/gate-env.test.mjs scripts/gate-worker/gate-worker.test.mjs scripts/gate-worker/gate-dispatch.test.mjs scripts/merge-lease.test.mjs scripts/merge-train.test.mjs :: \
   "build (all workspaces)" build_all :: \
   "lint (biome + type-aware no-floating-promises)" parallel_lint :: \
   "quiet-window auto-deploy harness" npm run test:auto-deploy :: \
