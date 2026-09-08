@@ -16,7 +16,7 @@ import {
   createMergeTailRepairTask,
   handleRegressionCompletion,
   repairBindingMismatchAtOpen,
-  openDefenseAuditNotice,
+  recordDefenseAudit,
   openMergeTailStopNotice,
   settleMergeTailCompletion,
   stopMergeTail,
@@ -551,18 +551,37 @@ test("openMergeTailStopNotice derives its dedupe key from the task and reason", 
   });
 });
 
-test("openDefenseAuditNotice records the triggered paths against the readiness task", async () => {
-  let upsert: Record<string, unknown> | undefined;
+test("recordDefenseAudit records one control-plane activity per readiness task and head", async () => {
+  const activities: Array<{ taskId: string; actorType: string; body: string; metadata: Record<string, unknown> }> = [];
   const tx = {
-    inboxMessage: {
-      upsert: async (args: Record<string, unknown>) => {
-        upsert = args;
-        return {};
+    taskActivity: {
+      findFirst: async ({ where }: { where: Prisma.TaskActivityWhereInput }) => {
+        const matches = (activity: typeof activities[number], predicate: Prisma.TaskActivityWhereInput): boolean =>
+          Object.entries(predicate).every(([key, value]) => {
+            if (key === "AND") {
+              const clauses = Array.isArray(value) ? value : [value];
+              return clauses.every((clause) => matches(activity, clause as Prisma.TaskActivityWhereInput));
+            }
+            if (key === "metadata") {
+              const filter = value as { path: string[]; equals: unknown };
+              const actual = filter.path.reduce<unknown>((current, part) =>
+                (current as Record<string, unknown>)[part], activity.metadata);
+              return actual === filter.equals;
+            }
+            return activity[key as keyof typeof activity] === value;
+          });
+        return activities.find((activity) => matches(activity, where)) ?? null;
+      },
+      create: async ({ data }: { data: typeof activities[number] }) => {
+        activities.push(data);
+        return data;
       },
     },
+    inboxMessage: {
+      upsert: async () => assert.fail("defense audits must not write Inbox messages"),
+    },
   } as unknown as Prisma.TransactionClient;
-
-  await openDefenseAuditNotice(tx, {
+  const input = {
     readinessTaskId: "readiness-task-1",
     headSha: "a".repeat(40),
     baseSha: "b".repeat(40),
@@ -570,24 +589,26 @@ test("openDefenseAuditNotice records the triggered paths against the readiness t
       { path: "packages/api/src/app.ts", reason: "merge-tail-machinery" },
       { path: "scripts/gate-worker/run.sh", reason: "gate-worker" },
     ],
-  });
+  };
 
-  const dedupeKey = `defense-audit:readiness-task-1:${"a".repeat(40)}`;
-  assert.deepEqual(upsert, {
-    where: { dedupeKey },
-    create: {
-      from: "AGENT",
-      taskId: "readiness-task-1",
-      kind: "TEXT",
-      body: [
-        "Merge proceeded with defense-list changes",
-        `Exact range ${"b".repeat(40)}..${"a".repeat(40)}.`,
-        "- packages/api/src/app.ts (merge-tail-machinery)\n- scripts/gate-worker/run.sh (gate-worker)",
-      ].join("\n\n"),
-      dedupeKey,
-    },
-    update: {},
-  });
+  await recordDefenseAudit(tx, input);
+  assert.deepEqual(activities, [{
+    taskId: input.readinessTaskId,
+    actorType: "control-plane",
+    body: [
+      "Merge proceeded with defense-list changes",
+      `Exact range ${input.baseSha}..${input.headSha}.`,
+      "- packages/api/src/app.ts (merge-tail-machinery)\n- scripts/gate-worker/run.sh (gate-worker)",
+    ].join("\n\n"),
+    metadata: { kind: "mergeTail.defenseAudit", schemaVersion: 1, headSha: input.headSha, baseSha: input.baseSha, triggers: input.triggers },
+  }]);
+  await recordDefenseAudit(tx, input);
+  await recordDefenseAudit(tx, { ...input, baseSha: "c".repeat(40) });
+  assert.equal(activities.length, 1, "same task and head retains the original audit even if the base changes");
+  assert.equal(activities[0]!.metadata.baseSha, input.baseSha);
+  await recordDefenseAudit(tx, { ...input, headSha: "d".repeat(40) });
+  await recordDefenseAudit(tx, { ...input, readinessTaskId: "readiness-task-2" });
+  assert.equal(activities.length, 3, "different heads and readiness tasks have their own audits");
 });
 
 test("settleMergeTailCompletion records a successful repair", async () => {

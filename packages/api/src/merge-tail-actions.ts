@@ -215,13 +215,12 @@ export const openMergeTailStopNotice = async (
 /**
  * The audit trail a merge leaves when its diff moved defence-list paths.
  *
- * The merge is not held for it: the message records what moved and why the path
- * is on the list, so the change is reviewable after the fact rather than
- * blocking beforehand. Keyed by readiness task and exact head, and upserted for
- * the same reason the stop notice is — a readiness tick that re-evaluates the
- * same head must not raise P2002 inside its caller's transaction.
+ * The merge is not held for it: a control-plane activity on the readiness Step
+ * records what moved and why the path is on the list. The readiness claim
+ * serializes the marker lookup and write inside the authorization transaction,
+ * so re-evaluating the same head leaves the original activity alone.
  */
-export const openDefenseAuditNotice = async (
+export const recordDefenseAudit = async (
   tx: DbTx,
   input: {
     readinessTaskId: string;
@@ -230,19 +229,35 @@ export const openDefenseAuditNotice = async (
     triggers: Array<{ path: string; reason: string }>;
   },
 ): Promise<void> => {
-  const dedupeKey = `defense-audit:${input.readinessTaskId}:${input.headSha}`;
+  const existing = await tx.taskActivity.findFirst({
+    where: {
+      taskId: input.readinessTaskId,
+      actorType: "control-plane",
+      AND: [
+        { metadata: { path: ["kind"], equals: "mergeTail.defenseAudit" } },
+        { metadata: { path: ["headSha"], equals: input.headSha } },
+      ],
+    },
+    select: { id: true },
+  });
+  if (existing) return;
   const body = [
     "Merge proceeded with defense-list changes",
     `Exact range ${input.baseSha}..${input.headSha}.`,
     input.triggers.map((trigger) => `- ${trigger.path} (${trigger.reason})`).join("\n"),
   ].join("\n\n");
-  await tx.inboxMessage.upsert({ where: { dedupeKey }, create: {
-    from: "AGENT",
+  await tx.taskActivity.create({ data: {
     taskId: input.readinessTaskId,
-    kind: "TEXT",
+    actorType: "control-plane",
     body,
-    dedupeKey,
-  }, update: {} });
+    metadata: {
+      kind: "mergeTail.defenseAudit",
+      schemaVersion: 1,
+      headSha: input.headSha,
+      baseSha: input.baseSha,
+      triggers: input.triggers,
+    },
+  } });
 };
 
 export const baseDriftRecoveryContext = async (

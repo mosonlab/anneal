@@ -2876,6 +2876,14 @@ train marker also carries `state: "aborted"` and its reason. These entries are
 the per-Chain audit of a train and do not represent a per-Chain base-drift
 Regression re-run while `MERGE_TRAIN_WIDTH` is enabled.
 
+When a merge proceeds after its diff touches a defense-list path, the
+readiness Step receives one control-plane activity whose body starts with
+`Merge proceeded with defense-list changes`, followed by the exact
+`baseSha..headSha` range and one `path (reason)` line for each trigger. Its
+metadata has kind `mergeTail.defenseAudit` and `schemaVersion: 1`, and carries
+`headSha`, `baseSha`, and the `triggers` array. The activity is idempotent for `(readinessTaskId, headSha)`,
+and this audit creates no Inbox message; existing rows are left untouched.
+
 ```sh
 curl "$BASE_URL/tasks/$TASK_ID/activity" -H "Authorization: Bearer $OPERATOR_TOKEN"
 ```
