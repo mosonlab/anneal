@@ -372,7 +372,7 @@ test("a held lock is waited for, and one left behind by a dead holder is stolen"
   }
 });
 
-test("a live heartbeating holder can cross the creation ceiling before releasing the lock", async () => {
+test("a live heartbeating holder can cross the creation ceiling before releasing the lock", { timeout: 30_000 }, async () => {
   const { root, remote, config, mirror } = await fixture("lock-live");
   const holderReady = deferred<void>();
   const holderRelease = deferred<void>();
@@ -390,6 +390,7 @@ test("a live heartbeating holder can cross the creation ceiling before releasing
 
   let clock = 0;
   let released = false;
+  const waitClocks: number[] = [];
   const progress: RepoMirrorProgress[] = [];
   try {
     await holderReady.promise;
@@ -403,16 +404,20 @@ test("a live heartbeating holder can cross the creation ceiling before releasing
         lockPollMs: 1,
         now: () => clock,
         sleep: async () => {
-          clock += 1_000;
-          // Keep the lock held through the first acquisition attempt after the
-          // creation ceiling. The waiter's explicit slack then gives the live
-          // holder time to finish its in-lock setup and teardown.
-          if (clock > CLONE_CREATION_TIMEOUT_MS && released === false) {
-            if (clock > CLONE_CREATION_TIMEOUT_MS + 1_000) {
-              released = true;
-              holderRelease.resolve();
-            }
+          // Keep the lock held at the ceiling and through the first acquisition
+          // attempt beyond it, then let the holder finish its release. The
+          // clock stops there so the fake wait cannot overshoot the default
+          // lock wait while the real holder's cleanup gets a chance to run.
+          if (waitClocks.length === 0) {
+            clock = CLONE_CREATION_TIMEOUT_MS;
+          } else if (waitClocks.length === 1) {
+            clock = CLONE_CREATION_TIMEOUT_MS + 1_000;
+          } else if (released === false) {
+            released = true;
+            holderRelease.resolve();
+            await holder;
           }
+          waitClocks.push(clock);
           await new Promise<void>((resolve) => { setImmediate(resolve); });
         },
         report: (event) => progress.push(event),
@@ -421,7 +426,12 @@ test("a live heartbeating holder can cross the creation ceiling before releasing
     );
 
     assert.equal(result, mirror);
-    assert.ok(clock > CLONE_CREATION_TIMEOUT_MS, "the waiter must outlive the full creation ceiling");
+    assert.deepEqual(
+      waitClocks,
+      [CLONE_CREATION_TIMEOUT_MS, CLONE_CREATION_TIMEOUT_MS + 1_000, CLONE_CREATION_TIMEOUT_MS + 1_000],
+      "the waiter must cover the ceiling and first poll beyond it before releasing the live holder",
+    );
+    assert.equal(clock, CLONE_CREATION_TIMEOUT_MS + 1_000, "the synthetic clock must stay inside the default lock wait");
     assert.equal(progress.some(({ event }) => event === "lock-steal"), false, "a live holder must not be stolen");
   } finally {
     holderRelease.resolve();
