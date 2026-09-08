@@ -1493,6 +1493,11 @@ export const readinessTick = async (
       discover: discoverReadiness,
       read: (database, task, at) => readReadiness(database, task, at, daemons),
       authorize: authorizeReadinessSettlement,
+      refuse: (read, decision) => decision.kind === "stop"
+        ? stopReadinessSettlement({ readinessTaskId: read.readiness.id, regressionTaskId: read.regression.id,
+          reason: decision.evidence, recovery: read.recovery, refusalCode: null, now: read.input.now })
+        : requeueRegressionSettlement({ readinessTaskId: read.readiness.id, regressionTaskId: read.regression.id,
+          ...decision, recovery: read.recovery, now: read.input.now }),
       executor: {
         blocking: () => executorsBlockingAuthorization(daemons),
         closeEpisode: (tx, read) => closeExecutorOfflineEpisodeTx(tx, read.readiness.id, read.claim, "executor observed online under the train Lease"),

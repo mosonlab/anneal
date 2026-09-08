@@ -1003,7 +1003,7 @@ test("a changed PR head aborts the train before it can authorize a stale candida
     headShaByPr: new Map([[seed.candidates[0]!.prNumber, changedHead]]),
   }), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
   assert.equal(settled.authorized, 0);
-  assert.equal(settled.requeued, 0);
+  assert.equal(settled.requeued, 1);
   assert.equal(settled.stopped, 0);
   assert.equal(await db.taskActivity.count({ where: {
     taskId: { in: seed.candidates.map((candidate) => candidate.readiness.id) },
@@ -1015,9 +1015,43 @@ test("a changed PR head aborts the train before it can authorize a stale candida
   assert.equal(marker.state, "aborted");
   assert.match(String(marker.reason), /stale PASS head/u);
   assert.deepEqual(releasedChainIds, [seed.candidates[0]!.chainId]);
+  // One formation and one settlement acquisition; candidate requeue never
+  // reacquires or releases the train's Lease independently.
+  assert.equal(leasedTargets.length, 2);
+  const changed = seed.candidates[0]!;
+  assert.notEqual((await db.task.findUniqueOrThrow({ where: { id: changed.regression.id } })).status, TaskStatus.DONE);
+  assert.equal(await db.run.count({ where: { taskId: changed.regression.id } }), 2);
+  const next = await readinessTick(db, readerFor(seed, {
+    headShaByPr: new Map([[changed.prNumber, changedHead]]),
+  }), new Date(TEST_NOW.getTime() + 2_000), 5, releaseChainLease, runWithMergeLease, () => []);
+  assert.equal(next.authorized, 1);
+  assert.equal(next.requeued, 0);
+  assert.equal(await db.task.count({ where: { projectId: seed.project.id, chainId: null } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: changed.regression.id } }), 2);
 });
 
-test("a trailing second-read refusal preserves the passing prefix and returns only that candidate to ready", async () => {
+test("a permanent second-read refusal stops the candidate before the next train tick", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
+  await finishTrainRun(seed, await recordFor(seed, ["pass", "pass"], 2));
+  const facts = readerFor(seed);
+  const refused: PullRequestReader = { ...facts, compareCommits: async (...args) => ({
+    ...await facts.compareCommits!(...args), filesComplete: false,
+  }) };
+  const settled = await readinessTick(db, refused, new Date(TEST_NOW.getTime() + 1_000),
+    5, releaseChainLease, runWithMergeLease, () => []);
+  assert.equal(settled.authorized, 0);
+  assert.equal(settled.stopped, 2);
+  for (const candidate of seed.candidates) {
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.readiness.id } })).status, TaskStatus.REVIEW);
+  }
+  await readinessTick(db, refused, new Date(TEST_NOW.getTime() + 2_000), 5, releaseChainLease, runWithMergeLease, () => []);
+  assert.equal(await db.task.count({ where: { projectId: seed.project.id, chainId: null } }), 1);
+  assert.equal(leasedTargets.length, 2);
+});
+
+test("a trailing stale head preserves the passing prefix and requeues only that candidate", async () => {
   process.env.MERGE_TRAIN_WIDTH = "3";
   const seed = await seedTrainCandidates(3);
   await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
@@ -1031,6 +1065,7 @@ test("a trailing second-read refusal preserves the passing prefix and returns on
 
   assert.equal(settled.authorized, 2);
   assert.equal(settled.stopped, 0);
+  assert.equal(settled.requeued, 1);
   for (const candidate of seed.candidates.slice(0, 2)) {
     assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.readiness.id } })).status, TaskStatus.DONE);
   }
@@ -1040,10 +1075,17 @@ test("a trailing second-read refusal preserves the passing prefix and returns on
     metadata: { path: ["kind"], equals: "mergeTail.repairAttempt" },
   } }), 0);
   const marker = (await trainMarkersFor(trailing.readiness.id)).at(-1)!.metadata as Record<string, unknown>;
-  assert.equal(marker.outcome, "ready");
+  assert.equal(marker.outcome, "requeued");
   assert.equal(marker.settlement, "no-verdict");
   assert.match(String(marker.reason), /stale PASS head/u);
   assert.deepEqual(releasedChainIds, [seed.candidates[0]!.chainId]);
+  assert.notEqual((await db.task.findUniqueOrThrow({ where: { id: trailing.regression.id } })).status, TaskStatus.DONE);
+  assert.equal(await db.run.count({ where: { taskId: trailing.regression.id } }), 2);
+  const next = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 2_000),
+    5, releaseChainLease, runWithMergeLease, () => []);
+  assert.equal(next.authorized, 0);
+  assert.equal(next.requeued, 0);
+  assert.equal(await db.task.count({ where: { projectId: seed.project.id, chainId: null } }), 1);
 });
 
 test("an unapproved gated candidate stops alone and truncates the authorized prefix", async () => {
