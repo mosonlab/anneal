@@ -26,6 +26,7 @@ import {
   type RegressionVerdict,
   type RecoveryContext,
   recoveryContext,
+  stepRole,
   TaskStatus,
   writeMarker,
 } from "@anneal/db";
@@ -991,6 +992,25 @@ export const createMergeTailRepairTask = async (
     : input.repairKind === "gate-fix"
       ? ["spec", "implementation", "fixed-implementation"]
       : ["spec", "implementation"];
+  if (input.repairKind === "review-fix") {
+    // Keep known planning and documentation outputs out of the repair prompt,
+    // but do not let an unregistered output disappear behind the whitelist.
+    // That would silently turn a retired or malformed review report into an
+    // incomplete repair context.
+    const priorKinds = await tx.taskStepOutput.findMany({
+      where: { task: {
+        projectId: regressionTask.projectId,
+        chainId: regressionTask.chainId,
+        chainIndex: { lt: regressionTask.chainIndex },
+      }, kind: { notIn: repairPriorOutputKinds } },
+      select: { kind: true },
+      orderBy: { task: { chainIndex: "asc" } },
+    });
+    const unknownKind = priorKinds.find(({ kind }) => stepRole({ outputKind: kind }) === null);
+    if (unknownKind) {
+      return { refusal: `unknown-kind: review-fix prior output ${unknownKind.kind} has no registered Step role` };
+    }
+  }
   const priorOutputs = await tx.taskStepOutput.findMany({
     where: { task: {
       projectId: regressionTask.projectId,

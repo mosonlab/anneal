@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  LEGACY_TEMPLATE_GENERATIONS,
   type Marker,
   MergeRecoveryStatus,
   type Prisma,
@@ -12,6 +13,7 @@ import {
 
 import {
   activeRepairRecoverySourceRun,
+  createMergeTailRepairTask,
   handleRegressionCompletion,
   repairBindingMismatchAtOpen,
   openDefenseAuditNotice,
@@ -71,6 +73,57 @@ const recoveryRow = (overrides: Record<string, unknown> = {}) => ({
 const recoveryTx = (row: Record<string, unknown> | null) => ({
   mergeRecoveryAttempt: { findFirst: async () => row },
 } as unknown as Prisma.TransactionClient);
+
+test("review-fix refuses an unregistered prior output before creating a repair task", async () => {
+  const retiredReviewKind = LEGACY_TEMPLATE_GENERATIONS["direct-engineer-workflow"]
+    .find(({ marker }) => marker === "pre-model-neutral-review-output")?.shape
+    .find(({ name }) => name === "Code review")?.outputKind;
+  assert.ok(retiredReviewKind);
+
+  const taskCreates: unknown[] = [];
+  const outputQueries: Array<Record<string, unknown>> = [];
+  const tx = {
+    mergeRecoveryAttempt: { findFirst: async () => null },
+    agent: { findFirst: async () => ({ id: "repair-agent" }) },
+    agentRepoAccess: { findFirst: async () => ({ id: "repo-grant" }) },
+    taskStepOutput: {
+      findMany: async (query: Record<string, unknown>) => {
+        outputQueries.push(query);
+        return [{ kind: retiredReviewKind }];
+      },
+    },
+    task: { create: async (args: unknown) => { taskCreates.push(args); return { id: "repair-task" }; } },
+  } as unknown as Prisma.TransactionClient;
+
+  const result = await createMergeTailRepairTask(tx, {
+    regressionTask: {
+      id: "regression-task",
+      projectId: "project",
+      repoId: "repo",
+      templateId: "template",
+      chainId: "chain",
+      chainIndex: 5,
+      targetBranch: "main",
+    },
+    sourceRun: { id: "source-run", branch: "agentos/repair" },
+    assignee: { kind: "agent", agentId: "repair-agent", label: "senior-dev-astra-medium" },
+    repairKind: "review-fix",
+    headSha: "a".repeat(40),
+    baseHeadSha: "b".repeat(40),
+    summary: "review failure",
+    now: new Date(),
+  });
+
+  assert.deepEqual(result, {
+    refusal: `unknown-kind: review-fix prior output ${retiredReviewKind} has no registered Step role`,
+  });
+  assert.equal(taskCreates.length, 0);
+  assert.equal(outputQueries.length, 1);
+  const firstQuery = outputQueries[0];
+  assert.deepEqual((firstQuery?.where as Record<string, unknown>)?.kind, {
+    notIn: ["spec", "implementation", "review-findings", "blind-findings", "fixed-implementation"],
+  });
+});
 
 test("repair completion carries context only for a complete active recovery", async () => {
   assert.deepEqual(await activeRepairRecoverySourceRun(recoveryTx(recoveryRow()), {
