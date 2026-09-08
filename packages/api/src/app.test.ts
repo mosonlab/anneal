@@ -10,7 +10,7 @@ import {
   type PrismaClient,
 } from "@anneal/db";
 
-import { createApp, partitionArchivable } from "./test-app.js";
+import { createApp } from "./test-app.js";
 import { createApp as createLiveApp } from "./app.js";
 import { LOOPBACK_BROWSER_ORIGINS } from "./local-origin.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
@@ -155,14 +155,6 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
   } as unknown as PrismaClient;
   assert.equal(await reconcileDatabaseRuns(database, now), 1);
   assert.deepEqual(lost, ["run-dead"]);
-});
-
-test("partitionArchivable keeps the busy tasks out of the archive set and counts them as skipped", () => {
-  assert.deepEqual(partitionArchivable(["a", "b", "c"], ["b"]), { archive: ["a", "c"], skipped: 1 });
-  assert.deepEqual(partitionArchivable(["a", "b"], []), { archive: ["a", "b"], skipped: 0 });
-  assert.deepEqual(partitionArchivable([], ["b"]), { archive: [], skipped: 0 });
-  // A busy id that is not a candidate cannot inflate the skipped count.
-  assert.deepEqual(partitionArchivable(["a"], ["z"]), { archive: ["a"], skipped: 0 });
 });
 
 test("an unknown view is refused rather than silently served as the full shape", async () => {

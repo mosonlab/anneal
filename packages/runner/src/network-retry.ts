@@ -1,48 +1,11 @@
-import { isDeterministicRefusal } from "@anneal/github-client";
+import { isDeterministicAccessRefusal, isTransientTransportFailure } from "@anneal/db/transport-vocabulary";
 
 import { isCommandTimeout, KILL_OVERHEAD_MS } from "./exec.js";
 
-const TRANSIENT_NETWORK_PATTERNS = [
-  /fetch failed/i,
-  /SSL_ERROR_SYSCALL/i,
-  /unexpected EOF/i,
-  /connection (?:reset|closed|timed out|lost)/i,
-  /ECONNRESET/i,
-  /ETIMEDOUT/i,
-  /EAI_AGAIN/i,
-  /HTTP(?: response)?\s*5\d\d/i,
-  /status(?: code)?\s*5\d\d/i,
-  /502 Bad Gateway/i,
-  /503 Service Unavailable/i,
-  /504 Gateway Timeout/i,
-] as const;
-
-const DETERMINISTIC_ACCESS_PATTERNS = [
-  /authentication failed/i,
-  /could not read Username/i,
-  /permission denied/i,
-  /forbidden/i,
-  /HTTP(?: response)?\s*(?:401|403)/i,
-  /status(?: code)?\s*(?:401|403)/i,
-  /bad credentials/i,
-] as const;
-
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
-/** Git reports some access refusals without the HTTP/status prefixes used by
- * the shared GitHub write classifier. Keep those common forms in the push
- * veto, while leaving isTransientNetworkError's agent-process vocabulary
- * untouched. */
-const GIT_ACCESS_REFUSAL_PATTERNS = [
-  /authorization failed/iu,
-  /\bunauthorized\b/iu,
-  /invalid credentials/iu,
-  /requested URL returned error:\s*(?:401|403)\b/iu,
-] as const;
-
 const isDeterministicPushRefusal = (error: unknown): boolean =>
-  isDeterministicRefusal(error)
-  || GIT_ACCESS_REFUSAL_PATTERNS.some((pattern) => pattern.test(messageOf(error)));
+  isDeterministicAccessRefusal(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
 
 export const isTransientNetworkError = (error: unknown): boolean => {
   // Our own per-command timeout is recognised by type, never by its wording.
@@ -51,9 +14,7 @@ export const isTransientNetworkError = (error: unknown): boolean => {
   // binary; a text token would silently reclassify that as a network blip and
   // make a deterministic failure retryable.
   if (isCommandTimeout(error)) return true;
-  const message = messageOf(error);
-  if (DETERMINISTIC_ACCESS_PATTERNS.some((pattern) => pattern.test(message))) return false;
-  return TRANSIENT_NETWORK_PATTERNS.some((pattern) => pattern.test(message));
+  return isTransientTransportFailure(messageOf(error));
 };
 
 export type RetryOptions = {

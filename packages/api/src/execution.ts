@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { FailureClass, type FailureEnvelope, type Prisma } from "@anneal/db";
+import { isDeterministicAccessRefusal, isTransientTransportFailure } from "@anneal/db/transport-vocabulary";
 
 export const makeFencingToken = (runId: string, generation: number): string =>
   `${generation}:${runId}:${randomUUID()}`;
@@ -84,83 +85,19 @@ const PROVIDER_OUTAGE_PATTERN = /provider outage|\b(?:(?:API\s+)?Error|failed wi
 
 const PROVIDER_TRY_AGAIN_PATTERN = /try again later/iu;
 
-/** A provider refusing the request because the model pool has no room right
- *  now: Codex's "Selected model is at capacity. Please try a different model."
- *  and Claude's equivalent capacity wording. Nothing about the task caused it
- *  and nothing about the task can avoid it — the same prompt on the same model
- *  succeeds once the pool frees up — so it belongs with the transport/outage
- *  phrases, on the verdict channels only. */
-const PROVIDER_CAPACITY_PATTERN = /\bmodel\s+is\s+(?:currently\s+)?at capacity\b/iu;
-
-/**
- * Ported from `packages/runner/src/network-retry.ts` (`TRANSIENT_NETWORK_PATTERNS`
- * and `DETERMINISTIC_ACCESS_PATTERNS`), which `adapters.ts classifyError` called
- * through `isTransientNetworkError`.
- *
- * Moving the authority here without moving this vocabulary would have been a
- * silent regression rather than a relocation: an agent whose stderr said only
- * `ECONNRESET` was TRANSIENT_PROVIDER and retryable before, and would have
- * become TASK_FAILED and final — spending an attempt and then refusing the
- * retry that used to be allowed.
- *
- * The deterministic list is a veto, not a class. It is what stops
- * "authentication failed, connection reset" from being retried into a lockout,
- * and it has to travel with the transient list to mean anything.
- *
- * One semantic *is* deliberately dropped: the runner fed this predicate
- * `stderr + stdout`. Here it sees the verdict channels only. That is the defect
- * this ticket exists to fix, not an oversight — an agent writing a network
- * retry loop has every one of these tokens in its stdout.
- */
-const TRANSIENT_NETWORK_PATTERNS = [
-  /fetch failed/i,
-  /SSL_ERROR_SYSCALL/i,
-  /unexpected EOF/i,
-  /\bPost\s+"[^\"]+"\s*:\s*EOF\b/i,
-  /our servers are currently overloaded/i,
-  /connection (?:reset|closed|timed out|lost)/i,
-  /ECONNRESET/i,
-  /ETIMEDOUT/i,
-  /EAI_AGAIN/i,
-  /HTTP(?: response)?\s*5\d\d/i,
-  /status(?: code)?\s*5\d\d/i,
-  /502 Bad Gateway/i,
-  /503 Service Unavailable/i,
-  /504 Gateway Timeout/i,
-] as const;
-
-const DETERMINISTIC_ACCESS_PATTERNS = [
-  /authentication failed/i,
-  /could not read Username/i,
-  /permission denied/i,
-  /forbidden/i,
-  /HTTP(?: response)?\s*(?:401|403)/i,
-  /status(?: code)?\s*(?:401|403)/i,
-  /bad credentials/i,
-] as const;
-
-// Plumbing also accepts git's explicit refusals without widening the
-// EXECUTE transient-evidence vocabulary to incidental credential words.
+// Bare status codes are authoritative access refusals in plumbing phases.
 const plumbingAccessRefusal = (text: string): boolean =>
-  deterministicAccessRefusal(text)
-  || /authorization failed|invalid credentials|\bunauthorized\b|\b(?:401|403)\b/iu.test(text);
-
-const deterministicAccessRefusal = (text: string): boolean =>
-  DETERMINISTIC_ACCESS_PATTERNS.some((pattern) => pattern.test(text));
-
-export const transientNetworkText = (text: string): boolean => {
-  if (deterministicAccessRefusal(text)) return false;
-  return TRANSIENT_NETWORK_PATTERNS.some((pattern) => pattern.test(text));
-};
+  isDeterministicAccessRefusal(text)
+  || /\b(?:401|403)\b/iu.test(text);
 
 const envelopeVerdictText = (envelope: FailureEnvelope): string =>
   `${envelope.providerError ?? ""}\n${envelope.stderrSummary ?? ""}`;
 
 const transientProviderText = (envelope: FailureEnvelope): boolean => {
   const verdict = envelopeVerdictText(envelope);
-  return transientNetworkText(verdict)
+  if (isDeterministicAccessRefusal(verdict)) return false;
+  return isTransientTransportFailure(verdict)
   || PROVIDER_OUTAGE_PATTERN.test(verdict)
-  || PROVIDER_CAPACITY_PATTERN.test(verdict)
   // This generic provider prompt is authoritative only on the structured
   // provider channel. Agent stderr can contain the same words from any tool
   // the task invoked and must not decide a budget refund by itself.

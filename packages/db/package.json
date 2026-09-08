@@ -11,6 +11,11 @@
       "development": "./src/index.ts",
       "import": "./dist/index.js"
     },
+    "./transport-vocabulary": {
+      "types": "./src/transport-vocabulary.ts",
+      "development": "./src/transport-vocabulary.ts",
+      "import": "./dist/transport-vocabulary.js"
+    },
     "./merge-integrator": {
       "types": "./src/merge-integrator.ts",
       "development": "./src/merge-integrator.ts",

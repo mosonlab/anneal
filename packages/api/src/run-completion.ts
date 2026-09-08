@@ -22,7 +22,6 @@ import {
   isCanonicalIntegratorStep,
   isMergeReadinessStep,
   isRegressionVerificationOutputKind,
-  latestMarker,
   lockChainRows,
   lockRunRow,
   MERGE_TAIL_KIND,
@@ -35,9 +34,6 @@ import {
   Prisma,
   type PrismaClient,
   PushStatus,
-  readLatestMarker,
-  readMarkers,
-  readMarkerHistory,
   recordIntegratorStop,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
   runBudgetCeiling,
@@ -69,15 +65,13 @@ import {
   type CompletionAdvancementFacts,
 } from "./completion-advancement.js";
 import {
-  activeRepairRecoverySourceRun,
   handleRegressionCompletion,
-  mergeTailRequeueContextForRun,
   recordMergeTailRequeue,
-  regressionVerdictForRun,
   settleMergeTailCompletion,
   stopUnboundRepair,
 } from "./merge-tail-actions.js";
 import { explainFenceRefusal, fenceRefusalResponse, fencedRunWhere, type RunFence } from "./run-fence.js";
+import { readMergeTailSettlement } from "./merge-tail-settlement.js";
 import { terminalizeRun } from "./run-terminal.js";
 import {
   commitWithLeaseOutcome,
@@ -720,37 +714,6 @@ export const completeRun = async (
         && (body.outcome.envelope.phase !== "EXECUTE"
           || isTextMatchedTransientProviderFailure(body.outcome.envelope, failureClass)));
     const retryAt = failureClass && retryable ? new Date(now.getTime() + retryDelayMs(run.runNumber, failureClass)) : null;
-    // A negative Regression verdict survives a later external failure, including
-    // delivery or salvage failure before completion can report a head. Keep the
-    // existing retryable protocol-error case too. The canonical qualifier owns
-    // Run identity, JSON validation and exact authored-head binding; only an
-    // unreported head may fall back to persisted evidence. PASS stays excluded.
-    // The legacy output kind deliberately keeps its existing failure path.
-    const persistedV2RegressionStep = run.task?.templateStep?.outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND;
-    const externalRegressionFailure = external && persistedV2RegressionStep;
-    const retryableProtocolRegressionFailure = failureClass === FailureClass.PROTOCOL_ERROR && retryable
-      && isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind);
-    const failedRegressionVerdict = !succeeded
-      && (externalRegressionFailure || retryableProtocolRegressionFailure)
-      && run.taskId && run.task
-      ? await regressionVerdictForRun(tx, {
-          task: run.task,
-          runId: run.id,
-          runHeadSha: body.headSha ?? null,
-          allowPersistedHeadWhenUnreported: externalRegressionFailure,
-        })
-      : null;
-    const durableNegativeRegressionVerdict = Boolean(
-      failedRegressionVerdict?.status === "ok"
-      && failedRegressionVerdict.verdict.outcome !== "pass"
-      && ((retryableProtocolRegressionFailure && body.headSha === failedRegressionVerdict.headSha)
-        || (externalRegressionFailure
-          && (failedRegressionVerdict.verdict.outcome === "review-fail"
-            || failedRegressionVerdict.verdict.outcome === "refresh-conflict"))),
-    );
-    const completionHeadSha = durableNegativeRegressionVerdict && failedRegressionVerdict?.status === "ok"
-      ? failedRegressionVerdict.headSha
-      : body.headSha ?? null;
     // Completion always mutates its Task, including terminal non-retryable
     // failures. Run is already locked above; acquire the Task/chain mutex now
     // before reading capped-refund history so two completion decisions cannot
@@ -798,118 +761,11 @@ export const completeRun = async (
       refunded,
     );
     const budgetCeiling = completionBudget.maxRunsPerTask;
-    // One marker read for both completion outcomes; this handler used to
-    // declare `tailRows` twice and scan twice. The success path consults it
-    // only for a standalone auxiliary task — an automatic repair, which is not
-    // a chain step — while the failure path consults it only for a failure
-    // that is not about to be retried, which is why the ceiling is computed
-    // above the read.
-    const failureIsFinal = !succeeded
-      && (durableNegativeRegressionVerdict || !(retryable && run.runNumber < budgetCeiling));
-    const documentationStepSucceeded = succeeded
-      && isDocumentationStep(run.task?.templateStep);
-    // Train settlement is read separately below from control-plane activity;
-    // it does not widen repair marker reads for retryable detached failures.
-    const tailMarkers = run.task && (failureIsFinal
-      || (succeeded && !run.task.templateId && !run.task.chainId))
-      ? await readMarkers(tx, run.task.id)
-      : [];
-    // A task-failed repair with no current-Run result spends its next ordinary
-    // session before the tail stops. Use the immutable Run ceiling, just like
-    // other completion retries; this grants neither a refund nor a new repair.
-    const failedRepairHistory = !succeeded && failureClass === FailureClass.TASK_FAILED
-      && run.taskId && run.runNumber < budgetCeiling
-      ? await readMarkerHistory(tx, run.taskId)
-      : [];
-    const failedRepairMarker = latestMarker(failedRepairHistory, "repairAttempt");
-    const failedRepairOutput = failedRepairMarker?.regressionTaskId && run.taskId
-      ? await tx.taskStepOutput.findUnique({ where: { taskId: run.taskId }, select: { runId: true } })
-      : null;
-    const retryFailedRepair = Boolean(failedRepairMarker?.regressionTaskId
-      && failedRepairMarker.headSha
-      && ["refresh-conflict", "review-fix", "gate-fix"].includes(failedRepairMarker.repairKind ?? "")
-      && failedRepairOutput?.runId !== run.id
-      && !failedRepairHistory.some((marker) => marker.kind === "repairResult" && marker.raw.runId === run.id));
-    const succeededMarkers = succeeded ? tailMarkers : [];
-    const mergeTailRequeueContext = documentationStepSucceeded && run.task
-      ? await mergeTailRequeueContextForRun(tx, { taskId: run.task.id, runId: run.id })
-      : null;
-    const mergeTailSuccessorRequeue = mergeTailRequeueContext !== null;
-    const repairMarker = latestMarker(succeededMarkers, "repairAttempt");
-    const repairRegression = repairMarker?.regressionTaskId
-      ? await tx.task.findUnique({
-          where: { id: repairMarker.regressionTaskId },
-          select: {
-            projectId: true,
-            chainId: true,
-            templateId: true,
-            templateStep: { select: { outputKind: true, taskTemplate: { select: { name: true } } } },
-          },
-        })
-      : null;
-    // A repair must put its chain's Documentation Step back before Regression.
-    // The Step comes from the repair target's own persisted template rows, so a
-    // chain minted from any generation is addressable — including a seed-era
-    // row whose retired graph shape was never registered anywhere.
-    const repairChain = repairRegression?.chainId && repairRegression.templateId
-      && repairRegression.templateStep
-      && stepRole(repairRegression.templateStep) === "regression"
-      ? {
-          projectId: repairRegression.projectId,
-          chainId: repairRegression.chainId,
-          templateId: repairRegression.templateId,
-          templateName: repairRegression.templateStep.taskTemplate.name,
-        }
-      : null;
-    const repairTemplateSteps = repairChain
-      ? await tx.taskTemplateStep.findMany({
-          where: { taskTemplateId: repairChain.templateId },
-          orderBy: { stepIndex: "asc" },
-          select: { id: true, outputKind: true },
-        })
-      : [];
-    const repairDocumentationStep = repairTemplateSteps.find(
-      (step) => stepRole(step) === "documentation",
-    ) ?? null;
-    const repairDocumentationTask = repairChain && repairDocumentationStep
-      ? await tx.task.findFirst({
-          where: {
-            projectId: repairChain.projectId,
-            chainId: repairChain.chainId,
-            templateId: repairChain.templateId,
-            templateStepId: repairDocumentationStep.id,
-            archivedAt: null,
-          },
-          orderBy: { chainIndex: "desc" },
-          select: { id: true },
-        })
-      : null;
-    // A template that owns no Documentation Step is a fact about that chain, not
-    // an accident of a missing graph shape: say so rather than skipping in silence.
-    const repairDocumentationAbsence = repairChain && repairDocumentationStep === null
-      ? repairChain.templateName
-      : null;
-    // An auxiliary task is one whose own marker names the Regression it serves.
-    const mergeTailAuxiliary = Boolean(repairMarker?.regressionTaskId);
-    // A detached merge-train card the readiness tick has already settled. The
-    // train session persists its record before `session.finish`, so settlement
-    // commonly commits while this Run is still active; the card's terminal
-    // state is the tick's, not this completion's, in either direction.
-    // Agent activity can carry marker-shaped metadata but cannot settle a
-    // train. Read the control plane's latest state independently of the recent
-    // activity window so session chatter cannot hide an existing settlement.
-    const trainMarker = run.task && !run.task.templateId && !run.task.chainId
-      ? await readLatestMarker(tx, run.task.id, "train")
-      : null;
-    const mergeTrainSettled = Boolean(run.task
-      && trainMarker?.raw.trainTaskId === run.task.id
-      && (trainMarker.state === "settled" || trainMarker.state === "aborted"));
-    const auxiliaryTargetTaskId = repairMarker?.regressionTaskId
-      ? repairDocumentationTask?.id ?? repairMarker.regressionTaskId
-      : null;
-    const repairSourceRunId = typeof repairMarker?.raw.sourceRunId === "string"
-      ? repairMarker.raw.sourceRunId
-      : null;
+    const tail = await readMergeTailSettlement(tx, {
+      run, task: run.task, succeeded, external, retryable, failureClass,
+      headSha: body.headSha ?? null, budgetCeiling,
+    });
+    const { durableNegativeRegressionVerdict, completionHeadSha } = tail;
     // Preserve a failed completion's diagnostic reason even when a definitive
     // mechanical result overrides its protocol classification. Ordinary
     // reported success still carries no failure reason; an unbound repair's
@@ -940,25 +796,6 @@ export const completeRun = async (
     let leaseOutcome: "continue" | "stop" = "continue";
     // Set only when the ladder rejects this completion for an unbound repair.
     let repairBindingRejection: CompleteRunRefusal | null = null;
-    if (auxiliaryTargetTaskId && auxiliaryTargetTaskId !== run.task?.id) {
-      await lockTaskMutationRows(tx, auxiliaryTargetTaskId);
-    }
-    // Which recovery, if any, this repair completion settles — read under the
-    // repair target chain's mutex taken just above, because the recovery
-    // aggregate is that chain's, and every other writer of it takes the same
-    // lock. Decided before the terminal write, because a repair the platform
-    // cannot bind is not an internal server error and must not escape this
-    // transaction as one: the Run carries the reason, the repair Task parks,
-    // and the completion answers a classified rejection.
-    const repairRecoveryBinding = repairMarker?.regressionTaskId && repairSourceRunId
-      ? await activeRepairRecoverySourceRun(tx, {
-          regressionTaskId: repairMarker.regressionTaskId,
-          sourceRunId: repairSourceRunId,
-        })
-      : null;
-    const unboundRepair = repairRecoveryBinding?.case === "mismatch" && repairMarker?.regressionTaskId
-      ? { regressionTaskId: repairMarker.regressionTaskId, mismatch: repairRecoveryBinding.mismatch }
-      : null;
     if (run.task && typeof (tx.task as { findUnique?: unknown }).findUnique === "function") {
       await tx.task.findUnique({ where: { id: run.task.id }, select: { status: true } });
     }
@@ -1052,20 +889,20 @@ export const completeRun = async (
     let retryCreated = false;
     let retryRunId: string | null = null;
     let retryRefusal: OpenRunRefusal | null = null;
-    if (!succeeded && (retryable || retryFailedRepair) && !durableNegativeRegressionVerdict && run.task && run.runNumber < budgetCeiling) {
+    if (!succeeded && (retryable || tail.retryFailedRepair) && !durableNegativeRegressionVerdict && run.task && run.runNumber < budgetCeiling) {
       const opened = await openRun(tx, run.task.id, {
         kind: "retry-after-completion",
         sourceRunId: run.id,
         sourceMaxRunsPerTask: run.maxRunsPerTask,
         sourceBudgetGrants: run.budgetGrants,
         budgetGrant: refunded,
-        ...(retryFailedRepair ? { retryFailedRepair: true } : {}),
+        ...(tail.retryFailedRepair ? { retryFailedRepair: true } : {}),
         readyAt: retryAt ?? now,
       });
       if (opened.ok) {
         retryCreated = true;
         retryRunId = opened.run.id;
-        if (retryFailedRepair) {
+        if (tail.retryFailedRepair) {
           await tx.taskActivity.create({ data: {
             taskId: run.task.id,
             actorType: "control-plane",
@@ -1124,7 +961,7 @@ export const completeRun = async (
             : `Run ${run.runNumber} stopped before merging`,
           metadata: jsonValue({ exitCode: body.exitCode, mergeOutcome: outcome.outcome }),
         } });
-      } else if (succeeded && run.task && (run.task.templateId || run.task.chainId || mergeTailAuxiliary)) {
+      } else if (succeeded && run.task && (run.task.templateId || run.task.chainId || tail.mergeTailAuxiliary)) {
         // Body, runId, metadata, and commit binding describe one act of
         // authorship and only move together through task_output. Completion
         // validates that immutable binding; it never restamps an authored
@@ -1203,19 +1040,21 @@ export const completeRun = async (
             task: {
               id: run.task.id,
               templateStep: run.task.templateStep,
-              documentationTaskId: repairDocumentationTask?.id ?? null,
+              documentationTaskId: tail.documentationTaskId,
             },
             run: { id: run.id, agentId: run.agentId, sessionId: run.session.id, completedAt: now },
             body: { headSha: body.headSha ?? null },
-            markers: tailMarkers,
+            markers: tail.tailMarkers,
             succeeded,
             repositoryReader,
           })
         : { handled: false, leaseOutcome: "continue" as const };
-      const regressionVerificationStep = isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind);
-      leaseOutcome = canonicalOutputFailure && regressionVerificationStep
-        ? "stop"
-        : mergeTailCompletion.leaseOutcome;
+      const { regressionVerificationStep } = tail;
+      leaseOutcome = !succeeded && !retryCreated
+        ? (tail.terminalFailureStopsLease ? "stop" : "continue")
+        : canonicalOutputFailure && regressionVerificationStep
+          ? "stop"
+          : mergeTailCompletion.leaseOutcome;
       // The Task row is included with the fenced Run, so a Run that names a
       // task always carries it. Every advancement below is about that Task.
       const completionTask = run.task;
@@ -1239,13 +1078,13 @@ export const completeRun = async (
         },
         durableNegativeRegressionVerdict,
         outputRefusal: canonicalOutputFailure,
-        mergeTailAuxiliary,
+        mergeTailAuxiliary: tail.mergeTailAuxiliary,
         mergeTailHandled: mergeTailCompletion.handled,
-        mergeTrainSettled,
-        repairBindingRefusal: unboundRepair?.mismatch.reason ?? null,
-        auxiliaryTargetTaskId,
-        mergeTailRequeue: mergeTailSuccessorRequeue,
-        mergeTailRecoverySourceRunId: mergeTailRequeueContext?.recoverySourceRunId ?? null,
+        mergeTrainSettled: tail.mergeTrainSettled,
+        repairBindingRefusal: tail.repairBindingRefusal,
+        auxiliaryTargetTaskId: tail.auxiliaryTargetTaskId,
+        mergeTailRequeue: tail.mergeTailSuccessorRequeue,
+        mergeTailRecoverySourceRunId: tail.mergeTailRecoverySourceRunId,
         retryCreated,
         retryRefusalMessage: retryRefusal?.message ?? null,
         budgetExhausted,
@@ -1266,8 +1105,8 @@ export const completeRun = async (
           await handleRegressionCompletion(tx, {
             task: completionTask,
             run: regressionRun,
-            ...(failedRegressionVerdict?.status === "ok"
-              ? { qualifiedVerdict: failedRegressionVerdict.verdict }
+            ...(tail.qualifiedRegressionVerdict?.status === "ok"
+              ? { qualifiedVerdict: tail.qualifiedRegressionVerdict.verdict }
               : {}),
             now,
           });
@@ -1332,21 +1171,21 @@ export const completeRun = async (
               }, now);
             }
             if (advancement.auxiliaryTargetTaskId) {
-              if (repairDocumentationAbsence !== null) {
+              if (tail.repairDocumentationAbsence !== null) {
                 await tx.taskActivity.create({ data: {
                   taskId: advancement.auxiliaryTargetTaskId,
                   actorType: "control-plane",
-                  body: `Repair target template ${repairDocumentationAbsence} has no Documentation Step; the repair re-opens Regression directly`,
+                  body: `Repair target template ${tail.repairDocumentationAbsence} has no Documentation Step; the repair re-opens Regression directly`,
                   metadata: {
                     kind: MERGE_TAIL_DOCUMENTATION_ABSENT_KIND,
                     schemaVersion: 1,
-                    templateName: repairDocumentationAbsence,
+                    templateName: tail.repairDocumentationAbsence,
                   },
                 } });
               }
               await activateMergeTailTarget(tx, advancement.auxiliaryTargetTaskId, now, {
-                ...(repairRecoveryBinding?.case === "recovery"
-                  ? { recoverySourceRunId: repairRecoveryBinding.recoverySourceRunId }
+                ...(tail.repairBinding?.case === "recovery"
+                  ? { recoverySourceRunId: tail.repairBinding.recoverySourceRunId }
                   : {}),
               });
             }
@@ -1359,26 +1198,26 @@ export const completeRun = async (
           // repair Task with the reason, record the overlap on the Regression
           // task, and leave the tail in the state the operator reentry route
           // reopens. The completion answers a classified rejection below.
-          if (!unboundRepair) {
+          if (!tail.unboundRepair) {
             throw new Error(`Run ${run.id} rejected a repair binding it did not classify`);
           }
           await stopUnboundRepair(tx, {
             runId: run.id,
             repairTaskId: run.taskId,
             ...(completionTaskStatus ? { repairTaskStatus: completionTaskStatus } : {}),
-            regressionTaskId: unboundRepair.regressionTaskId,
-            documentationTaskId: repairDocumentationTask?.id ?? null,
-            mismatch: unboundRepair.mismatch,
+            regressionTaskId: tail.unboundRepair.regressionTaskId,
+            documentationTaskId: tail.documentationTaskId,
+            mismatch: tail.unboundRepair.mismatch,
             run: { agentId: run.agentId, sessionId: run.session.id, completedAt: now },
           });
           repairBindingRejection = {
             reason: "merge-tail-repair-unbound",
-            message: unboundRepair.mismatch.reason,
+            message: tail.unboundRepair.mismatch.reason,
             detail: {
-              recoveryId: unboundRepair.mismatch.recoveryId,
-              boundRecoveryRunId: unboundRepair.mismatch.boundRecoveryRunId,
-              boundSourceRunId: unboundRepair.mismatch.boundSourceRunId,
-              repairedRunId: unboundRepair.mismatch.repairedRunId,
+              recoveryId: tail.unboundRepair.mismatch.recoveryId,
+              boundRecoveryRunId: tail.unboundRepair.mismatch.boundRecoveryRunId,
+              boundSourceRunId: tail.unboundRepair.mismatch.boundSourceRunId,
+              repairedRunId: tail.unboundRepair.mismatch.repairedRunId,
             },
           };
           leaseOutcome = "stop";
@@ -1502,8 +1341,7 @@ export const completeRun = async (
       // a recovery worker can acquire the next Lease and create a replacement.
       // Regression and mechanical Steps are the direct Lease consumers here.
       leaseOutcome: retryRunId
-        && (mechanical
-          || isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind))
+        && tail.retryInheritsLease
         ? { kind: "hand-off", taskId: run.taskId, handoffRunId: retryRunId, at: now, fromRunId: run.id }
         : leaseOutcome === "stop" || strandedHandoff
         ? {

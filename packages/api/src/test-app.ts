@@ -112,5 +112,3 @@ export const createApp = (db: PrismaClient, options: {
     ...(options.runnerRegistry === undefined ? {} : { runnerRegistry: options.runnerRegistry }),
   });
 };
-
-export { partitionArchivable } from "./task-archive.js";

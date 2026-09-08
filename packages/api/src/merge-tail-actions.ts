@@ -9,7 +9,6 @@ import {
   findCanonicalAgent,
   githubRepositoryFromRemote,
   isIntegratorStep,
-  isRegressionVerificationOutputKind,
   latestMarker,
   MAX_MERGE_TAIL_REPAIR_ATTEMPTS,
   MERGE_TAIL_KIND,
@@ -31,6 +30,7 @@ import {
   writeMarker,
 } from "@anneal/db";
 
+import { terminalFailureStopsLease } from "./merge-tail-settlement.js";
 import type { BranchAncestryReader } from "./github-read.js";
 import { READINESS_READ_BUDGET_MS } from "./readiness-decision.js";
 import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js";
@@ -738,9 +738,6 @@ export const settleMergeTailCompletion = async (
 ): Promise<MergeTailCompletionResult> => {
   const repairMarker = latestMarker(input.markers, "repairAttempt");
   const repairCompletion = Boolean(repairMarker?.regressionTaskId);
-  const terminalFailureStopsLease = isIntegratorStep(input.task.templateStep)
-    || isRegressionVerificationOutputKind(input.task.templateStep?.outputKind)
-    || repairCompletion;
 
   if (!input.succeeded) {
     if (repairMarker?.regressionTaskId) {
@@ -761,7 +758,7 @@ export const settleMergeTailCompletion = async (
     }
     return {
       handled: repairCompletion,
-      leaseOutcome: terminalFailureStopsLease ? "stop" : "continue",
+      leaseOutcome: terminalFailureStopsLease(input.task.templateStep, repairCompletion) ? "stop" : "continue",
     };
   }
 
