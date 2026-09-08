@@ -79,11 +79,10 @@ export const revalidateAfterClassCeiling = async (
       failureReason: `Automatic base-drift recovery re-validating after its ${className} ceiling was reset`,
     },
   });
-  await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", {
+  await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", "class-revalidated", {
     actorType: "operator",
     body: `Automatic pre-merge base-drift recovery re-validated: ${className} counters reset by operator`,
     metadata: {
-      state: "class-revalidated",
       integratorTaskId: input.integratorTaskId,
       sourceStopId: input.sourceStopId,
       aggregateId: attempt.id,

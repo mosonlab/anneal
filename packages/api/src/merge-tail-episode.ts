@@ -82,22 +82,21 @@ export const observeEpisode = async (
   const detail = input.family === "lease-contention"
     ? `Chain ${input.target.chainId} has been unable to take the merge Lease for ${minutes} minutes; it is held by ${describeHolder(holder)}`
     : `${input.family} on Task ${input.taskId}: ${input.detail ?? input.answer} (${minutes} minutes)`;
-  await writeMarker(tx, input.taskId, offline ? "executorOffline" : "leaseContention", {
+  const episodeState = offline
+    ? MERGE_EXECUTOR_OFFLINE_STATE
+    : transition === "closed" ? "resolved" : transition === "alerted" ? "alerted" : input.answer;
+  await writeMarker(tx, input.taskId, offline ? "executorOffline" : "leaseContention", episodeState, {
     actorType: "control-plane",
     body: transition === "closed" ? `${input.family} episode ended: ${input.detail ?? input.answer}` : detail,
     metadata: {
       ...(offline ? {
-        state: MERGE_EXECUTOR_OFFLINE_STATE,
         reason: MERGE_EXECUTOR_OFFLINE_REASON,
         ...(input.family === "executor-offline" && input.executorRunnerIds
           ? { executorRunnerIds: input.executorRunnerIds } : {}),
         episodeStartedAt: startedAt.toISOString(),
         episodeClosed: transition === "closed",
         episodeAlerted: transition === "alerted" || alreadyAlerted,
-      } : {
-        state: transition === "closed" ? "resolved" : transition === "alerted" ? "alerted" : input.answer,
-        firstContendedAt: startedAt.toISOString(),
-      }),
+      } : { firstContendedAt: startedAt.toISOString() }),
       ...(input.family === "lease-contention" ? input.target : {}),
       ...(holder ? { holder: holder.holder, holderTask: holder.task, holderReason: holder.reason,
         holderAcquiredAt: holder.acquiredAt, holderLeaseSha: holder.sha } : {}),

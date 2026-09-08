@@ -1,6 +1,6 @@
 import {
   FailureClass, isIntegratorStep, isRegressionVerificationOutputKind,
-  latestMarker, readMarkers, readMarkerHistory, readLatestMarker,
+  latestMarker, mergeTrainConcluded, readMarkers, readMarkerHistory, readLatestMarker,
   REGRESSION_VERIFICATION_OUTPUT_KIND, stepRole,
   type Marker, type Prisma,
 } from "@anneal/db";
@@ -28,7 +28,7 @@ type SettlementInput = {
 };
 type SettlementRows = {
   markers: Marker[];
-  trainMarker: Marker | null;
+  trainMarker: Marker<"train"> | null;
   failedRepairHistory: Marker[];
   failedRepairOutput: { runId: string | null } | null;
   failedRegressionVerdict: RegressionVerdictQualification | null;
@@ -85,7 +85,7 @@ export const deriveMergeTailFacts = (input: SettlementInput & SettlementRows) =>
     qualifiedRegressionVerdict: input.failedRegressionVerdict,
     mergeTrainSettled: Boolean(input.task && !input.task.templateId && !input.task.chainId
       && input.trainMarker?.raw.trainTaskId === input.task.id
-      && (input.trainMarker.state === "settled" || input.trainMarker.state === "aborted")),
+      && mergeTrainConcluded(input.trainMarker)),
     mergeTailAuxiliary: Boolean(repairMarker?.regressionTaskId),
     auxiliaryTargetTaskId: repairMarker?.regressionTaskId
       ? input.documentationTaskId ?? repairMarker.regressionTaskId : null,

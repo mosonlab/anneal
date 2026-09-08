@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FailureClass, markerFromMetadata, type Marker, type RegressionVerdict } from "@anneal/db";
+import {
+  FailureClass, markerFromMetadata, MERGE_TAIL_KIND,
+  type Marker, type MarkerKind, type RegressionVerdict,
+} from "@anneal/db";
 import { deriveMergeTailFacts, type MergeTailFacts } from "./merge-tail-settlement.js";
 
 type Input = Parameters<typeof deriveMergeTailFacts>[0];
 const headSha = "a".repeat(40);
-const marker = (kind: string, fields: Record<string, string> = {}): Marker => {
-  const parsed = markerFromMetadata({ kind: `mergeTail.${kind}`, schemaVersion: 1, ...fields });
-  assert.ok(parsed);
-  return parsed;
+const marker = <K extends MarkerKind>(kind: K, fields: Record<string, string> = {}): Marker<K> => {
+  const parsed = markerFromMetadata({ kind: MERGE_TAIL_KIND[kind], schemaVersion: 1, ...fields });
+  assert.ok(parsed && parsed.kind === kind);
+  return parsed as Marker<K>;
 };
 const repair = marker("repairAttempt", {
   regressionTaskId: "regression", sourceRunId: "source", headSha,

@@ -45,11 +45,10 @@ export const replayPendingIntegratorAuthorization = async (
   if (!authorizationActivityId) return null;
   const opened = await openRun(tx, pending.integratorTaskId, { kind: "integrator-authorized", readyAt: now });
   if (!opened.ok) {
-    await writeMarker(tx, pending.integratorTaskId, "baseDriftRecovery", {
+    await writeMarker(tx, pending.integratorTaskId, "baseDriftRecovery", "authorization-replay-refused", {
       actorType: "control-plane",
       body: `Pending recovery authorization was not replayed: ${opened.refusal.message}`,
-      metadata: { state: "authorization-replay-refused", aggregateId: pending.id,
-        authorizationActivityId, reason: opened.refusal.code },
+      metadata: { aggregateId: pending.id, authorizationActivityId, reason: opened.refusal.code },
     });
     return null;
   }
@@ -71,11 +70,10 @@ export const replayPendingIntegratorAuthorization = async (
     refusalCode: null,
     endedAt: now,
   });
-  await writeMarker(tx, pending.integratorTaskId, "baseDriftRecovery", {
+  await writeMarker(tx, pending.integratorTaskId, "baseDriftRecovery", "authorization-replayed", {
     actorType: "control-plane",
     body: "Recovery authorization replayed; mechanical merge Run queued under its Lease",
     metadata: {
-      state: "authorization-replayed",
       aggregateId: pending.id,
       integratorTaskId: pending.integratorTaskId,
       sourceStopId: pending.sourceStopId,

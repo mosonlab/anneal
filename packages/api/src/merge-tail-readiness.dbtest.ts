@@ -37,7 +37,6 @@ import {
   READINESS_BASE_DRIFT_REQUEUE_LIMIT,
   READINESS_CLAIM_LEASE_MS,
   READINESS_EXCEPTION_REQUEUE_LIMIT,
-  READINESS_EXCEPTION_REQUEUE_STATE,
   readinessTick,
   requeueRegressionSettlement,
   type DaemonSnapshotReader,
@@ -2041,7 +2040,7 @@ const exceptionRequeueMarkers = (regressionTaskId: string) => db.taskActivity.fi
     taskId: regressionTaskId,
     AND: [
       { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.readiness } },
-      { metadata: { path: ["state"], equals: READINESS_EXCEPTION_REQUEUE_STATE } },
+      { metadata: { path: ["state"], equals: "requeued-exception" } },
     ],
   },
   orderBy: [{ createdAt: "asc" }, { id: "asc" }],

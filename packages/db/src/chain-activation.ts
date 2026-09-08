@@ -18,7 +18,6 @@ import {
   carryMergeRecoveryRun,
   isMergeReadinessStep,
   isRegressionVerificationOutputKind,
-  MERGE_TAIL_KIND,
   transitionMergeRecovery,
 } from "./merge-tail.js";
 import { writeMarker } from "./merge-tail-markers.js";
@@ -737,17 +736,11 @@ const activateChainSuccessorInternal = async (
         gated = true;
         continue;
       }
-      await tx.taskActivity.create({ data: {
-        taskId: successor.id,
+      await writeMarker(tx, successor.id, "readiness", "queued", {
         actorType: "control-plane",
         body: "Predecessor layer completed; server-side merge readiness queued",
-        metadata: {
-          kind: MERGE_TAIL_KIND.readiness,
-          schemaVersion: 1,
-          state: "queued",
-          sourceRunId: options.sourceRunId ?? null,
-        },
-      } });
+        metadata: { sourceRunId: options.sourceRunId ?? null },
+      });
       continue;
     }
 
@@ -974,13 +967,12 @@ export const activateRecoveryIntegratorSuccessor = async (
       where: { id: recovery.id },
       data: { pendingAuthorizationId: authorization.id },
     });
-    await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", {
+    await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", "authorization-withheld", {
       actorType: "control-plane",
       body: control.heldLayer === null
         ? "Recovery authorization recorded for Chain resume; the Chain is held"
         : `Recovery authorization recorded for Chain resume; the Chain is held after layer ${String(control.heldLayer)}`,
       metadata: {
-        state: "authorization-withheld",
         aggregateId: recovery.id,
         integratorTaskId: input.integratorTaskId,
         sourceStopId: input.sourceStopId,

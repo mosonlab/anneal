@@ -30,6 +30,7 @@ const marker = (repairKind: "review-fix" | "gate-fix", sourceRunId: string): Mar
   repairTaskId: "prior-repair",
   readinessTaskId: null,
   repairKind,
+  targetHeadSha: null,
   headSha: HEAD,
   baseHeadSha: BASE,
   baseSha: null,

@@ -39,10 +39,10 @@ export const settleFailedIntegratorRun = async (
     await tx.task.update({ where: { id: input.integratorTaskId }, data: {
       status: TaskStatus.REVIEW, failureReason: input.failureReason,
     } });
-    await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", {
+    await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", "external-failure-pending", {
       actorType: "control-plane",
       body: "External integrator failure queued recovery validation of the pending authorization",
-      metadata: { state: "external-failure-pending", aggregateId: aggregate.id, sourceStopId,
+      metadata: { aggregateId: aggregate.id, sourceStopId,
         failedRunId: input.runId, authorizationActivityId: aggregate.authorizationActivityId },
     });
     return { kind: "pending" };
@@ -50,10 +50,10 @@ export const settleFailedIntegratorRun = async (
   const question = await openDeferredBaseDriftQuestion(tx, input.integratorTaskId, sourceStopId, {
     revalidations: aggregate?.revalidations ?? 0, ceiling: false,
   });
-  await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", {
+  await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", "question-opened", {
     actorType: "control-plane",
     body: `Merge integrator Run failed (${input.failureReason}); the deferred base-drift question is now open`,
-    metadata: { state: "question-opened", sourceStopId, failedRunId: input.runId,
+    metadata: { sourceStopId, failedRunId: input.runId,
       external: input.external, questionId: question?.id ?? null },
   });
   return { kind: "question-opened", questionId: question?.id ?? null };

@@ -43,7 +43,8 @@ export const GATE_ATTESTATION_BASE_MISMATCH = "gate-attestation-base-mismatch";
 
 export { MERGE_EXECUTOR_OFFLINE_STATE, MERGE_EXECUTOR_OFFLINE_REASON } from "./merge-tail-markers.js";
 import { MERGE_EXECUTOR_OFFLINE_STATE, MERGE_EXECUTOR_OFFLINE_REASON,
-  executorOfflineDetail, latestExecutorOfflineMarker, openEpisodeStart } from "./merge-tail-markers.js";
+  executorOfflineDetail, latestExecutorOfflineMarker, openEpisodeStart,
+  type MarkerState } from "./merge-tail-markers.js";
 
 /** Persist only after the caller's approval transaction has rolled back. */
 export const recordMergeEvidenceRefusal = async (db: PrismaClient, error: unknown): Promise<void> => {
@@ -83,7 +84,9 @@ const executorOfflineRefusal = async (
       taskId: readinessTaskId,
       metadata: {
         kind: MERGE_TAIL_KIND.readiness,
-        state: unreadableCause ? "requeued-executor-unobservable" : MERGE_EXECUTOR_OFFLINE_STATE,
+        state: (unreadableCause
+          ? "requeued-executor-unobservable"
+          : MERGE_EXECUTOR_OFFLINE_STATE) satisfies MarkerState<"readiness">,
         reason: MERGE_EXECUTOR_OFFLINE_REASON,
         executorRunnerIds: [...executorRunnerIds],
         ...(unreadableCause

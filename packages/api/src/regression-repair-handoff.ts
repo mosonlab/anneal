@@ -1,7 +1,8 @@
 import {
-  asJsonObject,
   FailureClass,
   isRegressionVerificationOutputKind,
+  type Marker,
+  markerFromMetadata,
   MERGE_TAIL_KIND,
   parseRegressionVerdict,
   Prisma,
@@ -85,15 +86,17 @@ export const regressionRepairHandoffForClaim = async (
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: 20,
   });
-  const resultMetadata = resultRows.map((row) => asJsonObject(row.metadata));
-  const boundToThisVerdict = (metadata: Record<string, unknown> | null): boolean => (
-    metadata?.repairKind === repairKind
-    && metadata.startHeadSha === expectedHeadSha
-    && metadata.targetHeadSha === expectedBaseHeadSha
+  const results = resultRows.flatMap((row) => {
+    const marker = markerFromMetadata(row.metadata);
+    return marker?.kind === "repairResult" ? [marker as Marker<"repairResult">] : [];
+  });
+  const boundToThisVerdict = (marker: Marker<"repairResult">): boolean => (
+    marker.repairKind === repairKind
+    && marker.startHeadSha === expectedHeadSha
+    && marker.targetHeadSha === expectedBaseHeadSha
   );
-  const result = resultMetadata.find((metadata) => (
-    boundToThisVerdict(metadata) && metadata?.state === undefined
-  ));
+  // A successful repair records no state; every other repair result names one.
+  const result = results.find((marker) => boundToThisVerdict(marker) && marker.state === null);
   if (!result) {
     const orphanedNoChangesOutput = priorOutput.run?.status === RunStatus.FAILED
       && priorOutput.run.failureClass === FailureClass.NO_CHANGES_PRODUCED
@@ -123,17 +126,15 @@ export const regressionRepairHandoffForClaim = async (
     // A rejected resolver output is the common reason there is no successful
     // result, and the refusal is read on the Regression card: name the repair
     // task that produced it so the operator can open it directly.
-    const rejected = resultMetadata.find((metadata) => (
-      boundToThisVerdict(metadata) && metadata?.state === "invalid-output"
+    const rejected = results.find((marker) => (
+      boundToThisVerdict(marker) && marker.state === "invalid-output"
     ));
-    const rejectedTaskId = typeof rejected?.repairTaskId === "string" ? rejected.repairTaskId : null;
-    const rejection = rejectedTaskId
-      ? `; repair task ${rejectedTaskId} returned invalid output: ${typeof rejected?.reason === "string" ? rejected.reason : "reason not recorded"}`
+    const rejection = rejected?.repairTaskId
+      ? `; repair task ${rejected.repairTaskId} returned invalid output: ${typeof rejected.raw.reason === "string" ? rejected.raw.reason : "reason not recorded"}`
       : "";
     return invalid(`no successful ${repairKind} result binds ${expectedHeadSha} to ${expectedBaseHeadSha}${rejection}`);
   }
-  const repairTaskId = typeof result.repairTaskId === "string" ? result.repairTaskId : null;
-  const resolvedHeadSha = typeof result.resolvedHeadSha === "string" ? result.resolvedHeadSha : null;
+  const { repairTaskId, resolvedHeadSha } = result;
   if (!repairTaskId || !resolvedHeadSha || !EXACT_SHA.test(resolvedHeadSha)) {
     return invalid("repair result lacks its task id or exact resolved head");
   }

@@ -25,7 +25,6 @@ import {
   mergeExecutorsBlockingAuthorization,
   MERGE_EXECUTOR_OFFLINE_REASON,
   MergeGateAuthorizationError,
-  MERGE_TAIL_KIND,
   parseRegressionVerdict,
   readMarkerHistory,
   requireMergeGateAuthorization,
@@ -335,8 +334,6 @@ const stopReadinessSettlement = (
   },
 });
 
-export const READINESS_EXCEPTION_REQUEUE_STATE = "requeued-exception";
-
 /**
  * Returns the readiness Step to `TODO` after an evaluation exception so the
  * next tick evaluates it again. That Step is the only row whose status this
@@ -363,12 +360,11 @@ export const requeueReadinessExceptionSettlement = (
       where: { id: input.readinessTaskId },
       data: { status: TaskStatus.TODO, failureReason: null },
     });
-    await writeMarker(tx, input.regressionTaskId, "readiness", {
+    await writeMarker(tx, input.regressionTaskId, "readiness", "requeued-exception", {
       actorType: "control-plane",
       body: `Merge readiness requeued after evaluation exception ${String(input.requeue)}`
         + ` of ${String(input.limit)}: ${input.reason}`,
       metadata: {
-        state: READINESS_EXCEPTION_REQUEUE_STATE,
         reason: input.reason,
         requeue: input.requeue,
         limit: input.limit,
@@ -395,7 +391,7 @@ const spentExceptionRequeues = async (
 ): Promise<number> => {
   const markers = await readMarkerHistory(db as Prisma.TransactionClient, regressionTaskId);
   return markers.filter((marker) => marker.kind === "readiness"
-    && marker.state === READINESS_EXCEPTION_REQUEUE_STATE
+    && marker.state === "requeued-exception"
     && (marker.raw.recoveryAggregateId ?? null) === (recovery?.aggregateId ?? null)).length;
 };
 
@@ -485,11 +481,10 @@ export const requeueRegressionSettlement = (
         baseDrift,
         reason: input.reason,
       });
-      await writeMarker(tx, input.regressionTaskId, "readiness", {
+      await writeMarker(tx, input.regressionTaskId, "readiness", "requeued-regression", {
         actorType: "control-plane",
         body: `Merge readiness returned to regression: ${input.reason}; ${input.staleBaseSha} -> ${input.currentBaseSha}`,
         metadata: {
-          state: "requeued-regression",
           reason: input.reason,
           staleBaseSha: input.staleBaseSha,
           currentBaseSha: input.currentBaseSha,
@@ -722,8 +717,6 @@ const discoverReadiness = async (
   }
 };
 
-const EXECUTOR_OFFLINE_REARMED = "executor-offline-rearmed";
-
 /** Re-arm only the pair parked by this outage, under the Chain mutation lock. */
 const rearmExecutorOffline = async (
   db: PrismaClient,
@@ -757,13 +750,11 @@ const rearmExecutorOffline = async (
       where: { id: regression.id },
       data: { status: TaskStatus.DONE, failureReason: null, readinessClaimToken: null, readinessClaimExpiresAt: null },
     });
-    await tx.taskActivity.create({ data: {
-      taskId: readiness.id,
+    await writeMarker(tx, readiness.id, "readiness", "executor-offline-rearmed", {
       actorType: "control-plane",
       body: "Merge executor observed online; executor-offline ceiling stop exited, readiness returned to TODO and existing Regression evidence restored to DONE without a new Run",
-      metadata: { kind: MERGE_TAIL_KIND.readiness, state: EXECUTOR_OFFLINE_REARMED,
-        regressionTaskId: regression.id, regressionOutputId: regression.stepOutput?.id ?? null },
-    } });
+      metadata: { regressionTaskId: regression.id, regressionOutputId: regression.stepOutput?.id ?? null },
+    });
     await tx.inboxMessage.updateMany({ where: {
       taskId: { in: [readiness.id, regression.id] }, status: "OPEN",
       body: { contains: readiness.failureReason! },
@@ -911,18 +902,15 @@ const recordLeaseDeferral = async (
 ): Promise<boolean> => db.$transaction(async (tx) => {
   const settlement = await claim.settle(tx, {
     kind: "keep",
-    apply: async (client) => client.taskActivity.create({ data: {
-      taskId: input.readinessTaskId,
+    apply: async (client) => writeMarker(client, input.readinessTaskId, "readiness", "lease-transport-deferred", {
       actorType: "control-plane",
       body: `Merge lease transport deferred: ${input.detail}`,
       metadata: {
-        kind: MERGE_TAIL_KIND.readiness,
-        state: "lease-transport-deferred",
         chainId: input.chainId,
         detail: input.detail,
         retryAfter: new Date(input.at.getTime() + READINESS_CLAIM_LEASE_MS).toISOString(),
       },
-    } }),
+    }),
   });
   return settlement.settled;
 });
@@ -1042,11 +1030,10 @@ const authorizeReadinessSettlement = (
           triggers: decision.auditTriggers,
         });
       }
-      await writeMarker(tx, readiness.id, "readiness", {
+      await writeMarker(tx, readiness.id, "readiness", "authorized", {
         actorType: "control-plane",
         body: `Merge readiness authorized exact head ${decision.evidence.headSha}; merge execution queued`,
         metadata: {
-          state: "authorized",
           headSha: decision.evidence.headSha,
           authorizationActivityId: activity.id,
           recoverySourceStopId: recovery?.sourceStopId ?? null,
