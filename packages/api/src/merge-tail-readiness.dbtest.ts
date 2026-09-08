@@ -2150,7 +2150,7 @@ test("a tick whose readiness claim was replaced cannot close the offline episode
   });
 });
 
-test("executor return re-arms a ceiling stop without discarding its recovery aggregate", async () => {
+for (const width of [0, 2]) test(`executor return re-arms a ceiling stop with train width ${width} without discarding its recovery aggregate`, async () => {
   await withExecutorAllowlist(EXECUTOR_RUNNER_ID, async () => {
     const seeded = await seedReadiness();
     const run = await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
@@ -2169,21 +2169,23 @@ test("executor return re-arms a ceiling stop without discarding its recovery agg
       authorizedHeadSha: HEAD, authorizedBaseSha: BASE, observedBaseSha: BASE, currentBaseSha: BASE,
     } });
     const offline = executorsAt(OFFLINE_NOW);
-    await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, offline);
+    await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, offline, width);
     const expired = new Date(OFFLINE_NOW.getTime() + MERGE_EXECUTOR_OFFLINE_WAIT_MS);
-    await readinessTick(db, reader(), expired, 5, releaseChainLease, runWithMergeLease, offline);
+    await readinessTick(db, reader(), expired, 5, releaseChainLease, runWithMergeLease, offline, width);
     assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } })).status,
       MergeRecoveryStatus.BLOCKED_DOWNSTREAM);
     const result = await readinessTick(db, reader([], snapshot({ baseSha: "d".repeat(40) })),
-      new Date(expired.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, executorsAt(ONLINE_NOW));
+      new Date(expired.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, executorsAt(ONLINE_NOW), width);
     assert.equal(await db.inboxMessage.count({ where: {
       taskId: seeded.regression.id, status: "OPEN",
       dedupeKey: { startsWith: "merge-base-drift-recovery-tail-stop:" },
     } }), 0);
     assert.equal(result.authorized, 0);
-    assert.equal(result.requeued, 1);
+    assert.equal(result.requeued, width === 0 ? 1 : 0);
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.TODO);
     assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } })).status,
-      MergeRecoveryStatus.REPAIRING);
+      width === 0 ? MergeRecoveryStatus.REPAIRING : MergeRecoveryStatus.AWAITING_AUTHORIZATION);
+    assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), width === 0 ? 2 : 1);
   });
 });
 
