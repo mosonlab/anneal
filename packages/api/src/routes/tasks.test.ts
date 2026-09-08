@@ -273,6 +273,7 @@ const retryRequest = async (
       },
       agentRepoAccess: { count: async () => 1 },
       taskActivity: {
+        findMany: async () => [],
         create: async ({ data }: { data: Record<string, unknown> }) => {
           activities.push(data);
           return data;
@@ -1755,5 +1756,18 @@ test("operator revalidation output respects the persisted template protocol", as
       assert.equal(writes, expectedStatus === 200 ? 1 : 0);
       assert.equal(routeLookups, expectedRoutes);
     }
+  });
+});
+
+test("operator retry returns 400 for a mis-bound integrator without a Run or park", async () => {
+  await withTokens(async () => {
+    const { response, created, activities } = await retryRequest({
+      id: "ordinary-agent", name: "Ordinary Agent", model: "claude",
+      runnerPreference: RunnerPreference.CLAUDE, foundationalPrompt: "foundation", rolePrompt: "role",
+    }, { runner: RunnerKind.CLAUDE, outputKind: "merge-result" });
+    assert.equal(response.status, 400);
+    assert.match((await response.json() as { error: string }).error, /merge-integrator/);
+    assert.equal(created, undefined);
+    assert.deepEqual(activities, []);
   });
 });

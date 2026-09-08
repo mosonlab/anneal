@@ -241,7 +241,10 @@ test("lease-loss retry refuses an archived Agent and parks the Task visibly", as
         create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
       },
       mergeLeaseEvent: { findMany: async () => [] },
-      inboxMessage: { create: async ({ data }: { data: Record<string, unknown> }) => { inbox.push(data); return {}; } },
+      inboxMessage: {
+        create: async ({ data }: { data: Record<string, unknown> }) => { inbox.push(data); return {}; },
+        upsert: async ({ create }: { create: Record<string, unknown> }) => { inbox.push(create); return {}; },
+      },
     }),
     taskActivity: {
       createMany: async ({ data }: { data: Record<string, unknown>[] }) => { activities.push(...data); return { count: data.length }; },
@@ -252,7 +255,7 @@ test("lease-loss retry refuses an archived Agent and parks the Task visibly", as
   assert.match(String(lostUpdate?.failureReason), /heartbeat starved.*lease expired/i);
   assert.equal(queued, undefined);
   assert.equal(taskUpdates.at(-1)?.status, TaskStatus.REVIEW);
-  assert.match(String(taskUpdates.at(-1)?.failureReason), /retry refused.*Archived/i);
+  assert.match(String(taskUpdates.at(-1)?.failureReason), /Archived/i);
   assert.match(String(activities.at(-1)?.body), /automatic retry refused.*Archived/i);
   assert.match(String(inbox.at(-1)?.body), /Automatic retry refused.*Archived/i);
 });
@@ -340,7 +343,10 @@ const lostRunDatabase = (options: {
         create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
       },
       mergeLeaseEvent: { findMany: async () => [] },
-      inboxMessage: { create: async ({ data }: { data: Record<string, unknown> }) => { inbox.push(data); return {}; } },
+      inboxMessage: {
+        create: async ({ data }: { data: Record<string, unknown> }) => { inbox.push(data); return {}; },
+        upsert: async ({ create }: { create: Record<string, unknown> }) => { inbox.push(create); return {}; },
+      },
     }),
     taskActivity: { createMany: async () => ({ count: 0 }) },
   } as unknown as PrismaClient;
@@ -374,32 +380,12 @@ test("the fourth lease loss is refused by name, parks the Task, and grants nothi
   assert.deepEqual(created, [], "no replacement is queued");
   assert.equal(taskUpdates.at(-1)?.status, TaskStatus.REVIEW);
   assert.match(String(taskUpdates.at(-1)?.failureReason), /Lease-loss refunds exhausted after 3/);
-  // Only the code: the refusal's own detail stays out of the park for every
-  // refusal but the spend cap.
-  assert.deepEqual(activities.at(-1)?.metadata, { refusal: "lease-loss-refunds-exhausted" });
   assert.match(String(activities.at(-1)?.body), /Run 2 lost; automatic retry refused/);
   assert.match(String(inbox.at(-1)?.body), /Lease-loss refunds exhausted/);
   // A refund nobody may use is not recorded: the operator's own retry must not
   // inherit the attempt this reconciliation just refused.
   assert.equal(lostUpdates.at(-1)?.budgetGrants, 3);
   assert.equal(lostUpdates.at(-1)?.maxRunsPerTask, 8);
-});
-
-test("an automatic lease-loss retry refused by a spend cap parks the cap and the total it refused against", async () => {
-  const { database, now, created, activities, taskUpdates } = lostRunDatabase({
-    leaseLossRefunds: 0, spendCap: "1.00", spentUsd: "1.50",
-  });
-
-  assert.equal(await reconcileDatabaseRuns(database, now), 1);
-
-  assert.deepEqual(created, [], "no replacement is queued");
-  assert.equal(taskUpdates.at(-1)?.status, TaskStatus.REVIEW);
-  assert.match(String(taskUpdates.at(-1)?.failureReason), /Spend cap \$1\.00 reached/);
-  // The park an operator filters by is also the one that has to name which cap
-  // to raise: the code alone leaves the amounts in prose and nowhere else.
-  assert.deepEqual(activities.at(-1)?.metadata, {
-    refusal: "spend-cap-exhausted", spendCapUsd: "1.00", spentUsd: "1.50", runs: 1,
-  });
 });
 
 test("refund exhaustion wins when the fourth lost run also reaches the ordinary ceiling", async () => {

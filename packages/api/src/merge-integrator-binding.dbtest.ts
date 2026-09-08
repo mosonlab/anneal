@@ -229,8 +229,14 @@ test("retry refuses a mis-bound integrator task", async () => {
     where: { id: chain.gateTask.id },
     data: { status: TaskStatus.DONE },
   });
+  const activitiesBefore = await db.taskActivity.count({ where: { taskId: chain.integratorTask!.id } });
+  const inboxBefore = await db.inboxMessage.count({ where: { taskId: chain.integratorTask!.id } });
   const refused = await call("POST", `/tasks/${chain.integratorTask!.id}/retry`);
   assert.equal(refused.status, 400, JSON.stringify(refused.body));
+  assert.match(refused.body.error, /merge-integrator/);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.integratorTask!.id } })).status, TaskStatus.TODO);
+  assert.equal(await db.taskActivity.count({ where: { taskId: chain.integratorTask!.id } }), activitiesBefore);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: chain.integratorTask!.id } }), inboxBefore);
   assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id, status: "QUEUED" } }), 0);
 });
 

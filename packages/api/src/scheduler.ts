@@ -5,7 +5,7 @@ import {
   lockChainRows,
   lockChainStructure,
   openRun,
-  runBirthRefusalMetadata,
+  settleRunBirthRefusal,
   Prisma,
   type PrismaClient,
   ScheduleKind,
@@ -174,29 +174,11 @@ export const fireCronTask = async (
     if (copy.assigneeType === AssigneeType.AGENT && copy.assigneeAgentId && copy.repoId) {
       const opened = await openRun(tx, copy.id, { kind: "enqueue", readyAt: now });
       if (!opened.ok) {
-        const refusal = opened.refusal;
-        // Every disposition parks the copy. The copy is chainless and belongs
-        // to no integrator, so `held` and `stopped` cannot reach here, and a
-        // fired schedule that produced no Run is something an operator has to
-        // see whatever refused it.
-        await tx.task.update({
-          where: { id: copy.id },
-          data: { status: TaskStatus.REVIEW, failureReason: refusal.message },
+        const settlement = await settleRunBirthRefusal(tx, {
+          taskId: copy.id, refusal: opened.refusal, mode: "park", now,
+          origin: { kind: "recurring-schedule", recurringTaskId: task.id },
         });
-        await tx.taskActivity.createMany({ data: [
-          {
-            taskId: task.id,
-            actorType: "scheduler",
-            body: `Recurring schedule advanced without a Run: ${refusal.message}`,
-            metadata: { ...runBirthRefusalMetadata(refusal), recurringTaskId: task.id, copyTaskId: copy.id },
-          },
-          {
-            taskId: copy.id,
-            actorType: "scheduler",
-            body: `Created from recurring task ${task.id}; Run birth refused: ${refusal.message}`,
-            metadata: { ...runBirthRefusalMetadata(refusal), recurringTaskId: task.id },
-          },
-        ] });
+        if (settlement.kind === "raise") throw settlement.error;
         return false;
       }
     }
@@ -241,27 +223,11 @@ export const fireAtTask = async (db: PrismaClient, task: Task, now: Date): Promi
       if (current._count.runs > 0) return false;
       const opened = await openRun(tx, task.id, { kind: "enqueue", readyAt: now });
       if (opened.ok) return true;
-      const refusal = opened.refusal;
-      switch (refusal.disposition) {
-        case "held":
-          // The schedule stays due. Nothing is wrong with it, and the next tick
-          // after the hold releases fires it.
-          return false;
-        case "stopped":
-        case "fault":
-          await tx.task.update({ where: { id: task.id }, data: { runAt: null } });
-          await tx.taskActivity.create({ data: {
-            taskId: task.id,
-            actorType: "scheduler",
-            body: `Schedule quarantined after Run birth refusal: ${refusal.message}`,
-            metadata: runBirthRefusalMetadata(refusal),
-          } });
-          return false;
-        default: {
-          const unhandled: never = refusal.disposition;
-          return unhandled;
-        }
-      }
+      const settlement = await settleRunBirthRefusal(tx, {
+        taskId: task.id, refusal: opened.refusal, mode: "park", now, origin: { kind: "at-schedule" },
+      });
+      if (settlement.kind === "raise") throw settlement.error;
+      return false;
     }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
   } catch (error: unknown) {
     // A held successor is intentionally left due: the scheduler must be able
