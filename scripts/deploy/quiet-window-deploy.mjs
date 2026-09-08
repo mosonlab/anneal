@@ -1092,7 +1092,6 @@ export const createDeployHost = ({
   serviceControl: providedServiceControl,
   runCommand = runDeployCommand,
   readMigrationTail = migrationTail,
-  verifyRecoveredServices = verifyStableServicePaths,
   readTargetRevision = null,
   log: logImpl = log,
   environment = process.env,
@@ -1175,6 +1174,52 @@ export const createDeployHost = ({
         ? `${error.reason}-${error.detail}`
         : error instanceof Error ? error.name : "probe-failed";
     }
+  };
+  /** Sample the complete release proof for either activation direction. The
+   * inventory and probes belong to this host; only the commit and pre-restart
+   * registrations vary. Keep wrapper binding in the steady proof as required
+   * by recovery, and retain the successful API stamp for the forward ledger. */
+  const releaseReadiness = ({ commit, before }) => {
+    const sample = async () => {
+      try {
+        const state = await serviceState(serviceControl, serviceLabels);
+        if (!state.ok) {
+          const manager = serviceControl.platform === "linux" ? "systemd" : "launchd";
+          return `${manager}-unavailable-${state.unavailable.join(",")}`;
+        }
+        for (const label of serviceLabels) {
+          const description = await serviceControl.describe(label);
+          if (!describesStableWrapper({ description, label, wrapperPath: serviceWrapperPath(REPOSITORY_ROOT) })) {
+            return `service-wrapper-verification-failed-${label}`;
+          }
+        }
+      } catch (error) {
+        const failure = failureOf(error);
+        return `${failure.reason}-${failure.detail}`;
+      }
+      if (deployRole !== "runner") {
+        try {
+          const port = environment.API_PORT ?? "3000";
+          const health = await fetchImpl(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
+          const version = await fetchImpl(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) });
+          const payload = version.ok ? await version.json() : {};
+          if (!health.ok || !version.ok || payload.commit !== commit || payload.dirty !== false) {
+            return `health-${health.status}-version-${version.status}-commit-${String(payload.commit ?? "unknown")}`;
+          }
+          sample.activatedBuildStamp = {
+            packageName: payload.packageName,
+            commit: payload.commit,
+            dirty: payload.dirty,
+          };
+        } catch (error) {
+          if (error instanceof DeployFailure) throw error;
+          return error instanceof Error ? error.name : "probe-failed";
+        }
+      }
+      return registrationRefusal({ before, targetCommit: commit });
+    };
+    sample.activatedBuildStamp = null;
+    return sample;
   };
   let canonicalSyncRefusals = [];
   const notifyDeployOutcome = async (record) => notifyImpl(canonicalSyncNoticeRecord(record, canonicalSyncRefusals));
@@ -1533,48 +1578,10 @@ export const createDeployHost = ({
     verifyServices: async (attempt) => {
       const revisions = attempt.requireFact("revisions");
       const before = attempt.requireFact("runnerRegistrationsBeforeRestart");
-      let activatedBuildStamp = null;
-
-      const apiRefusal = async () => {
-        try {
-          const port = environment.API_PORT ?? "3000";
-          const health = await fetchImpl(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(2_000) });
-          const version = await fetchImpl(`http://127.0.0.1:${port}/version`, { signal: AbortSignal.timeout(2_000) });
-          const payload = version.ok ? await version.json() : {};
-          if (health.ok && version.ok && payload.commit === revisions.to && payload.dirty === false) {
-            activatedBuildStamp = {
-              packageName: payload.packageName,
-              commit: payload.commit,
-              dirty: payload.dirty,
-            };
-            return null;
-          }
-          return `health-${health.status}-version-${version.status}-commit-${String(payload.commit ?? "unknown")}`;
-        } catch (error) {
-          if (error instanceof DeployFailure) throw error;
-          return error instanceof Error ? error.name : "probe-failed";
-        }
-      };
-
-      // One sample of the whole readiness criterion: every unit active, the
-      // API answering on the activated build where this role owns one, and
-      // every local runner re-registered. A control-plane deploy requires all
-      // three; neither probe substitutes for the other.
-      const readinessRefusal = async () => {
-        const state = await serviceState(serviceControl, serviceLabels);
-        if (!state.ok) {
-          const manager = serviceControl.platform === "linux" ? "systemd" : "launchd";
-          return `${manager}-unavailable-${state.unavailable.join(",")}`;
-        }
-        if (deployRole !== "runner") {
-          const refusal = await apiRefusal();
-          if (refusal !== null) return refusal;
-        }
-        return registrationRefusal({ before, targetCommit: revisions.to });
-      };
+      const sample = releaseReadiness({ commit: revisions.to, before });
 
       const observedForMs = await observeReadiness({
-        sample: readinessRefusal, observationWindowMs,
+        sample, observationWindowMs,
         timeoutMs: serviceVerificationTimeoutMs, wait: serviceVerificationWait,
         failureReason: "service-verification-failed",
       });
@@ -1586,7 +1593,7 @@ export const createDeployHost = ({
           activatedBuildCommit: revisions.to,
           observationWindowMs,
           observedForMs,
-          ...(activatedBuildStamp === null ? {} : { activatedBuildStamp }),
+          ...(sample.activatedBuildStamp === null ? {} : { activatedBuildStamp: sample.activatedBuildStamp }),
         },
       };
     },
@@ -1612,17 +1619,7 @@ export const createDeployHost = ({
       }
       const previousCommit = attempt.requireFact("revisions").from;
       await observeReadiness({
-        sample: async () => {
-          // The restored pointer supplies the prior API identity and wrapper
-          // binding. Re-prove every service on every sample, not just once.
-          try {
-            await verifyRecoveredServices(serviceControl, { environment, fetchImpl, labels: serviceLabels });
-          } catch (error) {
-            const failure = failureOf(error);
-            return `${failure.reason}-${failure.detail}`;
-          }
-          return registrationRefusal({ before: runnerRegistrationsBeforeRestore, targetCommit: previousCommit });
-        },
+        sample: releaseReadiness({ commit: previousCommit, before: runnerRegistrationsBeforeRestore }),
         observationWindowMs, timeoutMs: serviceVerificationTimeoutMs,
         wait: serviceVerificationWait, failureReason: "previous-service-verification-failed",
       });
