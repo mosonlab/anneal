@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { canonicalTemplateIdentity, LEGACY_TEMPLATE_GENERATIONS } from "./canonical-template-transition.js";
 import { REGRESSION_VERIFICATION_SCHEMA_VERSION } from "./merge-tail.js";
 import { stepGeneration, stepRole, type StepRole, type TemplateStepLike } from "./step-role.js";
 
@@ -198,10 +199,21 @@ export const canonicalOutputSchemas: Readonly<Partial<Record<StepRole, SchemaByG
   },
 };
 
+/** Retained prompt protocols are registered with the template that owns them.
+ * Keep this above the importless role seam so registry imports cannot cycle. */
+export const canonicalOutputGeneration = (step: TemplateStepLike): string => {
+  const name = step.taskTemplate?.name ?? step.taskTemplateName;
+  const identity = name ? canonicalTemplateIdentity(name) : null;
+  const retained = identity?.generation
+    ? LEGACY_TEMPLATE_GENERATIONS[identity.canonicalName].find(({ marker }) => marker === identity.generation)
+    : null;
+  return retained?.outputGenerations?.[step.outputKind] ?? stepGeneration(step);
+};
+
 /** Resolve one Step output contract through the role and output protocol generation seam. */
 export const canonicalOutputSchema = (step: TemplateStepLike): z.ZodType | null => {
   const role = stepRole(step);
   if (role === null) return null;
-  const generation = stepGeneration(step);
+  const generation = canonicalOutputGeneration(step);
   return canonicalOutputSchemas[role]?.[generation] ?? null;
 };
