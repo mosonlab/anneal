@@ -1435,7 +1435,10 @@ test("the ref that was actually pushed is recorded on every path that pushed", a
     if (executable === "gh" && args[1] === "create") throw new Error("gh: API rate limit exceeded");
     return "";
   };
-  const failed = await deliverWorkspace(config, claim, workspace, { command: prFails });
+  // These command doubles test publication evidence, not backoff wall time.
+  // Keep the real retry policy/attempts; advance through its waits immediately.
+  const retryOptions = { wait: async () => undefined };
+  const failed = await deliverWorkspace(config, claim, workspace, { command: prFails, retryOptions });
   assert.equal(failed.pushStatus, "FAILED");
   assert.equal(failed.pushedBranch, "feature/test");
 
@@ -1443,7 +1446,7 @@ test("the ref that was actually pushed is recorded on every path that pushed", a
     if (executable === "git" && args[0] === "push") throw new Error("remote rejected");
     return "";
   };
-  assert.equal((await deliverWorkspace(config, claim, workspace, { command: pushFails })).pushedBranch, undefined);
+  assert.equal((await deliverWorkspace(config, claim, workspace, { command: pushFails, retryOptions })).pushedBranch, undefined);
 
   const salvage: CommandRunner = async (executable, args) => {
     if (executable === "git" && args[0] === "status") return "M tracked.ts";
