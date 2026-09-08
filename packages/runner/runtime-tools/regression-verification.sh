@@ -56,11 +56,14 @@ head_sha() {
 
 FETCH_ATTEMPTS=6
 
-# The transient half of network-retry.ts, in the vocabulary git writes. Only a
-# match is retried: an absent branch, a bad credential, or an unreadable remote
-# is the remote's answer, and spending the backoff budget on it would delay a
-# failure the operator still has to read.
-FETCH_TRANSIENT_RE='SSL_ERROR_SYSCALL|SSL_connect|unexpected EOF|early EOF|RPC failed|Connection (reset|refused|timed out)|Operation timed out|Failed to connect|Could not resolve host|Recv failure|ECONNRESET|ETIMEDOUT|EAI_AGAIN|HTTP( response)? 5[0-9][0-9]'
+# Kept in parity with db's transport vocabulary by transport-vocabulary.test.ts.
+FETCH_TRANSIENT_RE='fetch failed|SSL_ERROR_SYSCALL|SSL_connect|unexpected EOF|early EOF|(^|[^A-Za-z0-9_])Post[[:space:]]+"[^"]+"[[:space:]]*:[[:space:]]*EOF([^A-Za-z0-9_]|$)|our servers are currently overloaded|(^|[^A-Za-z0-9_])model[[:space:]]+is[[:space:]]+(currently[[:space:]]+)?at capacity([^A-Za-z0-9_]|$)|connection (reset|closed|timed out|lost|aborted|refused)|RPC failed|Operation timed out|Failed to connect|Could not resolve host|Recv failure|socket hang ?up|HTTP( response)?[[:space:]]*(408|425|429|5[0-9][0-9])|status( code)?[[:space:]]*(408|425|429|5[0-9][0-9])|502 Bad Gateway|503 Service Unavailable|504 Gateway Timeout|ECONNABORTED|ECONNRESET|EHOSTUNREACH|ENETDOWN|ENETRESET|ENETUNREACH|EPIPE|ETIMEDOUT|EAI_AGAIN|ETIMEOUT'
+FETCH_ACCESS_REFUSAL_RE='authentication failed|could not read Username|permission denied|forbidden|HTTP( response)?[[:space:]]*(401|403)|status( code)?[[:space:]]*(401|403)|bad credentials|authorization failed|(^|[^A-Za-z0-9_])unauthorized([^A-Za-z0-9_]|$)|invalid credentials|requested URL returned error:[[:space:]]*(401|403)([^A-Za-z0-9_]|$)|resource not accessible'
+
+fetch_is_transient() (
+  shopt -s nocasematch
+  [[ ! "$1" =~ $FETCH_ACCESS_REFUSAL_RE && "$1" =~ $FETCH_TRANSIENT_RE ]]
+)
 
 # Exponential backoff with full jitter, capped per attempt, matching the clone
 # profile in network-retry.ts. This host reaches GitHub through a proxy whose
@@ -130,7 +133,7 @@ fetch_base() {
       printf '%s' "$fetched"
       return 0
     fi
-    if [[ ! "$error" =~ $FETCH_TRANSIENT_RE ]]; then
+    if ! fetch_is_transient "$error"; then
       persist_target_fetch_block "$error"
       printf 'regression-verification: target fetch failed (exit %s): %s\n' "$status" "$error" >&2
       return 1
