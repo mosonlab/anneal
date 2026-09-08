@@ -4,6 +4,7 @@ import {
   isChainHeldError,
   isCompoundImplementationAssigneeError,
   isIntegratorStoppedError,
+  isIntegratorBindingError,
   isMergeConfirmationError,
   isMergeEvidenceError,
   isPinnedBaseCommitError,
@@ -144,6 +145,7 @@ export const refusalFor = (error: unknown): Refusal | null => {
       },
     };
   }
+  if (isIntegratorBindingError(error)) return { reason: "invalid-request", message: error.message };
   if (isIntegratorStoppedError(error)) return { reason: "integrator-stopped", message: error.message };
   if (isPinnedBaseCommitError(error)) return { reason: "pinned-base-commit", message: error.message };
   if (isMergeEvidenceError(error)) return { reason: "merge-evidence", message: error.message };

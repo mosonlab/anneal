@@ -7,6 +7,7 @@ import {
   ChainHeldError,
   CompoundImplementationAssigneeError,
   IntegratorStoppedError,
+  IntegratorBindingError,
   MergeConfirmationError,
   MergeEvidenceError,
   PinnedBaseCommitError,
@@ -169,4 +170,12 @@ test("authoring refusals carry their code and optional stepIndex", () => {
   const withoutStep = refusalResponse(refusalFor(new TemplateAuthoringRefusal("template_in_use", "in use"))!);
   assert.equal(withoutStep.body.code, "template_in_use");
   assert.equal("stepIndex" in withoutStep.body, false);
+});
+
+test("a raised integrator binding refusal keeps its invalid-request HTTP family", () => {
+  const rejected = refusalFor(new IntegratorBindingError("Integrator binding is invalid"));
+  assert.ok(rejected);
+  assert.deepEqual(refusalResponse(rejected), {
+    status: 400, body: { error: "Integrator binding is invalid" },
+  });
 });
