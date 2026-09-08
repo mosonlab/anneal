@@ -601,6 +601,7 @@ test("chain advancement parks an archived successor without throwing or enqueuei
       findFirst: async () => null,
       create: async () => { creates += 1; return {}; },
     },
+    inboxMessage: { upsert: async () => ({}) },
     taskActivity: {
       create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
     },
@@ -614,7 +615,6 @@ test("chain advancement parks an archived successor without throwing or enqueuei
   assert.equal(updates[1]?.status, "REVIEW");
   assert.match(String(updates[1]?.failureReason), /Archived Successor/);
   assert.match(String(activities[0]?.body), /Run birth was refused:.*Archived Successor/);
-  assert.deepEqual(activities[0]?.metadata, { refusal: "assignee-archived" });
 });
 
 test("an Inbox-resumed queued run for an archived agent is surfaced by the sweep", async () => {

@@ -617,7 +617,7 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
       const opened = await openRun(tx, taskId, { kind: "retry", readyAt: now });
       if (!opened.ok) {
         const settlement = await settleRunBirthRefusal(tx, {
-          taskId, refusal: opened.refusal, mode: "raise", origin: { kind: "request" }, now,
+          taskId, refusal: opened.refusal, mode: "raise", origin: { kind: "retry" }, now,
         });
         if (settlement.kind === "raise") throw settlement.error;
         return opened.refusal;

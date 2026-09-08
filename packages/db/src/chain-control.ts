@@ -663,7 +663,7 @@ export const resumeChain = async (
           await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
           // Settlement follows rollback so the park survives discarded births.
           const settlement = await settleRunBirthRefusal(tx, {
-            taskId: task.id, refusal: opened.refusal, mode: "raise", origin: { kind: "request" }, now,
+            taskId: task.id, refusal: opened.refusal, mode: "raise", origin: { kind: "chain-resume" }, now,
           });
           if (settlement.kind === "raise") throw settlement.error;
           return refusal("conflict", opened.refusal.message);

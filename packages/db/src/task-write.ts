@@ -247,10 +247,19 @@ export const writeTask = async <T>(
   tx: Prisma.TransactionClient,
   taskId: string,
   change: (locked: LockedTask) => Promise<TaskWritePlan<T>>,
+  options?: { lockScope: "task" },
 ): Promise<TaskWriteResult<T>> => {
-  const locked = await lockTaskMutationRows(tx, taskId);
+  // Run-birth settlement may already own one Task and its Agent. Expanding
+  // to sibling Tasks here would invert their lock order. Its status-only park
+  // retains the birth's Task mutex; ordinary mutations keep the full Chain.
+  const locked = options?.lockScope === "task"
+    ? await lockTask(tx, taskId) : await lockTaskMutationRows(tx, taskId);
   if (!locked) return { ok: false, refusal: { kind: "absent" } };
   const plan = await change(locked);
+  if (options?.lockScope === "task" && plan.update
+    && Object.keys(plan.update).some((key) => !["status", "failureReason", "runAt"].includes(key))) {
+    throw new Error("Task-only writes are restricted to refusal parking fields");
+  }
   if (plan.update) {
     const assigneeType = plannedScalar<AssigneeType>(plan.update.assigneeType);
     const assigneeAgentId = plannedScalar<string | null>(plan.update.assigneeAgentId);
@@ -293,7 +302,7 @@ export const writeTask = async <T>(
     task: locked,
     written,
     activityId: activity?.id ?? null,
-    chainLocked: locked.chainId !== null,
+    chainLocked: options?.lockScope !== "task" && locked.chainId !== null,
     value: plan.value,
   };
 };

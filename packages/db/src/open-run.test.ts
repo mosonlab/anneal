@@ -156,6 +156,7 @@ const fakeTx = (
   const creates: Array<Record<string, unknown>> = [];
   const activities: Array<Record<string, unknown>> = [];
   const taskUpdates: Array<Record<string, unknown>> = [];
+  const inbox: Array<Record<string, unknown>> = [];
   let agentLocks = 0;
   const tx = {
     $queryRaw: async () => {
@@ -174,7 +175,7 @@ const fakeTx = (
         return { ...task, ...data };
       },
     },
-    inboxMessage: { upsert: async () => ({}) },
+    inboxMessage: { upsert: async ({ create }: { create: Record<string, unknown> }) => { inbox.push(create); return {}; } },
     taskActivity: {
       findMany: async () => options.stopRows ?? [],
       create: async ({ data }: { data: Record<string, unknown> }) => {
@@ -203,7 +204,7 @@ const fakeTx = (
       },
     },
   };
-  return { tx: tx as never, creates, activities, taskUpdates, agentLocks: () => agentLocks };
+  return { tx: tx as never, creates, activities, taskUpdates, inbox, agentLocks: () => agentLocks };
 };
 
 const integratorStep = {
@@ -1138,6 +1139,23 @@ test("every OpenRunRefusal code comes from a real guard, carries a disposition, 
     assert.deepEqual(opened.refusal.detail, fixture.detail, `${code} detail`);
     assert.deepEqual(opened.refusal.context, fixture.context, `${code} context`);
     assert.equal(creates.length, 0, `${code} must not write a Run`);
+    if (code === "integrator-stopped") {
+      const origin = { kind: "chain-activation", predecessorName: "Before", sourceRunId: "source-1", compoundImplementation: false } as const;
+      const present = fakeTx(fixture.task, fixture.options);
+      assert.deepEqual(await settleRunBirthRefusal(present.tx, {
+        taskId: "task-1", refusal: opened.refusal, mode: "raise", origin, now,
+      }), { kind: "parked" });
+      assert.equal(present.inbox.length, 1);
+      assert.match(String(present.activities[0]?.body), /predecessor.*Before.*preserved/i);
+      const absent = fakeTx(fixture.task);
+      const result = await settleRunBirthRefusal(absent.tx, {
+        taskId: "task-1", refusal: opened.refusal, mode: "raise", origin, now,
+      });
+      assert.equal(result.kind, "raise");
+      assert.deepEqual(absent.taskUpdates, []);
+      assert.deepEqual(absent.activities, []);
+      assert.deepEqual(absent.inbox, []);
+    }
     for (const mode of ["park", "raise"] as const) {
       const decision = runBirthRefusalDecision(opened.refusal, { mode, origin: { kind: "request" } });
       const expectedAction = mode === "raise" && code !== "spend-cap-exhausted"
@@ -1145,6 +1163,15 @@ test("every OpenRunRefusal code comes from a real guard, carries a disposition, 
       assert.equal(decision.action, expectedAction, `${code}/${mode}`);
       assert.equal("taskStatus" in decision ? decision.taskStatus : null, expectedAction === "park" ? "REVIEW" : null, `${code}/${mode} status`);
       assert.equal("inbox" in decision, expectedAction === "park", `${code}/${mode} Inbox`);
+      const recording = fakeTx(taskRow());
+      const settled = await settleRunBirthRefusal(recording.tx, {
+        taskId: "task-1", refusal: opened.refusal, mode, origin: { kind: "request" }, now,
+      });
+      assert.equal(settled.kind, expectedAction === "park" ? "parked" : expectedAction === "hold" ? "held" : "raise");
+      assert.equal(recording.taskUpdates.length, expectedAction === "park" ? 1 : 0);
+      assert.equal(recording.activities.length, expectedAction === "park" ? 1 : 0);
+      assert.equal(recording.inbox.length, expectedAction === "park" ? 1 : 0);
+
       const activation = runBirthRefusalDecision(opened.refusal, {
         mode, origin: { kind: "chain-activation", predecessorName: "Predecessor", sourceRunId: null, compoundImplementation: false },
       });
@@ -1878,4 +1905,33 @@ test("a no-result repair retry uses its repair card ref despite a salvage public
   assert.equal(creates[0]?.maxRunsPerTask, 2);
   assert.equal(creates[0]?.budgetGrants, 0);
   assert.equal(creates[0]?.leaseLossRefunds, 0);
+});
+
+
+test("activation translates compound assignment faults while Resume retains conflict semantics", () => {
+  const refusal: OpenRunRefusal = {
+    code: "task-assignee-type-invalid", reason: "invalid-request", disposition: "fault", message: "Agent required",
+  };
+  const activation = runBirthRefusalDecision(refusal, {
+    mode: "raise", origin: { kind: "chain-activation", predecessorName: "Before", sourceRunId: null, compoundImplementation: true },
+  });
+  assert.equal(activation.action, "raise");
+  if (activation.action !== "raise") return;
+  assert.equal(activation.error.name, "CompoundImplementationAssigneeError");
+  const resumed = runBirthRefusalDecision(refusal, { mode: "raise", origin: { kind: "chain-resume" } });
+  assert.equal(resumed.action, "raise");
+  if (resumed.action !== "raise") return;
+  assert.equal((resumed.error as { reason?: string }).reason, "conflict");
+});
+
+test("held and raised refusals perform no transaction reads or writes", async () => {
+  const tx = new Proxy({}, { get: () => { throw new Error("Settlement touched the transaction"); } }) as Prisma.TransactionClient;
+  const refusal: OpenRunRefusal = {
+    code: "chain-held", reason: "chain-held", disposition: "held", message: "Chain held",
+    context: { taskId: "task-1", chainId: "chain-1", taskLayer: 2, heldLayer: 1 },
+  };
+  const held = await settleRunBirthRefusal(tx, { taskId: "task-1", refusal, mode: "park", origin: { kind: "request" }, now });
+  assert.deepEqual(held, { kind: "held" });
+  const raised = await settleRunBirthRefusal(tx, { taskId: "task-1", refusal, mode: "raise", origin: { kind: "request" }, now });
+  assert.equal(raised.kind, "raise");
 });

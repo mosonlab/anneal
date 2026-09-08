@@ -278,3 +278,25 @@ test("restating the assignment a running task already has is not a reassignment"
   assert.deepEqual(locks, ["task-row", "agent-row"]);
   assert.deepEqual(writes.map((write) => write.kind), ["task.update"]);
 });
+
+
+test("a refusal park retains the existing Task mutex without expanding to Chain siblings", async () => {
+  const { tx, locks, writes } = recordingTx({ task: task({ chainId: "chain-1" }), siblings: ["task-1", "task-2"] });
+  const result = await writeTask(tx, "task-1", async () => ({
+    update: { status: TaskStatus.REVIEW, failureReason: "Run birth refused" },
+    activity: { actorType: "control-plane", body: "Run birth refused" },
+    value: undefined,
+  }), { lockScope: "task" });
+  assert.ok(result.ok);
+  assert.equal(result.chainLocked, false);
+  assert.deepEqual(locks, ["task-row"]);
+  assert.deepEqual(writes.map((write) => write.kind), ["task.update", "taskActivity.create"]);
+});
+
+test("the Task-only refusal park cannot mutate assignment or other Task fields", async () => {
+  const { tx, writes } = recordingTx({ task: task({ chainId: "chain-1" }) });
+  await assert.rejects(writeTask(tx, "task-1", async () => ({
+    update: { assigneeAgentId: "agent-2" }, activity: null, value: undefined,
+  }), { lockScope: "task" }), /restricted to refusal parking fields/);
+  assert.deepEqual(writes, []);
+});

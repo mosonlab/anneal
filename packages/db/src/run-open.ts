@@ -888,19 +888,9 @@ export type OpenRunIntent =
   };
 
 /**
- * What a caller has to do about a refused Run birth.
- *
- * Fifteen codes answer three questions, and no caller of `openRun` has ever
- * needed a finer answer than these:
- *
- * - `held`: a live Chain authority is withholding birth on purpose. The Task
- *   keeps its place and a later attempt succeeds once the hold is released, so
- *   a caller records the refusal and leaves the Task alone.
- * - `stopped`: an integrator stop condition refuses birth. The stop record is
- *   the operator's own instrument, so a caller that owns stop records parks the
- *   Task under the stop; any other caller treats it as a fault.
- * - `fault`: birth cannot succeed until an operator changes something. The Task
- *   must be surfaced, never left looking queued.
+ * The refusal roster consumed by settlement: held leaves the Task in place,
+ * stopped preserves the integrator stop authority, and fault requires an
+ * operator correction. Callers choose their settlement mode and origin.
  */
 export type OpenRunDisposition = "held" | "stopped" | "fault";
 
@@ -1424,14 +1414,16 @@ export const attemptRunBirth = async (
   return { outcome: "opened", run: opened.run };
 };
 
-/** Retained for the completion paths owned by the next lane. */
+/** Completion reporting also consumes the refusal metadata. */
 export const runBirthRefusalMetadata = (refusal: OpenRunRefusal): Record<string, string | number | boolean | null> =>
   refusal.code === "spend-cap-exhausted" ? { ...refusal.detail, refusal: refusal.code } : { refusal: refusal.code };
 
 /** The caller supplies the event that attempted birth, never refusal policy. */
 export type RunBirthRefusalOrigin =
   | { kind: "request" }
-  | { kind: "automatic"; activityPrefix: string; actorType?: string }
+  | { kind: "retry" }
+  | { kind: "chain-resume" }
+  | { kind: "automatic"; activityPrefix: string }
   | { kind: "chain-activation"; predecessorName: string; sourceRunId: string | null; compoundImplementation: boolean }
   | { kind: "bound-dispatch"; predecessorTaskId: string; predecessorChainId: string; successorTaskId: string; successorChainId: string }
   | { kind: "recurring-schedule"; recurringTaskId: string }
@@ -1453,7 +1445,9 @@ export const runBirthRefusalDecision = (
   if (disposition === "held" && (mode === "park" || activation)) return { action: "hold" };
   if (mode === "raise" && refusal.code !== "spend-cap-exhausted"
     && !(activation && disposition === "stopped")) {
-    const error = errorForOpenRunRefusal(refusal);
+    const error = origin.kind === "chain-resume"
+      ? new WorkflowRefusalError("conflict", refusal.message) : errorForOpenRunRefusal(refusal);
+    if (origin.kind === "retry") error.message = refusal.message;
     return {
       action: "raise",
       error: activation && origin.compoundImplementation && isWorkflowRefusalError(error)
@@ -1464,10 +1458,11 @@ export const runBirthRefusalDecision = (
   let actorType = "control-plane";
   let prefix = "Run birth refused";
   switch (origin.kind) {
-    case "request": break;
+    case "request":
+    case "retry":
+    case "chain-resume": break;
     case "automatic":
       prefix = origin.activityPrefix;
-      actorType = origin.actorType ?? actorType;
       break;
     case "chain-activation":
       prefix = "Predecessor layer completed but Run birth was refused";
@@ -1531,7 +1526,7 @@ export const settleRunBirthRefusal = async (
     update: { status: decision.taskStatus, failureReason, ...(origin.kind === "at-schedule" ? { runAt: null } : {}) },
     activity: { ...activity, createdAt: now },
     value: undefined,
-  }));
+  }), { lockScope: "task" });
   if (!written.ok) throw new Error(`Cannot settle Run birth refusal for Task ${taskId}: ${written.refusal.kind}`);
   if (origin.kind === "recurring-schedule" || origin.kind === "bound-dispatch") {
     await tx.taskActivity.create({ data: {
