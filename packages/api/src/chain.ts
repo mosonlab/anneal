@@ -11,7 +11,8 @@ import {
   lockAgentRepoGrant,
   Prisma,
   type PrismaClient,
-  runBudgetCeiling,
+  budgetRemaining,
+  highestBudgetGrants,
   TaskStatus,
 } from "@anneal/db";
 import { heldPredicate } from "@anneal/db/chain-hold";
@@ -213,7 +214,7 @@ export const taskStartability = (
     repoBound: row.repoId !== null,
     agentAssignee: row.assigneeType === AssigneeType.AGENT && row.assigneeAgentId !== null,
     repoAccessGrant: row.hasRepoGrant,
-    budgetRemaining: facts.total < runBudgetCeiling(maxSessionsPerTask, facts.budgetGrants),
+    budgetRemaining: budgetRemaining(maxSessionsPerTask, facts),
     noActiveRun: !facts.active,
     predecessorsDone: predecessorsDone && bindingResolved,
   };
@@ -268,7 +269,7 @@ export const runFactsByTask = (
       active: current.active || activeStatuses.includes(row.status),
       // A max across the status groups, not the newest run's value: the groupBy
       // is unordered, and grants only ever grow, so the two agree.
-      budgetGrants: Math.max(current.budgetGrants ?? 0, row._max?.budgetGrants ?? 0) || null,
+      budgetGrants: highestBudgetGrants([current.budgetGrants, row._max?.budgetGrants]) || null,
     });
   }
   return facts;
