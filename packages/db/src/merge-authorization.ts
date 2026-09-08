@@ -18,7 +18,7 @@ import {
   type MergeExecutorLivenessReader,
 } from "./merge-integrator-db.js";
 import { MERGE_TAIL_KIND } from "./merge-tail.js";
-import { errorForOpenRunRefusal, openRun, parksInsteadOfRaising, recordRunBirthRefusal } from "./run-open.js";
+import { openRun, settleRunBirthRefusal } from "./run-open.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -210,8 +210,10 @@ export const produceMergeAuthorization = async (
       // say why no merge run appeared; parking keeps the authorization on the
       // record and puts the integrator in REVIEW naming the cap, which is the
       // operator's cue to raise it and retry.
-      if (!parksInsteadOfRaising(opened.refusal)) throw errorForOpenRunRefusal(opened.refusal);
-      await recordRunBirthRefusal(tx, integrator.id, opened.refusal);
+      const settlement = await settleRunBirthRefusal(tx, {
+        taskId: integrator.id, refusal: opened.refusal, mode: "raise", origin: { kind: "request" }, now,
+      });
+      if (settlement.kind === "raise") throw settlement.error;
       return { activityId: activity.id, purpose, payload };
     }
     await tx.task.updateMany({

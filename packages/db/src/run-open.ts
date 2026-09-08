@@ -30,6 +30,7 @@ import {
 import { runnerFor } from "./model-routing.js";
 import { spendCapExhausted, taskSpendUsd, usd } from "./spend-cap.js";
 import { runOwnedHead } from "./run-head.js";
+import { writeTask } from "./task-write.js";
 import { stepRole } from "./step-role.js";
 
 type Tx = Prisma.TransactionClient;
@@ -1232,7 +1233,7 @@ export const openRun = async (
   // The consequence is the caller's, as it is for every other refusal code: a
   // birth attempted through `attemptRunBirth` is rolled back to a savepoint, so
   // a write made here would not survive on those paths and would be written
-  // twice on the ones where it did. `recordRunBirthRefusal` below is the shared
+  // twice on the ones where it did. `settleRunBirthRefusal` below is the shared
   // write, and the callers that used to raise this refusal out of their own
   // transaction now park the task with it instead — a spend limit crossed
   // silently by arriving through the wrong caller is the defect this closes.
@@ -1423,62 +1424,134 @@ export const attemptRunBirth = async (
   return { outcome: "opened", run: opened.run };
 };
 
-/**
- * What a park says about the refusal it records, for every caller that writes
- * one. The code is what an operator filters a REVIEW by, and it is the whole
- * of the metadata for every refusal but one: a refusal's `detail` belongs to
- * the message and to `errorForOpenRunRefusal`, not to a shape callers already
- * record. The spend cap is the exception, because its park *is* the operator's
- * only record of which cap refused the attempt: it adds the formatted
- * `spendCapUsd`, `spentUsd` and `runs` the handbook promises beside the code.
- * Callers add their own keys around this; those win, because a caller naming a
- * task or a schedule of its own knows which row it meant.
- */
-export const runBirthRefusalMetadata = (
-  refusal: OpenRunRefusal,
-): Record<string, string | number | boolean | null> =>
-  (refusal.code === "spend-cap-exhausted"
-    ? { ...refusal.detail, refusal: refusal.code }
-    : { refusal: refusal.code });
+/** Retained for the completion paths owned by the next lane. */
+export const runBirthRefusalMetadata = (refusal: OpenRunRefusal): Record<string, string | number | boolean | null> =>
+  refusal.code === "spend-cap-exhausted" ? { ...refusal.detail, refusal: refusal.code } : { refusal: refusal.code };
 
-/**
- * The park a Run-birth refusal leaves behind, for the callers that have none of
- * their own. `reconcile`, `workspace-reclaim`, `scheduler` and the chain
- * activation paths each write their own REVIEW and named activity, shaped by
- * what the refusal means to them; the callers that instead *raised* the refusal
- * wrote nothing, and raising rolls their transaction back, so a refusal that
- * arrived through one of them left no durable trace at all. This is the write
- * they were missing. It must be called on a path that goes on to commit —
- * never before a `throw`, and never inside `attemptRunBirth`'s savepoint.
- */
-export const recordRunBirthRefusal = async (
-  tx: Tx,
-  taskId: string,
+/** The caller supplies the event that attempted birth, never refusal policy. */
+export type RunBirthRefusalOrigin =
+  | { kind: "request" }
+  | { kind: "automatic"; activityPrefix: string; actorType?: string }
+  | { kind: "chain-activation"; predecessorName: string; sourceRunId: string | null; compoundImplementation: boolean }
+  | { kind: "bound-dispatch"; predecessorTaskId: string; predecessorChainId: string; successorTaskId: string; successorChainId: string }
+  | { kind: "recurring-schedule"; recurringTaskId: string }
+  | { kind: "at-schedule" };
+
+type RefusalActivity = { actorType: string; body: string; metadata: Prisma.InputJsonObject };
+type RunBirthRefusalDecision =
+  | { action: "hold" }
+  | { action: "raise"; error: Error }
+  | { action: "park"; taskStatus: typeof TaskStatus.REVIEW; activity: RefusalActivity; inbox: { body: string } };
+
+/** The roster decides once; raise paths write nothing, including an Inbox notice. */
+export const runBirthRefusalDecision = (
   refusal: OpenRunRefusal,
-): Promise<void> => {
-  await tx.task.update({
-    where: { id: taskId },
-    data: { status: TaskStatus.REVIEW, failureReason: refusal.message },
-  });
-  await tx.taskActivity.create({
-    data: {
-      taskId,
-      actorType: "control-plane",
-      body: `Run birth refused: ${refusal.message}`,
-      metadata: runBirthRefusalMetadata(refusal),
-    },
-  });
+  { mode, origin }: { mode: "park" | "raise"; origin: RunBirthRefusalOrigin },
+): RunBirthRefusalDecision => {
+  const disposition = dispositionByCode[refusal.code];
+  const activation = origin.kind === "chain-activation";
+  if (disposition === "held" && (mode === "park" || activation)) return { action: "hold" };
+  if (mode === "raise" && refusal.code !== "spend-cap-exhausted"
+    && !(activation && disposition === "stopped")) {
+    const error = errorForOpenRunRefusal(refusal);
+    return {
+      action: "raise",
+      error: activation && origin.compoundImplementation && isWorkflowRefusalError(error)
+        ? new CompoundImplementationAssigneeError() : error,
+    };
+  }
+  const metadata: Prisma.InputJsonObject = runBirthRefusalMetadata(refusal);
+  let actorType = "control-plane";
+  let prefix = "Run birth refused";
+  switch (origin.kind) {
+    case "request": break;
+    case "automatic":
+      prefix = origin.activityPrefix;
+      actorType = origin.actorType ?? actorType;
+      break;
+    case "chain-activation":
+      prefix = "Predecessor layer completed but Run birth was refused";
+      break;
+    case "bound-dispatch":
+      prefix = "Bound predecessor completed; successor parked in REVIEW";
+      Object.assign(metadata, {
+        predecessorTaskId: origin.predecessorTaskId, predecessorChainId: origin.predecessorChainId,
+        successorTaskId: origin.successorTaskId, successorChainId: origin.successorChainId,
+        state: "parked", failureReason: refusal.message,
+      });
+      break;
+    case "recurring-schedule":
+      actorType = "scheduler";
+      prefix = `Created from recurring task ${origin.recurringTaskId}; Run birth refused`;
+      Object.assign(metadata, { recurringTaskId: origin.recurringTaskId });
+      break;
+    case "at-schedule":
+      actorType = "scheduler";
+      prefix = "Schedule quarantined after Run birth refusal";
+      break;
+  }
+  const body = `${prefix}: ${refusal.message}`;
+  return { action: "park", taskStatus: TaskStatus.REVIEW, activity: { actorType, body, metadata }, inbox: { body } };
 };
 
+export type RunBirthRefusalSettlement =
+  | { kind: "parked" }
+  | { kind: "held" }
+  | { kind: "raise"; error: Error };
+
 /**
- * A refusal a caller must park rather than raise. `spend-cap-exhausted` is the
- * only one: every other code either belongs to a caller that already parks it,
- * or is an invariant failure whose honest answer is an error. A spend cap is an
- * operator's own limit, and rolling its refusal back would delete the very
- * record that tells them which cap to raise.
+ * Call after attemptRunBirth has released its savepoint, on a path that commits.
+ * A durable park must never precede a throw or live inside the birth savepoint.
+ * Hold and raise deliberately perform no writes. The notice is one per Task and
+ * refusal code; a repeated park reopens it instead of flooding the Inbox.
  */
-export const parksInsteadOfRaising = (refusal: OpenRunRefusal): boolean =>
-  refusal.code === "spend-cap-exhausted";
+export const settleRunBirthRefusal = async (
+  tx: Tx,
+  input: { taskId: string; refusal: OpenRunRefusal; mode: "park" | "raise"; origin: RunBirthRefusalOrigin; now: Date },
+): Promise<RunBirthRefusalSettlement> => {
+  const { taskId, refusal, origin, now } = input;
+  const decision = runBirthRefusalDecision(refusal, input);
+  if (decision.action === "hold") return { kind: "held" };
+  if (decision.action === "raise") return { kind: "raise", error: decision.error };
+  let failureReason = refusal.message;
+  let activity = decision.activity;
+  if (origin.kind === "chain-activation" && dispositionByCode[refusal.code] === "stopped") {
+    // The stop is re-read after birth rollback: its authority must still exist
+    // before preserving predecessor success and parking the stopped successor.
+    const stopped = await stopStateFor(tx, taskId);
+    if (!stopped) return { kind: "raise", error: errorForOpenRunRefusal(refusal) };
+    failureReason = `Merge integrator stopped on ${stopped.stop.condition}; predecessor success preserved and successor not activated`;
+    activity = {
+      actorType: "control-plane",
+      body: `Predecessor ${origin.predecessorName} completed successfully and was preserved; successor not activated because merge integrator stopped on ${stopped.stop.condition}`,
+      metadata: { ...activity.metadata, condition: stopped.stop.condition, sourceRunId: origin.sourceRunId, sourceStopId: stopped.stop.stopId },
+    };
+  }
+  const written = await writeTask(tx, taskId, async () => ({
+    update: { status: decision.taskStatus, failureReason, ...(origin.kind === "at-schedule" ? { runAt: null } : {}) },
+    activity: { ...activity, createdAt: now },
+    value: undefined,
+  }));
+  if (!written.ok) throw new Error(`Cannot settle Run birth refusal for Task ${taskId}: ${written.refusal.kind}`);
+  if (origin.kind === "recurring-schedule" || origin.kind === "bound-dispatch") {
+    await tx.taskActivity.create({ data: {
+      taskId: origin.kind === "recurring-schedule" ? origin.recurringTaskId : origin.predecessorTaskId,
+      actorType: activity.actorType,
+      body: origin.kind === "recurring-schedule"
+        ? `Recurring schedule advanced without a Run: ${refusal.message}`
+        : `Bound chain dispatch refused; successor parked in REVIEW: ${refusal.message}`,
+      metadata: origin.kind === "recurring-schedule" ? { ...activity.metadata, copyTaskId: taskId } : activity.metadata,
+      createdAt: now,
+    } });
+  }
+  const dedupeKey = `run-birth-refusal:${taskId}:${refusal.code}`;
+  await tx.inboxMessage.upsert({
+    where: { dedupeKey },
+    create: { from: "AGENT", taskId, kind: "TEXT", body: decision.inbox.body, dedupeKey, createdAt: now },
+    update: { status: "OPEN", answeredAt: null, body: decision.inbox.body },
+  });
+  return { kind: "parked" };
+};
 
 export const errorForOpenRunRefusal = (refusal: OpenRunRefusal): Error => {
   if (refusal.reason === "archived-task") {

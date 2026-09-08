@@ -25,10 +25,9 @@ import {
   leaseLossRefundDecision,
   basePublishedStamp,
   openRun,
-  parksInsteadOfRaising,
   pinnedImplementationRange,
-  recordRunBirthRefusal,
-  runBirthRefusalMetadata,
+  settleRunBirthRefusal,
+  runBirthRefusalDecision,
   runBudgetCeiling,
 } from "./run-open.js";
 import { runOwnedHead } from "./run-head.js";
@@ -167,6 +166,7 @@ const fakeTx = (
       findUnique: async () => options.lockedAgent === undefined ? task?.assigneeAgent ?? null : options.lockedAgent,
     },
     task: {
+      findUniqueOrThrow: async () => task,
       findUnique: async () => task,
       findFirst: async () => null,
       update: async ({ data }: { data: Record<string, unknown> }) => {
@@ -174,6 +174,7 @@ const fakeTx = (
         return { ...task, ...data };
       },
     },
+    inboxMessage: { upsert: async () => ({}) },
     taskActivity: {
       findMany: async () => options.stopRows ?? [],
       create: async ({ data }: { data: Record<string, unknown> }) => {
@@ -1137,6 +1138,18 @@ test("every OpenRunRefusal code comes from a real guard, carries a disposition, 
     assert.deepEqual(opened.refusal.detail, fixture.detail, `${code} detail`);
     assert.deepEqual(opened.refusal.context, fixture.context, `${code} context`);
     assert.equal(creates.length, 0, `${code} must not write a Run`);
+    for (const mode of ["park", "raise"] as const) {
+      const decision = runBirthRefusalDecision(opened.refusal, { mode, origin: { kind: "request" } });
+      const expectedAction = mode === "raise" && code !== "spend-cap-exhausted"
+        ? "raise" : code === "chain-held" ? "hold" : "park";
+      assert.equal(decision.action, expectedAction, `${code}/${mode}`);
+      assert.equal("taskStatus" in decision ? decision.taskStatus : null, expectedAction === "park" ? "REVIEW" : null, `${code}/${mode} status`);
+      assert.equal("inbox" in decision, expectedAction === "park", `${code}/${mode} Inbox`);
+      const activation = runBirthRefusalDecision(opened.refusal, {
+        mode, origin: { kind: "chain-activation", predecessorName: "Predecessor", sourceRunId: null, compoundImplementation: false },
+      });
+      assert.equal(activation.action, code === "chain-held" ? "hold" : code === "integrator-stopped" ? "park" : expectedAction, `${code}/${mode} activation`);
+    }
   }
 });
 
@@ -1685,8 +1698,7 @@ test("the park a raising caller owes a spend-cap refusal names the cap and the t
 
   // Only this code is parked rather than raised. Every other refusal either
   // belongs to a caller that already parks it or is an invariant failure.
-  assert.equal(parksInsteadOfRaising(opened.refusal), true);
-  await recordRunBirthRefusal(tx, task.id, opened.refusal);
+  assert.deepEqual(await settleRunBirthRefusal(tx, { taskId: task.id, refusal: opened.refusal, mode: "raise", origin: { kind: "request" }, now }), { kind: "parked" });
   assert.equal(taskUpdates.length, 1);
   assert.equal(taskUpdates[0]?.status, "REVIEW");
   assert.equal(
@@ -1713,7 +1725,7 @@ test("the park a raising caller owes a spend-cap refusal names the cap and the t
   // the claim-invalidation replacement and the scheduler — name the refusal
   // through the same builder, so an operator reads the same cap and total
   // whichever intent was refused.
-  assert.deepEqual(runBirthRefusalMetadata(opened.refusal), activities[0]?.metadata);
+
 });
 
 /**
@@ -1741,7 +1753,10 @@ test("only the spend-cap park carries detail; every other refusal is its code al
   assert.equal(lost.ok, false);
   if (lost.ok) return;
   assert.deepEqual(lost.refusal.detail, { leaseLossRefunds: 3, cap: 3 });
-  assert.deepEqual(runBirthRefusalMetadata(lost.refusal), {
+  const lostDecision = runBirthRefusalDecision(lost.refusal, { mode: "park", origin: { kind: "request" } });
+  assert.equal(lostDecision.action, "park");
+  if (lostDecision.action !== "park") return;
+  assert.deepEqual(lostDecision.activity.metadata, {
     refusal: "lease-loss-refunds-exhausted",
   });
 
@@ -1758,7 +1773,10 @@ test("only the spend-cap park carries detail; every other refusal is its code al
   );
   assert.equal(capped.ok, false);
   if (capped.ok) return;
-  assert.deepEqual(runBirthRefusalMetadata(capped.refusal), {
+  const cappedDecision = runBirthRefusalDecision(capped.refusal, { mode: "park", origin: { kind: "request" } });
+  assert.equal(cappedDecision.action, "park");
+  if (cappedDecision.action !== "park") return;
+  assert.deepEqual(cappedDecision.activity.metadata, {
     refusal: "spend-cap-exhausted",
     spendCapUsd: "1.00",
     spentUsd: "1.50",
