@@ -1,6 +1,5 @@
 import {
   settleRunBirthRefusal,
-  ACTIVE_RUN_STATUSES,
   AssigneeType,
   chainControlReadProjection,
   chainRunHistoryRefusal,
@@ -9,7 +8,6 @@ import {
   gateSlotOf,
   MERGE_INTEGRATOR_KIND,
   holdChain,
-  InboxStatus,
   LEASE_LOSS_REFUND_EXHAUSTED_PREFIX,
   integratorBindingRefusalFor,
   latestTargetCorrection,
@@ -53,7 +51,6 @@ import { z } from "zod";
 import {
   operatorMoveTargets,
   readBoard,
-  readChainRepairTaskIds,
   readRepairChainByTask,
   readTaskList,
   serializeUsageCost,
@@ -70,7 +67,13 @@ import {
 import { baselineKey, readRunBaselines } from "../run-baseline.js";
 import { runMetrics } from "../run-metrics.js";
 import { readRunMetricEvents } from "../run-metric-events.js";
-import { lockDoneTasks, partitionArchivable } from "../task-archive.js";
+import {
+  applyArchive,
+  applyUnarchive,
+  archiveSet,
+  doneArchiveSet,
+  unarchiveSet,
+} from "../task-archive.js";
 import { editableBrief } from "../task-brief.js";
 import { isRevalidationStep } from "../revalidation.js";
 import { applyRevalidationRoute } from "../revalidation-routing.js";
@@ -96,7 +99,7 @@ import { requestMergeTailRepair } from "../merge-tail-repair-reentry.js";
 import { requestMergeTailRerun } from "../merge-tail-rerun-reentry.js";
 import { computeNextOccurrence, validateSchedule } from "../scheduler.js";
 import { patchTask, taskInput, taskPatch } from "../task-patch.js";
-import { isLiveStatus, lockTask, lockTaskMutationRows, reactivationBlocked } from "../task-write.js";
+import { lockTaskMutationRows } from "../task-write.js";
 import { readCommitted, serializable } from "../transaction.js";
 import { withoutUndefined } from "../without-undefined.js";
 import {
@@ -694,130 +697,9 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
   app.post("/tasks/:taskId/archive", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
     const result = await readCommitted(db, async (tx) => {
-      // Detached repair completion takes its own Task lock before the primary
-      // Chain lock. Join that order so a completion that already owns the
-      // repair row can emit its notice before archive closes notices, while an
-      // archive that wins can refuse the still-active repair Run. Chain
-      // identity and repair markers are immutable, but resolve repairs again
-      // after the Chain lock to catch one created between these two reads.
-      const identity = await tx.task.findUnique({
-        where: { id: taskId },
-        select: { projectId: true, chainId: true },
-      });
-      if (!identity) return refusal("not-found", "Task not found");
-      if (identity.chainId !== null) {
-        const unlockedChainTaskIds = (await tx.task.findMany({
-          where: { projectId: identity.projectId, chainId: identity.chainId },
-          select: { id: true },
-        })).map((task) => task.id);
-        const unlockedRepairTaskIds = await readChainRepairTaskIds(tx, {
-          projectId: identity.projectId,
-          chainTaskIds: unlockedChainTaskIds,
-        });
-        for (const repairTaskId of unlockedRepairTaskIds) {
-          if (!await lockTask(tx, repairTaskId)) {
-            throw new Error(`Chain repair task ${repairTaskId} disappeared while archive acquired its lock`);
-          }
-        }
-      }
-      const locked = await lockTaskMutationRows(tx, taskId);
-      if (!locked) return refusal("not-found", "Task not found");
-      const taskIds = locked.chainId === null
-        ? [taskId]
-        : (await tx.task.findMany({
-            where: { projectId: locked.projectId, chainId: locked.chainId },
-            select: { id: true },
-          })).map((task) => task.id);
-      const repairTaskIds = locked.chainId === null
-        ? []
-        : await readChainRepairTaskIds(tx, {
-            projectId: locked.projectId,
-            chainTaskIds: taskIds,
-          });
-      const activeRuns = await tx.run.count({
-        where: {
-          taskId: { in: [...new Set([...taskIds, ...repairTaskIds])] },
-          status: { in: ACTIVE_RUN_STATUSES },
-        },
-      });
-      if (activeRuns > 0) {
-        return refusal("conflict", "Cannot archive a task with an active run");
-      }
-      const tasks = await tx.task.findMany({
-        where: { id: { in: taskIds } },
-        select: { id: true, status: true, archivedAt: true },
-      });
-      const reviewIds = tasks.filter((task) => task.status === TaskStatus.REVIEW).map((task) => task.id);
-      if (reviewIds.length > 0) {
-        const open = await tx.inboxMessage.count({
-          where: { gateTaskId: { in: reviewIds }, status: InboxStatus.OPEN },
-        });
-        if (open > 0) return refusal("conflict", "Decide the approval gate in the Inbox first");
-      }
-      const archiveIds = tasks.filter((task) => task.archivedAt === null).map((task) => task.id);
-      if (archiveIds.length > 0) {
-        await tx.task.updateMany({ where: { id: { in: archiveIds } }, data: { archivedAt: new Date() } });
-        await tx.taskActivity.createMany({ data: archiveIds.map((archivedTaskId) => ({
-          taskId: archivedTaskId, actorType: "operator", body: "Task archived",
-        })) });
-
-        // Stop notices are owned by the task archive lifecycle. Restrict the
-        // query to tasks that this request actually archived: re-running the
-        // route on a historical archive must not become a backfill operation.
-        const stopNotices = await tx.inboxMessage.findMany({
-          where: {
-            taskId: { in: archiveIds },
-            status: InboxStatus.OPEN,
-            dedupeKey: { startsWith: "merge-tail-stop:" },
-          },
-          select: { id: true, taskId: true },
-          orderBy: [{ taskId: "asc" }, { id: "asc" }],
-        });
-        if (stopNotices.length > 0) {
-          const stopNoticeIds = stopNotices.map((notice) => notice.id);
-          const answeredAt = new Date();
-          const closed = await tx.inboxMessage.updateMany({
-            where: {
-              id: { in: stopNoticeIds },
-              taskId: { in: archiveIds },
-              status: InboxStatus.OPEN,
-              dedupeKey: { startsWith: "merge-tail-stop:" },
-            },
-            data: { status: InboxStatus.CLOSED, answeredAt },
-          });
-          if (closed.count !== stopNotices.length) {
-            // Inbox close is a compare-and-set that does not take the Task
-            // mutex. A concurrent operator close is already the desired final
-            // state; only an initially selected notice that remains OPEN is an
-            // inconsistency worth rolling the archive back for.
-            const remainingOpen = await tx.inboxMessage.findMany({
-              where: { id: { in: stopNoticeIds }, status: InboxStatus.OPEN },
-              select: { id: true },
-            });
-            if (remainingOpen.length > 0) {
-              throw new Error(
-                `Archive found ${stopNotices.length} OPEN merge-tail stop notices but ${remainingOpen.length} remained OPEN`,
-              );
-            }
-          }
-
-          const closedByTask = new Map<string, string[]>();
-          for (const notice of stopNotices) {
-            if (notice.taskId === null) {
-              throw new Error(`Merge-tail stop notice ${notice.id} has no task binding`);
-            }
-            const ids = closedByTask.get(notice.taskId) ?? [];
-            ids.push(notice.id);
-            closedByTask.set(notice.taskId, ids);
-          }
-          await tx.taskActivity.createMany({ data: [...closedByTask].map(([closedTaskId, messageIds]) => ({
-            taskId: closedTaskId,
-            actorType: "control-plane",
-            body: `Closed merge-tail stop notices: ${messageIds.join(", ")}`,
-            metadata: { inboxMessageIds: messageIds },
-          })) });
-        }
-      }
+      const set = await archiveSet(tx, taskId);
+      if ("message" in set) return set;
+      await applyArchive(tx, set.ids, new Date());
       return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
     });
     if ("message" in result) return refusalJson(context, result);
@@ -825,46 +707,10 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
   });
   app.post("/tasks/:taskId/unarchive", async (context) => {
     const taskId = id.parse(context.req.param("taskId"));
-    // This used to run unlocked, on the theory that unarchiving cannot race a
-    // run into existence. It cannot — but archivedAt is the other half of what
-    // makes a task live, so unarchiving a TODO|DOING|REVIEW row *is* a
-    // reactivation and has to join the same protocol: Task row first, Agent row
-    // second, decided on the state this transaction holds.
-    //
-    // Restoring DONE or BACKLOG history stays unconditional. Neither is claimed
-    // by a runner or shown as work in progress, so an archived assignee cannot
-    // strand them — and refusing them would make an agent's archival delete the
-    // operator's ability to read their own history back onto the board.
     const result = await readCommitted(db, async (tx) => {
-      const locked = await lockTaskMutationRows(tx, taskId);
-      if (!locked) return refusal("not-found", "Task not found");
-      const taskIds = locked.chainId === null
-        ? [taskId]
-        : (await tx.task.findMany({
-            where: { projectId: locked.projectId, chainId: locked.chainId },
-            select: { id: true },
-          })).map((task) => task.id);
-      const tasks = await tx.task.findMany({
-        where: { id: { in: taskIds } },
-        select: { id: true, status: true, archivedAt: true, projectId: true, assigneeAgentId: true },
-      });
-      const reactivating = tasks
-        .filter((task) => task.archivedAt !== null && isLiveStatus(task.status))
-        .sort((left, right) => (
-          (left.assigneeAgentId ?? "").localeCompare(right.assigneeAgentId ?? "")
-          || left.id.localeCompare(right.id)
-        ));
-      for (const task of reactivating) {
-        const blocked = await reactivationBlocked(tx, task);
-        if (blocked) return refusal("conflict", blocked);
-      }
-      const unarchiveIds = tasks.filter((task) => task.archivedAt !== null).map((task) => task.id);
-      if (unarchiveIds.length > 0) {
-        await tx.task.updateMany({ where: { id: { in: unarchiveIds } }, data: { archivedAt: null } });
-        await tx.taskActivity.createMany({ data: unarchiveIds.map((unarchivedTaskId) => ({
-          taskId: unarchivedTaskId, actorType: "operator", body: "Task unarchived",
-        })) });
-      }
+      const set = await unarchiveSet(tx, taskId);
+      if ("message" in set) return set;
+      await applyUnarchive(tx, set.ids);
       return { task: await tx.task.findUniqueOrThrow({ where: { id: taskId } }) };
     });
     if ("message" in result) return refusalJson(context, result);
@@ -873,40 +719,9 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
   app.post("/projects/:projectId/tasks/archive-done", async (context) => {
     const projectId = id.parse(context.req.param("projectId"));
     const result = await readCommitted(db, async (tx) => {
-      const candidates = await tx.task.findMany({
-        where: { projectId, status: TaskStatus.DONE, archivedAt: null },
-        select: { id: true, chainId: true },
-      });
-      // Lock before reading runs, so a retry cannot slip a run in between the
-      // selection and the write. Ids that vanished, moved out of `Done` or were
-      // archived in between simply do not come back from the lock and count as
-      // neither archived nor skipped.
-      const chainIds = [...new Set(candidates.flatMap((task) => task.chainId ? [task.chainId] : []))].sort();
-      for (const chainId of chainIds) await lockChainRows(tx, { projectId, chainId });
-      const standaloneIds = candidates.filter((task) => !task.chainId).map((task) => task.id);
-      const lockedStandaloneIds = await lockDoneTasks(tx, projectId, standaloneIds);
-      const chainedIds = candidates.filter((task) => task.chainId).map((task) => task.id);
-      const stillDoneChained = chainedIds.length === 0 ? [] : await tx.task.findMany({
-        where: { id: { in: chainedIds }, projectId, status: TaskStatus.DONE, archivedAt: null },
-        select: { id: true },
-      });
-      const lockedIds = [...lockedStandaloneIds, ...stillDoneChained.map(({ id: chainedTaskId }) => chainedTaskId)];
-      const busy = lockedIds.length === 0 ? [] : await tx.run.findMany({
-        where: { taskId: { in: lockedIds }, status: { in: ACTIVE_RUN_STATUSES } },
-        select: { taskId: true },
-        distinct: ["taskId"],
-      });
-      const { archive, skipped } = partitionArchivable(
-        lockedIds,
-        busy.map((run) => run.taskId).filter((taskId): taskId is string => taskId !== null),
-      );
-      if (archive.length > 0) {
-        await tx.task.updateMany({ where: { id: { in: archive } }, data: { archivedAt: new Date() } });
-        await tx.taskActivity.createMany({ data: archive.map((taskId) => ({
-          taskId, actorType: "operator", body: "Task archived",
-        })) });
-      }
-      return { archived: archive.length, skipped };
+      const set = await doneArchiveSet(tx, projectId);
+      await applyArchive(tx, set.ids, new Date());
+      return { archived: set.ids.length, skipped: set.skipped };
     });
     return context.json(result);
   });
