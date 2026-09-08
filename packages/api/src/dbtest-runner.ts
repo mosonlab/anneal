@@ -8,9 +8,9 @@
 // than when it is finished with, and the run's result is not green unless the
 // cleanup was.
 
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import {
   connectionLimit,
@@ -22,7 +22,11 @@ import {
   type DbtestAssignment,
   type DbtestPlan,
 } from "./dbtest-plan.js";
-import { formatTimingReport, parseTimings, timingsEnvironmentVariable } from "./dbtest-timings.js";
+import {
+  formatTimingLine, formatTimingReport, orderByTimings, parseTimings,
+  timingDisplayName, timingHistoryEnvironmentVariable, timingsEnvironmentVariable,
+  type DbtestFileTiming,
+} from "./dbtest-timings.js";
 
 /** Just enough of ScratchDatabaseManager to run against, and to fake. */
 export interface ScratchManagerLike {
@@ -123,8 +127,23 @@ export const runDbtest = async ({
   const planDirectory = mkdtempSync(join(tmpdir(), "agentos-dbtest-plan-"));
   const timingsPath = join(planDirectory, "timings.jsonl");
   const abandoned = (): number => signalExitCode(signalled ?? "SIGTERM");
+  const historyPath = environment[timingHistoryEnvironmentVariable];
+  let orderedFiles = files;
+  if (historyPath) {
+    try {
+      const history = parseTimings(readFileSync(historyPath, "utf8"));
+      if (history.unreadable > 0) log(`timing history: ignored ${history.unreadable} unreadable record(s)`);
+      orderedFiles = orderByTimings(files, history.timings);
+      const known = new Set(history.timings.map(({ file }) => timingDisplayName(file)));
+      log(`timing history: longest first, ${files.filter((file) => known.has(timingDisplayName(file))).length}/${files.length} measured files`);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      log(`timing history unavailable (${code ?? String(error)}); using discovery order`);
+    }
+  }
 
   const provisionAndRun = async (): Promise<number> => {
+    const provisioningStarted = performance.now();
     const { reclaimed } = await manager.reclaimOrphans();
     if (reclaimed.length > 0) {
       log(`reclaimed ${reclaimed.length} database(s) from a run that never got to clean up`);
@@ -165,26 +184,33 @@ export const runDbtest = async ({
     const planPath = join(planDirectory, "plan.json");
     writeFileSync(planPath, JSON.stringify(plan));
     log(`template ${template.name} cloned ${files.length} times, ${limit} connections each of ${maxConnections}`);
+    log(`provisioning: ${((performance.now() - provisioningStarted) / 1000).toFixed(1)}s`);
 
     // Created empty rather than left to the first writer: an appending process
     // should not have to decide whether the file exists, and an empty file is
     // also the honest report for a run that was signalled before a file ended.
     writeFileSync(timingsPath, "");
 
-    return await runTests({
-      files,
+    const testsStarted = performance.now();
+    const status = await runTests({
+      files: orderedFiles,
       concurrency,
       environment: {
         ...environment,
         [planEnvironmentVariable]: planPath,
         [timingsEnvironmentVariable]: timingsPath,
+        // Nested harness fixtures must never publish over the real wave's history.
+        [timingHistoryEnvironmentVariable]: undefined,
       },
       signal: controller.signal,
     });
+    log(`test processes: ${((performance.now() - testsStarted) / 1000).toFixed(1)}s`);
+    return status;
   };
 
   let exitCode: number | null = null;
   let failure: unknown = null;
+  let measured: DbtestFileTiming[] = [];
   try {
     exitCode = await provisionAndRun();
   } catch (error) {
@@ -196,14 +222,35 @@ export const runDbtest = async ({
   // failed: a red wave is exactly when someone wants to know which file it was.
   try {
     const { timings, unreadable } = parseTimings(readFileSync(timingsPath, "utf8"));
+    if (unreadable === 0) measured = timings;
     for (const line of formatTimingReport(timings, { unreadable })) log(line);
   } catch {
     // No timings file means the run never got as far as starting the tests.
   }
   rmSync(planDirectory, { recursive: true, force: true });
+  const cleanupStarted = performance.now();
   const leaked = await manager.dropAll();
   for (const { name, error } of leaked) log(`could not drop ${name}: ${error.message}`);
   await manager.disconnect();
+  log(`database cleanup: ${((performance.now() - cleanupStarted) / 1000).toFixed(1)}s`);
+
+  // Atomically replace advisory scheduling data only after a complete clean
+  // wave. A cache failure is reported, never promoted into verification proof.
+  if (historyPath && failure === null && exitCode === 0 && leaked.length === 0
+    && measured.length === files.length
+    && files.every((file) => measured.some((entry) => resolve(entry.file) === resolve(file)))) {
+    const temporary = `${historyPath}.${process.pid}.tmp`;
+    try {
+      mkdirSync(dirname(historyPath), { recursive: true });
+      writeFileSync(temporary, measured.map(({ file, ms }) => formatTimingLine({ file: timingDisplayName(file), ms })).join(""));
+      renameSync(temporary, historyPath);
+    } catch (error) {
+      log(`could not save timing history: ${String(error)}`);
+    } finally {
+      try { rmSync(temporary, { force: true }); }
+      catch (error) { log(`could not remove temporary timing history: ${String(error)}`); }
+    }
+  }
 
   // The cleanup runs before this rethrow so that a failure while provisioning
   // still takes its databases with it; the failure itself is what the caller

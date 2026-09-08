@@ -20,6 +20,7 @@
 
 /** Names the file every test process appends its own line to. */
 export const timingsEnvironmentVariable = "AGENTOS_DBTEST_TIMINGS";
+export const timingHistoryEnvironmentVariable = "AGENTOS_DBTEST_TIMING_HISTORY";
 
 /**
  * How a file is named in the report.
@@ -44,6 +45,20 @@ export interface DbtestFileTiming {
   ms: number;
 }
 
+/** History controls order only. Unknown files run first so new slow tests do
+ * not become an unmeasured tail. Every requested file is retained exactly once
+ * per occurrence, regardless of stale or foreign history entries. */
+export const orderByTimings = (files: string[], timings: DbtestFileTiming[]): string[] => {
+  const known = new Map(timings.map(({ file, ms }) => [timingDisplayName(file), ms]));
+  return [...files].sort((left, right) => {
+    const a = known.get(timingDisplayName(left));
+    const b = known.get(timingDisplayName(right));
+    if (a === undefined && b !== undefined) return -1;
+    if (b === undefined && a !== undefined) return 1;
+    return (b ?? 0) - (a ?? 0) || left.localeCompare(right);
+  });
+};
+
 export const formatTimingLine = (timing: DbtestFileTiming): string => `${JSON.stringify(timing)}\n`;
 
 /**
@@ -62,7 +77,7 @@ export const parseTimings = (contents: string): { timings: DbtestFileTiming[]; u
     try {
       const parsed: unknown = JSON.parse(line);
       const record = parsed as Partial<DbtestFileTiming>;
-      if (typeof record.file !== "string" || typeof record.ms !== "number" || !Number.isFinite(record.ms)) {
+      if (typeof record.file !== "string" || typeof record.ms !== "number" || !Number.isFinite(record.ms) || record.ms < 0) {
         unreadable += 1;
         continue;
       }

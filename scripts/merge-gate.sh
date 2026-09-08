@@ -787,6 +787,7 @@ run_database_tests() {
   local suite_root="${GATE_TMP}/dbtest-roots"
   mkdir -p "${suite_root}/workspaces" "${suite_root}/state" "${suite_root}/files" || return 1
   AGENTOS_DBTEST_CONCURRENCY="${GATE_DB_LANES}" \
+  AGENTOS_DBTEST_TIMING_HISTORY="${CACHE_ROOT}/dbtest-timings.jsonl" \
   RUNNER_WORKSPACE_ROOT="${suite_root}/workspaces" \
   CONTROL_PLANE_STATE_DIR="${suite_root}/state" \
   FILES_ROOT="${suite_root}/files" \

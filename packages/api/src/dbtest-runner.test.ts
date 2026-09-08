@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,9 +10,54 @@ import test from "node:test";
 import { planEnvironmentVariable } from "./dbtest-plan.js";
 import { runDbtest, type RunTestsOptions, type ScratchManagerLike } from "./dbtest-runner.js";
 import { fixtureDatabaseUrl } from "./dbtest-url-fixture.js";
+import { formatTimingLine, timingHistoryEnvironmentVariable, timingsEnvironmentVariable } from "./dbtest-timings.js";
 
 const dbtestScript = fileURLToPath(new URL("../scripts/dbtest.mjs", import.meta.url));
 const apiRoot = fileURLToPath(new URL("..", import.meta.url));
+const testProcess = fileURLToPath(new URL("../scripts/dbtest-process.mjs", import.meta.url));
+
+test("DBTEST-PROCESS preserves queue order, isolates files, and propagates failures", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "agentos-dbtest-order-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const first = join(directory, "z-first.mjs");
+  const second = join(directory, "a-second.mjs");
+  writeFileSync(first, 'import test from "node:test"; globalThis.leaked = true; test("first", () => console.log("ORDER=first"));');
+  writeFileSync(second, 'import test from "node:test"; import assert from "node:assert/strict"; test("second", () => { console.log("ORDER=second"); assert.equal(globalThis.leaked, undefined); });');
+  const environment = { ...process.env, NODE_TEST_CONTEXT: undefined, AGENTOS_DBTEST_PLAN: undefined, NODE_OPTIONS: undefined };
+  const invoke = (files: string[]) => spawnSync(process.execPath, [testProcess, "1", ...files], {
+    encoding: "utf8", env: environment,
+  });
+  const passed = invoke([first, second]);
+  assert.equal(passed.status, 0, passed.stdout + passed.stderr);
+  assert.deepEqual(passed.stdout.match(/ORDER=\w+/gu), ["ORDER=first", "ORDER=second"]);
+  writeFileSync(second, 'import test from "node:test"; test("fails", () => { throw new Error("intentional-fixture-failure"); });');
+  const failed = invoke([first, second]);
+  assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+  assert.match(failed.stdout, /intentional-fixture-failure/u);
+  assert.equal(invoke([join(directory, "missing.mjs")]).status, 1);
+});
+
+test("DBTEST-PROCESS aborts its live file child before returning a signal status", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "agentos-dbtest-signal-"));
+  const ready = join(directory, "ready");
+  const entry = join(directory, "pending.mjs");
+  writeFileSync(entry, `import { writeFileSync } from "node:fs"; import test from "node:test";
+    test("pending", async () => { writeFileSync(${JSON.stringify(ready)}, String(process.pid));
+      await new Promise(() => { setInterval(() => {}, 1000); }); });`);
+  const child = spawn(process.execPath, [testProcess, "1", entry], {
+    stdio: "ignore", env: { ...process.env, NODE_TEST_CONTEXT: undefined, AGENTOS_DBTEST_PLAN: undefined },
+  });
+  const closed = new Promise<number | null>((resolve) => child.once("close", resolve));
+  t.after(() => { child.kill("SIGKILL"); rmSync(directory, { recursive: true, force: true }); });
+  // A loaded worker can delay child startup; wait for its actual ready signal.
+  const deadline = Date.now() + 30_000;
+  while (!existsSync(ready) && Date.now() < deadline) await delay(20);
+  assert.ok(existsSync(ready), "file child never became ready");
+  const filePid = Number(readFileSync(ready, "utf8"));
+  child.kill("SIGTERM");
+  assert.equal(await closed, 143);
+  assert.throws(() => process.kill(filePid, 0), /ESRCH/u, "coordinator left its file child alive");
+});
 
 /**
  * The manager's own contract, in memory: a database exists from the moment
@@ -206,6 +252,26 @@ test("DBTEST-RUN-ISOLATION gives every file its own database and its own three r
       assert.ok(existsSync(assignment[field] as string), `${field} was planned but not created`);
     }
   }
+});
+
+test("DBTEST-HISTORY is advisory, withheld from children, and saved only after a clean wave", async (t) => {
+  const h = harness(t);
+  const directory = mkdtempSync(join(tmpdir(), "agentos-dbtest-history-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const history = join(directory, "history.jsonl");
+  const previous = h.files.map((file, index) => formatTimingLine({ file, ms: index + 1 })).join("");
+  writeFileSync(history, previous);
+  h.environment[timingHistoryEnvironmentVariable] = history;
+  const invoke = (status: number) => run(h, async ({ files, environment }) => {
+    assert.deepEqual(files, [...h.files].reverse());
+    assert.equal(environment[timingHistoryEnvironmentVariable], undefined);
+    writeFileSync(environment[timingsEnvironmentVariable]!, files.map((file) => formatTimingLine({ file, ms: 5 })).join(""));
+    return status;
+  });
+  assert.equal(await invoke(1), 1);
+  assert.equal(readFileSync(history, "utf8"), previous);
+  assert.equal(await invoke(0), 0);
+  assert.notEqual(readFileSync(history, "utf8"), previous);
 });
 
 test("DBTEST-RUN-CLEANUP drops every database it made, and takes the plan with it", async (t) => {

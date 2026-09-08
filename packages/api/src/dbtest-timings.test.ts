@@ -7,7 +7,17 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { formatTimingLine, formatTimingReport, parseTimings, timingDisplayName } from "./dbtest-timings.js";
+import { formatTimingLine, formatTimingReport, orderByTimings, parseTimings, timingDisplayName } from "./dbtest-timings.js";
+
+it("history orders long files first across checkouts without selecting or dropping files", () => {
+  const files = ["/new/packages/api/src/a.ts", "/new/packages/db/src/a.ts", "/new/packages/api/src/new.ts"];
+  const history = [
+    { file: "api/a.ts", ms: 10 }, { file: "/old/packages/db/src/a.ts", ms: 90 },
+    { file: "api/deleted.ts", ms: 999 },
+  ];
+  assert.deepEqual(orderByTimings(files, history), [files[2], files[1], files[0]]);
+  assert.deepEqual(files, ["/new/packages/api/src/a.ts", "/new/packages/db/src/a.ts", "/new/packages/api/src/new.ts"]);
+});
 
 describe("formatTimingLine", () => {
   it("writes one complete line per file, which is what keeps concurrent writers apart", () => {

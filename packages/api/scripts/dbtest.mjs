@@ -28,11 +28,10 @@ import { spawn } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { availableParallelism, constants } from "node:os";
 import { join, resolve } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import {
   derivedMaintenanceUrl,
-  planEnvironmentVariable,
   provisioningAvailable,
   provisioningRequested,
 } from "../src/dbtest-plan.ts";
@@ -41,7 +40,7 @@ import { dbtestInvocationDecision } from "../src/dbtest-scope.ts";
 
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const sourceDirectory = join(packageRoot, "src");
-const preamble = pathToFileURL(join(packageRoot, "scripts", "dbtest-preamble.mjs")).href;
+const testProcess = join(packageRoot, "scripts", "dbtest-process.mjs");
 
 const say = (message) => process.stdout.write(`dbtest: ${message}\n`);
 
@@ -63,9 +62,13 @@ const testFiles = () => {
  */
 const runNodeTest = ({ files, concurrency, environment, signal }) => new Promise((resolveRun) => {
   const args = ["--conditions=development", "--import", "tsx"];
-  if (environment[planEnvironmentVariable]) args.push("--import", preamble);
-  args.push("--test", `--test-concurrency=${concurrency}`, ...files);
-  const child = spawn(process.execPath, args, { cwd: packageRoot, stdio: "inherit", env: environment });
+  args.push(testProcess, String(concurrency), ...files);
+  const child = spawn(process.execPath, args, {
+    cwd: packageRoot, stdio: "inherit",
+    // A DB harness can itself be exercised by a node:test file. The coordinator
+    // is a new runner, not a recursive call in that test's child process.
+    env: { ...environment, NODE_TEST_CONTEXT: undefined },
+  });
   const forward = () => child.kill("SIGTERM");
   signal?.addEventListener("abort", forward, { once: true });
   const done = (code) => {

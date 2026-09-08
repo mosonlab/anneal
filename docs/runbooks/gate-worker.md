@@ -78,6 +78,21 @@ is a guess about a ratio nothing maintains, and on the four-core fallback worker
 the guess starved the small wave to a single lane and 201 seconds. One pool
 balances itself and migrates the template once.
 
+The pool schedules files by the previous successful wave's measured duration,
+longest first, with unmeasured files first. This prevents a late-starting slow
+file from holding the worker after its other lanes drain. The programmatic
+Node test runner preserves that queue order; the CLI sorts explicit filenames.
+Each file still owns a separate process, cloned database, and host roots, and
+the lane budget is unchanged. Provisioning, test processes, and database
+cleanup have separate timings in the log.
+
+Scheduling history lives at `dbtest-timings.jsonl` under the gate cache root.
+It contains package-relative filenames and durations, never test results or
+proof. Missing or unreadable history is reported and cannot omit a file; only
+a complete passing database wave with successful cleanup replaces it, using
+an atomic rename. History may span commits because it changes execution order
+only. Every full gate still executes every check against its exact candidate.
+
 `provision.sh` is in `scripts/gate-worker/`; the other five ship from
 `packages/runner/runtime-tools/gate-worker/`:
 

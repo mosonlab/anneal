@@ -84,6 +84,7 @@
     { "glob": "packages/api/binding.gyp", "purpose": "API native addon build definition" },
     { "glob": "packages/api/native/control_plane_directory.c", "purpose": "API control-plane directory native implementation" },
     { "glob": "packages/api/scripts/dbtest-preamble.mjs", "purpose": "database-test preamble: hands each test file the database and roots the run planned for it, and refuses a file that plan does not name" },
+    { "glob": "packages/api/scripts/dbtest-process.mjs", "purpose": "database-test process runner preserving measured file order and per-file process isolation" },
     { "glob": "packages/api/scripts/dbtest.mjs", "purpose": "database-test runner: the process behind npm run test:db, which migrates one template, gives every test file a copy of it, and drops what it made" },
     { "glob": "packages/api/src/**/*.ts", "purpose": "API TypeScript source and tests" },
     { "glob": "packages/api/tsconfig.json", "purpose": "API TypeScript configuration" },
