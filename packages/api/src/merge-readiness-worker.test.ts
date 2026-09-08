@@ -120,6 +120,7 @@ for (const condition of ["base-advanced", "train-base-stale", "stale-head", "anc
         $queryRaw: async () => [{ id: agent.id }],
         agent: { findUnique: async () => agent },
         task: {
+          findUniqueOrThrow: async () => ({ id: "regression-1", chainId: null }),
           findUnique: async () => ({
             id: "regression-1", name: "Regression", assigneeType: "AGENT", assigneeAgent: agent,
             archivedAt: null, repo: { id: "repo-1", defaultBranch: "main" },

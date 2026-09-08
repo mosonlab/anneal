@@ -4,7 +4,7 @@ import {
   leaseLossRefundDecision,
   lockTaskRow,
   openRun,
-  runBirthRefusalMetadata,
+  settleRunBirthRefusal,
   RunStatus,
   TaskStatus,
   type PrismaClient,
@@ -358,30 +358,12 @@ export const reconcileDatabaseRuns = async (
             data: { taskId: run.taskId, actorType: "control-plane", body: `Run ${run.runNumber} lost; retry ${opened.run.runNumber} queued` },
           });
         } else {
+          const settlement = await settleRunBirthRefusal(tx, {
+            taskId: run.taskId, refusal: opened.refusal, mode: "park", now,
+            origin: { kind: "automatic", activityPrefix: `Run ${run.runNumber} lost; automatic retry refused` },
+          });
+          if (settlement.kind === "raise") throw settlement.error;
           leaseOutcomes.push({ kind: "stop", taskId: run.taskId });
-          await tx.task.update({
-            where: { id: run.taskId },
-            data: { status: TaskStatus.REVIEW, failureReason: `Lease-loss retry refused: ${opened.refusal.message}` },
-          });
-          await tx.taskActivity.create({
-            data: {
-              taskId: run.taskId,
-              actorType: "control-plane",
-              body: `Run ${run.runNumber} lost; automatic retry refused: ${opened.refusal.message}`,
-              // Named, not merely prose: `lease-loss-refunds-exhausted` is the
-              // reason an operator filters this REVIEW by; a spend cap alone
-              // adds the cap and the total it refused against.
-              metadata: runBirthRefusalMetadata(opened.refusal),
-            },
-          });
-          await tx.inboxMessage.create({
-            data: {
-              from: "AGENT",
-              taskId: run.taskId,
-              kind: "TEXT",
-              body: `Automatic retry refused after lease loss: ${opened.refusal.message}`,
-            },
-          });
         }
       } else {
         // Budget exhausted: no retry follows, so this lost run is the chain's
