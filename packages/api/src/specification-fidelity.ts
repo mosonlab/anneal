@@ -8,6 +8,7 @@ import {
   PR_TEMPLATE_NAME,
   stepRole,
 } from "@anneal/db";
+import { TRANSIENT_SYSTEM_ERROR_CODES } from "@anneal/db/transport-vocabulary";
 import type { ClaimSpecificationMaterialization } from "@anneal/db/claim-contract";
 
 import { abortableDelay, abortReason } from "./abortable-delay.js";
@@ -498,17 +499,6 @@ const isAbortError = (error: unknown): boolean => (
 );
 
 export type SpecificationReadFailureKind = SpecificationRefusalClassification;
-
-const TRANSIENT_SYSTEM_ERROR_CODES = new Set([
-  "ECONNABORTED",
-  "ECONNRESET",
-  "EHOSTUNREACH",
-  "ENETDOWN",
-  "ENETRESET",
-  "ENETUNREACH",
-  "EPIPE",
-  "ETIMEDOUT",
-]);
 
 /** Only transport and deadline failures are retried; repository/content responses fail closed immediately. */
 export const classifySpecificationReadFailure = (error: unknown): SpecificationReadFailureKind => {

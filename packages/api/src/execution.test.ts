@@ -1,3 +1,4 @@
+import { isTransientTransportFailure } from "@anneal/db/transport-vocabulary";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -405,13 +406,6 @@ test("the envelope a real hung push produces is classified as retryable transien
   assert.notEqual(verdict.failureClass, HUNG_PUSH_ENVELOPE.runnerClass);
 });
 
-/**
- * Every phrase `packages/runner/src/network-retry.ts` treats as transient, and
- * every phrase it vetoes. This list is the contract between the two files:
- * `adapters.ts classifyError` reached that predicate through
- * `isTransientNetworkError`, so relocating the authority here without the
- * vocabulary would have quietly made these failures final.
- */
 const TRANSIENT_PHRASES = [
   "fetch failed",
   "SSL_ERROR_SYSCALL: connection failed",
@@ -431,6 +425,7 @@ const TRANSIENT_PHRASES = [
 
 for (const phrase of TRANSIENT_PHRASES) {
   test(`stderr saying "${phrase}" stays retryable transience`, () => {
+    assert.equal(isTransientTransportFailure(phrase), true);
     const verdict = classifyEnvelope(envelope({ stderrSummary: phrase }));
     assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER);
     assert.equal(verdict.retryable, true);
@@ -526,5 +521,17 @@ test("credential helper warnings do not veto plumbing transport retries", () => 
     assert.equal(verdict.failureClass, FailureClass.TRANSIENT_PROVIDER, phase);
     assert.equal(verdict.retryable, true, phase);
     assert.equal(verdict.externalFailure, true, phase);
+  }
+});
+
+test("access refusal vetoes capacity and outage evidence on verdict channels", () => {
+  for (const text of [
+    "Bad credentials; model is at capacity",
+    "Permission denied; provider outage",
+    "Resource not accessible; HTTP 503",
+  ]) {
+    const verdict = classifyEnvelope(envelope({ stderrSummary: text }));
+    assert.equal(verdict.failureClass, FailureClass.TASK_FAILED);
+    assert.equal(verdict.retryable, false);
   }
 });

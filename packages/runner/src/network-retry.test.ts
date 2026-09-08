@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { isTransientTransportFailure } from "@anneal/db/transport-vocabulary";
+
 import { CommandTimeoutError, KILL_OVERHEAD_MS } from "./exec.js";
 import {
   CLONE_COMMAND_TIMEOUT_MS, CLONE_OPERATION_BUDGET_MS, deliveryDeadline, MIN_ATTEMPT_TIMEOUT_MS,
@@ -210,4 +212,17 @@ test("git push retries transport failures accompanied by credential helper warni
     throw new Error("gnutls_handshake() failed; git: 'credential-osxkeychain' is not a git command.");
   }, { wait: async () => undefined }));
   assert.equal(calls, 6);
+});
+
+test("model capacity refusal uses the shared vocabulary and retries", async () => {
+  const message = "Selected model is at capacity. Please try a different model.";
+  assert.equal(isTransientTransportFailure(message), true);
+  let calls = 0;
+  const result = await runWithNetworkRetry("git", ["fetch", "origin"], async () => {
+    calls += 1;
+    if (calls === 1) throw new Error(message);
+    return "fetched";
+  }, { wait: async () => undefined });
+  assert.equal(result, "fetched");
+  assert.equal(calls, 2);
 });
