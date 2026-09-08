@@ -893,7 +893,7 @@ test("canonical unbound direct instantiation retains the seven-task prompt snaps
     { name: "snapshot chain: Code review", descriptionSha256: "9b6d28537d11423006f897eb0661e6120ff8ea96f8857cfa6b4cfe06ad3c3c27" },
     { name: "snapshot chain: Blind code review", descriptionSha256: "af02f099a6e2b6b10f3ea2b31b8bcfd06a057cd91b134c16a3df552690fc979b" },
     { name: "snapshot chain: Apply review fixes", descriptionSha256: "89607144c06f5ee42b01f9d3e3ae1513d5d5232f8b0541d736b505b312408a8e" },
-    { name: "snapshot chain: Regression verification", descriptionSha256: "5ba403dde0fa9a2becfe969646691f59e3db947ef3eefed1ed2150db2db11dbd" },
+    { name: "snapshot chain: Regression verification", descriptionSha256: "e88247d9d62467ac81629ca66e5955845421127a32ffbfd3f9403072bdfba1e2" },
     { name: "snapshot chain: Merge authorization", descriptionSha256: "6cc850c691d3334a0ba8e4b26b24acdc3c7ab70c4b8cbac1fccb65ee708a7da7" },
     { name: "snapshot chain: Merge execution", descriptionSha256: "6f3ee10eef0967fec9bfdb09a73ab8b9f5e07aa3e4548e48d1174e2a90602a53" },
   ]);
