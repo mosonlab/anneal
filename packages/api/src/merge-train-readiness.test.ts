@@ -344,8 +344,13 @@ test("a disabled train drain gives every unrelated candidate its single decision
   const rows = ["ready-a", "ready-b"].map((id) => ({ id, repoId: "other-repo", templateStep }));
   const tx = {
     $queryRaw: async () => [{ held: true }],
-    task: { findMany: async () => [], update: async () => ({}) },
-    taskActivity: { findFirst: async () => ({ metadata: { kind: "mergeTail.train", state: "queued" } }), create: async () => ({}) },
+    task: { findMany: async () => [], update: async () => ({}),
+      findUnique: async () => ({ projectId: "project", chainId: candidate.chainId }) },
+    taskActivity: {
+      findFirst: async ({ where }: { where: { metadata: { equals: string } } }) => where.metadata.equals === "mergeTail.train"
+        ? { metadata: { kind: "mergeTail.train", state: "queued" } } : null,
+      create: async () => ({}),
+    },
   } as unknown as Prisma.TransactionClient;
   const db = {
     ...tx,

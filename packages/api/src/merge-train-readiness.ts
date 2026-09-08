@@ -30,6 +30,7 @@ import type { ClaimedReadiness, ReadinessCandidate, ReadinessDiscovery, Readines
 import { reserveMergeTrainTask, enqueueMergeTrainTask, mergeTrainTaskDescription } from "./merge-train-task.js";
 import { stopMergeTail } from "./merge-tail-actions.js";
 import { noticeMergeTrainAbort, settleMergeTrainFailure } from "./merge-train-repair.js";
+import { observeEpisode } from "./merge-tail-episode.js";
 import { lockTaskMutationRows } from "./task-write.js";
 
 
@@ -97,61 +98,13 @@ const tryRepositoryMutex = async (tx: Prisma.TransactionClient, repoId: string):
   return row?.held === true;
 };
 
-/**
- * Record an acquisition this tick could not make. Contention is ordinary and a
- * train simply waits, but the specification requires every failure to be named
- * and visible rather than silently retried, so the episode is durable state on
- * the train card and on each candidate. The write is skipped while the same
- * episode continues so a poll interval cannot flood the board.
- */
-const noteTrainLeaseUnavailable = async (
+/** Project the repository observation onto the train and its candidate Tasks. */
+const observeTrainLease = async (
   tx: Prisma.TransactionClient, train: PendingTrain,
-  state: "contended" | "unreachable", detail: string, now: Date,
+  answer: "contended" | "unreachable" | "resolved", now: Date, detail?: string,
 ): Promise<void> => {
-  const open = await readLatestMarker(tx, train.taskId, "leaseContention");
-  const body = state === "contended"
-    ? `Merge train ${train.taskId} is waiting for the repository merge Lease: ${detail}`
-    : `Merge train ${train.taskId} could not reach the merge Lease: ${detail}`;
-  const firstContendedAt = open && open.state !== "resolved" && typeof open.raw.firstContendedAt === "string"
-    ? open.raw.firstContendedAt
-    : now.toISOString();
-  if (!(open?.state === state && open.raw.detail === detail)) {
-    await writeMarker(tx, train.taskId, "leaseContention", { actorType: "control-plane", body,
-      metadata: { state, trainTaskId: train.taskId, detail, firstContendedAt, firstObservedAt: firstContendedAt } });
-  }
-  for (const candidate of train.candidates) {
-    const candidateOpen = await readLatestMarker(tx, candidate.taskId, "leaseContention");
-    // An already-alerted chain episode remains the authoritative projection;
-    // the train's episode will still be visible on its own card.
-    if (candidateOpen?.state === "alerted") continue;
-    if (candidateOpen?.state === state && candidateOpen.raw.detail === detail) continue;
-    const candidateFirstContendedAt = candidateOpen && candidateOpen.state !== "resolved"
-      && typeof candidateOpen.raw.firstContendedAt === "string"
-      ? candidateOpen.raw.firstContendedAt
-      : now.toISOString();
-    await writeMarker(tx, candidate.taskId, "leaseContention", { actorType: "control-plane", body,
-      metadata: { state, trainTaskId: train.taskId, detail, firstContendedAt: candidateFirstContendedAt } });
-  }
-};
-
-/** Any answer other than another refusal ends the episode. */
-const clearTrainLeaseUnavailable = async (
-  tx: Prisma.TransactionClient, train: PendingTrain, now: Date,
-): Promise<void> => {
-  const open = await readLatestMarker(tx, train.taskId, "leaseContention");
-  if (open && open.state !== "resolved") {
-    await writeMarker(tx, train.taskId, "leaseContention", { actorType: "control-plane",
-      body: `Merge train ${train.taskId} took the repository merge Lease`,
-      metadata: { state: "resolved", trainTaskId: train.taskId, resolvedAt: now.toISOString() } });
-  }
-  for (const candidate of train.candidates) {
-    const candidateOpen = await readLatestMarker(tx, candidate.taskId, "leaseContention");
-    if (!candidateOpen || candidateOpen.state === "resolved") continue;
-    await writeMarker(tx, candidate.taskId, "leaseContention", { actorType: "control-plane",
-      body: `Merge train ${train.taskId} took the repository merge Lease`,
-      metadata: { state: "resolved", trainTaskId: train.taskId, resolvedAt: now.toISOString(),
-        ...(typeof candidateOpen.raw.firstContendedAt === "string"
-          ? { firstContendedAt: candidateOpen.raw.firstContendedAt } : {}) } });
+  for (const taskId of [train.taskId, ...train.candidates.map((candidate) => candidate.taskId)]) {
+    await observeEpisode(tx, { taskId, family: "train-lease-contention", answer, now, ...(detail === undefined ? {} : { detail }) });
   }
 };
 
@@ -180,7 +133,15 @@ const withTrainLease = async <T>(
     let failed = false;
     let failure: unknown;
     const leased = await lease(target, async () => {
-      try { return await fn(); }
+      try {
+        // Commit the activity FK locks before settlement takes Task row locks
+        // in its own transaction; both still run inside the held Lease window.
+        await db.$transaction(async (episodeTx) => {
+          await lockCandidates(episodeTx, train.candidates);
+          await observeTrainLease(episodeTx, train, "resolved", now);
+        }, serializable);
+        return await fn();
+      }
       catch (error: unknown) {
         failed = true;
         failure = error;
@@ -191,14 +152,13 @@ const withTrainLease = async <T>(
     // An acquisition that never ran the callback leaves the train exactly as it
     // was; it is deferred to a later tick, but never without a record.
     if (leased.outcome === "contended") {
-      await noteTrainLeaseUnavailable(mutexTx, train, "contended", holderDetail(leased.holder), now);
+      await observeTrainLease(mutexTx, train, "contended", now, holderDetail(leased.holder));
       return;
     }
     if (leased.outcome === "unreachable") {
-      await noteTrainLeaseUnavailable(mutexTx, train, "unreachable", leased.detail, now);
+      await observeTrainLease(mutexTx, train, "unreachable", now, leased.detail);
       return;
     }
-    await clearTrainLeaseUnavailable(mutexTx, train, now);
   }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted, timeout: 300_000 });
 };
 

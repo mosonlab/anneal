@@ -8,11 +8,19 @@ import {
   PrismaClient,
 } from "@anneal/db";
 
-import {
-  clearLeaseContention,
-  contentionAlertAfterMs,
-  noteLeaseContention,
-} from "./merge-lease-contention.js";
+import { observeLeaseEpisode } from "./merge-lease-contention.js";
+import type { ReadinessClaimHandle } from "./readiness-claim.js";
+import type { MergeLeaseHolder } from "../../../scripts/merge-lease-adapter.mjs";
+
+const noteLeaseContention = async (database: PrismaClient, input: {
+  target: { projectId: string; chainId: string }; readinessTaskId: string;
+  holder: MergeLeaseHolder | null; claim: ReadinessClaimHandle; now: Date;
+}) => (await observeLeaseEpisode(database, input.claim, { taskId: input.readinessTaskId,
+  target: input.target, holder: input.holder, family: "lease-contention", answer: "contended", now: input.now }))?.transition ?? "not-owned";
+const clearLeaseContention = async (database: PrismaClient, input: {
+  target: { projectId: string; chainId: string }; readinessTaskId: string; claim: ReadinessClaimHandle; now: Date;
+}) => (await observeLeaseEpisode(database, input.claim, { taskId: input.readinessTaskId,
+  target: input.target, family: "lease-contention", answer: "resolved", now: input.now }))?.transition === "closed";
 import { claimReadinessStep } from "./readiness-claim.js";
 import { createApp } from "./test-app.js";
 import type { MergeLeaseView } from "./routes/merge-lease.js";
@@ -83,10 +91,6 @@ const alerts = async () => await db.inboxMessage.findMany({
   where: { dedupeKey: { startsWith: "merge-lease-contention:" } },
 });
 
-// Explicit in every case: the window is configurable, so a host that set
-// MERGE_LEASE_CONTENTION_ALERT_MINUTES must not change what these assert.
-const WINDOW_MS = contentionAlertAfterMs({ MERGE_LEASE_CONTENTION_ALERT_MINUTES: "30" });
-
 test("the first contention writes the activity naming the holder and alerts nobody", async () => {
   const chain = await seedChain();
   const outcome = await noteLeaseContention(db, {
@@ -95,7 +99,7 @@ test("the first contention writes the activity naming the holder and alerts nobo
     holder,
     claim: chain.claim,
     now: started,
-  }, WINDOW_MS);
+  });
 
   assert.equal(outcome, "opened");
   const markers = await contentionMarkers(chain.readinessTaskId);
@@ -120,7 +124,7 @@ test("contention short of the window repeats neither the activity nor an alert",
     holder,
     claim: chain.claim,
     now: started,
-  }, WINDOW_MS);
+  });
   for (const minutes of [1, 10, 29]) {
     assert.equal(
       await noteLeaseContention(db, {
@@ -129,7 +133,7 @@ test("contention short of the window repeats neither the activity nor an alert",
         holder,
         claim: chain.claim,
         now: minutesAfter(minutes),
-      }, WINDOW_MS),
+      }),
       "continuing",
       `${minutes} minutes in`,
     );
@@ -147,7 +151,7 @@ test("contention past the window alerts once, records one event, and steals noth
     holder,
     claim: chain.claim,
     now: started,
-  }, WINDOW_MS);
+  });
 
   assert.equal(
     await noteLeaseContention(db, {
@@ -156,7 +160,7 @@ test("contention past the window alerts once, records one event, and steals noth
       holder,
       claim: chain.claim,
       now: minutesAfter(31),
-    }, WINDOW_MS),
+    }),
     "alerted",
   );
 
@@ -183,7 +187,7 @@ test("contention past the window alerts once, records one event, and steals noth
         holder,
         claim: chain.claim,
         now: minutesAfter(minutes),
-      }, WINDOW_MS),
+      }),
       "continuing",
     );
   }
@@ -204,7 +208,7 @@ test("taking the lease ends the episode, and the next contention starts a new on
     holder,
     claim: chain.claim,
     now: started,
-  }, WINDOW_MS);
+  });
 
   assert.equal(
     await clearLeaseContention(db, {
@@ -233,7 +237,7 @@ test("taking the lease ends the episode, and the next contention starts a new on
       holder,
       claim: chain.claim,
       now: minutesAfter(40),
-    }, WINDOW_MS),
+    }),
     "opened",
   );
   // The new episode's window is measured from its own first contention, so the
@@ -245,7 +249,7 @@ test("taking the lease ends the episode, and the next contention starts a new on
       holder,
       claim: chain.claim,
       now: minutesAfter(50),
-    }, WINDOW_MS),
+    }),
     "continuing",
   );
   assert.deepEqual(await contentionEvents(chain.target.chainId), []);
@@ -259,7 +263,7 @@ test("an episode outlives a burst of unrelated activity on the same task", async
     holder,
     claim: chain.claim,
     now: started,
-  }, WINDOW_MS);
+  });
 
   // More rows than the recent-marker window is deep. An episode read through
   // that window would be invisible here, restarting its own 30 minutes on every
@@ -279,7 +283,7 @@ test("an episode outlives a burst of unrelated activity on the same task", async
       holder,
       claim: chain.claim,
       now: minutesAfter(31),
-    }, WINDOW_MS),
+    }),
     "alerted",
   );
   const opened = await alerts();
@@ -296,7 +300,7 @@ test("an episode outlives a burst of unrelated activity on the same task", async
       holder,
       claim: chain.claim,
       now: minutesAfter(60),
-    }, WINDOW_MS),
+    }),
     "continuing",
   );
   assert.equal((await alerts()).length, 1);
@@ -313,7 +317,7 @@ test("a worker that lost the claim records no activity, event, or alert", async 
       holder,
       claim: chain.claim,
       now: started,
-    }, WINDOW_MS),
+    }),
     "not-owned",
   );
   assert.deepEqual(await contentionMarkers(chain.readinessTaskId), []);
@@ -340,7 +344,7 @@ test("a still-open alert from an earlier episode does not silence the next one",
     holder,
     claim: chain.claim,
     now: minutesAfter(minutes),
-  }, WINDOW_MS);
+  });
 
   await contend(0);
   assert.equal(await contend(31), "alerted");
@@ -379,15 +383,15 @@ test("a contention the script could not attribute is still recorded and alerted"
     holder: null,
     claim: chain.claim,
     now: started,
-  }, contentionAlertAfterMs({ MERGE_LEASE_CONTENTION_ALERT_MINUTES: "5" }));
+  });
   assert.equal(
     await noteLeaseContention(db, {
       target: chain.target,
       readinessTaskId: chain.readinessTaskId,
       holder: null,
       claim: chain.claim,
-      now: minutesAfter(6),
-    }, contentionAlertAfterMs({ MERGE_LEASE_CONTENTION_ALERT_MINUTES: "5" })),
+      now: minutesAfter(31),
+    }),
     "alerted",
   );
   const events = await contentionEvents(chain.target.chainId);
@@ -404,14 +408,14 @@ test("the lease route answers with the live holder and the recorded contention",
     holder,
     claim: chain.claim,
     now: started,
-  }, WINDOW_MS);
+  });
   await noteLeaseContention(db, {
     target: chain.target,
     readinessTaskId: chain.readinessTaskId,
     holder,
     claim: chain.claim,
     now: minutesAfter(31),
-  }, WINDOW_MS);
+  });
 
   const operatorToken = process.env.OPERATOR_TOKEN;
   process.env.OPERATOR_TOKEN = "operator-dbtest-token";
