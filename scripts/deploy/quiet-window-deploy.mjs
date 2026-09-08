@@ -1194,6 +1194,9 @@ export const createDeployHost = ({
           }
         }
       } catch (error) {
+        // Authorization, control and interruption failures must retain their
+        // escalation class; only an inspection timeout is a readiness sample.
+        if (!(error instanceof DeployFailure) || error.reason !== "service-inspection-timeout") throw error;
         const failure = failureOf(error);
         return `${failure.reason}-${failure.detail}`;
       }

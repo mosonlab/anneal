@@ -2989,7 +2989,7 @@ test("canonical prompt sync uses the host command seam", async (t) => {
 });
 
 // Both directions cross the host seam with the same adapter fixture.
-const releaseProofFixture = ({ direction, platform = "linux", windowMs = 0, regression = null, wrongCommit = false }) => {
+const releaseProofFixture = ({ direction, platform = "linux", windowMs = 0, regression = null, wrongCommit = false, inspectionFailure = null }) => {
   const commit = direction === "forward" ? revisions.to : revisions.from;
   const failureReason = direction === "forward" ? "service-verification-failed" : "previous-service-verification-failed";
   let samples = 0;
@@ -3004,6 +3004,7 @@ const releaseProofFixture = ({ direction, platform = "linux", windowMs = 0, regr
       platform,
       restart: async () => {},
       isRunning: async (label) => {
+        if (inspectionFailure !== null) throw inspectionFailure;
         if (label === SERVICE_LABELS[0]) samples += 1;
         if (regression === "inspection" && samples > 1) {
           throw new DeployFailure("service-inspection-timeout", label);
@@ -3053,6 +3054,13 @@ for (const direction of ["forward", "rollback"]) {
     await assert.rejects(proof.verify(), (error) => error.reason === proof.failureReason
       && error.detail === `health-200-version-200-commit-${"f".repeat(40)}`);
   });
+  for (const reason of ["service-control-denied", "service-control-failed:is-active:com.agentos.api", "deploy-interrupted"]) {
+    test(`${direction} preserves fatal ${reason} without retrying`, async () => {
+      const inspectionFailure = new DeployFailure(reason, "inspection-refused");
+      const proof = releaseProofFixture({ direction, inspectionFailure });
+      await assert.rejects(proof.verify(), (error) => error === inspectionFailure);
+    });
+  }
   for (const regression of ["unit", "api", "wrapper", "runner", "inspection"]) {
     test(`${direction} detects ${regression} regression during its observation window`, async () => {
       const proof = releaseProofFixture({ direction, windowMs: 10, regression });
