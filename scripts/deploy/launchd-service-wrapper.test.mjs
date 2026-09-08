@@ -44,7 +44,6 @@ import {
   bootstrapCurrentRelease,
   installLaunchdServices,
   renderServicePlists,
-  verifyServicePlistDefinitions,
 } from "./install-launchd.mjs";
 import { runServiceInstaller } from "./install-launchd-services.mjs";
 
@@ -590,7 +589,6 @@ test("service plist rendering and installation cover every label before activati
       stderrPath: join(home, "stderr.log"),
       path: "/usr/bin:/bin",
     });
-    assert.equal(verifyServicePlistDefinitions(rendered, DEFAULT_INVENTORY), true);
     for (const label of SERVICE_LABELS) {
       assert.match(rendered[label], new RegExp(`<string>${label}</string>`, "u"));
       assert.match(rendered[label], /agentos-service-wrapper\.mjs/u);

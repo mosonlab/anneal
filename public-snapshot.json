@@ -130,6 +130,7 @@
     { "glob": "scripts/deploy/service-platform.sh", "purpose": "shared service-platform resolver for shell deployment tools" },
     { "glob": "scripts/deploy/service-inventory.sh", "purpose": "shell reader for the one resolved service inventory" },
     { "glob": "scripts/deploy/fixtures/darwin-9a52c6ad-baseline.json", "purpose": "frozen Darwin launchd compatibility baseline for cross-platform deployment regressions" },
+    { "glob": "scripts/deploy/fixtures/service-definition-golden.json", "purpose": "pre-refactor launchd and systemd definition outputs for byte equality regression tests" },
     { "glob": "scripts/fixtures/local-api-origin-cases.json", "purpose": "shared local API destination policy table" },
     { "glob": "scripts/fixtures/onboarding-remote-cases.json", "purpose": "shared repository remote policy table" },
     { "glob": "packages/runner/runtime-tools/gate-worker/gate-dispatch.sh", "purpose": "gate worker: slot-rationed dispatch across the local machine and the worker" },

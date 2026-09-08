@@ -14,23 +14,7 @@
   <string>__REPOSITORY_ROOT__</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key>
-    <string>__PATH__</string>
-    <key>DEPLOY_NODE_BINARY</key>
-    <string>__NODE_BINARY__</string>
-    <key>AGENTOS_REPOSITORY_ROOT</key>
-    <string>__REPOSITORY_ROOT__</string>
-    <key>AGENTOS_SHARED_ROOT</key>
-    <string>__SHARED_ROOT__</string>
-    <key>AGENTOS_SHARED_ENV_FILE</key>
-    <string>__SHARED_ENV_FILE__</string>
-    <key>AGENTOS_CURRENT_POINTER</key>
-    <string>current</string>
-    <key>AGENTOS_RELEASES_DIRECTORY</key>
-    <string>releases</string>
-    <key>AGENTOS_SERVICE_LABEL</key>
-    <string>__LABEL__</string>
-__RUNNER_ENVIRONMENT__
+__ENVIRONMENT__
   </dict>
   <key>RunAtLoad</key>
   <true/>
