@@ -1,3 +1,4 @@
+import { isRetiredReviewOutputKind, retiredReviewOutputRefusal } from "../historical-review-output.js";
 import {
   ACTIVE_RUN_STATUSES,
   AssigneeType,
@@ -1034,10 +1035,14 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
       });
       const existing = await tx.taskStepOutput.findUnique({ where: { taskId } });
       const immutableReview = isCanonicalReviewFindingsStep(task.templateStep)
-      || isCanonicalBlindFindingsStep(task.templateStep);
+      || isCanonicalBlindFindingsStep(task.templateStep)
+      || isRetiredReviewOutputKind(task.templateStep?.outputKind)
+      || isRetiredReviewOutputKind(existing?.kind);
       if (immutableReview && existing) {
         return refusal("conflict", `${task.templateStep?.outputKind ?? body.kind} task output is immutable once persisted`);
       }
+      const retiredRefusal = retiredReviewOutputRefusal(task.templateStep?.outputKind) ?? retiredReviewOutputRefusal(body.kind);
+      if (retiredRefusal) return refusal("conflict", retiredRefusal);
       if (task.templateStep && isRevalidationStep(task.templateStep)) {
         if (body.kind !== "revalidation") return refusal("conflict", "task_output kind must be revalidation for this canonical step");
         const invalid = canonicalBodyRefusal(task.templateStep, body.body, body.commitSha ?? null, null);

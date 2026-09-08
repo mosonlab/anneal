@@ -34,12 +34,14 @@ const retiredReviewOutputKind = (): string => {
   return reviewStep.outputKind;
 };
 
-const operatorGet = async (path: string): Promise<{ status: number; body: any }> => {
+const operatorGet = async (path: string, replacement?: { kind: string; body: string }): Promise<{ status: number; body: any }> => {
   const previous = process.env.OPERATOR_TOKEN;
   process.env.OPERATOR_TOKEN = OPERATOR;
   try {
     const response = await createApp(db).request(path, {
-      headers: { Authorization: `Bearer ${OPERATOR}` },
+      method: replacement ? "PUT" : "GET",
+      headers: { Authorization: `Bearer ${OPERATOR}`, "Content-Type": "application/json" },
+      ...(replacement ? { body: JSON.stringify(replacement) } : {}),
     });
     return { status: response.status, body: await response.json() as any };
   } finally {
@@ -203,4 +205,14 @@ test("GET task detail and output retain archived historical review records verba
 
   const persistedRun = await db.run.findUniqueOrThrow({ where: { id: seeded.run.id } });
   assert.equal(persistedRun.output, seeded.runTail);
+});
+
+test("operator PUT preserves an archived historical review output byte-for-byte", async () => {
+  const seeded = await seedArchivedHistoricalChain();
+  const where = { taskId: seeded.reviewTask.id };
+  const before = await db.taskStepOutput.findUniqueOrThrow({ where });
+  const response = await operatorGet(`/tasks/${seeded.reviewTask.id}/output`, { kind: "note", body: "replacement" });
+  assert.equal(response.status, 409);
+  assert.equal(response.body.error, `${seeded.retiredKind} task output is immutable once persisted`);
+  assert.deepEqual(await db.taskStepOutput.findUniqueOrThrow({ where }), before);
 });

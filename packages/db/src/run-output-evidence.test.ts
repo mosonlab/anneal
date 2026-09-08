@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { z } from "zod";
 
 import {
   decidePrHandoff,
@@ -197,7 +198,13 @@ test("the wire parser refuses the historical review output kind", () => {
   assert.throws(() => parseRunOutputEvidence({
     satisfaction: decideRunOutputSatisfaction("run-1", required, persisted("run-1")),
     prHandoff: { case: "complete", outputs: rows },
-  }));
+  }), (error: unknown) => {
+    assert.ok(error instanceof z.ZodError);
+    assert.equal(error.issues.length, 1);
+    assert.deepEqual(error.issues[0]!.path, ["prHandoff", "outputs", 1, "kind"]);
+    assert.equal(error.issues[0]!.code, "invalid_value");
+    return true;
+  });
 });
 
 test("PR handoff refuses duplicate review outputs in place of independent and blind review", () => {

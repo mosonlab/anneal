@@ -1,3 +1,4 @@
+import { isRetiredReviewOutputKind } from "./historical-review-output.js";
 import { createHash } from "node:crypto";
 
 import {
@@ -26,7 +27,6 @@ import {
   type RegressionVerdict,
   type RecoveryContext,
   recoveryContext,
-  stepRole,
   TaskStatus,
   writeMarker,
 } from "@anneal/db";
@@ -993,10 +993,8 @@ export const createMergeTailRepairTask = async (
       ? ["spec", "implementation", "fixed-implementation"]
       : ["spec", "implementation"];
   if (input.repairKind === "review-fix") {
-    // Keep known planning and documentation outputs out of the repair prompt,
-    // but do not let an unregistered output disappear behind the whitelist.
-    // That would silently turn a retired or malformed review report into an
-    // incomplete repair context.
+    // Only retired review evidence blocks repair; unrelated custom outputs
+    // retain their existing whitelist filtering.
     const priorKinds = await tx.taskStepOutput.findMany({
       where: { task: {
         projectId: regressionTask.projectId,
@@ -1006,7 +1004,7 @@ export const createMergeTailRepairTask = async (
       select: { kind: true },
       orderBy: { task: { chainIndex: "asc" } },
     });
-    const unknownKind = priorKinds.find(({ kind }) => stepRole({ outputKind: kind }) === null);
+    const unknownKind = priorKinds.find(({ kind }) => isRetiredReviewOutputKind(kind));
     if (unknownKind) {
       return { refusal: `unknown-kind: review-fix prior output ${unknownKind.kind} has no registered Step role` };
     }

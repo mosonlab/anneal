@@ -1,3 +1,4 @@
+import { retiredReviewOutputRefusal } from "./historical-review-output.js";
 import type { BranchAncestryReader } from "./github-read.js";
 import { READINESS_READ_BUDGET_MS } from "./readiness-decision.js";
 import {
@@ -676,7 +677,7 @@ export const completeRun = async (
     const persistedOutput = outputTaskId
       ? await tx.taskStepOutput.findUnique({ where: { taskId: outputTaskId } })
       : null;
-    const missingOutputReason = completionEvidenceRefusal(
+    const missingOutputReason = retiredReviewOutputRefusal(run.task?.templateStep?.outputKind) ?? completionEvidenceRefusal(
       run,
       reported.succeeded,
       body.headSha ?? null,

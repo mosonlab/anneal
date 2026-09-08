@@ -2907,6 +2907,12 @@ curl "$BASE_URL/tasks/$TASK_ID/output" -H "Authorization: Bearer $OPERATOR_TOKEN
 
 ### PUT `/tasks/:taskId/output`
 
+Historical review reports remain immutable once persisted, including archived
+Tasks with the retired review kind. Replacing one returns `409 Conflict` and
+leaves the stored report unchanged. New writes using the retired kind are
+refused with `unknown-kind`; session persistence and Run completion also refuse
+that contract before writing output or advancing the Chain.
+
 - Required path parameter: `taskId`.
 - Required JSON fields: `kind`, `body`.
 - Optional JSON fields: `fencingToken`, `metadata`, `commitSha`.

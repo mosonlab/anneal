@@ -643,3 +643,28 @@ test("a noncanonical implementation continuation does not diagnose its unrelated
   assert.equal("ok" in result && result.ok, true);
   assert.deepEqual(activities, []);
 });
+
+test("session persistence refuses retired Steps before any output write", async () => {
+  const kind = LEGACY_TEMPLATE_GENERATIONS["direct-engineer-workflow"]
+    .find(({ marker }) => marker === "pre-model-neutral-review-output")!.shape
+    .find(({ name }) => name === "Code review")!.outputKind;
+  const task = { id: "historical-task", templateStep: step("historical", 2, kind) };
+  let writes = 0;
+  const tx = {
+    $queryRaw: async () => [{ id: task.id }],
+    run: { findFirst: async (args: { select?: Record<string, unknown> }) =>
+      args.select && "taskId" in args.select ? { taskId: task.id } : { task } },
+    taskStepOutput: {
+      findUnique: async () => null,
+      upsert: async () => { writes++; return {}; },
+    },
+  } as unknown as Prisma.TransactionClient;
+  const result = await persistSessionTaskOutput(tx, {
+    task, fence: { runId: "run", fencingToken: "token", at: new Date() },
+    kind, body: "replacement", commitSha: FIX_HEAD,
+  });
+  assert.deepEqual(result, { ok: false, reason: `unknown-kind: retired task output kind ${kind}` });
+  assert.equal(writes, 0);
+  assert.equal(canonicalOutputRefusal(task.templateStep, null, "run", FIX_HEAD),
+    `unknown-kind: retired task output kind ${kind}`);
+});
