@@ -54,15 +54,18 @@ import { decryptSecret } from "./secrets.js";
 import {
   prepareSpecificationVerification,
   specificationDigest,
-  specificationReadBudgetExhaustedRefusal,
-  specificationReadDeadlineExceededRefusal,
   specificationMaterializationForDirectImplementation,
   type SpecificationReader,
   type SpecificationRefusal,
   type SpecificationVerification,
-  SPEC_TRANSCRIPTION_UNREADABLE_REASON,
   verifyPreparedSpecification,
 } from "./specification-fidelity.js";
+import {
+  deferSpecificationRead,
+  specificationReadDeferralHistoryQuery,
+  type SpecificationReadDeferralSettlement,
+  specificationReadEpisode,
+} from "./specification-read-deferral.js";
 import { lockTaskMutationRows } from "./task-write.js";
 import { isSerializationConflict, serializable } from "./transaction.js";
 
@@ -123,27 +126,6 @@ export type ClaimRunInput = {
 const MAX_OPERATOR_NOTES = 10;
 const MAX_OPERATOR_NOTES_CHARS = 4_000;
 export const OPERATOR_NOTE_METADATA_FIELD = "operatorNote";
-const SPECIFICATION_READ_DEFERRAL_CONDITION = "specification-read-claim-deferred";
-/** Any transient read failure other than a deadline hit keeps this budget. */
-const SPECIFICATION_READ_DEFERRAL_BUDGET_MS = 5 * 60_000;
-/**
- * The larger ceiling for a budget whose every failure was a deadline hit. Such
- * a read is slow, not broken: the observed host-load spikes that produced it
- * outlast five minutes but subside well inside half an hour. It is a constant,
- * not configuration, so the extended window stays bounded and a read that never
- * completes still ends in a loud, parked task.
- */
-const SPECIFICATION_READ_TIMEOUT_DEFERRAL_CEILING_MS = 30 * 60_000;
-const SPECIFICATION_READ_DEADLINE_EXTENDED_CONDITION = "specification-read-deadline-extended";
-const SPECIFICATION_READ_DEFERRAL_DELAYS_MS = [15_000, 30_000, 60_000] as const;
-/** The single mapping from "every failure was a deadline hit" to its ceiling. */
-const specificationReadDeferralBudgetMs = (allTimeouts: boolean): number => (
-  allTimeouts ? SPECIFICATION_READ_TIMEOUT_DEFERRAL_CEILING_MS : SPECIFICATION_READ_DEFERRAL_BUDGET_MS
-);
-const asRecord = (value: unknown): Record<string, unknown> => (
-  typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}
-);
-
 const openMechanicalContractMismatchAlert = async (
   tx: Prisma.TransactionClient,
   input: { body: string; dedupeKey: string; dedupeKeyPrefix: string },
@@ -424,117 +406,27 @@ export const claimRun = async (
         });
       })();
     const executorRunnerIds = mergeExecutorRunnerIds();
-    const priorSpecificationReadDeferrals = async (candidate: (typeof candidates)[number]) => {
+    const specificationReadEpisodeOf = async (candidate: (typeof candidates)[number]) => {
       if (!candidate.task) throw new Error(`Queued candidate ${candidate.id} has no task to inspect`);
-      return tx.taskActivity.findMany({
-        where: {
-          taskId: candidate.task.id,
-          // A resumed Run keeps its id, but every successful claim rewrites
-          // claimedAt. Rows before it belong to an earlier claim episode.
-          ...(candidate.claimedAt ? { createdAt: { gt: candidate.claimedAt } } : {}),
-          AND: [
-            { metadata: { path: ["condition"], equals: SPECIFICATION_READ_DEFERRAL_CONDITION } },
-            { metadata: { path: ["runId"], equals: candidate.id } },
-          ],
-        },
-        select: { createdAt: true, metadata: true },
-        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-      });
+      return specificationReadEpisode(await tx.taskActivity.findMany(specificationReadDeferralHistoryQuery({
+        taskId: candidate.task.id,
+        runId: candidate.id,
+        claimedAt: candidate.claimedAt,
+      })));
     };
-    const specificationReadDeferralState = async (candidate: (typeof candidates)[number]) => {
-      const priorDeferrals = await priorSpecificationReadDeferrals(candidate);
-      const budgetStartedAt = priorDeferrals[0]?.createdAt;
-      if (!budgetStartedAt) return null;
-      const latestEvidence = asRecord(priorDeferrals.at(-1)?.metadata);
-      const persistedDetail = typeof latestEvidence.lastUnderlyingErrorDetail === "string"
-        ? latestEvidence.lastUnderlyingErrorDetail
-        : null;
-      const persistedMessage = typeof latestEvidence.lastUnderlyingError === "string"
-        ? latestEvidence.lastUnderlyingError
-        : "repository content read failed";
-      const messagePrefix = `Spec transcription claim refused: ${SPEC_TRANSCRIPTION_UNREADABLE_REASON}: `;
-      // A deferral written before the split carries no cause; read it as a
-      // non-timeout transient so an in-flight budget keeps its 5-minute window.
-      const allTimeouts = priorDeferrals.every((deferral) => (
-        asRecord(deferral.metadata).transientCause === "timeout"
-      ));
-      const budgetMs = specificationReadDeferralBudgetMs(allTimeouts);
-      return {
-        attemptCount: priorDeferrals.length,
-        budgetStartedAt,
-        allTimeouts,
-        budgetMs,
-        budgetDeadlineAt: new Date(budgetStartedAt.getTime() + budgetMs),
-        lastUnderlyingError: persistedDetail
-          ?? (persistedMessage.startsWith(messagePrefix) ? persistedMessage.slice(messagePrefix.length) : persistedMessage),
-      };
-    };
-    const exhaustTransientSpecificationRead = async (
+    /** The writes one deferral decision names, and nothing else. */
+    const applySpecificationReadDeferral = async (
       candidate: (typeof candidates)[number],
-      state: NonNullable<Awaited<ReturnType<typeof specificationReadDeferralState>>>,
-      implementationHeadSha: string,
-    ) => {
-      // An episode extended for timeouts and then broken by one other transient
-      // parks on the 5-minute budget but has already run longer than it, so the
-      // window the refusal names is the observed one, not the budget constant.
-      const elapsedMs = now.getTime() - state.budgetStartedAt.getTime();
-      const refusal = state.allTimeouts
-        ? specificationReadDeadlineExceededRefusal({
-          attempts: state.attemptCount,
-          elapsedMs,
-          ceilingMs: SPECIFICATION_READ_TIMEOUT_DEFERRAL_CEILING_MS,
-          lastUnderlyingError: state.lastUnderlyingError,
-        })
-        : specificationReadBudgetExhaustedRefusal({
-          budgetMs: state.budgetMs,
-          elapsedMs,
-          lastUnderlyingError: state.lastUnderlyingError,
-        });
-      return await settleQueuedCandidate(tx, candidate, {
-        kind: "specification-read-exhausted",
-        refusal,
-        metadata: {
-          classification: refusal.classification,
-          exhaustedCondition: SPECIFICATION_READ_DEFERRAL_CONDITION,
-          budgetStartedAt: state.budgetStartedAt.toISOString(),
-          budgetDeadlineAt: state.budgetDeadlineAt.toISOString(),
-          budgetMs: state.budgetMs,
-          transientCause: state.allTimeouts ? "timeout" : "other",
-          implementationHeadSha,
-          lastUnderlyingError: state.lastUnderlyingError,
-        },
-      }, now);
-    };
-    const deferTransientSpecificationRead = async (
-      candidate: (typeof candidates)[number],
-      refusal: SpecificationRefusal,
-      implementationHeadSha: string,
-      state: Awaited<ReturnType<typeof specificationReadDeferralState>>,
-    ) => {
+      decision: SpecificationReadDeferralSettlement,
+    ): Promise<CandidateDecision> => {
       if (!candidate.task) throw new Error(`Queued candidate ${candidate.id} has no task to defer`);
-      const budgetStartedAt = state?.budgetStartedAt ?? now;
-      // One non-timeout transient anywhere in the budget forfeits the extended
-      // ceiling for the whole episode: only a purely slow read earns it.
-      const transientCause = refusal.transientCause === "timeout" ? "timeout" : "other";
-      const allTimeouts = transientCause === "timeout" && (state?.allTimeouts ?? true);
-      const budgetMs = specificationReadDeferralBudgetMs(allTimeouts);
-      const budgetDeadlineAt = new Date(budgetStartedAt.getTime() + budgetMs);
-      if (now.getTime() >= budgetDeadlineAt.getTime()) {
-        return exhaustTransientSpecificationRead(candidate, {
-          attemptCount: state?.attemptCount ?? 0,
-          budgetStartedAt,
-          allTimeouts,
-          budgetMs,
-          budgetDeadlineAt,
-          lastUnderlyingError: refusal.detail,
-        }, implementationHeadSha);
+      if (decision.action === "exhaust") {
+        return await settleQueuedCandidate(tx, candidate, {
+          kind: "specification-read-exhausted",
+          refusal: decision.refusal,
+          metadata: decision.metadata,
+        }, now);
       }
-
-      const attempt = (state?.attemptCount ?? 0) + 1;
-      const delayMs = SPECIFICATION_READ_DEFERRAL_DELAYS_MS[
-        Math.min(attempt - 1, SPECIFICATION_READ_DEFERRAL_DELAYS_MS.length - 1)
-      ]!;
-      const nextAttemptAt = new Date(Math.min(now.getTime() + delayMs, budgetDeadlineAt.getTime()));
       const deferred = await tx.run.updateMany({
         where: {
           id: candidate.id,
@@ -542,53 +434,27 @@ export const claimRun = async (
           leaseGeneration: candidate.leaseGeneration,
           readyAt: candidate.readyAt,
         },
-        data: { readyAt: nextAttemptAt },
+        data: { readyAt: decision.nextAttemptAt },
       });
       if (deferred.count !== 1) return SKIP;
       await tx.taskActivity.create({
         data: {
           taskId: candidate.task.id,
           actorType: "control-plane",
-          body: `Review claim deferred after transient specification read failure; attempt ${attempt} will be eligible at ${nextAttemptAt.toISOString()}`,
-          metadata: {
-            condition: SPECIFICATION_READ_DEFERRAL_CONDITION,
-            classification: refusal.classification,
-            runId: candidate.id,
-            attempt,
-            delayMs,
-            transientCause,
-            budgetMs,
-            budgetStartedAt: budgetStartedAt.toISOString(),
-            budgetDeadlineAt: budgetDeadlineAt.toISOString(),
-            nextAttemptAt: nextAttemptAt.toISOString(),
-            implementationHeadSha,
-            lastUnderlyingError: refusal.message,
-            lastUnderlyingErrorDetail: refusal.detail,
-          },
+          body: decision.evidence.body,
+          metadata: decision.evidence.metadata,
         },
       });
-      // A sustained overload is worth exactly one notice per task: the first
-      // deferral that outlives the ordinary budget, none of the ones after it.
-      // The dedupe key is scoped to the Task, not to the Run's deferral episode,
-      // so a task that hits this condition again after an operator retry stays
-      // silent - the open notice already tells the operator this task is being
-      // held by host load, and one row per episode is the noise this notice
-      // exists to avoid. Parking still announces itself per Run.
-      const extendedPastOrdinaryBudget = allTimeouts
-        && now.getTime() >= budgetStartedAt.getTime() + SPECIFICATION_READ_DEFERRAL_BUDGET_MS;
-      if (extendedPastOrdinaryBudget) {
-        const dedupeKey = `${SPECIFICATION_READ_DEADLINE_EXTENDED_CONDITION}:${candidate.task.id}`;
+      if (decision.notice) {
         await tx.inboxMessage.upsert({
-          where: { dedupeKey },
+          where: { dedupeKey: decision.notice.dedupeKey },
           create: {
             from: "AGENT",
             agentId: candidate.agentId,
             taskId: candidate.task.id,
             kind: "TEXT",
-            body: `Specification read keeps exceeding its deadline under host load; the claim deferral window was extended past `
-              + `${SPECIFICATION_READ_DEFERRAL_BUDGET_MS}ms to ${SPECIFICATION_READ_TIMEOUT_DEFERRAL_CEILING_MS}ms. `
-              + `The task stays queued and will be parked if the ceiling is reached. Last underlying error: ${refusal.detail}`,
-            dedupeKey,
+            body: decision.notice.body,
+            dedupeKey: decision.notice.dedupeKey,
           },
           update: {},
         });
@@ -828,14 +694,15 @@ export const claimRun = async (
         }, now);
       }
       if (prepared.status === "ready") {
-        const deferralState = await specificationReadDeferralState(candidate);
-        if (deferralState && now.getTime() >= deferralState.budgetDeadlineAt.getTime()) {
-          return exhaustTransientSpecificationRead(
-            candidate,
-            deferralState,
-            prepared.verification.implementationHeadSha,
-          );
-        }
+        const episode = {
+          now,
+          prior: await specificationReadEpisodeOf(candidate),
+          taskId: candidate.task.id,
+          runId: candidate.id,
+          implementationHeadSha: prepared.verification.implementationHeadSha,
+        };
+        const beforeRead = deferSpecificationRead({ ...episode, refusal: null });
+        if (beforeRead.action !== "proceed") return await applySpecificationReadDeferral(candidate, beforeRead);
         if (!verificationResults.has(prepared.verification.key)) {
           // Repository I/O must not happen while this serializable transaction
           // holds candidate/chain rows. The outer claim loop performs the read
@@ -845,12 +712,7 @@ export const claimRun = async (
         const refusal = verificationResults.get(prepared.verification.key) ?? null;
         if (refusal) {
           if (refusal.classification === "transient") {
-            return deferTransientSpecificationRead(
-              candidate,
-              refusal,
-              prepared.verification.implementationHeadSha,
-              deferralState,
-            );
+            return await applySpecificationReadDeferral(candidate, deferSpecificationRead({ ...episode, refusal }));
           }
           return await settleQueuedCandidate(tx, candidate, {
             kind: "spec-transcription-refused",

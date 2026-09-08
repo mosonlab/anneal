@@ -20,17 +20,14 @@ import {
   codexGptCapability,
   compoundImplementationAssigneeValid,
   enqueueTaskRun,
-  LEASE_LOSS_REFUND_CAP,
-  leaseLossRefundAvailable,
-  leaseLossRefundDecision,
   basePublishedStamp,
   openRun,
   pinnedImplementationRange,
   settleRunBirthRefusal,
   runBirthRefusalDecision,
-  runBudgetCeiling,
 } from "./run-open.js";
 import { runOwnedHead } from "./run-head.js";
+import { LEASE_LOSS_REFUND_CAP, refundDecision } from "./run-refund.js";
 
 const now = new Date("2026-08-26T12:00:00.000Z");
 
@@ -1410,23 +1407,6 @@ test("an ordinary birth carries the task's refund count forward without spending
   assert.equal(first.creates[0]?.leaseLossRefunds, 0);
 });
 
-test("leaseLossRefundAvailable reads the count alone and clamps a negative one", () => {
-  assert.equal(LEASE_LOSS_REFUND_CAP, 3);
-  assert.deepEqual(
-    [-1, 0, 1, 2, 3, 4].map((refunds) => leaseLossRefundAvailable(refunds)),
-    [true, true, true, true, false, false],
-  );
-  assert.equal(leaseLossRefundAvailable(null), true);
-  assert.equal(leaseLossRefundAvailable(undefined), true);
-});
-
-test("runBudgetCeiling is the only ceiling algorithm and clamps negative grants", () => {
-  assert.equal(runBudgetCeiling(5, undefined), 5);
-  assert.equal(runBudgetCeiling(5, null), 5);
-  assert.equal(runBudgetCeiling(5, -2), 5);
-  assert.equal(runBudgetCeiling(5, 3), 8);
-});
-
 // §R14. The compound implementation root is a capability, so the predicate is
 // tested directly: name is not an input, and the runtime configuration is.
 const compoundStep = {
@@ -1588,32 +1568,32 @@ for (const intent of reassignedRetryIntents) {
 test("terminal refund grants and replacement birth use the same source Run", async () => {
   for (const refunds of [0, 1, 2, 3]) {
     const source = priorRun({ leaseLossRefunds: refunds, maxRunsPerTask: 1 + refunds, budgetGrants: refunds });
-    const decision = leaseLossRefundDecision(source, source.id);
+    const decision = refundDecision({ reason: "lease-loss", run: source, latestRunId: source.id });
     const task = taskRow({ repoId: "repo-1", repo: { id: "repo-1", defaultBranch: "main" }, runs: [source] });
     const { tx, creates } = fakeTx(task);
     const result = await openRun(tx, task.id, {
-      kind: "retry-after-lease-loss", sourceRunId: decision.sourceRunId, readyAt: now,
+      kind: "retry-after-lease-loss", sourceRunId: source.id, readyAt: now,
       sourceMaxRunsPerTask: source.maxRunsPerTask, sourceBudgetGrants: source.budgetGrants,
     });
-    assert.equal(result.ok, decision.refundAvailable);
+    assert.equal(result.ok, decision.grant);
     if (result.ok) {
-      assert.equal(creates[0]?.maxRunsPerTask, decision.maxRunsPerTask);
-      assert.equal(creates[0]?.budgetGrants, decision.budgetGrants);
+      assert.equal(creates[0]?.maxRunsPerTask, decision.budget.maxRunsPerTask);
+      assert.equal(creates[0]?.budgetGrants, decision.budget.budgetGrants);
     } else {
-      assert.equal(decision.maxRunsPerTask, source.maxRunsPerTask);
-      assert.equal(decision.budgetGrants, source.budgetGrants);
+      assert.equal(decision.budget.maxRunsPerTask, source.maxRunsPerTask);
+      assert.equal(decision.budget.budgetGrants, source.budgetGrants);
     }
     // Claim invalidation records the grant before birth reads the same row.
-    const revoked = { ...source, maxRunsPerTask: decision.maxRunsPerTask, budgetGrants: decision.budgetGrants };
+    const revoked = { ...source, ...decision.budget };
     const claimTask = taskRow({ ...task, maxSessionsPerTask: 1, runs: [revoked] });
     const claimTx = fakeTx(claimTask);
     const claimBirth = await openRun(claimTx.tx, claimTask.id, {
-      kind: "claim-invalidated", sourceRunId: decision.sourceRunId, readyAt: now,
+      kind: "claim-invalidated", sourceRunId: source.id, readyAt: now,
     });
-    assert.equal(claimBirth.ok, decision.refundAvailable);
+    assert.equal(claimBirth.ok, decision.grant);
     if (claimBirth.ok) {
-      assert.equal(claimTx.creates[0]?.maxRunsPerTask, decision.maxRunsPerTask);
-      assert.equal(claimTx.creates[0]?.budgetGrants, decision.budgetGrants);
+      assert.equal(claimTx.creates[0]?.maxRunsPerTask, decision.budget.maxRunsPerTask);
+      assert.equal(claimTx.creates[0]?.budgetGrants, decision.budget.budgetGrants);
       assert.equal(claimTx.creates[0]?.leaseLossRefunds, refunds + 1);
     }
   }
@@ -1623,14 +1603,6 @@ test("terminal refund grants and replacement birth use the same source Run", asy
   assert.equal(stale.ok, false);
   if (!stale.ok) assert.equal(stale.refusal.code, "source-run-stale");
   assert.equal(creates.length, 0);
-});
-
-test("a terminalized source cannot record a refund belonging to a newer Run", () => {
-  const source = priorRun({ leaseLossRefunds: 0 });
-  const decision = leaseLossRefundDecision(source, "newer-run");
-  assert.equal(decision.refundAvailable, false);
-  assert.equal(decision.maxRunsPerTask, source.maxRunsPerTask);
-  assert.equal(decision.budgetGrants, source.budgetGrants);
 });
 
 test("completed merge-tail repairs grant verification attempts without spending loss refunds", async () => {

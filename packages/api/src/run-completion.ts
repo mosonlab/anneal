@@ -13,7 +13,6 @@ import {
   CleanupStatus,
   decideRunOutputSatisfaction,
   executionModeFor,
-  EXTERNAL_FAILURE_REFUND_CAP,
   FailureClass,
   failurePhases,
   gateQuestion,
@@ -35,8 +34,8 @@ import {
   type PrismaClient,
   PushStatus,
   recordIntegratorStop,
+  refundDecision,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
-  runBudgetCeiling,
   type RunOutcome,
   runOutcomeVerdict,
   RunStatus,
@@ -209,123 +208,6 @@ export const completionOutputFailurePolicy = ({
   return {
     externalFailure: targetFetchFailed,
     cappedExternalFailure: targetFetchFailed,
-  };
-};
-
-type RefundDecisionInput = {
-  runNumber: number;
-  external: boolean;
-  refundable: boolean;
-  mechanical: boolean;
-  capped: boolean;
-  priorCappedRefunds: number;
-};
-
-type RefundActivity = {
-  body: string;
-  metadata: {
-    kind: "externalFailureRefund.granted" | "externalFailureRefund.refused";
-    schemaVersion: 1;
-    policy: "capped" | "uncapped";
-    granted: boolean;
-    cap: number;
-    capReached: boolean;
-  };
-};
-
-export type ExternalFailureRefundDecision = {
-  refunded: 0 | 1;
-  capReached: boolean;
-  activity: RefundActivity | null;
-};
-
-const refundActivity = (
-  body: string,
-  policy: RefundActivity["metadata"]["policy"],
-  granted: boolean,
-  capReached: boolean,
-): RefundActivity => ({
-  body,
-  metadata: {
-    kind: granted ? "externalFailureRefund.granted" : "externalFailureRefund.refused",
-    schemaVersion: 1,
-    policy,
-    granted,
-    cap: EXTERNAL_FAILURE_REFUND_CAP,
-    capReached,
-  },
-});
-
-export const completionBudgetAfterRefund = (
-  maxRunsPerTask: number,
-  budgetGrants: number,
-  refunded: 0 | 1,
-): { maxRunsPerTask: number; budgetGrants: number } => ({
-  maxRunsPerTask: runBudgetCeiling(maxRunsPerTask, refunded),
-  budgetGrants: budgetGrants + refunded,
-});
-
-/** Decide and narrate one budget refund. `priorCappedRefunds` counts only the
- * grants emitted with the capped policy; legacy plumbing refunds do not
- * consume this allowance. */
-export const externalFailureRefundDecision = ({
-  runNumber,
-  external,
-  refundable,
-  mechanical,
-  capped,
-  priorCappedRefunds,
-}: RefundDecisionInput): ExternalFailureRefundDecision => {
-  if (!external) return { refunded: 0, capReached: false, activity: null };
-  const policy = capped ? "capped" : "uncapped";
-  if (mechanical) {
-    return {
-      refunded: 0,
-      capReached: false,
-      activity: refundActivity(
-        `Run ${runNumber} external failure was not refunded because the step is mechanical`,
-        policy,
-        false,
-        false,
-      ),
-    };
-  }
-  if (!refundable) {
-    return {
-      refunded: 0,
-      capReached: false,
-      activity: refundActivity(
-        `Run ${runNumber} external failure was not eligible for a budget refund`,
-        policy,
-        false,
-        false,
-      ),
-    };
-  }
-  if (capped && priorCappedRefunds >= EXTERNAL_FAILURE_REFUND_CAP) {
-    return {
-      refunded: 0,
-      capReached: true,
-      activity: refundActivity(
-        `Run ${runNumber} external-failure refund cap was reached (${EXTERNAL_FAILURE_REFUND_CAP})`,
-        policy,
-        false,
-        true,
-      ),
-    };
-  }
-  const ordinal = capped ? priorCappedRefunds + 1 : null;
-  return {
-    refunded: 1,
-    capReached: false,
-    activity: refundActivity(
-      capped
-        ? `Run ${runNumber} received external-failure budget refund ${ordinal} of ${EXTERNAL_FAILURE_REFUND_CAP}`
-        : `Run ${runNumber} received an external-failure budget refund`,
-      policy,
-      true,
-      false,
-    ),
   };
 };
 
@@ -736,8 +618,9 @@ export const completeRun = async (
           },
         })
       : 0;
-    const refundDecision = externalFailureRefundDecision({
-      runNumber: run.runNumber,
+    const refund = refundDecision({
+      reason: "external-failure",
+      run: { runNumber: run.runNumber, maxRunsPerTask: run.maxRunsPerTask, budgetGrants: run.budgetGrants },
       external,
       refundable: failureClass !== FailureClass.NO_CHANGES_PRODUCED
         && failureClass !== FailureClass.BUDGET_EXCEEDED
@@ -754,13 +637,8 @@ export const completeRun = async (
     // reachable interleaving rather than merely hard to reach. The failure
     // envelope's verdict decides *whether* the failure was external; it does
     // not get to raise the ceiling on this step either.
-    const refunded = refundDecision.refunded;
-    const completionBudget = completionBudgetAfterRefund(
-      run.maxRunsPerTask,
-      run.budgetGrants,
-      refunded,
-    );
-    const budgetCeiling = completionBudget.maxRunsPerTask;
+    const refunded: 0 | 1 = refund.grant ? 1 : 0;
+    const budgetCeiling = refund.budget.maxRunsPerTask;
     const tail = await readMergeTailSettlement(tx, {
       run, task: run.task, succeeded, external, retryable, failureClass,
       headSha: body.headSha ?? null, budgetCeiling,
@@ -780,7 +658,7 @@ export const completeRun = async (
     // budget changes. The in-flight ceiling stays derived from the run's own
     // row: a task's budget being edited mid-run must not retroactively refuse
     // an attempt already authorized.
-    const budgetGrants = completionBudget.budgetGrants;
+    const budgetGrants = refund.budget.budgetGrants;
     // The merge either landed in this Run or it did not. Everything that is not
     // a valid, same-Run `merged` result is a Run that ended holding a Lease it
     // never spent, and §D-P7's operators had to steal that Lease by hand.
@@ -913,14 +791,14 @@ export const completeRun = async (
       else retryRefusal = opened.refusal;
     }
     if (run.taskId) {
-      if (refundDecision.activity) {
+      if (refund.activity) {
         await tx.taskActivity.create({
           data: {
             taskId: run.taskId,
             actorType: "control-plane",
-            body: refundDecision.activity.body,
+            body: refund.activity.body,
             metadata: jsonValue({
-              ...refundDecision.activity.metadata,
+              ...refund.activity.metadata,
               runId: run.id,
               priorCappedRefunds,
               budgetGrantsBefore: run.budgetGrants,

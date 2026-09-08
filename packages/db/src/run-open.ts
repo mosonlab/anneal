@@ -28,86 +28,18 @@ import {
   stopStateFor,
 } from "./merge-integrator-db.js";
 import { runnerFor } from "./model-routing.js";
+import {
+  LEASE_LOSS_REFUND_CAP,
+  LEASE_LOSS_REFUND_EXHAUSTED_PREFIX,
+  leaseLossRefundAvailable,
+  runBudgetCeiling,
+} from "./run-refund.js";
 import { spendCapExhausted, taskSpendUsd, usd } from "./spend-cap.js";
 import { runOwnedHead } from "./run-head.js";
 import { writeTask } from "./task-write.js";
 import { stepRole } from "./step-role.js";
 
 type Tx = Prisma.TransactionClient;
-
-/** Newly refundable provider-transport and Regression target-fetch failures
- * are bounded so a persistently broken external dependency cannot create an
- * unbounded retry loop. Existing plumbing refunds remain outside this cap. */
-export const EXTERNAL_FAILURE_REFUND_CAP = 3;
-
-/**
- * How many attempts one task may have refunded because the *platform* lost the
- * Run: a lease declared LOST by reconciliation, a claim invalidated by a late
- * salvage, a merge-tail requeue.
- *
- * These refunds raise the ceiling they are measured against. `maxRunsPerTask`
- * and `budgetGrants` both grow by one with every refund, so `runNumber <
- * runBudgetCeiling(...)` is true forever in a pure lease-loss sequence and a
- * task that never runs a single agent attempt can requeue itself without end.
- * The count of refunds is therefore kept apart from the budget it produced,
- * and it is the only thing this bound reads.
- *
- * Matches `EXTERNAL_FAILURE_REFUND_CAP` in size and in reason, and bounds a
- * different class: that one bounds a provider or fetch that keeps failing, this
- * one bounds a runner that keeps disappearing.
- */
-export const LEASE_LOSS_REFUND_CAP = 3;
-export const LEASE_LOSS_REFUND_EXHAUSTED_PREFIX = "Lease-loss refunds exhausted";
-
-/** Whether a task carrying `leaseLossRefunds` may still be refunded once more. */
-export const leaseLossRefundAvailable = (leaseLossRefunds: number | null | undefined): boolean =>
-  Math.max(0, leaseLossRefunds ?? 0) < LEASE_LOSS_REFUND_CAP;
-
-/** The terminal grant and birth eligibility are one decision on an identified Run. */
-export const leaseLossRefundDecision = (source: {
-  id: string;
-  leaseLossRefunds?: number | null;
-  maxRunsPerTask: number;
-  budgetGrants: number;
-}, latestRunId: string | null) => {
-  const refundAvailable = source.id === latestRunId && leaseLossRefundAvailable(source.leaseLossRefunds);
-  return {
-    sourceRunId: source.id,
-    refundAvailable,
-    maxRunsPerTask: source.maxRunsPerTask + (refundAvailable ? 1 : 0),
-    budgetGrants: source.budgetGrants + (refundAvailable ? 1 : 0),
-  };
-};
-
-/**
- * The ceiling a task's next attempt is measured against.
- *
- * `Task.maxSessionsPerTask` is the configured budget: how many attempts the
- * agent's own work is allowed to cost, and an operator may change it at any
- * time through `PATCH /tasks/:id`. `Run.budgetGrants` is what has been granted
- * on top of it — one per attempt refunded as an external failure, plus any a
- * human re-authorized — and it is carried forward onto every run a task
- * creates, so the largest value across a task's runs is the running total.
- *
- * The two must stay separate. `Run.maxRunsPerTask` is the *sum* of the two as
- * of the moment it was written, and a sum cannot be un-added: reading a
- * historical `maxRunsPerTask` as though it were a grant meant a task whose
- * budget an operator had just lowered from 5 to 2 still got five attempts,
- * because two ordinary EXECUTE failures had left `5` on their rows and nothing
- * could tell that 5 apart from a refund.
- *
- * Every budget gate has to read this. Two of them did not (issue #113): `POST
- * /tasks/:id/start` and `startable` counted run rows against
- * `Task.maxSessionsPerTask` alone and could not see the refunds, so a task
- * whose only failures were sub-second clone errors reported "Run budget
- * exhausted" to the operator while the operator-retry route, reading the very
- * same refund one route away, would have let it run. A ceiling only half the
- * system honours is not a ceiling.
- */
-export const runBudgetCeiling = (
-  maxSessionsPerTask: number,
-  budgetGrants: number | null | undefined,
-): number => maxSessionsPerTask + Math.max(0, budgetGrants ?? 0);
 
 export type WorkflowRefusalReason =
   | "invalid-request"
@@ -1148,7 +1080,7 @@ export const openRun = async (
   // ever reached.
   const priorRefunds = prior?.leaseLossRefunds ?? 0;
   const refunding = platformRefundIntent(intent);
-  if (refunding && prior && !leaseLossRefundDecision(prior, prior.id).refundAvailable) {
+  if (refunding && prior && !leaseLossRefundAvailable(prior.leaseLossRefunds)) {
     return openRunRefusal(
       "lease-loss-refunds-exhausted",
       "conflict",

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   ACTIVE_RUN_STATUSES,
   EMPTY_READINESS_REQUEUE_TOTALS,
+  highestBudgetGrants,
   readChainControls,
   isIntegratorStep,
   markerFromMetadata,
@@ -598,9 +599,7 @@ export const boardCard = (
   const taskCost = sumUsageCosts(row.runs.flatMap((item) => item.session === null
     ? []
     : [runSessionUsageCost(item)!]));
-  const budgetGrants = row.runs.reduce<number | null>((highest, item) => (
-    highest === null ? item.budgetGrants : Math.max(highest, item.budgetGrants)
-  ), null);
+  const budgetGrants = highestBudgetGrants(row.runs.map((item) => item.budgetGrants));
   // Read the same way as the grants beside it — carried forward, so the newest
   // row is the running total and the highest is that total under any ordering.
   // Shown apart from `budgetRemaining` on purpose: a task can have budget left

@@ -1,10 +1,9 @@
 import {
   executionModeFor,
   isRegressionVerificationOutputKind,
-  leaseLossRefundDecision,
   lockTaskRow,
-  openRun,
-  settleRunBirthRefusal,
+  refundForLostRun,
+  reopenRefundedRun,
   RunStatus,
   TaskStatus,
   type PrismaClient,
@@ -274,10 +273,7 @@ export const reconcileDatabaseRuns = async (
       // way out is to raise `maxSessionsPerTask` deliberately.
       // The candidate predates the Task lock. A newer Run must not leave this
       // older row holding a grant that birth will reject as source-run-stale.
-      const latest = run.taskId ? await tx.run.findFirst({
-        where: { taskId: run.taskId }, orderBy: { runNumber: "desc" }, select: { id: true },
-      }) : null;
-      const { refundAvailable, maxRunsPerTask: budgetCeiling, budgetGrants } = leaseLossRefundDecision(run, latest?.id ?? null);
+      const refund = await refundForLostRun(tx, { taskId: run.taskId, run, reason: "lease-loss" });
       const rejectionFailureReason = completionRejection?.parsed.status === "ok"
         ? `Mechanical completion rejected with HTTP ${completionRejection.parsed.rejection.status}: ${completionRejection.parsed.rejection.responseBody}`
         : completionRejection?.parsed.status === "malformed"
@@ -295,8 +291,7 @@ export const reconcileDatabaseRuns = async (
             OR: [{ leaseExpiresAt: { lt: now } }, { leaseExpiresAt: null }],
           },
           reason: rejectionFailureReason ?? leaseLossReason,
-          maxRunsPerTask: budgetCeiling,
-          budgetGrants,
+          ...refund.budget,
         },
       });
       if (lost === null || "message" in lost) continue;
@@ -341,37 +336,30 @@ export const reconcileDatabaseRuns = async (
         });
         continue;
       }
-      if (!refundAvailable || run.runNumber < budgetCeiling) {
-        const opened = await openRun(tx, run.taskId, {
-          kind: "retry-after-lease-loss",
-          sourceRunId: run.id,
-          sourceMaxRunsPerTask: run.maxRunsPerTask,
-          sourceBudgetGrants: run.budgetGrants,
-          // Spaced by the refunds already granted, not queued at `now`: a host
-          // that keeps losing runs is given time to come back before the next
-          // attempt is spent on it.
-          readyAt: new Date(now.getTime() + leaseLossRetryDelayMs(run.leaseLossRefunds)),
+      const reopened = await reopenRefundedRun(tx, {
+        taskId: run.taskId,
+        refund,
+        // Spaced by the refunds already granted, not queued at `now`: a host
+        // that keeps losing runs is given time to come back before the next
+        // attempt is spent on it.
+        readyAt: new Date(now.getTime() + leaseLossRetryDelayMs(run.leaseLossRefunds)),
+        now,
+        activityPrefix: `Run ${run.runNumber} lost; automatic retry refused`,
+      });
+      if (reopened.kind === "reopened") {
+        await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DOING, failureReason: null } });
+        await tx.taskActivity.create({
+          data: { taskId: run.taskId, actorType: "control-plane", body: `Run ${run.runNumber} lost; retry ${reopened.run.runNumber} queued` },
         });
-        if (opened.ok) {
-          await tx.task.update({ where: { id: run.taskId }, data: { status: TaskStatus.DOING, failureReason: null } });
-          await tx.taskActivity.create({
-            data: { taskId: run.taskId, actorType: "control-plane", body: `Run ${run.runNumber} lost; retry ${opened.run.runNumber} queued` },
-          });
-        } else {
-          const settlement = await settleRunBirthRefusal(tx, {
-            taskId: run.taskId, refusal: opened.refusal, mode: "park", now,
-            origin: { kind: "automatic", activityPrefix: `Run ${run.runNumber} lost; automatic retry refused` },
-          });
-          if (settlement.kind === "raise") throw settlement.error;
-          leaseOutcomes.push({ kind: "stop", taskId: run.taskId });
-        }
+      } else if (reopened.kind === "refused") {
+        leaseOutcomes.push({ kind: "stop", taskId: run.taskId });
       } else {
         // Budget exhausted: no retry follows, so this lost run is the chain's
         // last word and its lease has no successor to hand itself to.
         leaseOutcomes.push({ kind: "stop", taskId: run.taskId });
         await tx.task.update({
           where: { id: run.taskId },
-          data: { status: TaskStatus.REVIEW, failureReason: `Maximum ${budgetCeiling} runs reached after lease loss` },
+          data: { status: TaskStatus.REVIEW, failureReason: `Maximum ${reopened.ceiling} runs reached after lease loss` },
         });
         await tx.inboxMessage.create({
           data: {
