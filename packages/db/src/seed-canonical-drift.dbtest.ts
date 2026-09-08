@@ -15,6 +15,11 @@ import { fileURLToPath } from "node:url";
 import { after, before, test } from "node:test";
 
 import { PrismaClient } from "@prisma/client";
+import { LEGACY_TEMPLATE_GENERATIONS } from "./canonical-template-transition.js";
+
+const historicalReviewKind = LEGACY_TEMPLATE_GENERATIONS["direct-engineer-workflow"]
+  .find(({ marker }) => marker === "pre-model-neutral-review-output")!.shape
+  .find(({ name }) => name === "Code review")!.outputKind;
 
 const packageRoot = fileURLToPath(new URL("../", import.meta.url)).replace(/\/+$/u, "");
 
@@ -83,7 +88,7 @@ test("seed rolls a registered canonical generation over inside its installation 
       where: { id: step.id },
       data: {
         // Historical generations retain their original review labels.
-        outputKind: step.outputKind === "review-findings" ? "sol-findings" : step.outputKind,
+        outputKind: step.outputKind === "review-findings" ? historicalReviewKind : step.outputKind,
         name: step.outputKind === "review-findings" ? "Code review (Sol)"
           : step.outputKind === "blind-findings" ? "Code review (Opus blind)" : step.name,
         stepIndex: step.stepIndex - 1,

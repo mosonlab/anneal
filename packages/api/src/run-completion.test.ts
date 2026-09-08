@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
+  LEGACY_TEMPLATE_GENERATIONS,
   CleanupStatus,
   EXTERNAL_FAILURE_REFUND_CAP,
   FailureClass,
@@ -160,6 +161,7 @@ const statefulCompletionHarness = (
   const activities: RecordedActivity[] = [];
   const queuedRuns: Record<string, unknown>[] = [];
   const closedRuns = new Map<string, Record<string, unknown>>();
+  const outputWrites: unknown[] = [];
   const taskUpdates: Record<string, unknown>[] = [];
   const archivedAt = new Date("2026-08-16T06:00:00.000Z");
   let currentRun: HarnessRun;
@@ -205,7 +207,11 @@ const statefulCompletionHarness = (
       findUnique: async () => ({ ...task, runs: [{ ...currentRun, task: undefined, session: undefined }] }),
       findUniqueOrThrow: async () => ({ ...task, runs: [{ ...currentRun, task: undefined, session: undefined }] }),
     },
-    taskStepOutput: { findUnique: async () => persistedOutput },
+    taskStepOutput: {
+      findUnique: async () => persistedOutput,
+      create: async (args: unknown) => { outputWrites.push(args); return {}; },
+      update: async (args: unknown) => { outputWrites.push(args); return {}; },
+    },
     taskActivity: {
       findMany: async ({ where, take }: { where: { taskId: string }; take?: number }) => activities
         .filter((activity) => activity.taskId === where.taskId).reverse().slice(0, take),
@@ -270,7 +276,7 @@ const statefulCompletionHarness = (
     return closedRuns.get(currentRun.id)!;
   };
 
-  return { activities, complete, taskUpdates, queuedRuns };
+  return { activities, complete, taskUpdates, queuedRuns, outputWrites };
 };
 
 for (const state of ["settled", "aborted"]) {
@@ -748,3 +754,20 @@ for (const repairKind of ["refresh-conflict", "review-fix", "gate-fix"]) {
     });
   }
 }
+
+for (const maxRunsPerTask of [1, 2]) test(`completeRun refuses retired Steps without output or advancement (budget ${maxRunsPerTask})`, async () => {
+  const kind = LEGACY_TEMPLATE_GENERATIONS["direct-engineer-workflow"]
+    .find(({ marker }) => marker === "pre-model-neutral-review-output")!.shape
+    .find(({ name }) => name === "Code review")!.outputKind;
+  const harness = statefulCompletionHarness({ chainId: "chain", templateId: "template", opensPullRequest: false });
+  const closed = await harness.complete({
+    runNumber: 1, maxRunsPerTask, budgetGrants: 0,
+    outcome: { case: "succeeded" }, headSha: "a".repeat(40),
+    templateStep: { outputKind: kind, requiresCommit: false, taskTemplate: { name: "historical" } },
+  });
+  assert.equal(closed.status, RunStatus.FAILED);
+  assert.equal(closed.failureReason, `unknown-kind: retired task output kind ${kind}`);
+  assert.equal(harness.taskUpdates.some((update) => update.status === "DONE"), false);
+  assert.equal(harness.queuedRuns.length, 0);
+  assert.deepEqual(harness.outputWrites, []);
+});

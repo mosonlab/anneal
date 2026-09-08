@@ -81,11 +81,10 @@ export const decideRunOutputSatisfaction = (
   return { case: "absent", outputKind, remediable: requirement.remediable };
 };
 
-/** Accepted PR output kinds, including the immutable legacy review contract. */
+/** Accepted PR output kinds for the current review contract. */
 export const PR_HANDOFF_KINDS = [
   "implementation",
   "review-findings",
-  "sol-findings",
   "blind-findings",
   "fixed-implementation",
 ] as const;

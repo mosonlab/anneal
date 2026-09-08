@@ -1,3 +1,4 @@
+import { isRetiredReviewOutputKind } from "./historical-review-output.js";
 import { createHash } from "node:crypto";
 
 import {
@@ -996,10 +997,27 @@ export const createMergeTailRepairTask = async (
   // review-fix that must trace their finding ids. Planning-stage and
   // documentation outputs repair nothing and stay out.
   const repairPriorOutputKinds = input.repairKind === "review-fix"
-    ? ["spec", "implementation", "review-findings", "sol-findings", "blind-findings", "fixed-implementation"]
+    ? ["spec", "implementation", "review-findings", "blind-findings", "fixed-implementation"]
     : input.repairKind === "gate-fix"
       ? ["spec", "implementation", "fixed-implementation"]
       : ["spec", "implementation"];
+  if (input.repairKind === "review-fix") {
+    // Only retired review evidence blocks repair; unrelated custom outputs
+    // retain their existing whitelist filtering.
+    const priorKinds = await tx.taskStepOutput.findMany({
+      where: { task: {
+        projectId: regressionTask.projectId,
+        chainId: regressionTask.chainId,
+        chainIndex: { lt: regressionTask.chainIndex },
+      }, kind: { notIn: repairPriorOutputKinds } },
+      select: { kind: true },
+      orderBy: { task: { chainIndex: "asc" } },
+    });
+    const unknownKind = priorKinds.find(({ kind }) => isRetiredReviewOutputKind(kind));
+    if (unknownKind) {
+      return { refusal: `unknown-kind: review-fix prior output ${unknownKind.kind} has no registered Step role` };
+    }
+  }
   const priorOutputs = await tx.taskStepOutput.findMany({
     where: { task: {
       projectId: regressionTask.projectId,

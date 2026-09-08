@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { type Prisma } from "@anneal/db";
+import { LEGACY_TEMPLATE_GENERATIONS, type Prisma } from "@anneal/db";
 
 import {
   isCanonicalAgentStep,
   isCanonicalBlindFindingsStep,
   isLegacyCombinedBlindReviewStep,
-  isCanonicalReviewFindingsStep,
   isCanonicalFixStep,
+  canonicalBodyRefusal,
   canonicalOutputRefusal,
   persistSessionTaskOutput,
   requiredOutputKind,
@@ -22,7 +22,7 @@ const step = (template: string, stepIndex: number, outputKind: string) => ({
   outputKind,
 });
 
-type ReviewKind = "review-findings" | "sol-findings" | "blind-findings";
+type ReviewKind = "review-findings" | "blind-findings";
 
 type ReviewTask = {
   id: string;
@@ -110,7 +110,7 @@ const persistFixedOutput = async (input: {
       taskTemplate: { name: "direct-engineer-workflow" },
     },
   };
-  const chainReviewSteps = input.chainReviewSteps ?? (["sol-findings", "blind-findings"] as const).map(
+  const chainReviewSteps = input.chainReviewSteps ?? (["review-findings", "blind-findings"] as const).map(
     (outputKind) => ({
       outputKind,
       instantiated: input.reviewTasks.some((task) => task.templateStep.outputKind === outputKind),
@@ -247,7 +247,6 @@ test("blind-findings is a versioned immutable review output and cannot be author
     reviewedHead: headSha,
     findings: [],
   });
-  assert.equal(isCanonicalReviewFindingsStep(step("direct-engineer-workflow", 2, "sol-findings")), true);
   assert.equal(canonicalOutputRefusal(blindStep, {
     runId: "run-1",
     kind: "blind-findings",
@@ -255,13 +254,22 @@ test("blind-findings is a versioned immutable review output and cannot be author
     commitSha: headSha,
     metadata: null,
   }, "run-1", headSha), null);
-  assert.match(canonicalOutputRefusal(step("direct-engineer-workflow", 2, "sol-findings"), {
-    runId: "run-1",
-    kind: "blind-findings",
-    body,
-    commitSha: headSha,
-    metadata: null,
-  }, "run-1", headSha) ?? "", /does not match canonical kind/u);
+});
+
+test("the retired review output kind has a named canonical refusal", () => {
+  const retiredReviewKind = LEGACY_TEMPLATE_GENERATIONS["direct-engineer-workflow"]
+    .find(({ marker }) => marker === "pre-model-neutral-review-output")?.shape
+    .find(({ name }) => name === "Code review")?.outputKind;
+  assert.ok(retiredReviewKind);
+  assert.equal(
+    canonicalBodyRefusal(
+      step("direct-engineer-workflow", 2, retiredReviewKind),
+      JSON.stringify({ schemaVersion: 1 }),
+      "a".repeat(40),
+      null,
+    ),
+    `canonical output kind ${retiredReviewKind} has no versioned JSON contract`,
+  );
 });
 
 test("immutable findings from a prior Run are accepted only after canonical validation", () => {
@@ -277,7 +285,7 @@ test("immutable findings from a prior Run are accepted only after canonical vali
     ...overrides,
   });
 
-  for (const kind of ["review-findings", "sol-findings", "blind-findings"] as const) {
+  for (const kind of ["review-findings", "blind-findings"] as const) {
     const reviewStep = step("direct-engineer-workflow", kind !== "blind-findings" ? 2 : 3, kind);
     const output = (overrides: Partial<{
       runId: string | null;
@@ -368,31 +376,22 @@ const persistenceRefusal = (
   result: Awaited<ReturnType<typeof persistFixedOutput>>,
 ): string | null => "ok" in result ? (result.ok ? null : result.reason) : result.reason;
 
-for (const kind of ["review-findings", "sol-findings"] as const) {
-  test(`a fixed-implementation output accepts the ${kind} review contract`, async () => {
-    const result = await persistFixedOutput({ reviewTasks: [reviewTask("review-task", kind)] });
-    assert.equal(persistenceRefusal(result), null);
-  });
+test("a fixed-implementation output accepts the review-findings review contract", async () => {
+  const result = await persistFixedOutput({ reviewTasks: [reviewTask("review-task", "review-findings")] });
+  assert.equal(persistenceRefusal(result), null);
+});
 
-  test(`a ${kind} Step refuses the other review kind even though its role matches`, async () => {
-    const task = reviewTask("review-task", kind);
-    task.stepOutput!.kind = kind === "review-findings" ? "sol-findings" : "review-findings";
-    const result = await persistFixedOutput({ reviewTasks: [task] });
-    assert.match(persistenceRefusal(result) ?? "", /requires exactly one immutable review-findings sibling output/u);
-  });
-}
-
-test("two review kind aliases cannot supply two reports for one review role", async () => {
-  const result = await persistFixedOutput({
-    reviewTasks: [reviewTask("old-review", "sol-findings"), reviewTask("new-review", "review-findings")],
-  });
+test("a review Step refuses an output from another review kind", async () => {
+  const task = reviewTask("review-task", "review-findings");
+  task.stepOutput!.kind = "blind-findings";
+  const result = await persistFixedOutput({ reviewTasks: [task] });
   assert.match(persistenceRefusal(result) ?? "", /requires exactly one immutable review-findings sibling output/u);
 });
 
 test("a present blind review sibling without output keeps its exact refusal", async () => {
   const result = await persistFixedOutput({
     reviewTasks: [
-      reviewTask("sol-task", "sol-findings"),
+      reviewTask("review-task", "review-findings"),
       reviewTask("blind-task", "blind-findings", null),
     ],
   });
@@ -405,9 +404,9 @@ test("a present blind review sibling without output keeps its exact refusal", as
 
 test("a review step this chain instantiated is owed in the predecessor layer", async () => {
   const result = await persistFixedOutput({
-    reviewTasks: [reviewTask("sol-task", "sol-findings")],
+    reviewTasks: [reviewTask("review-task", "review-findings")],
     chainReviewSteps: [
-      { outputKind: "sol-findings", instantiated: true },
+      { outputKind: "review-findings", instantiated: true },
       { outputKind: "blind-findings", instantiated: true },
     ],
   });
@@ -430,7 +429,7 @@ test("a fixed-implementation output refuses a review layer with no review siblin
 test("present review siblings must agree on their reviewed base", async () => {
   const result = await persistFixedOutput({
     reviewTasks: [
-      reviewTask("sol-task", "sol-findings"),
+      reviewTask("review-task", "review-findings"),
       reviewTask("blind-task", "blind-findings", {
         runId: "blind-task-run",
         kind: "blind-findings",
@@ -643,6 +642,31 @@ test("a noncanonical implementation continuation does not diagnose its unrelated
   });
   assert.equal("ok" in result && result.ok, true);
   assert.deepEqual(activities, []);
+});
+
+test("session persistence refuses retired Steps before any output write", async () => {
+  const kind = LEGACY_TEMPLATE_GENERATIONS["direct-engineer-workflow"]
+    .find(({ marker }) => marker === "pre-model-neutral-review-output")!.shape
+    .find(({ name }) => name === "Code review")!.outputKind;
+  const task = { id: "historical-task", templateStep: step("historical", 2, kind) };
+  let writes = 0;
+  const tx = {
+    $queryRaw: async () => [{ id: task.id }],
+    run: { findFirst: async (args: { select?: Record<string, unknown> }) =>
+      args.select && "taskId" in args.select ? { taskId: task.id } : { task } },
+    taskStepOutput: {
+      findUnique: async () => null,
+      upsert: async () => { writes++; return {}; },
+    },
+  } as unknown as Prisma.TransactionClient;
+  const result = await persistSessionTaskOutput(tx, {
+    task, fence: { runId: "run", fencingToken: "token", at: new Date() },
+    kind, body: "replacement", commitSha: FIX_HEAD,
+  });
+  assert.deepEqual(result, { ok: false, reason: `unknown-kind: retired task output kind ${kind}` });
+  assert.equal(writes, 0);
+  assert.equal(canonicalOutputRefusal(task.templateStep, null, "run", FIX_HEAD),
+    `unknown-kind: retired task output kind ${kind}`);
 });
 
 const persistRevalidationOutput = async (templateName: string, schemaVersion: number, includeRoute = false) => {

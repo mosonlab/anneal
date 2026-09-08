@@ -1,3 +1,4 @@
+import { isRetiredReviewOutputKind, retiredReviewOutputRefusal } from "./historical-review-output.js";
 import {
   canonicalClosedReviewArtifactSchema as closedReviewArtifact,
   canonicalFixedImplementationArtifactSchema as fixedImplementationArtifact,
@@ -380,6 +381,8 @@ export const canonicalOutputRefusal = (
   runId: string,
   completionHeadSha: string | null,
 ): string | null => {
+  const retiredRefusal = retiredReviewOutputRefusal(step?.outputKind);
+  if (retiredRefusal) return retiredRefusal;
   if (!step || !isCanonicalAgentStep(step)) return null;
   if (!output) return `missing ${step.outputKind} task output for current Run ${runId}`;
   // Findings reports are immutable after their first persistence. A later Run
@@ -431,7 +434,7 @@ export const canonicalImplementationOutputRefusal = (
  * persisted therefore has nothing left to author, whoever wrote it.
  */
 export const outputIsImmutableOncePersisted = (step: TemplateStepIdentity | null | undefined): boolean => (
-  isCanonicalReviewFindingsStep(step) || isCanonicalBlindFindingsStep(step)
+  isCanonicalReviewFindingsStep(step) || isCanonicalBlindFindingsStep(step) || isRetiredReviewOutputKind(step?.outputKind)
 );
 
 /**
@@ -484,6 +487,8 @@ export const persistSessionTaskOutput = async (
   if (!authorized.task || authorized.task.id !== input.task.id) return fenceRefusalResponse("stale-fence");
   const task = authorized.task;
   const step = task.templateStep;
+  const retiredRefusal = retiredReviewOutputRefusal(step?.outputKind) ?? retiredReviewOutputRefusal(input.kind);
+  if (retiredRefusal) return { ok: false, reason: retiredRefusal };
   if (step && isCanonicalAgentStep(step) && input.kind !== step.outputKind) {
     return { ok: false, reason: `task_output kind must be ${step.outputKind} for this canonical step` };
   }

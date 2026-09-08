@@ -5,6 +5,7 @@ import test from "node:test";
 
 import {
   COMPOUND_IMPLEMENTATION_ASSIGNEE_ERROR_CODE,
+  LEGACY_TEMPLATE_GENERATIONS,
   LEASE_LOSS_REFUND_EXHAUSTED_PREFIX,
   RunnerKind,
   RunnerPreference,
@@ -1430,6 +1431,36 @@ test("session and task detail return identical complete diagnostics for the same
     assert.equal(taskDetail.runs[1]!.metrics.ttft, null);
     assert.deepEqual(taskDetail.runs[1]!.metrics.vsBaseline, { costRatio: null, durationRatio: 2 });
     assert.equal(queries.filter((query) => query.sql?.includes('FROM "SessionEvent"')).length, 3);
+  });
+});
+
+test("operator output PUT refuses overwriting archived historical review reports", async () => {
+  await withTokens(async () => {
+    const kind = LEGACY_TEMPLATE_GENERATIONS["direct-engineer-workflow"]
+      .find(({ marker }) => marker === "pre-model-neutral-review-output")!.shape
+      .find(({ name }) => name === "Code review")!.outputKind;
+    const task = { id: "historical", projectId: "project", chainId: "chain", status: "DONE",
+      archivedAt: new Date(), templateStep: { outputKind: kind } };
+    let stored = { kind, body: "historical report\nunchanged", metadata: { historical: true } };
+    const before = structuredClone(stored);
+    let writes = 0;
+    const tx = {
+      $queryRaw: async () => [{ id: task.id }],
+      task: { findUnique: async () => task, findUniqueOrThrow: async () => task },
+      taskStepOutput: {
+        findUnique: async () => stored,
+        upsert: async ({ update }: { update: typeof stored }) => { writes++; stored = update; return stored; },
+      },
+    };
+    const database = { $transaction: async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx) } as unknown as PrismaClient;
+    const response = await createApp(database).request(`/tasks/${task.id}/output`, {
+      method: "PUT", headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "note", body: "replacement" }),
+    });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json() as { error: string }).error, `${kind} task output is immutable once persisted`);
+    assert.equal(writes, 0);
+    assert.deepEqual(stored, before);
   });
 });
 

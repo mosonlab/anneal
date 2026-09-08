@@ -2917,6 +2917,12 @@ curl "$BASE_URL/tasks/$TASK_ID/output" -H "Authorization: Bearer $OPERATOR_TOKEN
 
 ### PUT `/tasks/:taskId/output`
 
+Historical review reports remain immutable once persisted, including archived
+Tasks with the retired review kind. Replacing one returns `409 Conflict` and
+leaves the stored report unchanged. New writes using the retired kind are
+refused with `unknown-kind`; session persistence and Run completion also refuse
+that contract before writing output or advancing the Chain.
+
 - Required path parameter: `taskId`.
 - Required JSON fields: `kind`, `body`.
 - Optional JSON fields: `fencingToken`, `metadata`, `commitSha`.
@@ -3278,11 +3284,13 @@ review, or derive text from provider output, activity prose, or repository
 contents. Its source is persisted task output and its authentication is the
 claimed session/run identity.
 
-Output kinds name Step deliverables, not execution models. Existing Chains keep
-their original `sol-findings` review contract; the handoff accepts that legacy
-kind in the same review position and preserves it on the wire. New Chains use
-`review-findings`. Changing the assigned Agent or its model never renames a
-Step output or rewrites an immutable report.
+Output kinds name Step deliverables, not execution models. Execution uses
+`review-findings`; `sol-findings` is no longer accepted for Step roles, repair
+evidence, or PR handoff. Historical Chains retain that original kind: Task
+detail reads (`GET /tasks/:id`), outputs, and report text return it verbatim.
+Template adoption and rollover still upgrade older installations. Changing the
+assigned Agent or its model never renames a Step output or rewrites an
+immutable report.
 
 The machine-only `POST /runner/runs/:runId/events` append is bounded on both
 sides, and the two bounds are designed against each other. The API reads at most

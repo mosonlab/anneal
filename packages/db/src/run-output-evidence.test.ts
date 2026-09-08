@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { z } from "zod";
 
 import {
   decidePrHandoff,
@@ -10,9 +11,15 @@ import {
   type RunOutputRequirement,
   type RunOutputSatisfaction,
 } from "./run-output-evidence.js";
+import { LEGACY_TEMPLATE_GENERATIONS } from "./canonical-template-transition.js";
+
+// Derive the historical output kind from the transition fixture so this test
+// exercises an actual persisted predecessor without making it an accepted
+// execution contract here.
+const legacyReviewOutputKind = LEGACY_TEMPLATE_GENERATIONS["direct-engineer-workflow"][0]!.shape[1]!.outputKind;
 
 const required: RunOutputRequirement = { outputKind: "implementation", immutableOncePersisted: false, remediable: true };
-const findings: RunOutputRequirement = { outputKind: "sol-findings", immutableOncePersisted: true, remediable: true };
+const findings: RunOutputRequirement = { outputKind: "review-findings", immutableOncePersisted: true, remediable: true };
 const mechanical: RunOutputRequirement = { outputKind: "regression-verification-v2", immutableOncePersisted: false, remediable: false };
 const optional: RunOutputRequirement = { outputKind: null, immutableOncePersisted: false, remediable: true };
 
@@ -44,8 +51,8 @@ for (const [name, requirement, output, expected] of [
   [
     "an immutable findings artifact from an earlier Run leaves nothing to author",
     findings,
-    persisted("run-0", "sol-findings"),
-    { case: "satisfied-by-prior-run", outputKind: "sol-findings" },
+    persisted("run-0", "review-findings"),
+    { case: "satisfied-by-prior-run", outputKind: "review-findings" },
   ],
   [
     "a replaceable output from an earlier Run is not this Run's deliverable",
@@ -86,7 +93,7 @@ const candidate = (overrides: Partial<PrHandoffCandidate> & { kind: string; chai
 
 const finalCandidates = (): PrHandoffCandidate[] => [
   candidate({ kind: "implementation", chainIndex: 1 }),
-  candidate({ kind: "sol-findings", chainIndex: 2 }),
+  candidate({ kind: "review-findings", chainIndex: 2 }),
   candidate({ kind: "blind-findings", chainIndex: 3 }),
   candidate({ kind: "fixed-implementation", chainIndex: 4 }),
 ];
@@ -125,7 +132,7 @@ for (const [name, mutate, reason] of [
   ["a short handoff", (rows: PrHandoffCandidate[]) => rows.splice(2, 1), /requires exactly 4 output entries, not 3/u],
   ["an out-of-order kind", (rows: PrHandoffCandidate[]) => { rows.reverse(); }, /missing or out of order at implementation/u],
   ["an absent commit identity", (rows: PrHandoffCandidate[]) => { rows[0]!.commitSha = null; }, /malformed implementation canonical output evidence/u],
-  ["a commit identity that is not a SHA", (rows: PrHandoffCandidate[]) => { rows[1]!.commitSha = "not-a-sha"; }, /malformed sol-findings canonical output evidence/u],
+  ["a commit identity that is not a SHA", (rows: PrHandoffCandidate[]) => { rows[1]!.commitSha = "not-a-sha"; }, /malformed review-findings canonical output evidence/u],
   ["an empty body", (rows: PrHandoffCandidate[]) => { rows[2]!.body = "  "; }, /malformed blind-findings canonical output evidence/u],
   ["a non-positive chain index", (rows: PrHandoffCandidate[]) => { rows[0]!.chainIndex = 0; }, /malformed implementation canonical output evidence/u],
   ["a repeated chain index", (rows: PrHandoffCandidate[]) => { rows[1]!.chainIndex = 1; }, /not ordered by chain index/u],
@@ -166,21 +173,41 @@ for (const malformed of [
   });
 }
 
-for (const kind of ["review-findings", "sol-findings"] as const) {
-  test(`PR handoff preserves the ${kind} contract through the wire`, () => {
-    const rows = finalCandidates();
-    rows[1]!.kind = kind;
-    const evidence = {
-      satisfaction: decideRunOutputSatisfaction("run-1", required, persisted("run-1")),
-      prHandoff: decidePrHandoff(finalDelivery, rows),
-    };
-    assert.equal(evidence.prHandoff.case, "complete");
-    if (evidence.prHandoff.case === "complete") assert.equal(evidence.prHandoff.outputs[1]!.kind, kind);
-    assert.deepEqual(parseRunOutputEvidence(JSON.parse(JSON.stringify(evidence))), evidence);
-  });
-}
+test("PR handoff preserves the current review output contract through the wire", () => {
+  const evidence = {
+    satisfaction: decideRunOutputSatisfaction("run-1", required, persisted("run-1")),
+    prHandoff: decidePrHandoff(finalDelivery, finalCandidates()),
+  };
+  assert.equal(evidence.prHandoff.case, "complete");
+  if (evidence.prHandoff.case === "complete") assert.equal(evidence.prHandoff.outputs[1]!.kind, "review-findings");
+  assert.deepEqual(parseRunOutputEvidence(JSON.parse(JSON.stringify(evidence))), evidence);
+});
 
-test("PR handoff refuses two aliases in place of independent and blind review", () => {
+test("PR handoff refuses the historical review output kind with a named reason", () => {
+  const rows = finalCandidates();
+  rows[1]!.kind = legacyReviewOutputKind;
+  assert.deepEqual(decidePrHandoff(finalDelivery, rows), {
+    case: "incomplete",
+    reason: "canonical PR handoff evidence is missing or out of order at review-findings",
+  });
+});
+
+test("the wire parser refuses the historical review output kind", () => {
+  const rows = finalCandidates();
+  rows[1]!.kind = legacyReviewOutputKind;
+  assert.throws(() => parseRunOutputEvidence({
+    satisfaction: decideRunOutputSatisfaction("run-1", required, persisted("run-1")),
+    prHandoff: { case: "complete", outputs: rows },
+  }), (error: unknown) => {
+    assert.ok(error instanceof z.ZodError);
+    assert.equal(error.issues.length, 1);
+    assert.deepEqual(error.issues[0]!.path, ["prHandoff", "outputs", 1, "kind"]);
+    assert.equal(error.issues[0]!.code, "invalid_value");
+    return true;
+  });
+});
+
+test("PR handoff refuses duplicate review outputs in place of independent and blind review", () => {
   const rows = finalCandidates();
   rows[2]!.kind = "review-findings";
   assert.deepEqual(decidePrHandoff(finalDelivery, rows), {
