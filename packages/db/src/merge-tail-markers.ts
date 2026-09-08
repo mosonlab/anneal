@@ -22,7 +22,7 @@ export const MERGE_TAIL_MARKER_SCAN = 20;
 export type MarkerKind = keyof typeof MERGE_TAIL_KIND;
 
 /** Marker families whose state is a control-plane fact, never agent input. */
-const TRUSTED_MARKER_KINDS = new Set<MarkerKind>(["train", "leaseContention"]);
+const TRUSTED_MARKER_KINDS = new Set<MarkerKind>(["train", "leaseContention", "executorOffline"]);
 
 /**
  * A merge-tail marker with its persisted fields already narrowed. Callers read

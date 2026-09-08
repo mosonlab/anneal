@@ -34,7 +34,6 @@ import {
 import type { MergeLeaseTarget } from "./merge-lease-hold.js";
 import { executorsOnline } from "./merge-executor-daemon-fixture.js";
 import {
-  MERGE_EXECUTOR_OFFLINE_WAIT_MS,
   READINESS_BASE_DRIFT_REQUEUE_LIMIT,
   READINESS_CLAIM_LEASE_MS,
   READINESS_EXCEPTION_REQUEUE_LIMIT,
@@ -1794,7 +1793,7 @@ const offlineMarkers = (readinessTaskId: string) => db.taskActivity.findMany({
     taskId: readinessTaskId,
     metadata: { path: ["state"], equals: "requeued-executor-offline" },
   },
-  orderBy: { createdAt: "asc" },
+  orderBy: [{ createdAt: "asc" }, { id: "asc" }],
 });
 
 test("readiness requeues itself rather than authorizing a merge no online executor can claim", async () => {
@@ -1869,7 +1868,7 @@ test("a merge executor that stays offline past the wait stops the tail by name",
     // MERGE_READINESS_POLL_INTERVAL_MS decides that distance, so the ceiling
     // must not depend on it. Here the second tick is the whole wait later --
     // one poll interval of fifteen minutes -- and it still stops.
-    const expired = new Date(OFFLINE_NOW.getTime() + MERGE_EXECUTOR_OFFLINE_WAIT_MS);
+    const expired = new Date(OFFLINE_NOW.getTime() + (15 * 60_000));
     assert.deepEqual(
       await readinessTick(db, reader(), expired, 5, releaseChainLease, runWithMergeLease, offline),
       { claimed: 1, authorized: 0, requeued: 0, stopped: 1 },
@@ -1899,7 +1898,7 @@ test("a later outage waits out its own ceiling rather than the task's whole hist
     const contended: MergeLeaseAcquirer = async () => ({ outcome: "contended" });
     await readinessTick(db, reader(), back, 5, releaseChainLease, leaseRunner(contended), executorsAt(SEEN_AT));
     assert.equal(
-      ((await offlineMarkers(seeded.readiness.id))[0]!.metadata as Record<string, unknown>).episodeClosed,
+      ((await offlineMarkers(seeded.readiness.id)).at(-1)!.metadata as Record<string, unknown>).episodeClosed,
       true,
     );
 
@@ -1911,9 +1910,9 @@ test("a later outage waits out its own ceiling rather than the task's whole hist
       { claimed: 1, authorized: 0, requeued: 1, stopped: 0 },
     );
     const markers = await offlineMarkers(seeded.readiness.id);
-    assert.equal(markers.length, 2);
+    assert.equal(markers.length, 3);
     assert.equal(
-      (markers[1]!.metadata as Record<string, unknown>).episodeStartedAt,
+      (markers[2]!.metadata as Record<string, unknown>).episodeStartedAt,
       laterOutage.toISOString(),
       "the second outage anchors its wait to itself",
     );
@@ -1945,7 +1944,7 @@ test("a deferred read inside an outage keeps the outage's wait", async () => {
     assert.equal(markers.length, 1);
     assert.notEqual((markers[0]!.metadata as Record<string, unknown>).episodeClosed, true);
 
-    const expired = new Date(OFFLINE_NOW.getTime() + MERGE_EXECUTOR_OFFLINE_WAIT_MS);
+    const expired = new Date(OFFLINE_NOW.getTime() + (15 * 60_000));
     assert.deepEqual(
       await readinessTick(db, reader(), expired, 5, releaseChainLease, runWithMergeLease, offline),
       { claimed: 1, authorized: 0, requeued: 0, stopped: 1 },
@@ -1965,7 +1964,7 @@ test("an operator retry after the executor-offline stop waits out the next outag
       (await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, offline)).requeued,
       1,
     );
-    const expired = new Date(OFFLINE_NOW.getTime() + MERGE_EXECUTOR_OFFLINE_WAIT_MS);
+    const expired = new Date(OFFLINE_NOW.getTime() + (15 * 60_000));
     assert.equal(
       (await readinessTick(db, reader(), expired, 5, releaseChainLease, runWithMergeLease, offline)).stopped,
       1,
@@ -1973,7 +1972,7 @@ test("an operator retry after the executor-offline stop waits out the next outag
 
     // The stop answered that outage in full, so it closes it.
     assert.equal(
-      ((await offlineMarkers(seeded.readiness.id))[0]!.metadata as Record<string, unknown>).episodeClosed,
+      ((await offlineMarkers(seeded.readiness.id)).at(-1)!.metadata as Record<string, unknown>).episodeClosed,
       true,
     );
 
@@ -2121,7 +2120,7 @@ test("a live skip tick closes outage A before a held Step resumes into outage B"
     await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.REVIEW } });
     await readinessTick(db, reader(), new Date(OFFLINE_NOW.getTime() + 60_000), 5,
       releaseChainLease, runWithMergeLease, executorsAt(ONLINE_NOW));
-    assert.equal(((await offlineMarkers(seeded.readiness.id))[0]!.metadata as Record<string, unknown>).episodeClosed, true);
+    assert.equal(((await offlineMarkers(seeded.readiness.id)).at(-1)!.metadata as Record<string, unknown>).episodeClosed, true);
     await db.task.update({ where: { id: seeded.regression.id }, data: { status: TaskStatus.DONE } });
     const later = new Date(OFFLINE_NOW.getTime() + 2 * 86_400_000);
     const tick = await readinessTick(db, reader(), later, 5, releaseChainLease, runWithMergeLease, offline);
@@ -2138,7 +2137,7 @@ for (const drifted of [false, true]) {
       const seeded = await seedReadiness();
       const offline = executorsAt(OFFLINE_NOW);
       await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, offline);
-      const expired = new Date(OFFLINE_NOW.getTime() + MERGE_EXECUTOR_OFFLINE_WAIT_MS);
+      const expired = new Date(OFFLINE_NOW.getTime() + (15 * 60_000));
       await readinessTick(db, reader(), expired, 5, releaseChainLease, runWithMergeLease, offline);
       const notices = await db.inboxMessage.findMany({ where: { taskId: seeded.regression.id, status: "OPEN" } });
       assert.ok(notices.length > 0);
@@ -2168,7 +2167,7 @@ test("a tick whose readiness claim was replaced cannot close the offline episode
     assert.ok(claim);
     await db.task.update({ where: { id: seeded.readiness.id }, data: { readinessClaimToken: "replacement" } });
     await closeExecutorOfflineEpisode(db, seeded.readiness.id, claim, "executor observed online");
-    assert.notEqual(((await offlineMarkers(seeded.readiness.id))[0]!.metadata as Record<string, unknown>).episodeClosed, true);
+    assert.notEqual(((await offlineMarkers(seeded.readiness.id)).at(-1)!.metadata as Record<string, unknown>).episodeClosed, true);
   });
 });
 
@@ -2192,7 +2191,7 @@ for (const width of [0, 2]) test(`executor return re-arms a ceiling stop with tr
     } });
     const offline = executorsAt(OFFLINE_NOW);
     await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, offline, width);
-    const expired = new Date(OFFLINE_NOW.getTime() + MERGE_EXECUTOR_OFFLINE_WAIT_MS);
+    const expired = new Date(OFFLINE_NOW.getTime() + (15 * 60_000));
     await readinessTick(db, reader(), expired, 5, releaseChainLease, runWithMergeLease, offline, width);
     assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } })).status,
       MergeRecoveryStatus.BLOCKED_DOWNSTREAM);
@@ -2216,7 +2215,7 @@ test("a second identical outage ceiling reopens its previously closed stop notic
     const seeded = await seedReadiness();
     const offline = executorsAt(OFFLINE_NOW);
     await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, offline);
-    const expired = new Date(OFFLINE_NOW.getTime() + MERGE_EXECUTOR_OFFLINE_WAIT_MS);
+    const expired = new Date(OFFLINE_NOW.getTime() + (15 * 60_000));
     await readinessTick(db, reader(), expired, 5, releaseChainLease, runWithMergeLease, offline);
     const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id, status: "OPEN" } });
     const second = new Date(expired.getTime() + 1_000);
@@ -2225,7 +2224,7 @@ test("a second identical outage ceiling reopens its previously closed stop notic
     await readinessTick(db, reader(), second, 5, releaseChainLease, runWithMergeLease,
       () => ++observations === 1 ? executorsAt(ONLINE_NOW)() : offline());
     assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: notice.id } })).status, "CLOSED");
-    await readinessTick(db, reader(), new Date(second.getTime() + MERGE_EXECUTOR_OFFLINE_WAIT_MS),
+    await readinessTick(db, reader(), new Date(second.getTime() + (15 * 60_000)),
       5, releaseChainLease, runWithMergeLease, offline);
     const reopened = await db.inboxMessage.findUniqueOrThrow({ where: { id: notice.id } });
     assert.equal(reopened.status, "OPEN");
