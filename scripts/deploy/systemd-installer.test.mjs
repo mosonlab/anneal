@@ -1,3 +1,4 @@
+import { serviceDefinition } from "./service-definition.mjs";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -30,14 +31,10 @@ import {
   renderAutoDeploySystemdUnit,
   renderAutoDeploySystemdTimer,
   renderLaunchdPlist,
-  renderServiceLaunchdPlist,
-  renderServiceSystemdUnit,
   recognizeInstalledEntry,
   renderSystemdSudoers,
-  serviceEnvironmentValues,
   servicePlistValues,
   verifySystemdAutoDeployDefinitions,
-  verifySystemdServiceDefinitions,
 } from "./install-launchd.mjs";
 import { runServiceInstaller } from "./install-launchd-services.mjs";
 import { generateServiceInventory, resolveServiceInventory } from "./service-inventory.mjs";
@@ -312,17 +309,13 @@ test("systemd service units carry the exact plist environment contract", () => {
   }));
   const definitions = Object.fromEntries(values.map((value) => [
     value.label,
-    renderServiceSystemdUnit(undefined, { ...value, serviceUser: "anneal-test" }),
+    serviceDefinition({ ...value, serviceUser: "anneal-test" }).render("systemd"),
   ]));
-  assert.equal(verifySystemdServiceDefinitions(definitions, DEFAULT_INVENTORY), true);
   for (const value of values) {
     const unit = definitions[value.label];
-    const plist = renderServiceLaunchdPlist(
-      readFileSync(new URL("./com.agentos.service.plist.in", import.meta.url), "utf8"),
-      value,
-    );
+    const plist = serviceDefinition(value).render("launchd");
     assert.deepEqual(new Set(unitEnvironmentKeys(unit)), new Set(plistEnvironmentKeys(plist)));
-    assert.deepEqual(new Set(unitEnvironmentKeys(unit)), new Set(Object.keys(serviceEnvironmentValues(value))));
+    assert.deepEqual(new Set(unitEnvironmentKeys(unit)), new Set(Object.keys(serviceDefinition(value).keys)));
     assert.doesNotMatch(unit, /^EnvironmentFile=/mu);
     assert.match(unit, new RegExp(`^ExecStart="/usr/bin/node" .* ${value.label}$`, "mu"));
     assert.match(unit, /PATH=".*%%"/u);
@@ -377,11 +370,8 @@ test("non-default runner count is persisted in service and auto-deploy definitio
     stderrPath: "/tmp/stderr",
     path: "/usr/bin:/bin",
   });
-  const plist = renderServiceLaunchdPlist(
-    readFileSync(new URL("./com.agentos.service.plist.in", import.meta.url), "utf8"),
-    serviceValues,
-  );
-  const unit = renderServiceSystemdUnit(undefined, { ...serviceValues, serviceUser: "anneal-test" });
+  const plist = serviceDefinition(serviceValues).render("launchd");
+  const unit = serviceDefinition({ ...serviceValues, serviceUser: "anneal-test" }).render("systemd");
   assert.match(plist, /<key>AGENTOS_RUNNER_COUNT<\/key>/u);
   assert.match(unit, /^Environment=AGENTOS_RUNNER_COUNT=/mu);
   const autoValues = {
@@ -430,7 +420,7 @@ test("systemd path directives escape whitespace and percent specifiers", () => {
     path: "/usr/bin:/bin",
     wrapperPath: `${root}/shared/bin/agentos-service-wrapper.mjs`,
   });
-  const unit = renderServiceSystemdUnit(undefined, { ...values, serviceUser: "anneal-test" });
+  const unit = serviceDefinition({ ...values, serviceUser: "anneal-test" }).render("systemd");
   assert.match(unit, /^WorkingDirectory=\/opt\/Anneal\\x20Runtime\\x20100%%$/mu);
   assert.match(unit, /^ExecStart="\/opt\/Node Runtime 100%%\/node" "\/opt\/Anneal Runtime 100%%\/shared\/bin\/agentos-service-wrapper\.mjs" com\.agentos\.api$/mu);
 });
@@ -582,7 +572,7 @@ test("rendered unit syntax is verified by systemd-analyze when available", (t) =
     const files = [];
     for (const value of values) {
       const path = join(root, `${value.label}.service`);
-      writeFileSync(path, renderServiceSystemdUnit(undefined, { ...value, serviceUser }));
+      writeFileSync(path, serviceDefinition({ ...value, serviceUser }).render("systemd"));
       files.push(path);
     }
     const autoValues = {
@@ -2255,7 +2245,7 @@ test("privileged auto-deploy install rejects tampered targets and root service c
   });
 });
 
-test("the exported verification and sudoers entry points refuse an inventory the generator did not produce", () => {
+test("the sudoers entry point refuses an inventory the generator did not produce", () => {
   const forged = {
     runnerCount: DEFAULT_INVENTORY.runnerCount,
     runnerIdPrefix: DEFAULT_INVENTORY.runnerIdPrefix,
@@ -2264,5 +2254,4 @@ test("the exported verification and sudoers entry points refuse an inventory the
     entries: [{ label: "com.agentos.api", runnerIndex: null, runnerId: null, unitName: "com.agentos.api.service", plistName: "com.agentos.api.plist" }],
   };
   assert.throws(() => renderSystemdSudoers({ serviceUser: "anneal-test", inventory: forged }), /systemd-service-inventory-invalid/u);
-  assert.throws(() => verifySystemdServiceDefinitions({}, forged), /systemd-service-inventory-invalid/u);
 });
