@@ -275,15 +275,15 @@ previews other than a fresh install. This release adds three migrations.
 
 ### Costs and API
 
-- Claude Session usage now treats `FINAL_OUTPUT` cost and `modelUsage` totals
-  cumulatively across resumed events. A one-time post-deploy correction through
-  `recomputeSessionUsage` is pending for Claude Sessions with multiple
-  `FINAL_OUTPUT` events, including the four identified Sessions (`cmtqvyz950sc8db0iciwov1v7`,
-  `cmtqorhdj0akddb0i1829jsy0`, `cmtpxh0ys0fcfdb3epgfakk0s`, and
-  `cmtqlef8n000pdb0ipoos42ni`). Observed before/after Session totals: pending.
-  The authorized deployment step must capture each Session's stored totals
-  before and after the locked recompute and replace this pending note with
-  measured results; the background estimates are not execution evidence.
+- Claude Session usage counts the latest cumulative `FINAL_OUTPUT` cost and
+  `modelUsage` totals once per provider conversation within each process, then
+  adds totals across `PROCESS_STARTED` boundaries. Resuming can retain the
+  provider `session_id` while resetting its counters.
+  On 2026-09-08 UTC, the locked `recomputeSessionUsage` correction checked 14
+  historical Claude Sessions with multiple final outputs: 10 changed and four
+  remained correct. Their stored cost totals changed from $274.2944 to
+  $106.4807, removing $167.8137 of duplicate accounting. Each Session's derived
+  totals were verified after writing; a second recompute made no changes.
 - A Codex session with native children is priced by the model that produced each
   token, rather than attributing every token to the session's parent model.
 - A mechanical completion contract mismatch opens an Inbox alert instead of
