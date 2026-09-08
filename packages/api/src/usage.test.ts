@@ -230,7 +230,7 @@ const stubDatabase = (payloads: unknown[], columns: SessionColumns) => {
     $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation(database),
     $executeRawUnsafe: async () => 0,
     $queryRaw: async () => [],
-    sessionEvent: { findMany: async () => payloads.map((payload) => ({ payload })) },
+    sessionEvent: { findMany: async () => payloads.map((payload) => ({ type: "FINAL_OUTPUT", payload })) },
     session: {
       findUnique: async () => columns,
       update: async ({ data }: { data: SessionColumns }) => {
@@ -540,7 +540,7 @@ const resumedClaudeResult = (sessionId: string, cost: number, input: number, out
   modelUsage: { "claude-opus": { inputTokens: input, outputTokens: output } },
 });
 
-test("recomputeSessionUsage selects the last cumulative Claude resume total", async () => {
+test("recomputeSessionUsage selects the last cumulative Claude total within one process", async () => {
   const columns = emptyColumns();
   const events = [
     resumedClaudeResult("provider-a", 0.1, 100, 10),
@@ -612,7 +612,7 @@ test("recomputeSessionUsage does nothing when the session row is gone", async ()
     $transaction: async (operation: (tx: unknown) => Promise<unknown>) => operation(database),
     $executeRawUnsafe: async () => 0,
     $queryRaw: async () => [],
-    sessionEvent: { findMany: async () => [{ payload: CLAUDE_RESULT }] },
+    sessionEvent: { findMany: async () => [{ type: "FINAL_OUTPUT", payload: CLAUDE_RESULT }] },
     session: { findUnique: async () => null, update: async () => assert.fail("must not write") },
   } as unknown as PrismaClient;
   assert.equal(await recomputeSessionUsage(database, "missing"), false);

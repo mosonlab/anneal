@@ -8,7 +8,6 @@ import {
   claimantMayTake,
   deployBarrierAllowsClaim,
   executionModeFor,
-  FailureClass,
   InboxStatus,
   integratorBindingRefusal,
   INTEGRATOR_OUTPUT_KIND,
@@ -45,10 +44,10 @@ import { isCanonicalBlindFindingsStep, previousRunHandoffForClaim } from "./cano
 import { chainStepPresence } from "./chain-step-omission.js";
 import { activeDispatchDrain } from "./dispatch-drain.js";
 import { makeFencingToken } from "./execution.js";
-import { openMergeTailStopNotice } from "./merge-tail-actions.js";
 import { hasOpenOperatorAlert, openOperatorAlert } from "./operator-alert.js";
 import { regressionRepairHandoffForClaim } from "./regression-repair-handoff.js";
 import { regressionRecoveryContextForClaim } from "./regression-recovery-context.js";
+import { HALT, SKIP, settleQueuedCandidate } from "./run-claim-settlement.js";
 import { activeRunStatuses } from "./run-fence.js";
 import { runnerBackendAllowsClaim } from "./runner-backend-health.js";
 import { decryptSecret } from "./secrets.js";
@@ -61,11 +60,10 @@ import {
   type SpecificationReader,
   type SpecificationRefusal,
   type SpecificationVerification,
-  SPEC_TRANSCRIPTION_REFUSAL_REASON,
   SPEC_TRANSCRIPTION_UNREADABLE_REASON,
   verifyPreparedSpecification,
 } from "./specification-fidelity.js";
-import { lockTaskMutationRows, writeTask } from "./task-write.js";
+import { lockTaskMutationRows } from "./task-write.js";
 import { isSerializationConflict, serializable } from "./transaction.js";
 
 const telemetry = <T extends z.ZodTypeAny>(schema: T) => schema.optional().catch(({ error, input }) => {
@@ -111,9 +109,6 @@ const isCandidateActivationFailure = (error: unknown): error is CandidateActivat
 
 const namedFailureReason = (error: CandidateActivationFailure): string => `${error.name}: ${error.message}`;
 
-const SKIP = { outcome: "skip" } as const;
-const HALT = { outcome: "halt" } as const;
-
 export type ClaimRunInput = {
   body: ClaimInput;
   claimantClass: ClaimantClass;
@@ -127,7 +122,6 @@ export type ClaimRunInput = {
 
 const MAX_OPERATOR_NOTES = 10;
 const MAX_OPERATOR_NOTES_CHARS = 4_000;
-const PRIOR_OUTPUT_MISSING_REASON = "prior-output-missing";
 export const OPERATOR_NOTE_METADATA_FIELD = "operatorNote";
 const SPECIFICATION_READ_DEFERRAL_CONDITION = "specification-read-claim-deferred";
 /** Any transient read failure other than a deadline hit keeps this budget. */
@@ -430,56 +424,6 @@ export const claimRun = async (
         });
       })();
     const executorRunnerIds = mergeExecutorRunnerIds();
-    const parkQueuedCandidate = async (
-      candidate: (typeof candidates)[number],
-      settlement: {
-        reason: string;
-        condition: string;
-        activityBody: string;
-        inboxBody: string;
-        metadata?: Record<string, unknown>;
-      },
-    ): Promise<{ chainLocked: boolean }> => {
-      if (!candidate.task) throw new Error(`Queued candidate ${candidate.id} has no task to park`);
-      const stopped = await tx.run.updateMany({
-        where: { id: candidate.id, status: RunStatus.QUEUED, leaseGeneration: candidate.leaseGeneration },
-        data: {
-          status: RunStatus.FAILED,
-          failureClass: FailureClass.TASK_FAILED,
-          failureReason: settlement.reason,
-          retryable: false,
-          endedAt: now,
-        },
-      });
-      if (stopped.count !== 1) return { chainLocked: false };
-      const parked = await writeTask(tx, candidate.task.id, async () => ({
-        update: { status: TaskStatus.BACKLOG, failureReason: settlement.reason },
-        activity: {
-          actorType: "control-plane",
-          body: settlement.activityBody,
-          metadata: {
-            runId: candidate.id,
-            condition: settlement.condition,
-            ...settlement.metadata,
-          },
-        },
-        value: null,
-      }));
-      const dedupeKey = `${settlement.condition}:${candidate.id}`;
-      await tx.inboxMessage.upsert({
-        where: { dedupeKey },
-        create: {
-          from: "AGENT",
-          agentId: candidate.agentId,
-          taskId: candidate.task.id,
-          kind: "TEXT",
-          body: settlement.inboxBody,
-          dedupeKey,
-        },
-        update: {},
-      });
-      return { chainLocked: parked.ok && parked.chainLocked };
-    };
     const priorSpecificationReadDeferrals = async (candidate: (typeof candidates)[number]) => {
       if (!candidate.task) throw new Error(`Queued candidate ${candidate.id} has no task to inspect`);
       return tx.taskActivity.findMany({
@@ -546,11 +490,9 @@ export const claimRun = async (
           elapsedMs,
           lastUnderlyingError: state.lastUnderlyingError,
         });
-      await parkQueuedCandidate(candidate, {
-        reason: refusal.message,
-        condition: refusal.reason,
-        activityBody: `Review claim stopped after its transient specification-read budget was exhausted: ${refusal.message}`,
-        inboxBody: `Review claim failed and the task was parked in Backlog after its transient specification-read budget was exhausted: ${refusal.message}`,
+      return await settleQueuedCandidate(tx, candidate, {
+        kind: "specification-read-exhausted",
+        refusal,
         metadata: {
           classification: refusal.classification,
           exhaustedCondition: SPECIFICATION_READ_DEFERRAL_CONDITION,
@@ -561,10 +503,7 @@ export const claimRun = async (
           implementationHeadSha,
           lastUnderlyingError: state.lastUnderlyingError,
         },
-      });
-      // Match the existing unreadable-refusal settlement: one parked review
-      // does not keep an eligible sibling from settling in this same poll.
-      return SKIP;
+      }, now);
     };
     const deferTransientSpecificationRead = async (
       candidate: (typeof candidates)[number],
@@ -670,34 +609,7 @@ export const claimRun = async (
         if (executionMode === "agent") return dispatchDrainingRefusal(drain);
       }
       if (!candidate.agent.repoAccess.some((grant) => grant.repoId === candidate.repoId && grant.projectId === candidate.projectId)) {
-        const reason = "repository-grant-missing: restore the agent Repo grant, then retry this run";
-        const stranded = await tx.run.updateMany({
-          where: { id: candidate.id, status: RunStatus.QUEUED, leaseGeneration: candidate.leaseGeneration },
-          data: {
-            status: RunStatus.FAILED,
-            failureClass: FailureClass.TASK_FAILED,
-            failureReason: reason,
-            retryable: false,
-            endedAt: now,
-          },
-        });
-        if (stranded.count === 1) {
-          const parked = await writeTask(tx, candidate.task.id, async () => ({
-            update: { status: TaskStatus.BACKLOG, failureReason: reason },
-            activity: {
-              actorType: "control-plane",
-              body: "Queued run stopped because its repository grant is missing; restore the grant and retry",
-              metadata: { runId: candidate.id, condition: "repository-grant-missing" },
-            },
-            value: null,
-          }));
-          // A chained park expands the lock order from this Run to every Task
-          // in the chain. End the transaction here: scanning another
-          // candidate could next wait on a sibling Run while its claimant
-          // already holds that Run and waits for this chain mutex.
-          if (parked.ok && parked.chainLocked) return HALT;
-        }
-        return SKIP;
+        return await settleQueuedCandidate(tx, candidate, { kind: "repository-grant-missing" }, now);
       }
       // §D-P4. A candidate whose (agent, step) binding is invalid is *skipped*,
       // not claimed: a mis-bound step-12 row must never be handed to anything,
@@ -797,46 +709,19 @@ export const claimRun = async (
         outputKind: candidate.task.templateStep?.outputKind ?? null,
       });
       if (regressionRepairHandoff.status === "invalid") {
-        const stopped = await tx.run.updateMany({
-          where: { id: candidate.id, status: RunStatus.QUEUED, leaseGeneration: candidate.leaseGeneration },
-          data: {
-            status: RunStatus.FAILED,
-            failureClass: FailureClass.TASK_FAILED,
-            failureReason: regressionRepairHandoff.reason,
-            retryable: false,
-            endedAt: now,
-          },
-        });
-        if (stopped.count === 1) {
-          const parked = await writeTask(tx, candidate.task.id, async () => ({
-            update: { status: TaskStatus.REVIEW, failureReason: regressionRepairHandoff.reason },
-            activity: {
-              actorType: "control-plane",
-              body: `Fresh Regression Run stopped: ${regressionRepairHandoff.reason}`,
-              metadata: {
-                kind: MERGE_TAIL_KIND.repairResult,
-                schemaVersion: 1,
-                state: "handoff-invalid",
-                runId: candidate.id,
-                previousRunId: regressionRepairHandoff.previousRunId,
-                reason: regressionRepairHandoff.reason,
-              },
-            },
-            value: null,
-          }));
-          const sourceSession = await tx.session.findUnique({
-            where: { runId: regressionRepairHandoff.previousRunId },
-            select: { id: true },
-          });
-          await openMergeTailStopNotice(tx, {
-            taskId: candidate.task.id,
-            agentId: candidate.agentId,
-            ...(sourceSession ? { sessionId: sourceSession.id } : {}),
+        return await settleQueuedCandidate(tx, candidate, {
+          kind: "regression-repair-handoff-invalid",
+          reason: regressionRepairHandoff.reason,
+          previousRunId: regressionRepairHandoff.previousRunId,
+          metadata: {
+            kind: MERGE_TAIL_KIND.repairResult,
+            schemaVersion: 1,
+            state: "handoff-invalid",
+            runId: candidate.id,
+            previousRunId: regressionRepairHandoff.previousRunId,
             reason: regressionRepairHandoff.reason,
-          });
-          if (parked.ok && parked.chainLocked) return HALT;
-        }
-        return SKIP;
+          },
+        }, now);
       }
       const grants = [
         ...candidate.agent.environment.secrets,
@@ -868,11 +753,9 @@ export const claimRun = async (
         // published, in the metadata as well as the prose, so an operator can
         // tell them apart without opening the database.
         const unpublishedBase = isPinnedBaseCommitError(error) ? error.unpublishedBase : undefined;
-        const parked = await parkQueuedCandidate(candidate, {
+        return await settleQueuedCandidate(tx, candidate, {
           reason,
-          condition: "candidate-activation-failed",
-          activityBody: `Queued run activation failed: ${reason}`,
-          inboxBody: `Queued run activation failed and the task was parked in Backlog: ${reason}`,
+          kind: "candidate-activation-failed",
           metadata: {
             failureType: error.name,
             reason,
@@ -883,9 +766,7 @@ export const claimRun = async (
               }
               : {}),
           },
-        });
-        if (parked.chainLocked) return HALT;
-        return SKIP;
+        }, now);
       }
       const blindReviewTask = isCanonicalBlindFindingsStep(candidate.task.templateStep);
       const declaredPriorOutputKinds = candidate.task.templateStep === null
@@ -929,15 +810,10 @@ export const claimRun = async (
           : null;
         const unresolvedMissingKinds = missingKinds.filter((kind) => presence?.ofKind(kind) !== "omitted");
         if (unresolvedMissingKinds.length > 0) {
-          const reason = `Prior output claim refused: missing declared output kind${unresolvedMissingKinds.length === 1 ? "" : "s"}: ${unresolvedMissingKinds.join(", ")}`;
-          await parkQueuedCandidate(candidate, {
-            reason,
-            condition: PRIOR_OUTPUT_MISSING_REASON,
-            activityBody: `Prior output claim stopped: ${reason}`,
-            inboxBody: `Prior output claim failed and the task was parked in Backlog: ${reason}`,
-            metadata: { missingKinds: unresolvedMissingKinds },
-          });
-          return { error: reason, reason: PRIOR_OUTPUT_MISSING_REASON };
+          return await settleQueuedCandidate(tx, candidate, {
+            kind: "prior-output-missing",
+            missingKinds: unresolvedMissingKinds,
+          }, now);
         }
       }
       const prepared = await prepareSpecificationVerification(
@@ -946,14 +822,10 @@ export const claimRun = async (
         implementationRange?.implementationHeadSha ?? null,
       );
       if (prepared.status === "refused") {
-        await parkQueuedCandidate(candidate, {
-          reason: prepared.refusal.message,
-          condition: prepared.refusal.reason,
-          activityBody: `Review claim stopped: ${prepared.refusal.message}`,
-          inboxBody: `Review claim failed and the task was parked in Backlog: ${prepared.refusal.message}`,
-          metadata: { classification: prepared.refusal.classification },
-        });
-        return SKIP;
+        return await settleQueuedCandidate(tx, candidate, {
+          kind: "review-claim-refused",
+          refusal: prepared.refusal,
+        }, now);
       }
       if (prepared.status === "ready") {
         const deferralState = await specificationReadDeferralState(candidate);
@@ -980,19 +852,11 @@ export const claimRun = async (
               deferralState,
             );
           }
-          await parkQueuedCandidate(candidate, {
-            reason: refusal.message,
-            condition: refusal.reason,
-            activityBody: `Review claim stopped: ${refusal.message}`,
-            inboxBody: `Review claim failed and the task was parked in Backlog: ${refusal.message}`,
-            metadata: {
-              classification: refusal.classification,
-              implementationHeadSha: prepared.verification.implementationHeadSha,
-            },
-          });
-          return refusal.reason === SPEC_TRANSCRIPTION_REFUSAL_REASON
-            ? { error: refusal.message, reason: refusal.reason }
-            : SKIP;
+          return await settleQueuedCandidate(tx, candidate, {
+            kind: "spec-transcription-refused",
+            refusal,
+            implementationHeadSha: prepared.verification.implementationHeadSha,
+          }, now);
         }
       }
       const generation = candidate.leaseGeneration + 1;

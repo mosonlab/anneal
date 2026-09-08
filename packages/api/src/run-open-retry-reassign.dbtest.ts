@@ -9,6 +9,8 @@ import {
   NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT,
   NATIVE_IMPLEMENTATION_SUBAGENT_MODEL,
   openRun,
+  attemptRunBirth,
+  settleRunBirthRefusal,
   Prisma,
   PrismaClient,
   RunnerKind,
@@ -198,4 +200,42 @@ test("a retry with the assignee unchanged still replays the prior Run's configur
   assert.equal(run.agentId, failing.id);
   assert.equal(run.runner, RunnerKind.CLAUDE);
   assert.equal(run.model, "claude-opus-5:medium");
+});
+
+
+test("refusal settlement commits a park after birth rollback and leaves no trace when raised", async () => {
+  const { task, failing } = await seed();
+  await db.agent.update({ where: { id: failing.id }, data: { archivedAt: new Date() } });
+  const now = new Date();
+  const settle = async (mode: "park" | "raise") => db.$transaction(async (tx) => {
+    const attempt = await attemptRunBirth(tx, (client) => openRun(client, task.id, { kind: "retry", readyAt: now }));
+    assert.equal(attempt.outcome, "refused");
+    if (attempt.outcome !== "refused") throw new Error("Expected archived-assignee refusal");
+    const settlement = await settleRunBirthRefusal(tx, {
+      taskId: task.id, refusal: attempt.refusal, mode, origin: { kind: "request" }, now,
+    });
+    if (settlement.kind === "raise") throw settlement.error;
+    return settlement;
+  });
+  await assert.rejects(settle("raise"), /archived/i);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: task.id } })).status, TaskStatus.DOING);
+  assert.equal(await db.taskActivity.count({ where: { taskId: task.id } }), 0);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: task.id } }), 0);
+  assert.equal(await db.run.count({ where: { taskId: task.id } }), 1);
+
+  assert.deepEqual(await settle("park"), { kind: "parked" });
+  const parked = await db.task.findUniqueOrThrow({ where: { id: task.id } });
+  assert.equal(parked.status, TaskStatus.REVIEW);
+  assert.match(parked.failureReason ?? "", /archived/i);
+  const activity = await db.taskActivity.findFirstOrThrow({ where: { taskId: task.id } });
+  assert.deepEqual(activity.metadata, { refusal: "assignee-archived" });
+  const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: task.id } });
+  assert.match(notice.body, /archived/i);
+  assert.equal(notice.dedupeKey, `run-birth-refusal:${task.id}:assignee-archived`);
+  assert.equal(await db.run.count({ where: { taskId: task.id } }), 1);
+  // Replaying the refusal reopens the same notice, including after an answer.
+  await db.inboxMessage.update({ where: { id: notice.id }, data: { status: "ANSWERED", answeredAt: now } });
+  await settle("park");
+  assert.equal(await db.inboxMessage.count({ where: { taskId: task.id } }), 1);
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: notice.id } })).status, "OPEN");
 });

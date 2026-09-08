@@ -911,6 +911,7 @@ test("successful completion commits output and parks an archived chain successor
             return {};
           },
         },
+        inboxMessage: { upsert: async () => ({}) },
         taskActivity: {
           findMany: async () => [],
           create: async ({ data }: { data: Record<string, unknown> }) => {

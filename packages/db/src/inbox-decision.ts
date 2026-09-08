@@ -27,9 +27,7 @@ import {
   ArchivedTaskError,
   WorkflowRefusalError,
   enqueueTaskRunInternal,
-  errorForOpenRunRefusal,
-  parksInsteadOfRaising,
-  recordRunBirthRefusal,
+  settleRunBirthRefusal,
 } from "./run-open.js";
 
 type Tx = Prisma.TransactionClient;
@@ -401,8 +399,10 @@ export const applyInboxDecisionTx = async (
     // human's decision — the REVIEW naming the cap is what they act on.
     const redoOpened = await enqueueTaskRunInternal(tx, redo.id, now, null);
     if (!redoOpened.ok) {
-      if (!parksInsteadOfRaising(redoOpened.refusal)) throw errorForOpenRunRefusal(redoOpened.refusal);
-      await recordRunBirthRefusal(tx, redo.id, redoOpened.refusal);
+      const settlement = await settleRunBirthRefusal(tx, {
+        taskId: redo.id, refusal: redoOpened.refusal, mode: "raise", origin: { kind: "request" }, now,
+      });
+      if (settlement.kind === "raise") throw settlement.error;
     }
     return { duplicate: false, resumed: false, gateAction: "rejected", messageId: reply.id };
   }
