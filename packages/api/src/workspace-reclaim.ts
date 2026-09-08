@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import {
   ACTIVE_RUN_STATUSES,
   basePublishedStamp,
-  CleanupStatus, FailureClass, leaseLossRefundDecision, openRun, resolveRunBranches, settleRunBirthRefusal,
+  CleanupStatus, FailureClass, refundForLostRun, reopenRefundedRun, resolveRunBranches,
   runOwnedHead, RunStatus,
   SessionExecutionStatus, type Prisma, type PrismaClient,
 } from "@anneal/db";
@@ -483,7 +483,7 @@ export const repairReplacementAfterSalvage = async (
   if (!await lockTaskMutationRows(tx, run.taskId)) return "already-started";
   const replacement = await tx.run.findFirst({
     where: { taskId: run.taskId, runNumber: run.runNumber + 1 },
-    select: { id: true, status: true, startedAt: true, leaseLossRefunds: true, maxRunsPerTask: true, budgetGrants: true },
+    select: { id: true, runNumber: true, status: true, startedAt: true, leaseLossRefunds: true, maxRunsPerTask: true, budgetGrants: true },
   });
   if (!replacement) return "none";
   if (replacement.status === RunStatus.CLAIMED && replacement.startedAt === null) {
@@ -494,10 +494,9 @@ export const repairReplacementAfterSalvage = async (
     // reached, so recording a grant here that nothing may use would leave the
     // operator's own retry holding an attempt this transaction just refused.
     // Bind the grant to the same latest Run that openRun will check below.
-    const latest = await tx.run.findFirst({
-      where: { taskId: run.taskId }, orderBy: { runNumber: "desc" }, select: { id: true },
+    const refund = await refundForLostRun(tx, {
+      taskId: run.taskId, run: replacement, reason: "claim-invalidated",
     });
-    const refund = leaseLossRefundDecision(replacement, latest?.id ?? null);
     const revoked = await tx.run.updateMany({
       where: { id: replacement.id, status: RunStatus.CLAIMED, startedAt: null },
       data: {
@@ -508,8 +507,7 @@ export const repairReplacementAfterSalvage = async (
         failureClass: FailureClass.CANCELLED_OR_TIMED_OUT,
         failureReason: "Claim invalidated before start because late salvage changed its clone base",
         retryable: true,
-        maxRunsPerTask: refund.maxRunsPerTask,
-        budgetGrants: refund.budgetGrants,
+        ...refund.budget,
       },
     });
     if (revoked.count !== 1) return "already-started";
@@ -523,17 +521,16 @@ export const repairReplacementAfterSalvage = async (
     });
     // Named rather than `enqueue`: this replacement exists because the platform
     // invalidated a claim, so it is one of the refunds the bound counts.
-    const opened = await openRun(tx, run.taskId, { kind: "claim-invalidated", sourceRunId: refund.sourceRunId, readyAt: revokedAt });
-    if (!opened.ok) {
-      const settlement = await settleRunBirthRefusal(tx, {
-        taskId: run.taskId, refusal: opened.refusal, mode: "park", now: revokedAt,
-        origin: { kind: "automatic", activityPrefix: "Late-salvage replacement was revoked and not requeued" },
-      });
-      if (settlement.kind === "raise") throw settlement.error;
-      // The stale clone was revoked. Hold still owns when a replacement may run.
-      return "repaired";
-    }
-    return "requeued";
+    const reopened = await reopenRefundedRun(tx, {
+      taskId: run.taskId,
+      refund,
+      readyAt: revokedAt,
+      now: revokedAt,
+      activityPrefix: "Late-salvage replacement was revoked and not requeued",
+    });
+    // The stale clone was revoked either way. When no replacement follows, Hold
+    // still owns when one may run.
+    return reopened.kind === "reopened" ? "requeued" : "repaired";
   } else if (replacement.status !== RunStatus.QUEUED) {
     return "already-started";
   }

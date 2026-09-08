@@ -18,12 +18,10 @@ import { z } from "zod";
 
 import { classifyEnvelope } from "./execution.js";
 import {
-  completionBudgetAfterRefund,
   completionEvidenceRefusal,
   completionInput,
   completionOutputFailurePolicy,
   completeRun,
-  externalFailureRefundDecision,
 } from "./run-completion.js";
 
 const baseSha = "5".repeat(40);
@@ -112,85 +110,6 @@ test("a configured non-committing Step keeps its ordinary completion semantics",
   });
 
   assert.equal(completionEvidenceRefusal(run, true, baseSha, null), null);
-});
-
-test("three capped external failures refund the task and the fourth records the cap", () => {
-  let cappedRefunds = 0;
-  let completionBudget = { maxRunsPerTask: 1, budgetGrants: 0 };
-
-  for (let runNumber = 1; runNumber <= EXTERNAL_FAILURE_REFUND_CAP; runNumber += 1) {
-    const decision = externalFailureRefundDecision({
-      runNumber,
-      external: true,
-      refundable: true,
-      mechanical: false,
-      capped: true,
-      priorCappedRefunds: cappedRefunds,
-    });
-    assert.equal(decision.refunded, 1);
-    assert.equal(decision.capReached, false);
-    assert.match(decision.activity?.body ?? "", new RegExp(`${runNumber} of ${EXTERNAL_FAILURE_REFUND_CAP}`));
-    cappedRefunds += decision.refunded;
-    completionBudget = completionBudgetAfterRefund(
-      completionBudget.maxRunsPerTask,
-      completionBudget.budgetGrants,
-      decision.refunded,
-    );
-    assert.equal(completionBudget.budgetGrants, runNumber);
-    assert.equal(completionBudget.maxRunsPerTask, runNumber + 1);
-  }
-
-  assert.equal(completionBudget.budgetGrants, EXTERNAL_FAILURE_REFUND_CAP);
-  const fourth = externalFailureRefundDecision({
-    runNumber: EXTERNAL_FAILURE_REFUND_CAP + 1,
-    external: true,
-    refundable: true,
-    mechanical: false,
-    capped: true,
-    priorCappedRefunds: cappedRefunds,
-  });
-  assert.equal(fourth.refunded, 0);
-  assert.equal(fourth.capReached, true);
-  assert.match(fourth.activity?.body ?? "", /external-failure refund cap was reached/i);
-  assert.deepEqual(
-    completionBudgetAfterRefund(
-      completionBudget.maxRunsPerTask,
-      completionBudget.budgetGrants,
-      fourth.refunded,
-    ),
-    completionBudget,
-  );
-});
-
-test("legacy external refunds do not consume the capped allowance", () => {
-  const decision = externalFailureRefundDecision({
-    runNumber: 8,
-    external: true,
-    refundable: true,
-    mechanical: false,
-    capped: false,
-    priorCappedRefunds: EXTERNAL_FAILURE_REFUND_CAP,
-  });
-  assert.equal(decision.refunded, 1);
-  assert.equal(decision.capReached, false);
-  assert.equal(decision.activity?.metadata.policy, "uncapped");
-});
-
-test("ineligible and mechanical failures never receive a refund", () => {
-  for (const input of [
-    { refundable: false, mechanical: false },
-    { refundable: true, mechanical: true },
-  ]) {
-    const decision = externalFailureRefundDecision({
-      runNumber: 2,
-      external: true,
-      capped: false,
-      priorCappedRefunds: 0,
-      ...input,
-    });
-    assert.equal(decision.refunded, 0);
-    assert.equal(decision.activity?.metadata.granted, false);
-  }
 });
 
 test("a Regression target-fetch block keeps its git diagnostic and is externally refundable", () => {
