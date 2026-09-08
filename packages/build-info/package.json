@@ -11,6 +11,6 @@
   },
   "scripts": {
     "lint": "bash ../../scripts/host-proof-slot.sh lint @anneal/build-info -- /bin/sh -c 'biome lint . && eslint .'",
-    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/build-info -- node --conditions=development --test ${AGENTOS_RUN_ID:+--test-concurrency=2} *.test.mjs"
+    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/build-info -- node --conditions=development --test ${AGENTOS_RUN_ID:+--test-concurrency=2} ${AGENTOS_GATE_UNIT_TEST_CONCURRENCY:+--test-concurrency=${AGENTOS_GATE_UNIT_TEST_CONCURRENCY}} *.test.mjs"
   }
 }

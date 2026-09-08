@@ -7,7 +7,7 @@
     "build": "bash ../../scripts/host-proof-slot.sh build @anneal/merge-executor -- tsc -p tsconfig.json",
     "typecheck": "bash ../../scripts/host-proof-slot.sh typecheck @anneal/merge-executor -- tsc -p tsconfig.json --noEmit",
     "lint": "bash ../../scripts/host-proof-slot.sh lint @anneal/merge-executor -- /bin/sh -c 'biome lint . && eslint .'",
-    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/merge-executor -- node --conditions=development --import tsx --test ${AGENTOS_RUN_ID:+--test-concurrency=2} src/*.test.ts",
+    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/merge-executor -- node --conditions=development --import tsx --test ${AGENTOS_RUN_ID:+--test-concurrency=2} ${AGENTOS_GATE_UNIT_TEST_CONCURRENCY:+--test-concurrency=${AGENTOS_GATE_UNIT_TEST_CONCURRENCY}} src/*.test.ts",
     "start": "node dist/index.js",
     "schema-gate": "MERGE_EXECUTOR_SCHEMA_GATE_REQUIRED=1 node --conditions=development --import tsx --test src/schema-gate.test.ts"
   },

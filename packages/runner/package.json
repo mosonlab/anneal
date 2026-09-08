@@ -29,7 +29,7 @@
     "build": "bash ../../scripts/host-proof-slot.sh build @anneal/runner -- /bin/sh -c 'tsc -p tsconfig.json && node scripts/build-runtime-tools.mjs && node ../build-info/stamp.mjs dist'",
     "typecheck": "bash ../../scripts/host-proof-slot.sh typecheck @anneal/runner -- tsc -p tsconfig.json --noEmit",
     "lint": "bash ../../scripts/host-proof-slot.sh lint @anneal/runner -- /bin/sh -c 'biome lint . && eslint .'",
-    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/runner -- node --conditions=development --import tsx --test ${AGENTOS_RUN_ID:+--test-concurrency=2} src/*.test.ts src/adapters/*.test.ts scripts/*.test.mjs",
+    "test": "bash ../../scripts/host-proof-slot.sh test @anneal/runner -- node --conditions=development --import tsx --test ${AGENTOS_RUN_ID:+--test-concurrency=2} ${AGENTOS_GATE_UNIT_TEST_CONCURRENCY:+--test-concurrency=${AGENTOS_GATE_UNIT_TEST_CONCURRENCY}} src/*.test.ts src/adapters/*.test.ts scripts/*.test.mjs",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js"
   },
