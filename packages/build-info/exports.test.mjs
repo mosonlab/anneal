@@ -11,6 +11,7 @@ const repositoryRoot = resolve(fileURLToPath(new URL("../..", import.meta.url)))
 // that needs both a development target and a resolution proof.
 const mappings = [
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: ".", source: "./src/index.ts", dist: "./dist/index.js" },
+  { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./transport-vocabulary", source: "./src/transport-vocabulary.ts", dist: "./dist/transport-vocabulary.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./merge-integrator", source: "./src/merge-integrator.ts", dist: "./dist/merge-integrator.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./model-routing", source: "./src/model-routing.ts", dist: "./dist/model-routing.js" },
   { packageName: "@anneal/db", packageDirectory: "packages/db", subpath: "./agent-message", source: "./src/agent-message.ts", dist: "./dist/agent-message.js" },
@@ -32,7 +33,7 @@ const mappings = [
   { packageName: "@anneal/github-client", packageDirectory: "packages/github-client", subpath: ".", source: "./src/index.ts", dist: "./dist/index.js" },
 ];
 
-assert.equal(mappings.length, 20);
+assert.equal(mappings.length, 21);
 
 const packageSpecifier = ({ packageName, subpath }) =>
   subpath === "." ? packageName : `${packageName}/${subpath.slice(2)}`;
@@ -81,7 +82,7 @@ const resolveInChild = (conditions) => {
   return JSON.parse(execFileSync(process.execPath, args, { cwd: repositoryRoot, encoding: "utf8" }));
 };
 
-test("all twenty source-backed exports have ordered development targets", () => {
+test("all twenty-one source-backed exports have ordered development targets", () => {
   const entriesByPackage = new Map();
   for (const mapping of mappings) {
     const manifest = readManifest(mapping.packageDirectory);
