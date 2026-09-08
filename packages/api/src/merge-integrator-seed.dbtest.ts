@@ -249,7 +249,7 @@ test("a fresh seed writes the twelve-step, eight-step, and four-step canonical t
     (await db.agent.findFirstOrThrow({ where: { name: "librarian-luna-xhigh" } })).id);
   assert.equal(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.attachmentsFromPrevious, true);
   assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.prompt ?? "", /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" prepare/u);
-  assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.prompt ?? "", /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
+  assert.match(step.taskTemplate.steps.find((candidate) => candidate.stepIndex === 10)?.prompt ?? "", /head[\s\S]*and baseline frozen by prepare/u);
   // The fix step reads both reports itself; no node authors must-fix any more.
   assert.equal(step.taskTemplate.steps.some((candidate) => candidate.outputKind === "must-fix"), false);
   assert.match(

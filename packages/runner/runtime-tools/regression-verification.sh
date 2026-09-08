@@ -12,7 +12,6 @@
 set -u
 set -o pipefail
 
-EXIT_SEMANTIC_STALE=77
 OUTPUT_KIND="regression-verification-v2"
 SHA_RE='^[0-9a-f]{40}$'
 
@@ -44,6 +43,9 @@ cleanup() {
   [ -z "$GATE_LOG" ] || rm -f -- "$GATE_LOG"
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 valid_sha() { [[ "$1" =~ $SHA_RE ]]; }
 
@@ -54,24 +56,21 @@ head_sha() {
   printf '%s' "$head"
 }
 
-FETCH_ATTEMPTS=6
+FETCH_ATTEMPTS=3
 
-# Kept in parity with db's transport vocabulary by transport-vocabulary.test.ts.
-FETCH_TRANSIENT_RE='fetch failed|SSL_ERROR_SYSCALL|SSL_connect|unexpected EOF|early EOF|(^|[^A-Za-z0-9_])Post[[:space:]]+"[^"]+"[[:space:]]*:[[:space:]]*EOF([^A-Za-z0-9_]|$)|our servers are currently overloaded|(^|[^A-Za-z0-9_])model[[:space:]]+is[[:space:]]+(currently[[:space:]]+)?at capacity([^A-Za-z0-9_]|$)|connection (reset|closed|timed out|lost|aborted|refused)|RPC failed|Operation timed out|Failed to connect|Could not resolve host|Recv failure|socket hang ?up|HTTP( response)?[[:space:]]*(408|425|429|5[0-9][0-9])|status( code)?[[:space:]]*(408|425|429|5[0-9][0-9])|502 Bad Gateway|503 Service Unavailable|504 Gateway Timeout|ECONNABORTED|ECONNRESET|EHOSTUNREACH|ENETDOWN|ENETRESET|ENETUNREACH|EPIPE|ETIMEDOUT|EAI_AGAIN|ETIMEOUT'
-FETCH_ACCESS_REFUSAL_RE='authentication failed|could not read Username|permission denied|forbidden|HTTP( response)?[[:space:]]*(401|403)|status( code)?[[:space:]]*(401|403)|bad credentials|authorization failed|(^|[^A-Za-z0-9_])unauthorized([^A-Za-z0-9_]|$)|invalid credentials|requested URL returned error:[[:space:]]*(401|403)([^A-Za-z0-9_]|$)|resource not accessible'
+# Fetch is a read-only, replay-safe operation. Retry unknown failures within an
+# attempt budget; the Run deadline still bounds a hanging fetch. Error text
+# only vetoes actionable deterministic failures. Transport implementations
+# need no shared symptom vocabulary here.
+FETCH_REFUSAL_RE='authentication failed|could not read Username|permission denied|forbidden|HTTP( response)?[[:space:]]*(401|403|404|429)|status( code)?[[:space:]]*(401|403|404|429)|requested URL returned error:[[:space:]]*(401|403|404|429)|bad credentials|authorization failed|(^|[^A-Za-z0-9_])unauthorized([^A-Za-z0-9_]|$)|invalid credentials|resource not accessible|too many requests|rate limit|captcha|human verification|does not appear to be a git repository|not a git repository|repository .*not found|couldn.t find remote ref|invalid refspec|not a valid (object|ref|branch)|bad config|invalid config|unable to read config|URL rejected|bad/illegal format|unsupported protocol|protocol .*not supported|no space left|disk quota|read-only file system|unable to create|cannot create|could not lock|cannot lock ref|insufficient permission|unable to write|certificate.*(verif|expired|invalid)|SSL certificate problem|server certificate verification failed|unable to get local issuer certificate|host key verification failed'
 
-fetch_is_transient() (
+fetch_is_retryable() (
   shopt -s nocasematch
-  [[ ! "$1" =~ $FETCH_ACCESS_REFUSAL_RE && "$1" =~ $FETCH_TRANSIENT_RE ]]
+  [[ ! "$1" =~ $FETCH_REFUSAL_RE ]]
 )
 
-# Exponential backoff with full jitter, capped per attempt, matching the clone
-# profile in network-retry.ts. This host reaches GitHub through a proxy whose
-# 443 exit drops for seconds at a time; on 2026-09-02 the previous budget
-# (3 attempts, 1s apart) was exhausted inside one such drop twice in a row and
-# burned both Runs of a regression step before any verification began. Waiting
-# up to 1s,2s,4s,8s,8s (~23s worst case) rides out a second-scale drop while
-# staying far inside the step's stall timeout.
+# Full jitter gives brief transport interruptions time to clear, with at most
+# two waits (one and two seconds) inside the three-attempt operation budget.
 fetch_backoff() {
   local ceiling=$(( 1 << (($1 < 4 ? $1 : 4) - 1) ))
   sleep "$(awk -v ceiling="$ceiling" 'BEGIN { srand(); printf "%.2f", rand() * ceiling }')"
@@ -133,7 +132,12 @@ fetch_base() {
       printf '%s' "$fetched"
       return 0
     fi
-    if ! fetch_is_transient "$error"; then
+    # A terminated child is cancellation, never another transport attempt.
+    if [ "$status" -gt 128 ] && [ "$status" -lt 193 ]; then
+      printf 'regression-verification: target fetch interrupted (exit %s): %s\n' "$status" "$error" >&2
+      return "$status"
+    fi
+    if ! fetch_is_retryable "$error"; then
       persist_target_fetch_block "$error"
       printf 'regression-verification: target fetch failed (exit %s): %s\n' "$status" "$error" >&2
       return 1
@@ -141,7 +145,7 @@ fetch_base() {
     [ "$attempt" -lt "$FETCH_ATTEMPTS" ] || break
     printf 'regression-verification: target fetch failed; retrying attempt=%s/%s\n' \
       "$((attempt + 1))" "$FETCH_ATTEMPTS" >&2
-    fetch_backoff "$attempt"
+    fetch_backoff "$attempt" || return "$?"
   done
   persist_target_fetch_block "$error"
   printf 'regression-verification: target fetch failed after %s attempts: %s\n' \
@@ -580,7 +584,7 @@ prepare() {
   [ ! -L "$output_dir" ] || die "refusing symlinked regression output directory"
   rm -f -- "$OUTPUT_FILE" || die "cannot clear stale regression output handoff"
   incoming_head="$(head_sha)" || die "cannot resolve incoming workspace HEAD"
-  base_head="$(fetch_base)" || die "cannot refresh target head"
+  base_head="$(fetch_base)" || die "cannot refresh target head" "$?"
   refresh_onto_target "$base_head"
   result=$?
   [ "$result" -eq 0 ] || return 0
@@ -593,21 +597,6 @@ prepare() {
     write_state "$prepared_head" "$base_head"
     printf 'REGRESSION PREPARE: ready %s %s\n' "$prepared_head" "$base_head"
   fi
-}
-
-semantic_stale() {
-  local target_head="$1" result refreshed_head
-  # A base move invalidates the prepare-time semantic reuse authorization even
-  # when refreshing the workspace later reports a conflict. Do not leave a
-  # skipped-review marker available to a subsequent finalize invocation.
-  [ "${SEMANTIC_VERDICT:-}" = "reused" ] && clear_reuse_state
-  refresh_onto_target "$target_head"
-  result=$?
-  [ "$result" -eq 0 ] || return 0
-  refreshed_head="$(head_sha)" || die "cannot resolve refreshed workspace HEAD"
-  write_state "$refreshed_head" "$target_head"
-  printf 'REGRESSION FINALIZE: semantic-stale %s %s\n' "$refreshed_head" "$target_head"
-  return "$EXIT_SEMANTIC_STALE"
 }
 
 review_fail() {
@@ -626,7 +615,7 @@ review_fail() {
 }
 
 finalize() {
-  local current latest gate_log gate_status gate_proof gate_failure_summary gate_failure_excerpt attempt verdict
+  local current gate_log gate_status gate_proof gate_failure_summary gate_failure_excerpt attempt verdict
   read_state
   current="$(head_sha)" || die "cannot resolve finalize workspace HEAD"
   if [ "$current" != "$VERIFIED_HEAD_SHA" ]; then
@@ -634,14 +623,9 @@ finalize() {
     die "workspace HEAD changed after semantic verification"
   fi
 
-  # Most drift is discovered and integrated before acquire, so no other chain
-  # queues behind a tree that still needs another model pass.
-  latest="$(fetch_base)" || die "cannot refresh target head"
-  if [ "$latest" != "$BASE_HEAD_SHA" ]; then
-    semantic_stale "$latest"
-    return $?
-  fi
-
+  # Prove the pair frozen by prepare. Live target reads belong to Merge
+  # readiness under its Lease; a later network failure or base move must not
+  # discard completed semantic work or the gate verdict for this pair.
   current="$(head_sha)" || die "cannot resolve gated workspace HEAD"
   gate_log="$(mktemp "${TMPDIR:-/tmp}/regression-gate.XXXXXX")" \
     || die "cannot create gate output file"
@@ -661,14 +645,6 @@ finalize() {
     esac
   done
   gate_proof="$(gate_verdict_read "$gate_log")" || gate_proof=""
-
-  # Gate execution may be long. Do not publish evidence against a base that
-  # moved while it ran; readiness performs the final check again under Lease.
-  latest="$(fetch_base)" || die "cannot refresh target head after gate"
-  if [ "$latest" != "$BASE_HEAD_SHA" ]; then
-    semantic_stale "$latest"
-    return $?
-  fi
 
   case "$gate_proof" in
     "MERGE GATE: PASS $current")

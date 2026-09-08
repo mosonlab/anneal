@@ -329,11 +329,11 @@ test("the canonical twelve-step layered template sources split review and preser
   assert.match(compoundFix, /No adjudication step stands between the reviews and this one/u);
   assert.match(compoundFix, /ADOPTED[\s\S]*REJECTED[\s\S]*MERGED/u);
   const compoundRegression = templateSteps.find((step) => step.stepIndex === 10)!.prompt;
-  assert.match(compoundRegression, /platform script owns refresh\/merge[\s\S]*final `regression-verification-v2`/u);
+  assert.match(compoundRegression, /platform script owns prepare-time refresh\/merge[\s\S]*final `regression-verification-v2`/u);
   assert.match(compoundRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" prepare/u);
   assert.match(compoundRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" review-fail/u);
   assert.match(compoundRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" finalize/u);
-  assert.match(compoundRegression, /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
+  assert.match(compoundRegression, /head[\s\S]*and baseline frozen by prepare/u);
   assert.match(compoundRegression, /implementation summary,\s+every present review report/u);
   assert.match(compoundRegression, /blind review report may be absent/u);
   assert.match(compoundRegression, /fixed implementation with its dispositions/u);
@@ -423,7 +423,7 @@ test("the direct template sources expose the layered review spine and mechanical
   assert.match(directRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" prepare/u);
   assert.match(directRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" review-fail/u);
   assert.match(directRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" finalize/u);
-  assert.match(directRegression, /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
+  assert.match(directRegression, /head[\s\S]*and baseline frozen by prepare/u);
   assert.doesNotMatch(directRegression, /merge-lease\.sh|gate-dispatch\.sh|gateProof/u);
   const directImplementation = directTemplateSteps.find((step) => step.stepIndex === 2)!.prompt;
   assert.match(directImplementation, /brief is the specification of record/u);

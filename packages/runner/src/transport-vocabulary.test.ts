@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -90,19 +88,6 @@ const nonTransportMessages = [
   "Post \"https://example.com\": EOFx"
 ];
 
-const shell = readFileSync(new URL("../runtime-tools/regression-verification.sh", import.meta.url), "utf8");
-const transientSource = shell.match(/^FETCH_TRANSIENT_RE='([^']+)'$/m)?.[1];
-const refusalSource = shell.match(/^FETCH_ACCESS_REFUSAL_RE='([^']+)'$/m)?.[1];
-const predicate = shell.match(/^fetch_is_transient\(\) \(\n[\s\S]*?^\)/m)?.[0];
-assert.ok(transientSource);
-assert.ok(refusalSource);
-assert.ok(predicate);
-
-// POSIX space classes are the only ERE syntax needing translation for JS.
-const asJs = (source: string): RegExp => new RegExp(source.replaceAll("[[:space:]]", "\\s"), "i");
-const transientRegex = asJs(transientSource);
-const refusalRegex = asJs(refusalSource);
-
 const messages = [
   ...transientMessages,
   ...transientMessages.map((text) => text.toUpperCase()),
@@ -112,12 +97,10 @@ const messages = [
   ...refusals.map((text) => `Selected model is at capacity; ${text}`),
 ];
 
-test("shell fetch and TypeScript agree across the vocabulary, including veto precedence", () => {
+test("shared transport vocabulary covers its categories and access veto precedence", () => {
   for (const message of messages) {
-    assert.equal(
-      !refusalRegex.test(message) && transientRegex.test(message),
-      isTransientTransportFailure(message), message,
-    );
+    const expected = transientMessages.some((candidate) => candidate.toLowerCase() === message.toLowerCase());
+    assert.equal(isTransientTransportFailure(message), expected, message);
   }
   for (const pattern of TRANSIENT_TRANSPORT_PATTERNS) {
     assert.ok(transientMessages.some((text) => pattern.test(text)), String(pattern));
@@ -125,22 +108,4 @@ test("shell fetch and TypeScript agree across the vocabulary, including veto pre
   for (const pattern of DETERMINISTIC_ACCESS_PATTERNS) {
     assert.ok(refusals.some((text) => pattern.test(text)), String(pattern));
   }
-  for (const alternative of transientSource.split("|")) {
-    // Complete alternatives only: grouped branches are covered by TS fixtures.
-    if (alternative.includes("(") || alternative.includes(")")) continue;
-    assert.ok(transientMessages.some((text) => asJs(alternative).test(text)), alternative);
-  }
-});
-
-test("the actual Bash fetch predicate agrees without invoking regression tooling", () => {
-  const result = execFileSync("bash", ["-c", `
-FETCH_TRANSIENT_RE=$1
-FETCH_ACCESS_REFUSAL_RE=$2
-shift 2
-${predicate}
-for message in "$@"; do
-  if fetch_is_transient "$message"; then printf 'true\\n'; else printf 'false\\n'; fi
-done
-`, "transport-parity", transientSource, refusalSource, ...messages], { encoding: "utf8" });
-  assert.deepEqual(result.trim().split("\n"), messages.map((message) => String(isTransientTransportFailure(message))));
 });

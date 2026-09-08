@@ -63,7 +63,7 @@ const recoveryPromptSection = (claim: ClaimedTask): string[] => {
     "Platform-pinned base-drift recovery instruction:",
     `- Recovery Run ${context.recoveryRunId} is queued for base ${context.currentBaseSha} and authorized head ${context.authorizedHeadSha}.`,
     "- Run regression-verification.sh prepare first. If it reports `REGRESSION PREPARE: semantic-reused`, the persisted prior Run is an exact-head semantic PASS: skip the semantic model recheck and invoke regression-verification.sh finalize immediately.",
-    "- finalize always runs the Merge gate. If prepare reports `ready`, or finalize reports semantic-stale with exit 77, perform the full semantic recheck required by the Regression task before finalizing.",
+    "- finalize always runs the Merge gate. If prepare reports `ready`, perform the full semantic recheck with focused regressions required by the Regression task before finalizing. The gate proves the head and baseline frozen by prepare; Merge readiness checks the latest target under its Lease.",
   ];
 };
 

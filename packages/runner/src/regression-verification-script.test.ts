@@ -78,13 +78,13 @@ const fixture = (): Fixture => {
   // reaches real git. `git fetch` is the only reachable transient network call
   // in this script, and it is what the retry budget exists for.
   executable(join(bin, "git"), `#!/bin/sh
-if [ "$1" = "fetch" ] && [ "${"$"}{REGRESSION_FIXTURE_FETCH_FAILURES:-0}" -gt 0 ]; then
+if [ "$1" = "fetch" ]; then
   attempt="$(wc -l < "$REGRESSION_FIXTURE_FETCH_LOG" | tr -d ' ')"
   attempt=$((attempt + 1))
   printf '%s\\n' "$attempt" >> "$REGRESSION_FIXTURE_FETCH_LOG"
-  if [ "$attempt" -le "$REGRESSION_FIXTURE_FETCH_FAILURES" ]; then
-    printf 'fatal: unable to access: LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443\\n' >&2
-    exit 128
+  if [ "$attempt" -le "${"$"}{REGRESSION_FIXTURE_FETCH_FAILURES:-0}" ]; then
+    printf '%s\\n' "${"$"}{REGRESSION_FIXTURE_FETCH_ERROR:-fatal: unable to access: LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to github.com:443}" >&2
+    exit "${"$"}{REGRESSION_FIXTURE_FETCH_EXIT:-128}"
   fi
 fi
 if [ "$1" = "rev-parse" ] && [ "$2" = "FETCH_HEAD" ]; then
@@ -446,16 +446,6 @@ test("prepare fails loudly when the refreshed Prisma client cannot be regenerate
   assert.equal(existsSync(seeded.output), false, "a broken workspace publishes no verdict");
 });
 
-test("a semantic-stale refresh regenerates the Prisma client for the newer target", () => {
-  const seeded = fixture();
-  assert.equal(run(seeded, "prepare").status, 0);
-  advanceBase(seeded, "packages/db/prisma/schema.prisma", "// later schema\n");
-  const finalized = run(seeded, "finalize");
-  assert.equal(finalized.status, 77, finalized.stderr);
-  assert.match(finalized.stdout, /^REGRESSION FINALIZE: semantic-stale /u);
-  assert.equal(readFileSync(seeded.npmLog, "utf8"), "run db:generate\n");
-});
-
 test("finalize publishes the dispatch PASS handoff before readiness acquires the lease", () => {
   const seeded = fixture();
   assert.equal(run(seeded, "prepare").status, 0);
@@ -499,7 +489,7 @@ test("the mechanical handoff requires no session or fencing credentials", () => 
   assert.equal(seeded.env.AGENTOS_FENCING_TOKEN, undefined);
 });
 
-test("an unreachable target fails prepare and finalize with a block record", () => {
+test("an unreachable target blocks prepare but cannot erase a prepared verdict", () => {
   const prepareFixture = fixture();
   git(prepareFixture.work, "remote", "set-url", "origin", join(prepareFixture.root, "missing.git"));
   const prepared = run(prepareFixture, "prepare");
@@ -513,28 +503,57 @@ test("an unreachable target fails prepare and finalize with a block record", () 
   assert.equal(run(finalizeFixture, "prepare").status, 0);
   git(finalizeFixture.work, "remote", "set-url", "origin", join(finalizeFixture.root, "missing.git"));
   const finalized = run(finalizeFixture, "finalize");
-  assert.notEqual(finalized.status, 0);
-  assert.match(finalized.stderr, /target fetch failed \(exit \d+\): .*does not appear to be a git repository/su);
-  assert.doesNotMatch(finalized.stdout, /refresh-conflict/u);
-  assert.equal(existsSync(finalizeFixture.output), true);
+  assert.equal(finalized.status, 0, finalized.stderr);
+  assert.equal(JSON.parse(handoff(finalizeFixture).body).outcome, "pass");
+  assert.equal(readFileSync(finalizeFixture.fetchLog, "utf8").trim(), "1");
 });
 
 test("a transient target fetch failure is retried instead of failing the Run", () => {
   const seeded = fixture();
-  seeded.env.REGRESSION_FIXTURE_FETCH_FAILURES = "3";
+  seeded.env.REGRESSION_FIXTURE_FETCH_FAILURES = "2";
   const prepared = run(seeded, "prepare");
   assert.equal(prepared.status, 0);
   assert.match(prepared.stdout, /REGRESSION PREPARE: ready/u);
-  assert.match(prepared.stderr, /retrying attempt=4\/6/u);
-  assert.equal(readFileSync(seeded.fetchLog, "utf8").trim().split("\n").length, 4);
+  assert.match(prepared.stderr, /retrying attempt=3\/3/u);
+  assert.equal(readFileSync(seeded.fetchLog, "utf8").trim().split("\n").length, 3);
+});
+
+test("unknown fetch failures use the bounded read-only operation retry", () => {
+  for (const error of ["gnutls_handshake() failed: The TLS connection was non-properly terminated", "unrecognized upstream failure", "notunauthorized ECONNRESET"]) {
+    const seeded = fixture();
+    seeded.env.REGRESSION_FIXTURE_FETCH_FAILURES = "2";
+    seeded.env.REGRESSION_FIXTURE_FETCH_ERROR = error;
+    const prepared = run(seeded, "prepare");
+    assert.equal(prepared.status, 0, prepared.stderr);
+    assert.equal(readFileSync(seeded.fetchLog, "utf8").trim().split("\n").length, 3);
+  }
+});
+
+test("fetch refusals and child interruption never retry", () => {
+  for (const [error, status] of [
+    ["authentication failed", 128], ["HTTP 429 Too Many Requests", 128],
+    ["SSL certificate problem: certificate has expired", 128],
+    ["fatal: unable to create temporary file: No space left on device", 128],
+    ["fatal: bad config line 1", 128], ["fatal: couldn't find remote ref missing", 128],
+    ["interrupted", 130], ["terminated", 143],
+  ] as const) {
+    const seeded = fixture();
+    seeded.env.REGRESSION_FIXTURE_FETCH_FAILURES = "3";
+    seeded.env.REGRESSION_FIXTURE_FETCH_ERROR = error;
+    seeded.env.REGRESSION_FIXTURE_FETCH_EXIT = String(status);
+    const prepared = run(seeded, "prepare");
+    assert.equal(prepared.status, status > 128 ? status : 1, prepared.stderr);
+    assert.equal(readFileSync(seeded.fetchLog, "utf8").trim(), "1");
+    assert.doesNotMatch(prepared.stderr, /retrying attempt/u);
+  }
 });
 
 test("a target fetch failure leaves a machine-readable block record", () => {
   const seeded = fixture();
-  seeded.env.REGRESSION_FIXTURE_FETCH_FAILURES = "6";
+  seeded.env.REGRESSION_FIXTURE_FETCH_FAILURES = "3";
   const prepared = run(seeded, "prepare");
   assert.notEqual(prepared.status, 0);
-  assert.match(prepared.stderr, /target fetch failed after 6 attempts: .*SSL_ERROR_SYSCALL/u);
+  assert.match(prepared.stderr, /target fetch failed after 3 attempts: .*SSL_ERROR_SYSCALL/u);
   assert.equal(existsSync(seeded.output), true);
   const block = JSON.parse(readFileSync(seeded.output, "utf8")) as Record<string, unknown>;
   assert.equal(block.schemaVersion, 1);
@@ -582,50 +601,52 @@ test("a successful target fetch leaves no block record", () => {
   assert.equal(existsSync(seeded.output), false);
 });
 
-test("finalize refreshes drift outside the lease and requires semantic recheck", () => {
-  const seeded = fixture();
-  assert.equal(run(seeded, "prepare").status, 0);
-  const main = join(seeded.root, "main");
-  git(seeded.root, "clone", "--branch", "main", seeded.origin, main);
-  writeFileSync(join(main, "drift.txt"), "drift\n");
-  git(main, "add", "drift.txt");
-  git(main, "commit", "-m", "drift");
-  git(main, "push", "origin", "main");
-
-  const finalized = run(seeded, "finalize");
-  assert.equal(finalized.status, 77, finalized.stderr);
-  assert.match(finalized.stdout, /^REGRESSION FINALIZE: semantic-stale /u);
-  assert.equal(readFileSync(seeded.leaseLog, "utf8"), "", "drift was detected before acquire");
-  assert.equal(readFileSync(seeded.gateLog, "utf8"), "");
-  assert.equal(existsSync(seeded.output), false);
-  assert.equal(readFileSync(join(seeded.work, "drift.txt"), "utf8"), "drift\n");
+test("finalize refuses changed workspace HEAD and clears skipped-review provenance", () => {
+  for (const reused of [false, true]) {
+    const seeded = fixture();
+    if (reused) seeded.env.AGENTOS_REGRESSION_RECOVERY_CONTEXT = recoveryContext(seeded);
+    assert.equal(run(seeded, "prepare").status, 0);
+    writeFileSync(join(seeded.work, "changed.txt"), "changed\n");
+    git(seeded.work, "add", "changed.txt");
+    git(seeded.work, "commit", "-m", "changed after review");
+    const finalized = run(seeded, "finalize");
+    assert.notEqual(finalized.status, 0);
+    assert.match(finalized.stderr, /workspace HEAD changed after semantic verification/u);
+    assert.equal(readFileSync(seeded.gateLog, "utf8"), "");
+    assert.equal(existsSync(seeded.output), false);
+    assert.doesNotMatch(readFileSync(join(seeded.work, ".git", "agentos-regression-state"), "utf8"), /semanticVerdict|semanticSourceRunId/u);
+  }
 });
 
-test("a reused verdict is cleared when base drift refreshes the prepared head", () => {
+test("finalize preserves the prepared pair when the target advances before the gate", () => {
+  const seeded = fixture();
+  assert.equal(run(seeded, "prepare").status, 0);
+  advanceBase(seeded, "packages/db/prisma/schema.prisma", "// newer schema\n");
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 0, finalized.stderr);
+  const verdict = JSON.parse(handoff(seeded).body);
+  assert.equal(verdict.headSha, seeded.branchSha);
+  assert.equal(verdict.baseHeadSha, seeded.baseSha);
+  assert.equal(verdict.outcome, "pass");
+  assert.equal(readFileSync(seeded.npmLog, "utf8"), "");
+  assert.equal(readFileSync(seeded.fetchLog, "utf8").trim(), "1");
+});
+
+test("finalize preserves reuse provenance for the frozen pair despite target drift", () => {
   const seeded = fixture();
   seeded.env.AGENTOS_REGRESSION_RECOVERY_CONTEXT = recoveryContext(seeded);
   assert.equal(run(seeded, "prepare").status, 0);
-  assert.match(readFileSync(join(seeded.work, ".git", "agentos-regression-state"), "utf8"), /semanticVerdict=reused/u);
-
   advanceBase(seeded, "drift.txt", "drift\n");
-  const stale = run(seeded, "finalize");
-  assert.equal(stale.status, 77, stale.stderr);
-  assert.match(stale.stdout, /^REGRESSION FINALIZE: semantic-stale /u);
-  assert.doesNotMatch(readFileSync(join(seeded.work, ".git", "agentos-regression-state"), "utf8"), /semanticVerdict|semanticSourceRunId/u);
-  assert.equal(existsSync(seeded.output), false);
-
-  // The model would recheck the newly refreshed head before this second
-  // finalize. Calling finalize directly proves the stale head cannot inherit
-  // the skipped-review provenance from the first prepare.
   const finalized = run(seeded, "finalize");
   assert.equal(finalized.status, 0, finalized.stderr);
-  const verdict = JSON.parse(handoff(seeded).body) as Record<string, unknown>;
-  assert.equal(verdict.outcome, "pass");
-  assert.equal(verdict.semanticVerdict, undefined);
-  assert.equal(verdict.semanticSourceRunId, undefined);
+  const verdict = JSON.parse(handoff(seeded).body);
+  assert.equal(verdict.headSha, seeded.branchSha);
+  assert.equal(verdict.baseHeadSha, seeded.baseSha);
+  assert.equal(verdict.semanticVerdict, "reused");
+  assert.equal(verdict.semanticSourceRunId, "prior-regression-run");
 });
 
-test("finalize refuses a PASS when the target moves during the gate", () => {
+test("finalize persists frozen evidence when the target moves during the gate", () => {
   const seeded = fixture();
   assert.equal(run(seeded, "prepare").status, 0);
   const main = join(seeded.root, "main-during-gate");
@@ -641,11 +662,14 @@ printf 'MERGE GATE: PASS %s\n' "$1"
   seeded.env.REGRESSION_GATE_DISPATCH = driftGate;
 
   const finalized = run(seeded, "finalize");
-  assert.equal(finalized.status, 77, finalized.stderr);
-  assert.match(finalized.stdout, /^REGRESSION FINALIZE: semantic-stale /u);
-  assert.equal(existsSync(seeded.output), false);
+  assert.equal(finalized.status, 0, finalized.stderr);
+  const verdict = JSON.parse(handoff(seeded).body);
+  assert.equal(verdict.outcome, "pass");
+  assert.equal(verdict.headSha, seeded.branchSha);
+  assert.equal(verdict.baseHeadSha, seeded.baseSha);
   assert.equal(readFileSync(seeded.leaseLog, "utf8"), "");
-  assert.equal(readFileSync(join(seeded.work, "during-gate.txt"), "utf8"), "drift during gate\n");
+  assert.equal(existsSync(join(seeded.work, "during-gate.txt")), false);
+  assert.equal(readFileSync(seeded.fetchLog, "utf8").trim(), "1");
 });
 
 test("review-fail is emitted mechanically without acquiring or dispatching", () => {

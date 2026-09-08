@@ -229,6 +229,8 @@ test("a recovery Regression claim carries the pinned context and skip instructio
   assert.match(prompt, /Platform-pinned base-drift recovery instruction:/u);
   assert.match(prompt, /semantic-reused[\s\S]*skip the semantic model recheck[\s\S]*finalize immediately/u);
   assert.match(prompt, /finalize always runs the Merge gate/u);
+  assert.match(prompt, /head and baseline frozen by prepare/u);
+  assert.doesNotMatch(prompt, /semantic-stale|exit 77/u);
 
   const config = {
     path: "/bin",

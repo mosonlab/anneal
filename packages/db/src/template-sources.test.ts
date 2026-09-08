@@ -156,8 +156,10 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
     assert.match(regression.prompt, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" prepare/u);
     assert.match(regression.prompt, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" review-fail/u);
     assert.match(regression.prompt, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" finalize/u);
-    assert.match(regression.prompt, /finalize exit 77[\s\S]*Repeat the full semantic verification/u);
-    assert.match(regression.prompt, /finalize exit 0[\s\S]*`pass`, `gate-fail`,\s+or `refresh-conflict`/u);
+    assert.match(regression.prompt, /head[\s\S]*and baseline frozen by prepare/u);
+    assert.match(regression.prompt, /focused regressions[\s\S]*Merge gate owns full workspace and repository suites/u);
+    assert.doesNotMatch(regression.prompt, /semantic-stale|exit 77/u);
+    assert.match(regression.prompt, /finalize exit 0[\s\S]*`pass` or `gate-fail`/u);
     assert.match(regression.prompt, /script persists the one allowed v2 outcome/u);
     assert.doesNotMatch(regression.prompt, /merge-lease\.sh|gate-dispatch\.sh|\{"schemaVersion":2/u);
     assert.ok(regression.prompt.split("\n").length < 30, "the semantic prompt stays materially shorter than the retired 62-line procedure");
@@ -739,12 +741,13 @@ test("bare revalidation only selects v1 for complete historical Direct identitie
   assert.equal(canonicalOutputGeneration({ outputKind: "revalidation-v2", taskTemplateName }), "v2");
 });
 
-test("registered pre-route Direct generations retain the v1 output protocol", () => {
+test("registered Direct generations retain their historical revalidation protocol", () => {
   for (const generation of LEGACY_TEMPLATE_GENERATIONS[DIRECT_TEMPLATE_NAME]) {
     if (!generation.shape.some(({ outputKind }) => outputKind === "revalidation")) continue;
+    const expected = generation.marker === "pre-frozen-regression-baseline" ? "v2" : "v1";
     const taskTemplateName = templateRolloverName(DIRECT_TEMPLATE_NAME, generation.marker, "row");
-    assert.equal(canonicalOutputGeneration({ outputKind: "revalidation", taskTemplateName }), "v1");
-    assert.equal(canonicalOutputGeneration({ outputKind: "revalidation", taskTemplate: { name: taskTemplateName } }), "v1");
+    assert.equal(canonicalOutputGeneration({ outputKind: "revalidation", taskTemplateName }), expected);
+    assert.equal(canonicalOutputGeneration({ outputKind: "revalidation", taskTemplate: { name: taskTemplateName } }), expected);
     assert.equal(canonicalOutputGeneration({ outputKind: "revalidation-v2", taskTemplateName }), "v2");
   }
 });
