@@ -1194,8 +1194,10 @@ const runReadinessDecision = async (
   // under the Lease, below; this one only spares an outage the cost of taking
   // a Lease every tick, exactly as the pre-acquire read spares a base move one.
   const blockedExecutors = executorsBlockingAuthorization(daemons);
+  const regressionWillRequeue = decision.kind === "requeue-regression"
+    && !(trainWidth > 0 && decision.condition === "base-advanced");
   if (target && ((decision.kind === "authorize" && blockedExecutors.length > 0)
-    || decision.kind === "stop" || decision.kind === "requeue-regression")) {
+    || decision.kind === "stop" || regressionWillRequeue)) {
     await observeLeaseEpisode(db, claim, { taskId: readiness.id, target,
       family: "lease-contention", answer: "resolved", now: read.input.now });
   }
@@ -1204,8 +1206,6 @@ const runReadinessDecision = async (
     return;
   }
 
-  const regressionWillRequeue = decision.kind === "requeue-regression"
-    && !(trainWidth > 0 && decision.condition === "base-advanced");
   if (blockedExecutors.length === 0 || regressionWillRequeue || decision.kind === "stop") {
     await closeExecutorOfflineEpisode(db, readiness.id, claim,
       blockedExecutors.length === 0 ? "executor observed online" : `readiness ${decision.kind}`);

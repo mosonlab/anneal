@@ -1610,6 +1610,10 @@ test("a train deferral closes the executor-offline episode when authorization is
     body: "Merge readiness withheld its authorization: merge-executor-offline",
     metadata: { kind: "mergeTail.readiness", state: "requeued-executor-offline", episodeStartedAt },
   } });
+  await db.taskActivity.create({ data: {
+    taskId: candidate.readiness.id, actorType: "control-plane", body: "Earlier Lease contention",
+    metadata: { kind: "mergeTail.leaseContention", state: "contended", firstContendedAt: episodeStartedAt },
+  } });
   await db.mergeLeaseEvent.create({ data: {
     projectId: seed.project.id,
     chainId: candidate.chainId,
@@ -1631,6 +1635,12 @@ test("a train deferral closes the executor-offline episode when authorization is
   }, orderBy: [{ createdAt: "desc" }, { id: "desc" }] });
   assert.equal((persisted.metadata as Record<string, unknown>).episodeStartedAt, episodeStartedAt);
   assert.equal((persisted.metadata as Record<string, unknown>).episodeClosed, true);
+  const contention = await db.taskActivity.findMany({ where: {
+    taskId: candidate.readiness.id,
+    metadata: { path: ["kind"], equals: "mergeTail.leaseContention" },
+  } });
+  assert.equal(contention.length, 1, "a train deferral does not answer Lease contention");
+  assert.equal((contention[0]!.metadata as Record<string, unknown>).state, "contended");
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.regression.id } })).status, TaskStatus.DONE);
   assert.equal(await db.run.count({ where: { taskId: candidate.regression.id } }), 1);
 });

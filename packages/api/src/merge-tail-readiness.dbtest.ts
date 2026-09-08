@@ -1771,7 +1771,7 @@ const offlineMarkers = (readinessTaskId: string) => db.taskActivity.findMany({
     taskId: readinessTaskId,
     metadata: { path: ["state"], equals: "requeued-executor-offline" },
   },
-  orderBy: { createdAt: "asc" },
+  orderBy: [{ createdAt: "asc" }, { id: "asc" }],
 });
 
 test("readiness requeues itself rather than authorizing a merge no online executor can claim", async () => {
