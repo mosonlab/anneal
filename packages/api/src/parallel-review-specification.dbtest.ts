@@ -543,7 +543,7 @@ test("a raw abort from the reader is an ordinary transient, not an extendable de
   }), 0);
 });
 
-test("one poll settles every review sibling whose transient specification read budget expired", async () => {
+test("each poll settles one review sibling whose transient specification read budget expired", async () => {
   const fixture = await instantiateDirect();
   await completeImplementation(fixture, "sibling-exhaustion-implementation");
   const app = createApp(db, {
@@ -576,6 +576,10 @@ test("one poll settles every review sibling whose transient specification read b
   });
   await db.run.updateMany({ where: { id: { in: runIds } }, data: { readyAt: new Date(0) } });
 
+  assert.equal((await poll()).status, 204);
+  assert.equal(await db.run.count({
+    where: { id: { in: runIds }, status: RunStatus.FAILED },
+  }), 1);
   assert.equal((await poll()).status, 204);
   assert.equal(await db.run.count({
     where: { id: { in: runIds }, status: RunStatus.FAILED },
@@ -700,7 +704,7 @@ test("a faithful rolled-over compound chain still resolves the approved specific
   assert.ok([fixture.solTaskId, fixture.blindTaskId].includes(reviewed.run.taskId));
 });
 
-test("an unreadable review candidate is parked without blocking an unrelated claim in the same poll", async () => {
+test("chained unreadable reviews halt their polls before an unrelated candidate is claimed", async () => {
   const fixture = await instantiateDirect();
   await completeImplementation(fixture, "unreadable-implementation");
   const unrelatedChain = await instantiateTemplate(db, fixture.projectId, fixture.directTemplateId, {
@@ -713,11 +717,19 @@ test("an unreadable review candidate is parked without blocking an unrelated cla
   const unrelatedImplementationTask = unrelatedChain.tasks.find((task) => task.chainIndex === 1);
   assert.ok(unrelatedImplementationTask);
 
-  const response = await createApp(db, { specificationReader: null }).request("/runner/tasks/claim", {
+  const app = createApp(db, { specificationReader: null });
+  const poll = () => app.request("/runner/tasks/claim", {
     method: "POST",
     headers: { Authorization: `Bearer ${RUNNER_TOKEN}`, "Content-Type": "application/json" },
     body: JSON.stringify({ runnerId: "unrelated-runner", leaseSeconds: 120 }),
   });
+  for (const expectedFailed of [1, 2]) {
+    assert.equal((await poll()).status, 204);
+    assert.equal(await db.run.count({
+      where: { taskId: { in: [fixture.solTaskId, fixture.blindTaskId] }, status: RunStatus.FAILED },
+    }), expectedFailed);
+  }
+  const response = await poll();
   const responseText = await response.text();
   assert.equal(response.status, 200, responseText);
   const claimed = JSON.parse(responseText) as Claim;
