@@ -735,7 +735,15 @@ parallel_unit_tests() {
   # every run, then suppress only those redundant lifecycle hooks. If any hook
   # gains another responsibility, this check fails instead of skipping it.
   verify_build_only_lifecycle_hooks pretest || return 1
-  run_workspace_script_parallel test 1 "${GATE_UNIT_LANES}"
+  # Each workspace's node --test command can fan out its matched files too.
+  # Keep only one workspace command in flight and give that command the whole
+  # unit budget, so the nested fan-out is bounded by GATE_UNIT_LANES rather than
+  # multiplying it. The package scripts consume this gate-only variable before
+  # their file globs; it is unset on ordinary host and Run invocations.
+  (
+    export AGENTOS_GATE_UNIT_TEST_CONCURRENCY="${GATE_UNIT_LANES}"
+    run_workspace_script_parallel test 1 1
+  )
 }
 
 verify_build_only_lifecycle_hooks() {

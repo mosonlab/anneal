@@ -33,11 +33,12 @@ so do not remove the `set -m` around the spawn in `step-engine.sh`: it is what
 makes the whole tree reachable rather than just the member's own shell.
 
 How wide each group runs is derived from a stated share of the host, not from
-the core count. `run-gate.sh` exports `AGENTOS_GATE_HOST_SHARE` as the worker's
-`host-share` setting, which defaults to its slot count, so on the two-slot
-desktop each gate sizes itself for half the machine and two concurrent gates
-still add up to one host. A gate invoked by hand states no share and takes half
-the machine. Do not restore a per-phase fan-out in
+the core count. This is a sizing target, not a hard CPU quota: the operating
+system can still schedule the gate alongside other work. `run-gate.sh` exports
+`AGENTOS_GATE_HOST_SHARE` as the worker's `host-share` setting, which defaults
+to its slot count, so on the two-slot desktop each gate sizes itself for half
+the machine. A gate invoked by hand states no share and takes half the machine.
+Do not restore a per-phase fan-out in
 `run-gate.sh`: `7886fad` set `AGENTOS_DBTEST_CONCURRENCY` there, `merge-gate.sh`
 recomputed that same variable moments later, and the bound silently never took
 effect while both logs claimed it had.
@@ -568,16 +569,23 @@ machine and strict FIFO order is not promised. The first waiter to acquire
 whichever usable local or remote slot frees runs there.
 
 The database step runs one file per lane, each with a database of its own and
-its own subdirectory of the roots the gate exports. The lane count is not read
-from the CPU count here: `run-gate.sh` exports only `AGENTOS_GATE_HOST_SHARE`,
-the worker's `host-share` setting, and `merge-gate.sh` derives every parallel
-width in the run from `availableParallelism() / AGENTOS_GATE_HOST_SHARE`. That
-setting defaults to the worker's capacity, so on the 14-vCPU desktop worker a
-capacity-two gate gets 7 unit and 7 database lanes and two of them add up to the
-host, while a hand-run gate with no stated share defaults to half the host. A
+its own subdirectory of the roots the gate exports. Unit tests use the same
+lane budget, but the workspace commands are submitted one at a time: the
+active workspace receives `--test-concurrency=${GATE_UNIT_LANES}` through the
+gate-only `AGENTOS_GATE_UNIT_TEST_CONCURRENCY` variable. This bounds top-level
+unit-test file workers across workspaces by `GATE_UNIT_LANES`; subprocesses
+started by a test remain outside that count. Every workspace keeps its test
+command, loader, and file glob. The lane
+count is not read from the CPU count here: `run-gate.sh` exports only
+`AGENTOS_GATE_HOST_SHARE`, the worker's `host-share` setting, and `merge-gate.sh`
+derives every parallel width in the run from `availableParallelism() /
+AGENTOS_GATE_HOST_SHARE`. That setting defaults to the worker's capacity, so on
+the 14-vCPU desktop worker a capacity-two gate sizes for 7 unit and 7 database
+lanes, while a hand-run gate with no stated share defaults to half the host. A
 worker whose host also runs runners states a larger share than its capacity and
 gets correspondingly fewer lanes. Deriving every width from the one number is
-what keeps that invariant true; do not fix a width independently of the share.
+what keeps the sizing consistent; do not fix a width independently of the
+share.
 `AGENTOS_DBTEST_CONCURRENCY` lowers the file concurrency on other paths and
 `AGENTOS_DBTEST_PROVISION=0` puts the step back on one shared schema, serial.
 

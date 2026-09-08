@@ -268,6 +268,59 @@ test("on the 16-vCPU worker a host share of two gives each gate half the machine
   assert.equal(sizing(whole).GATE_CPUS, 16);
 });
 
+test("UNIT-SHAPE serializes workspaces while passing the full gate lane budget to Node", () => {
+  assert.match(gateSource, /export AGENTOS_GATE_UNIT_TEST_CONCURRENCY="\$\{GATE_UNIT_LANES\}"/u);
+  assert.match(gateSource, /run_workspace_script_parallel test 1 1/u);
+});
+
+test("UNIT-BOUND the gate cap limits real Node test-file processes", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "merge-gate-unit-bound."));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const events = join(root, "events.log");
+  writeFileSync(events, "");
+  const packageScript = "node --test ${AGENTOS_GATE_UNIT_TEST_CONCURRENCY:+--test-concurrency=${AGENTOS_GATE_UNIT_TEST_CONCURRENCY}} *.test.mjs";
+  writeFileSync(join(root, "package.json"), JSON.stringify({ private: true, scripts: { test: packageScript } }));
+  // Wait for a second worker instead of guessing a sleep. The 60s hang bound
+  // follows CONTRIBUTING.md's loaded-host test timing rule and costs no time
+  // when both workers are admitted promptly.
+  const fixture = [
+    'import test from "node:test";',
+    'import { appendFileSync, readFileSync } from "node:fs";',
+    'const events = process.env.UNIT_BOUND_EVENTS;',
+    'test("holds a file worker", async () => {',
+    '  appendFileSync(events, `start ${process.pid}\\n`);',
+    '  const deadline = Date.now() + 60_000;',
+    '  while (readFileSync(events, "utf8").split("\\n").filter((line) => line.startsWith("start ")).length < 2) {',
+    '    if (Date.now() > deadline) throw new Error("second file worker did not start within the bound");',
+    '    await new Promise((resolve) => setTimeout(resolve, 10));',
+    '  }',
+    '  appendFileSync(events, `end ${process.pid}\\n`);',
+    '});',
+  ].join("\n");
+  for (let index = 1; index <= 6; index += 1) {
+    writeFileSync(join(root, `case-${index}.test.mjs`), fixture);
+  }
+  const environment = { ...process.env, AGENTOS_GATE_UNIT_TEST_CONCURRENCY: "2", UNIT_BOUND_EVENTS: events };
+  // This is a fresh test runner, not a worker of the enclosing node:test process.
+  delete environment.NODE_TEST_CONTEXT;
+  const result = spawnSync("npm", ["run", "test", "--silent"], {
+    cwd: root,
+    encoding: "utf8",
+    env: environment,
+  });
+  assert.equal(result.status, 0, `${root}\n${packageScript}\n${fixture}\n${result.stdout}\n${result.stderr}`);
+  const active = new Set();
+  let maximum = 0;
+  for (const line of readFileSync(events, "utf8").trim().split("\n")) {
+    const [kind, name] = line.split(" ");
+    if (kind === "start") active.add(name);
+    else active.delete(name);
+    maximum = Math.max(maximum, active.size);
+  }
+  assert.equal(active.size, 0, "every test-file process should have finished");
+  assert.equal(maximum, 2, `Node should run two files concurrently under the gate cap, saw ${maximum}: ${root}: ${readFileSync(events, "utf8")}`);
+});
+
 // Enough of the gate for the engine to run: the two output helpers it owes the
 // engine, the temp root it writes member logs into, and the working directory
 // it runs members in. Nothing here stands in for the behaviour being tested.
