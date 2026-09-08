@@ -49,7 +49,10 @@ const transientMessages = [
   "EPIPE",
   "ETIMEDOUT",
   "EAI_AGAIN",
-  "ETIMEOUT"
+  "ETIMEOUT",
+  "notunauthorized ECONNRESET",
+  "HTTP\t503",
+  "model\tis currently\tat capacity"
 ];
 
 const refusals = [
@@ -79,7 +82,11 @@ const nonTransportMessages = [
   "EOF",
   "disk is at capacity",
   "the connection pool is at capacity; aborting",
-  "HTTP 404"
+  "HTTP 404",
+  "xmodel is at capacity",
+  "model is at capacityx",
+  "xPost \"https://example.com\": EOF",
+  "Post \"https://example.com\": EOFx"
 ];
 
 for (const message of transientMessages) {
