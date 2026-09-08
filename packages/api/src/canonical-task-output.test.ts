@@ -644,3 +644,68 @@ test("a noncanonical implementation continuation does not diagnose its unrelated
   assert.equal("ok" in result && result.ok, true);
   assert.deepEqual(activities, []);
 });
+
+const persistRevalidationOutput = async (templateName: string, schemaVersion: number, includeRoute = false) => {
+  const task = {
+    id: "revalidation-task", projectId: "project", chainId: "chain", chainIndex: 1,
+    chainLayer: 1, status: "IN_PROGRESS",
+    templateStep: step(templateName, 1, "revalidation"),
+  };
+  let routeLookups = 0;
+  let writes = 0;
+  const tx = {
+    $queryRaw: async () => [{ id: "locked" }],
+    run: { findFirst: async (query: { select?: { taskId?: boolean } }) => (
+      query.select?.taskId ? { taskId: task.id } : { task }
+    ) },
+    task: { findUnique: async () => { routeLookups += 1; return null; } },
+    taskStepOutput: {
+      findUnique: async () => null,
+      upsert: async ({ create }: { create: Record<string, unknown> }) => {
+        writes += 1;
+        return { id: "output", ...create, metadata: null };
+      },
+    },
+  } as unknown as Prisma.TransactionClient;
+  const result = await persistSessionTaskOutput(tx, {
+    task,
+    fence: { runId: "revalidation-run", fencingToken: "fence", at: new Date() },
+    kind: "revalidation", commitSha: IMPLEMENTATION_HEAD,
+    body: JSON.stringify({
+      schemaVersion, headSha: IMPLEMENTATION_HEAD, outcome: "unchanged",
+      summary: "Specification still matches the tree", changedReferences: [],
+      ...(includeRoute ? { route: { tier: "default", reason: "No escalation criterion applies" } } : {}),
+    }),
+  });
+  return { result, routeLookups, writes };
+};
+
+test("retired revalidation v1 output persists without applying an absent implementation route", async () => {
+  const name = "direct-engineer-workflow-legacy-pre-judged-implementation-route-template-row";
+  const legacy = await persistRevalidationOutput(name, 1);
+  assert.ok("ok" in legacy.result && legacy.result.ok);
+  assert.equal(legacy.writes, 1);
+  assert.equal(legacy.routeLookups, 0);
+  assert.ok(legacy.result.ok && "output" in legacy.result);
+  assert.equal(canonicalOutputRefusal(
+    step(name, 1, "revalidation"), legacy.result.output, "revalidation-run", IMPLEMENTATION_HEAD,
+  ), null);
+  const wrongVersion = await persistRevalidationOutput(name, 2, true);
+  assert.match(persistenceRefusal(wrongVersion.result) ?? "", /violates schemaVersion 1/u);
+  assert.equal(wrongVersion.writes, 0);
+});
+
+test("current bare revalidation still requires v2 and routes its validated decision", async () => {
+  const name = "direct-engineer-workflow";
+  const legacy = await persistRevalidationOutput(name, 1);
+  assert.match(persistenceRefusal(legacy.result) ?? "", /violates schemaVersion 2/u);
+  assert.equal(legacy.writes, 0);
+  assert.equal(legacy.routeLookups, 0);
+  const missingRoute = await persistRevalidationOutput(name, 2);
+  assert.match(persistenceRefusal(missingRoute.result) ?? "", /route/u);
+  assert.equal(missingRoute.writes, 0);
+  const current = await persistRevalidationOutput(name, 2, true);
+  assert.ok("ok" in current.result && current.result.ok);
+  assert.equal(current.writes, 1);
+  assert.equal(current.routeLookups, 1);
+});
