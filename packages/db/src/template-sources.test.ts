@@ -9,7 +9,8 @@ import { test } from "node:test";
 import { z } from "zod";
 
 import { DIRECT_TEMPLATE_NAME, PR_TEMPLATE_NAME } from "./agent-contract.js";
-import { canonicalOutputSchema, canonicalOutputSchemas } from "./canonical-output-schema.js";
+import { canonicalOutputGeneration, canonicalOutputSchema, canonicalOutputSchemas } from "./canonical-output-schema.js";
+import { LEGACY_TEMPLATE_GENERATIONS, templateRolloverName } from "./canonical-template-transition.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
 import {
   retiredStepShapeDifferences,
@@ -723,4 +724,27 @@ test("one field table decides both row-vs-spec comparisons", async () => {
     retiredStepShapeDifferences({ ...persisted, optional: true, requiresCommit: false, provisionDependencies: true }, omitted),
     ["optional"],
   );
+});
+
+test("bare revalidation only selects v1 for complete historical Direct identities", () => {
+  for (const name of [
+    "direct-engineer-workflow",
+    "direct-engineer-workflow-legacy-pre-judged-implementation-route-",
+    "direct-engineer-workflow-legacy-future-generation-row",
+    "custom-legacy-pre-judged-implementation-route-row",
+  ]) {
+    assert.equal(canonicalOutputGeneration({ outputKind: "revalidation", taskTemplateName: name }), "v2");
+  }
+  const taskTemplateName = templateRolloverName("direct-engineer-workflow", "pre-judged-implementation-route", "row");
+  assert.equal(canonicalOutputGeneration({ outputKind: "revalidation-v2", taskTemplateName }), "v2");
+});
+
+test("registered pre-route Direct generations retain the v1 output protocol", () => {
+  for (const generation of LEGACY_TEMPLATE_GENERATIONS[DIRECT_TEMPLATE_NAME]) {
+    if (!generation.shape.some(({ outputKind }) => outputKind === "revalidation")) continue;
+    const taskTemplateName = templateRolloverName(DIRECT_TEMPLATE_NAME, generation.marker, "row");
+    assert.equal(canonicalOutputGeneration({ outputKind: "revalidation", taskTemplateName }), "v1");
+    assert.equal(canonicalOutputGeneration({ outputKind: "revalidation", taskTemplate: { name: taskTemplateName } }), "v1");
+    assert.equal(canonicalOutputGeneration({ outputKind: "revalidation-v2", taskTemplateName }), "v2");
+  }
 });

@@ -58,6 +58,8 @@ import type { PersistedTemplateStepStructure } from "./template-sources.js";
  */
 export type LegacyTemplateGeneration = Readonly<{
   marker: string;
+  /** Retained output protocols when a prompt changed without renaming its kind. */
+  outputGenerations?: Readonly<Record<string, string>>;
   shape: readonly LegacyStepRecord[];
   /**
    * Whether this entry is retired from structural matching because a binding
@@ -200,6 +202,7 @@ const legacyTemplateGenerations = {
       // revalidation node, so an unbound seven-step row still matches
       // `pre-revalidate-step` above and rolls over structurally as before.
       marker: "pre-product-rename-anneal",
+      outputGenerations: { revalidation: "v1" },
       promptDigest: "0aa379a51d722ec9b8b5d91bc6158d9dd9a1f5d380b50695613d5aece9afda46",
       shape: [
         { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
@@ -214,6 +217,7 @@ const legacyTemplateGenerations = {
     },
     {
       marker: "pre-runner-provided-regression-tooling",
+      outputGenerations: { revalidation: "v1" },
       promptDigest: "c0ec5acb70b82b85bc3f3aff5840029a303d31e6098b7171a2bef35f105f3371",
       shape: [
         { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
@@ -228,6 +232,7 @@ const legacyTemplateGenerations = {
     },
     {
       marker: "pre-optional-review-omission",
+      outputGenerations: { revalidation: "v1" },
       promptDigest: "e8fdf5533275e85e33b0cf812db9474b00214de2401e4c97bb6eb0732f864df8",
       shape: [
         { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
@@ -246,6 +251,7 @@ const legacyTemplateGenerations = {
       // reads bindings this states the current graph, so it is kept as the
       // published-generation record and excluded from matching.
       marker: "pre-astra-low-review-fix",
+      outputGenerations: { revalidation: "v1" },
       retiredByBinding: true,
       shape: [
         { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
@@ -260,6 +266,7 @@ const legacyTemplateGenerations = {
     },
     {
       marker: "model-neutral-review-step-names",
+      outputGenerations: { revalidation: "v1" },
       shape: [
         { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -278,6 +285,7 @@ const legacyTemplateGenerations = {
       // stopping. The graph is unchanged, so `promptDigest` authenticates
       // the outgoing generation.
       marker: "pre-salvage-resume",
+      outputGenerations: { revalidation: "v1" },
       promptDigest: "8dbdb5fc5348a01eef73bd5908c4e142b4b6ca01bbb063eaf4916173fdc51543",
       shape: [
         { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
@@ -294,6 +302,7 @@ const legacyTemplateGenerations = {
       // Prompt-only rollover: the revalidation step now records the judged
       // implementation route and requires the v2 output envelope.
       marker: "pre-judged-implementation-route",
+      outputGenerations: { revalidation: "v1" },
       promptDigest: "04d473928d65443202bd68b6d865df61f26983fc35870cf43e5032279e1ed107",
       shape: [
         { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
@@ -308,6 +317,7 @@ const legacyTemplateGenerations = {
     },
     {
       marker: "pre-model-neutral-review-output",
+      outputGenerations: { revalidation: "v1" },
       shape: [
         { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
