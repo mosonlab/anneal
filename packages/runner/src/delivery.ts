@@ -197,7 +197,6 @@ const pullRequestFromUrl = (stdout: string): { url: string; number: number } | n
 
 const PR_IMPLEMENTATION_KIND = "implementation";
 const PR_REVIEW_FINDINGS_KIND = "review-findings";
-const PR_LEGACY_REVIEW_FINDINGS_KIND = "sol-findings";
 const PR_BLIND_FINDINGS_KIND = "blind-findings";
 const PR_FIXED_IMPLEMENTATION_KIND = "fixed-implementation";
 
@@ -250,14 +249,11 @@ const isCanonicalPrFinal = (claim: DeliveryClaim): boolean => (
   canonicalPrOutputKind(claim) === PR_FIXED_IMPLEMENTATION_KIND
 );
 
-/** The handoff entry is already selected by the control plane. Preserve its
- * exact review output kind so both current and immutable legacy Chains remain
- * readable, while rejecting unrelated kinds at this seam. */
+/** The handoff entry is already selected by the control plane. Accept only the
+ * current review output kind at this publication seam. */
 const canonicalPrReviewKind = (output: PrHandoffOutput | undefined): PrHandoffKind | null => {
   if (!output) return null;
-  return output.kind === PR_REVIEW_FINDINGS_KIND || output.kind === PR_LEGACY_REVIEW_FINDINGS_KIND
-    ? output.kind
-    : null;
+  return output.kind === PR_REVIEW_FINDINGS_KIND ? output.kind : null;
 };
 
 const BRIEF_HEADER_PREFIX = "\n<!-- agentos:task-brief:v1 length=";
