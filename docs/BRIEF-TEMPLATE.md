@@ -33,7 +33,8 @@ behavior and the mechanism behind it, naming the actual code concepts
 repository without guessing.
 
 If the card will be dispatched after another card through an `afterTaskId`
-binding or a serial line declared in a wave plan, state the premises in
+binding or serialization by choice under
+[Dependency qualification](governance/task-routing-v1.md#backlog-card-lifecycle), state the premises in
 Background and Changes as of the moment that predecessor has merged, name the
 predecessor by card or branch, and do not use "until X lands", "until it lands",
 or "X has not landed" language about it.
@@ -44,7 +45,8 @@ A numbered list. Each item must be independently checkable against the diff:
 a reviewer should be able to tick it off or flag it missing. Name concrete
 fields, routes, and validation points. If an item has a non-obvious rule
 inside it (ordering, one-cut migration, a validation edge), state the rule in
-the item itself.
+the item itself. Apply the [predecessor-binding rule](#background) to premises
+in each item.
 
 ### Out of scope
 
