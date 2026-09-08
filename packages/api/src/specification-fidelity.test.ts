@@ -223,7 +223,8 @@ test("a read deadline overrun is transient and exhausts the bounded retry schedu
   assert.match(verdict?.message ?? "", /last failure: repository content read exceeded the 5ms server deadline/u);
 });
 
-test("a read slower than the first deadline but faster than the last succeeds within one claim", async () => {
+test("a read slower than the first deadline but faster than the last succeeds within one claim", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   assert.ok(
     SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS.every((timeoutMs, index) => (
       index === 0 || timeoutMs > SPECIFICATION_READ_ATTEMPT_TIMEOUTS_MS[index - 1]!
@@ -237,7 +238,11 @@ test("a read slower than the first deadline but faster than the last succeeds wi
   const readDurationMs = attemptTimeoutsMs[0]! + 8;
   assert.ok(readDurationMs < attemptTimeoutsMs.at(-1)!);
   let reads = 0;
-  const verdict = await verifyPreparedSpecification(
+  let firstReadStarted!: () => void;
+  const firstReadStartedPromise = new Promise<void>((resolve) => { firstReadStarted = resolve; });
+  let secondReadStarted!: () => void;
+  const secondReadStartedPromise = new Promise<void>((resolve) => { secondReadStarted = resolve; });
+  const verdict = verifyPreparedSpecification(
     {
       key: "key",
       repository: "acme/repo",
@@ -249,6 +254,8 @@ test("a read slower than the first deadline but faster than the last succeeds wi
     },
     { readFileAtCommit: async (_repository, _path, _commitSha, signal) => {
       reads += 1;
+      if (reads === 1) firstReadStarted();
+      if (reads === 2) secondReadStarted();
       return new Promise<Uint8Array>((resolve, reject) => {
         const timer = setTimeout(() => resolve(bytes("authoritative")), readDurationMs);
         signal.addEventListener("abort", () => {
@@ -260,7 +267,13 @@ test("a read slower than the first deadline but faster than the last succeeds wi
     new AbortController().signal,
     { retryDelaysMs: [0, 0], attemptTimeoutsMs, wait: async () => {} },
   );
-  assert.equal(verdict, null);
+  await firstReadStartedPromise;
+  assert.equal(reads, 1);
+  t.mock.timers.tick(attemptTimeoutsMs[0]!);
+  await secondReadStartedPromise;
+  assert.equal(reads, 2);
+  t.mock.timers.tick(readDurationMs);
+  assert.equal(await verdict, null);
   assert.equal(reads, 2);
 });
 

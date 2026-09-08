@@ -56,7 +56,7 @@ const finalOutputPayload = {
 };
 
 const eventDatabase = (options: {
-  finalOutputRows?: Array<{ payload: unknown }>;
+  usageRows?: Array<{ type: string; payload: unknown }>;
   onUsageUpdate?: () => void;
   stored?: Array<Record<string, unknown>>;
   sessionWrites?: Array<Record<string, unknown>>;
@@ -80,7 +80,7 @@ const eventDatabase = (options: {
         stored.push(...data);
         return { count: data.length };
       },
-      findMany: async () => options.finalOutputRows ?? [],
+      findMany: async () => options.usageRows ?? [],
     },
     session: {
       findUnique: async () => ({
@@ -390,7 +390,7 @@ test("events normalize and persist through the lifecycle interface without chang
 test("FINAL_OUTPUT recomputes derived usage through the lifecycle interface", async () => {
   const sessionWrites: Array<Record<string, unknown>> = [];
   const result = await appendRunEvents(eventDatabase({
-    finalOutputRows: [{ payload: finalOutputPayload }],
+    usageRows: [{ type: "FINAL_OUTPUT", payload: finalOutputPayload }],
     sessionWrites,
   }), { runId: "run-1", body: eventBody(["MODEL_COMPLETED", "FINAL_OUTPUT"]), now });
 
@@ -409,7 +409,7 @@ test("FINAL_OUTPUT recomputes derived usage through the lifecycle interface", as
 test("events without FINAL_OUTPUT do not touch derived usage", async () => {
   const sessionWrites: Array<Record<string, unknown>> = [];
   const result = await appendRunEvents(eventDatabase({
-    finalOutputRows: [{ payload: finalOutputPayload }],
+    usageRows: [{ type: "FINAL_OUTPUT", payload: finalOutputPayload }],
     sessionWrites,
   }), { runId: "run-1", body: eventBody(["MODEL_COMPLETED", "TOOL_STARTED"]), now });
 
@@ -438,7 +438,7 @@ test("a failing derived usage write does not fail event ingestion", async () => 
   console.error = (...args: unknown[]) => { errors.push(args); };
   try {
     const result = await appendRunEvents(eventDatabase({
-      finalOutputRows: [{ payload: finalOutputPayload }],
+      usageRows: [{ type: "FINAL_OUTPUT", payload: finalOutputPayload }],
       onUsageUpdate: () => { throw new Error("value out of range for type integer"); },
     }), { runId: "run-1", body: eventBody(["FINAL_OUTPUT"]), now });
     assert.deepEqual(result, { accepted: 1 });
