@@ -226,3 +226,14 @@ test("model capacity refusal uses the shared vocabulary and retries", async () =
   assert.equal(result, "fetched");
   assert.equal(calls, 2);
 });
+
+test("git push preserves deterministic refusal evidence in Error.name", async () => {
+  const error = new Error("request rejected");
+  error.name = "Unauthorized";
+  let calls = 0;
+  await assert.rejects(runWithNetworkRetry("git", ["push"], async () => {
+    calls += 1;
+    throw error;
+  }, { wait: async () => undefined }), (caught) => caught === error);
+  assert.equal(calls, 1);
+});

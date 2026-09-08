@@ -5,7 +5,7 @@ import { isCommandTimeout, KILL_OVERHEAD_MS } from "./exec.js";
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 const isDeterministicPushRefusal = (error: unknown): boolean =>
-  isDeterministicAccessRefusal(messageOf(error));
+  isDeterministicAccessRefusal(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
 
 export const isTransientNetworkError = (error: unknown): boolean => {
   // Our own per-command timeout is recognised by type, never by its wording.
