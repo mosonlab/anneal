@@ -9,6 +9,16 @@ written.
 
 ## Unreleased
 
+- Retired the temporary `sol-findings` execution alias for Step roles, repair
+  evidence and prior outputs, and PR handoff. Execution uses `review-findings`;
+  ordinary staffing carry reports the retired kind as unknown. Historical
+  Tasks, Runs, outputs, and reports remain readable without rewriting or deleting
+  rows, and template adoption and rollover mappings remain supported. The
+  retirement boundary was established on 2026-09-08: of 280 Chains carrying the
+  old kind, the only three unarchived unfinished Chains (word-factory
+  `3cd7177f`, `21cc2d0b`, `bb60e911`) were archived and re-created from current
+  templates. The 103 archived unfinished Chains are abandoned with no supported
+  retry or resume path; archived completed Chains remain readable.
 - The readiness `merge-executor-offline` recovery guidance now tells operators
   that the manual fallback to automatic re-arm is to retry the Regression
   task, opening a new Regression Run at full rerun cost. It also records
