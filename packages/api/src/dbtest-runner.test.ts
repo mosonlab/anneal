@@ -37,7 +37,7 @@ test("DBTEST-PROCESS preserves queue order, isolates files, and propagates failu
   assert.equal(invoke([join(directory, "missing.mjs")]).status, 1);
 });
 
-test("DBTEST-PROCESS aborts its live file child before returning a signal status", async (t) => {
+test("DBTEST-PROCESS aborts its live file child before returning a signal status", { timeout: 45_000 }, async (t) => {
   const directory = mkdtempSync(join(tmpdir(), "agentos-dbtest-signal-"));
   const ready = join(directory, "ready");
   const entry = join(directory, "pending.mjs");
