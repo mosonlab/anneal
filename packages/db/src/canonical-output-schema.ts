@@ -64,12 +64,16 @@ export const canonicalFixedImplementationArtifactSchema = canonicalEnvelope.exte
   residualRisks: z.array(z.string()),
 });
 
-/** The bound Direct revalidation decision, including the implementation route. */
-export const canonicalRevalidationArtifactSchema = canonicalEnvelope.extend({
-  schemaVersion: z.literal(2),
+/** The retained revalidation contract on pre-route Direct Chains. */
+const legacyRevalidationArtifactSchema = canonicalEnvelope.extend({
   outcome: z.enum(["updated", "unchanged", "proceeded-after-premise-collapse"]),
   summary: nonEmptyString,
   changedReferences: stringList,
+});
+
+/** The bound Direct revalidation decision, including the implementation route. */
+export const canonicalRevalidationArtifactSchema = legacyRevalidationArtifactSchema.extend({
+  schemaVersion: z.literal(2),
   route: z.object({
     tier: z.enum(["default", "frontend", "hard", "hazard"]),
     reason: nonEmptyString,
@@ -88,6 +92,7 @@ export const canonicalOutputSchemas: Readonly<Partial<Record<StepRole, SchemaByG
     v1: canonicalEnvelope.extend({ spec: nonEmptyString }),
   },
   revalidation: {
+    v1: legacyRevalidationArtifactSchema,
     v2: canonicalRevalidationArtifactSchema,
   },
   plan: {
@@ -197,8 +202,6 @@ export const canonicalOutputSchemas: Readonly<Partial<Record<StepRole, SchemaByG
 export const canonicalOutputSchema = (step: TemplateStepLike): z.ZodType | null => {
   const role = stepRole(step);
   if (role === null) return null;
-  // Template rollovers preserve an output protocol unless outputKind itself
-  // changes; the bare revalidation kind is the one explicit v2 exception.
   const generation = stepGeneration(step);
   return canonicalOutputSchemas[role]?.[generation] ?? null;
 };

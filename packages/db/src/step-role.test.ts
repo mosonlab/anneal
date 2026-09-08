@@ -43,8 +43,9 @@ for (const [templateName, generations] of Object.entries(LEGACY_TEMPLATE_GENERAT
       const persistedName = templateRolloverName(templateName, generation.marker, "template-row");
       for (const step of generation.shape) {
         const { outputKind } = step;
-        assert.equal(stepGeneration({ outputKind, taskTemplateName: persistedName }), stepGeneration({ outputKind }));
-        assert.equal(stepGeneration({ outputKind, taskTemplate: { name: persistedName } }), stepGeneration({ outputKind }));
+        const generation = outputKind === "revalidation" ? "v1" : stepGeneration({ outputKind });
+        assert.equal(stepGeneration({ outputKind, taskTemplateName: persistedName }), generation);
+        assert.equal(stepGeneration({ outputKind, taskTemplate: { name: persistedName } }), generation);
         assert.equal(stepRole({ outputKind, taskTemplateName: persistedName }), EXPECTED_ROLES[outputKind]);
       }
       const implementation = { outputKind: "implementation", taskTemplate: { name: persistedName } };
@@ -128,8 +129,21 @@ test("step-role is a leaf module, so no sibling can close an import cycle throug
   // `stepGeneration` used to resolve a retired graph marker through
   // `canonical-template-transition.js`, which imports `stepRole` back: an ESM
   // cycle whose evaluation order decided whether either module saw the other's
-  // bindings. The branch is gone and the fix is structural — this module must
-  // stay importless, so a future edit cannot reintroduce the cycle silently.
+  // bindings. Generation compatibility must stay importless, so a future
+  // edit cannot reintroduce the cycle silently.
   const source = await readFile(new URL("./step-role.ts", import.meta.url), "utf8");
   assert.deepEqual(source.match(/^(?:\s*import\b|\s*export\b[^;]*\bfrom\b)|\bimport\s*\(/gmu), null);
+});
+
+test("bare revalidation only selects v1 for complete historical Direct identities", () => {
+  for (const name of [
+    "direct-engineer-workflow",
+    "direct-engineer-workflow-legacy-pre-judged-implementation-route-",
+    "direct-engineer-workflow-legacy-future-generation-row",
+    "custom-legacy-pre-judged-implementation-route-row",
+  ]) {
+    assert.equal(stepGeneration({ outputKind: "revalidation", taskTemplateName: name }), "v2");
+  }
+  const taskTemplateName = templateRolloverName("direct-engineer-workflow", "pre-judged-implementation-route", "row");
+  assert.equal(stepGeneration({ outputKind: "revalidation-v2", taskTemplateName }), "v2");
 });

@@ -46,12 +46,30 @@ export const stepRole = (step: TemplateStepLike): StepRole | null => {
   return OUTPUT_KIND_ROLES[normalizedOutputKind] ?? null;
 };
 
-/** A Step's output protocol generation is the `-vN` suffix on its output kind,
- *  except for the bare revalidation kind, whose required route decision is the
- *  v2 contract without changing the kind used to identify the step. The
- *  `taskTemplate` fields stay on `TemplateStepLike` for role predicates that
- *  still read them. */
+// These retired Direct templates keep their v1 prompt and instantiated Steps.
+// Keep this closed list here: importing the transition registry would create a
+// cycle through its structural role checks. Future rollovers default to v2.
+const REVALIDATION_V1_TEMPLATE_MARKERS = [
+  "pre-product-rename-anneal",
+  "pre-runner-provided-regression-tooling",
+  "pre-optional-review-omission",
+  "pre-astra-low-review-fix",
+  "model-neutral-review-step-names",
+  "pre-salvage-resume",
+  "pre-model-neutral-review-output",
+  "pre-judged-implementation-route",
+] as const;
+
+/** Explicit output-kind versions take precedence. Bare revalidation is v2,
+ * except on the closed set of retired Direct templates whose prompt is v1. */
 export const stepGeneration = (step: TemplateStepLike): string => {
-  if (step.outputKind === "revalidation") return "v2";
+  if (step.outputKind === "revalidation") {
+    const name = step.taskTemplate?.name ?? step.taskTemplateName;
+    const legacy = name && REVALIDATION_V1_TEMPLATE_MARKERS.some((marker) => {
+      const prefix = `direct-engineer-workflow-legacy-${marker}-`;
+      return name.startsWith(prefix) && name.length > prefix.length;
+    });
+    return legacy ? "v1" : "v2";
+  }
   return step.outputKind.match(VERSION_SUFFIX)?.[1] ?? "v1";
 };
