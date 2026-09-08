@@ -72,6 +72,7 @@ type TrainHooks = {
   candidates(db: PrismaClient, pageSize: number): AsyncGenerator<ReadinessCandidate>;
   discover(db: PrismaClient, task: ReadinessCandidate, now: Date): Promise<ReadinessDiscovery>;
   read(db: PrismaClient, task: ReadinessCandidate, now: Date): Promise<ReadinessRead>;
+  refuse(read: ClaimedReadiness, decision: Extract<ReadinessDecision, { kind: "stop" | "requeue-regression" }>): ReadinessSettlement;
   authorize(read: ClaimedReadiness, decision: Extract<ReadinessDecision, { kind: "authorize" }>, train: TrainAuthorization): ReadinessSettlement;
   single(db: PrismaClient, read: ClaimedReadiness, decision: ReadinessDecision, result: ReadinessTickResult,
     release: ReleaseMergeLease, lease: WithMergeLease, reader: PullRequestReader): Promise<void>;
@@ -491,17 +492,16 @@ const settleTrain = async (
     const bindingFailure = trainRecordBindingFailure(record, train, await liveBase(reader, reads[0]!));
     if (bindingFailure) throw new Error(bindingFailure);
     const decisions: ReadinessDecision[] = [];
-    for (const [index, read] of reads.entries()) {
+    for (const read of reads) {
       const decision = await evaluateReadiness(reader, { ...read.input,
         regression: { ...read.input.regression, baseHeadSha: record.baseSha },
         train: { baseSha: record.baseSha, candidateHeadSha: read.input.regression.headSha },
       });
-      // A stale base observed anywhere invalidates the whole record. Other
-      // refusals abort only inside the passing prefix: candidate-local trailing
-      // refusals leave that candidate ready without discarding its peers.
-      if ((decision.kind === "requeue-regression" && decision.condition === "train-base-stale")
-        || (decision.kind !== "authorize" && index < record.contiguousPassCount)) {
-        throw new Error(`Merge train second read refused ${read.readiness.id}: ${decision.kind}${"reason" in decision ? `: ${decision.reason}` : "evidence" in decision ? `: ${decision.evidence}` : ""}`);
+      // Base movement invalidates the cumulative record, not the candidate's
+      // Regression. Candidate-local refusals must settle below so an old PASS
+      // cannot form the same failing train again on the next tick.
+      if (decision.kind === "requeue-regression" && decision.condition === "train-base-stale") {
+        throw new Error(`Merge train second read refused ${read.readiness.id}: ${decision.kind}: ${decision.reason}`);
       }
       decisions.push(decision);
     }
@@ -513,6 +513,35 @@ const settleTrain = async (
       if ((await readLatestMarker(tx, train.taskId, "train"))?.state !== "queued") return { authorized: 0, stopped: 0, requeued: 0 };
       for (const read of reads) {
         if (!await evidenceStillMatches(tx, read)) throw new Error(`Merge train candidate ${read.readiness.id} evidence changed during settlement`);
+      }
+      const passingRefusal = decisions.slice(0, record.contiguousPassCount)
+        .find((decision) => decision.kind !== "authorize");
+      if (passingRefusal) {
+        const refusedRead = reads[decisions.indexOf(passingRefusal)]!;
+        const reason = `Merge train second read refused ${refusedRead.readiness.id}: ${passingRefusal.kind}${"reason" in passingRefusal ? `: ${passingRefusal.reason}` : "evidence" in passingRefusal ? `: ${passingRefusal.evidence}` : ""}`;
+        let stopped = 0;
+        let requeued = 0;
+        for (const [index, read] of reads.entries()) {
+          const decision = decisions[index]!;
+          if (decision.kind === "stop" || decision.kind === "requeue-regression") {
+            // Invoke only the settlement body: this transaction already owns
+            // candidate locks and the train owns the one external Merge Lease.
+            const applied = await hooks.refuse(read, decision).body(tx, read.claim);
+            if (!applied.value.applied) throw new Error(`Merge train readiness claim lost for ${read.readiness.id}`);
+            if (decision.kind === "stop" || applied.value.stopped) stopped += 1;
+            else requeued += 1;
+          } else {
+            const applied = await read.claim.settle(tx, { kind: "finish", at: now, apply: async (client) => {
+              await client.task.update({ where: { id: read.readiness.id }, data: { status: TaskStatus.TODO, failureReason: null } });
+              return { value: undefined, ownership: "released" };
+            } });
+            if (!applied.settled) throw new Error(`Merge train readiness claim lost for ${read.readiness.id}`);
+          }
+          await noticeMergeTrainAbort(tx, { readinessTaskId: read.readiness.id, trainTaskId: train.taskId, reason, now });
+          await candidateSettlementMarker(tx, train, index + 1, "aborted", reason);
+        }
+        await finishTrainMarker(tx, train, "aborted", reason, now);
+        return { authorized: 0, stopped, requeued };
       }
       // The approval gate applies per candidate, so one unapproved candidate
       // truncates the prefix here instead of discarding the whole train: the
@@ -548,6 +577,7 @@ const settleTrain = async (
       const summaries: string[] = [];
       let failed = false;
       let stopped = 0;
+      let requeued = 0;
       for (const [index, read] of reads.entries()) {
         const prefix = record.prefixes[index];
         let settlement = "ready";
@@ -582,6 +612,12 @@ const settleTrain = async (
             { verdict: prefix?.verdict ?? "skipped", ...(prefix ? { predecessorOid: prefix.predecessorOid } : {}) });
           summaries.push(`${index + 1}. ${read.readiness.id}: ${prefix?.verdict ?? "skipped"} → ${settlement}`);
           continue;
+        } else if (decision?.kind === "stop" || decision?.kind === "requeue-regression") {
+          const applied = await hooks.refuse(read, decision).body(tx, read.claim);
+          if (!applied.value.applied) throw new Error(`Merge train readiness claim lost for ${read.readiness.id}`);
+          settlement = decision.kind === "stop" || applied.value.stopped ? "stopped" : "requeued";
+          if (settlement === "stopped") stopped += 1;
+          else requeued += 1;
         } else {
           // A gate refusal truncates the published prefix at its position, so
           // every later prefix was gated against a predecessor this settlement
@@ -623,7 +659,7 @@ const settleTrain = async (
         summaries.push(`${index + 1}. ${read.readiness.id}: ${verdict} → ${settlement}`);
       }
       await finishTrainMarker(tx, train, "settled", summaries.join("\n"), now);
-      return { authorized: authorizedCount, stopped, requeued: 0 };
+      return { authorized: authorizedCount, stopped, requeued };
     }, serializable);
     result.authorized += counts.authorized;
     result.stopped += counts.stopped;
@@ -697,7 +733,10 @@ export const mergeTrainReadinessTick = async (
       const fallback: DiscoveredCandidate[] = [];
       for await (const candidate of hooks.candidates(db, Math.max(limit * 20, 100))) {
         if (!isMergeReadinessStep(candidate.templateStep)) continue;
-        if ((candidate.repoId && busyRepos.has(candidate.repoId)) || await excludedRecovery(db, candidate.id)) continue;
+        // REVIEW candidates must reach read(): an executor-offline ceiling
+        // parked their recovery in BLOCKED_DOWNSTREAM, which read can re-arm.
+        if (candidate.repoId && busyRepos.has(candidate.repoId)) continue;
+        if (candidate.status !== TaskStatus.REVIEW && await excludedRecovery(db, candidate.id)) continue;
         const discovery = await hooks.discover(db, candidate, now);
         const entry = { candidate, discovery };
         if (discovery.input.stage === "ready" && candidate.repoId && discovery.input.target.resolved) {
@@ -835,7 +874,9 @@ export const mergeTrainReadinessTick = async (
       // single-candidate tick; a formed train is bounded by `width` instead.
       if (result.claimed >= limit) break;
       if (!isMergeReadinessStep(candidate.templateStep)) continue;
-      if ((candidate.repoId && busyRepos.has(candidate.repoId)) || await excludedRecovery(db, candidate.id)) continue;
+      if (candidate.repoId && busyRepos.has(candidate.repoId)) continue;
+      // Keep the same re-arm path while draining trains after width is disabled.
+      if (candidate.status !== TaskStatus.REVIEW && await excludedRecovery(db, candidate.id)) continue;
       const read = await hooks.read(db, candidate, now);
       if (!read.claimed) continue;
       result.claimed += 1;

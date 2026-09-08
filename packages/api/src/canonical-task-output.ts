@@ -14,6 +14,7 @@ import {
   RunStatus,
   runOwnedHead,
   stepRole,
+  canonicalOutputGeneration,
   type CanonicalClosedReviewArtifact,
   type CanonicalFixedImplementationArtifact,
   type CanonicalReviewArtifact,
@@ -358,7 +359,7 @@ export const canonicalBodyRefusal = (
       : "";
     const schemaVersion = kind === REGRESSION_VERIFICATION_OUTPUT_KIND
       ? REGRESSION_VERIFICATION_SCHEMA_VERSION
-      : kind === "revalidation" ? 2 : 1;
+      : Number(canonicalOutputGeneration(step).slice(1));
     return `${kind} task output body violates schemaVersion ${String(schemaVersion)} at ${first?.location ?? "body"}: ${first?.message ?? "invalid value"}${additional}`;
   }
   const bodyHead = (parsed.data as { headSha: string }).headSha;
@@ -564,7 +565,7 @@ export const persistSessionTaskOutput = async (
     }
   }
 
-  if (step && isRevalidationStep(step)) {
+  if (step && isRevalidationStep(step) && canonicalOutputGeneration(step) === "v2") {
     const artifact = JSON.parse(input.body) as { route: Parameters<typeof applyRevalidationRoute>[2] };
     await applyRevalidationRoute(tx, task.id, artifact.route);
   }

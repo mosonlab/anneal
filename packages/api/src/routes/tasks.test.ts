@@ -1738,3 +1738,53 @@ test("operator output PUT refuses overwriting archived historical review reports
     assert.deepEqual(stored, before);
   });
 });
+
+test("operator revalidation output respects the persisted template protocol", async () => {
+  await withTokens(async () => {
+    for (const [templateName, schemaVersion, includeRoute, expectedStatus, expectedRoutes] of [
+      ["direct-engineer-workflow-legacy-pre-judged-implementation-route-row", 1, false, 200, 0],
+      ["direct-engineer-workflow", 1, false, 409, 0],
+      ["direct-engineer-workflow", 2, false, 409, 0],
+      ["direct-engineer-workflow", 2, true, 200, 1],
+    ] as const) {
+      let routeLookups = 0;
+      let writes = 0;
+      const tx = {
+        $queryRaw: async () => [{ id: "task-1" }],
+        task: {
+          findUnique: async ({ select }: { select: Record<string, unknown> }) => {
+            if (select.templateId) { routeLookups += 1; return null; }
+            return { id: "task-1", projectId: "project-1", chainId: null };
+          },
+          findUniqueOrThrow: async () => ({ templateStep: {
+            outputKind: "revalidation", stepIndex: 1, taskTemplate: { name: templateName },
+          } }),
+        },
+        taskStepOutput: {
+          findUnique: async () => null,
+          upsert: async ({ create }: { create: Record<string, unknown> }) => {
+            writes += 1;
+            return { id: "output", ...create, metadata: null };
+          },
+        },
+      };
+      const database = {
+        ...tx, $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+      } as unknown as PrismaClient;
+      const response = await createApp(database).request("/tasks/task-1/output", {
+        method: "PUT",
+        headers: { Authorization: "Bearer operator-unit-token", "Content-Type": "application/json" },
+        body: JSON.stringify({
+          kind: "revalidation", commitSha: "a".repeat(40),
+          body: JSON.stringify({
+            schemaVersion, headSha: "a".repeat(40), outcome: "unchanged", summary: "Still valid", changedReferences: [],
+            ...(includeRoute ? { route: { tier: "default", reason: "No escalation criterion applies" } } : {}),
+          }),
+        }),
+      });
+      assert.equal(response.status, expectedStatus, await response.text());
+      assert.equal(writes, expectedStatus === 200 ? 1 : 0);
+      assert.equal(routeLookups, expectedRoutes);
+    }
+  });
+});

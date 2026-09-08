@@ -254,6 +254,8 @@ own. The board holds either the card or its chain, never both.
   or co-dispatched chain and select exactly one dependency outcome. Parallel is
   the default. Bind with `afterTaskId` only for a true dependency; serialize by
   choice only for heavy overlap or a concurrent migration.
+  When qualifying dependencies, check the brief's premises against the
+  predecessor's merged outcome using the [brief template's predecessor-binding rule](../BRIEF-TEMPLATE.md#background).
   1. True dependency: this chain reads code the other merges, or the other
      must be deployed before this chain can be verified. Bind with
      `afterTaskId` and record `Depends on: <chain> — <what is consumed or why deploy-first>` in the instantiate description or card activity log. A

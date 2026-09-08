@@ -33,6 +33,7 @@ import {
   stopStateFor,
   sumUsageCosts,
   stepRole,
+  canonicalOutputGeneration,
   TaskStatus,
   taskIsIntegratorStep,
   type ChainControlAddress,
@@ -1047,8 +1048,10 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         if (body.kind !== "revalidation") return refusal("conflict", "task_output kind must be revalidation for this canonical step");
         const invalid = canonicalBodyRefusal(task.templateStep, body.body, body.commitSha ?? null, null);
         if (invalid) return refusal("conflict", invalid);
-        const artifact = JSON.parse(body.body) as { route: Parameters<typeof applyRevalidationRoute>[2] };
-        await applyRevalidationRoute(tx, taskId, artifact.route);
+        if (canonicalOutputGeneration(task.templateStep) === "v2") {
+          const artifact = JSON.parse(body.body) as { route: Parameters<typeof applyRevalidationRoute>[2] };
+          await applyRevalidationRoute(tx, taskId, artifact.route);
+        }
       }
       const output = await tx.taskStepOutput.upsert({
         where: { taskId },

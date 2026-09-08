@@ -44,11 +44,8 @@ export const stepRole = (step: TemplateStepLike): StepRole | null => {
   return OUTPUT_KIND_ROLES[normalizedOutputKind] ?? null;
 };
 
-/** A Step's output protocol generation is the `-vN` suffix on its output kind,
- *  except for the bare revalidation kind, whose required route decision is the
- *  v2 contract without changing the kind used to identify the step. The
- *  `taskTemplate` fields stay on `TemplateStepLike` for role predicates that
- *  still read them. */
+/** The output-kind protocol version. Bare revalidation defaults to v2;
+ * canonicalOutputGeneration resolves retained template-specific contracts. */
 export const stepGeneration = (step: TemplateStepLike): string => {
   if (step.outputKind === "revalidation") return "v2";
   return step.outputKind.match(VERSION_SUFFIX)?.[1] ?? "v1";
