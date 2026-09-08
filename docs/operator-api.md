@@ -2918,14 +2918,17 @@ curl "$BASE_URL/tasks/$TASK_ID/output" -H "Authorization: Bearer $OPERATOR_TOKEN
 - Required path parameter: `taskId`.
 - Required JSON fields: `kind`, `body`.
 - Optional JSON fields: `fencingToken`, `metadata`, `commitSha`.
-- When `kind` is `revalidation`, `body` must be the canonical version-2
+- On current Direct Steps, when `kind` is `revalidation`, `body` must be the canonical version-2
   revalidation object, including `schemaVersion`, `headSha`, `outcome`,
   `summary`, `changedReferences`, and a `route` object with one of the four
   tiers (`default`, `frontend`, `hard`, or `hazard`) and a non-empty reason.
   Version-1 bodies, missing routes, unknown tiers, and empty reasons are
-  rejected; the output kind and body schema must agree.
+  rejected; the output kind and body schema must agree. Retired Direct Chains
+  from before judged implementation routing retain their version-1 contract
+  without a route, selected by the persisted template generation. Their output
+  preserves the implementation assignee. The same rule applies to session output.
 - For a direct Chain's Route-less implementation Task with no Run, storing a
-  valid revalidation output applies the selected staffing profile's tier slot
+  valid version-2 revalidation output applies the selected staffing profile's tier slot
   to that Task in the same transaction. A Route line or explicit implementation
   `stepOverrides` assignee wins and is recorded as an override; an empty slot,
   an existing Run, or a missing Repo `GIT_WRITE` grant is recorded in the Task's
