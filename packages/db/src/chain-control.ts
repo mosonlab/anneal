@@ -12,7 +12,7 @@ import {
 } from "./chain-activation.js";
 import { heldBeforeFirstLayer } from "./chain-hold.js";
 import { compare, denseOrdinals, layerOf } from "./chain-order.js";
-import { enqueueTaskRunInternal, errorForOpenRunRefusal, parksInsteadOfRaising, recordRunBirthRefusal } from "./run-open.js";
+import { enqueueTaskRunInternal, settleRunBirthRefusal } from "./run-open.js";
 import { lockAgentRepoGrant, lockChainRows, lockChainStructure } from "./locks.js";
 import { markerFromMetadata } from "./merge-tail-markers.js";
 import {
@@ -661,13 +661,14 @@ export const resumeChain = async (
         if (hasSavepoint) {
           await rawTx.$executeRawUnsafe!(`ROLLBACK TO SAVEPOINT ${savepoint}`);
           await rawTx.$executeRawUnsafe!(`RELEASE SAVEPOINT ${savepoint}`);
-          // After the rollback, so the park survives the discarded births.
-          if (parksInsteadOfRaising(opened.refusal)) {
-            await recordRunBirthRefusal(tx, task.id, opened.refusal);
-          }
+          // Settlement follows rollback so the park survives discarded births.
+          const settlement = await settleRunBirthRefusal(tx, {
+            taskId: task.id, refusal: opened.refusal, mode: "raise", origin: { kind: "chain-resume" }, now,
+          });
+          if (settlement.kind === "raise") throw settlement.error;
           return refusal("conflict", opened.refusal.message);
         }
-        throw errorForOpenRunRefusal(opened.refusal);
+        throw new Error("Chain resume cannot settle a refused Run birth without its savepoint");
       }
       if (task.status === TaskStatus.BACKLOG) {
         await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.TODO } });

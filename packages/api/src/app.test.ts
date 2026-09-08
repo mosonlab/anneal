@@ -150,7 +150,7 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
       },
       taskActivity: { findMany: async () => [], create: async () => ({}) },
       mergeLeaseEvent: { findMany: async () => [] },
-      inboxMessage: { create: async () => ({}) },
+      inboxMessage: { create: async () => ({}), upsert: async () => ({}) },
     }),
   } as unknown as PrismaClient;
   assert.equal(await reconcileDatabaseRuns(database, now), 1);
