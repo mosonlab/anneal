@@ -219,7 +219,7 @@ export const openMergeTailStopNotice = async (
  * serializes the marker lookup and write inside the authorization transaction,
  * so re-evaluating the same head leaves the original activity alone.
  */
-export const openDefenseAuditNotice = async (
+export const recordDefenseAudit = async (
   tx: DbTx,
   input: {
     readinessTaskId: string;
@@ -233,7 +233,7 @@ export const openDefenseAuditNotice = async (
       taskId: input.readinessTaskId,
       actorType: "control-plane",
       AND: [
-        { metadata: { path: ["kind"], equals: "defenseAudit" } },
+        { metadata: { path: ["kind"], equals: "mergeTail.defenseAudit" } },
         { metadata: { path: ["headSha"], equals: input.headSha } },
       ],
     },
@@ -250,7 +250,8 @@ export const openDefenseAuditNotice = async (
     actorType: "control-plane",
     body,
     metadata: {
-      kind: "defenseAudit",
+      kind: "mergeTail.defenseAudit",
+      schemaVersion: 1,
       headSha: input.headSha,
       baseSha: input.baseSha,
       triggers: input.triggers,

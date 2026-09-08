@@ -878,9 +878,8 @@ adds eight migrations.
   live legacy recovery sentinel is retired.
 - The autonomous merge tail no longer holds a merge for an independent review
   of a defense-list diff. Defense-list detection stays as an audit record: a
-  match writes one control-plane TaskActivity on the readiness Step naming the
-  triggered paths and reasons, and the merge proceeds without creating an
-  Inbox message.
+  match writes one inbox message naming the triggered paths and reasons, and
+  the merge proceeds.
 - **The Ed25519 release-authority attestation layer is removed whole** — the
   signing and verification module, the mint and check scripts, the tracked key
   and attestation, the preflight `authority` condition, the resign worker, and

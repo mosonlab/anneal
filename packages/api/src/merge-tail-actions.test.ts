@@ -14,7 +14,7 @@ import {
   activeRepairRecoverySourceRun,
   handleRegressionCompletion,
   repairBindingMismatchAtOpen,
-  openDefenseAuditNotice,
+  recordDefenseAudit,
   openMergeTailStopNotice,
   settleMergeTailCompletion,
   stopMergeTail,
@@ -441,17 +441,26 @@ test("openMergeTailStopNotice derives its dedupe key from the task and reason", 
   });
 });
 
-test("openDefenseAuditNotice records one control-plane activity per readiness task and head", async () => {
+test("recordDefenseAudit records one control-plane activity per readiness task and head", async () => {
   const activities: Array<{ taskId: string; actorType: string; body: string; metadata: Record<string, unknown> }> = [];
   const tx = {
     taskActivity: {
       findFirst: async ({ where }: { where: Prisma.TaskActivityWhereInput }) => {
-        assert.equal(where.actorType, "control-plane");
-        const filters = where.AND as Array<{ metadata: { path: string[]; equals: unknown } }>;
-        assert.deepEqual(filters.map((filter) => filter.metadata.path), [["kind"], ["headSha"]]);
-        assert.equal(filters[0]!.metadata.equals, "defenseAudit");
-        return activities.find((activity) => activity.taskId === where.taskId
-          && filters.every((filter) => activity.metadata[filter.metadata.path[0]!] === filter.metadata.equals)) ?? null;
+        const matches = (activity: typeof activities[number], predicate: Prisma.TaskActivityWhereInput): boolean =>
+          Object.entries(predicate).every(([key, value]) => {
+            if (key === "AND") {
+              const clauses = Array.isArray(value) ? value : [value];
+              return clauses.every((clause) => matches(activity, clause as Prisma.TaskActivityWhereInput));
+            }
+            if (key === "metadata") {
+              const filter = value as { path: string[]; equals: unknown };
+              const actual = filter.path.reduce<unknown>((current, part) =>
+                (current as Record<string, unknown>)[part], activity.metadata);
+              return actual === filter.equals;
+            }
+            return activity[key as keyof typeof activity] === value;
+          });
+        return activities.find((activity) => matches(activity, where)) ?? null;
       },
       create: async ({ data }: { data: typeof activities[number] }) => {
         activities.push(data);
@@ -472,7 +481,7 @@ test("openDefenseAuditNotice records one control-plane activity per readiness ta
     ],
   };
 
-  await openDefenseAuditNotice(tx, input);
+  await recordDefenseAudit(tx, input);
   assert.deepEqual(activities, [{
     taskId: input.readinessTaskId,
     actorType: "control-plane",
@@ -481,14 +490,14 @@ test("openDefenseAuditNotice records one control-plane activity per readiness ta
       `Exact range ${input.baseSha}..${input.headSha}.`,
       "- packages/api/src/app.ts (merge-tail-machinery)\n- scripts/gate-worker/run.sh (gate-worker)",
     ].join("\n\n"),
-    metadata: { kind: "defenseAudit", headSha: input.headSha, baseSha: input.baseSha, triggers: input.triggers },
+    metadata: { kind: "mergeTail.defenseAudit", schemaVersion: 1, headSha: input.headSha, baseSha: input.baseSha, triggers: input.triggers },
   }]);
-  await openDefenseAuditNotice(tx, input);
-  await openDefenseAuditNotice(tx, { ...input, baseSha: "c".repeat(40) });
+  await recordDefenseAudit(tx, input);
+  await recordDefenseAudit(tx, { ...input, baseSha: "c".repeat(40) });
   assert.equal(activities.length, 1, "same task and head retains the original audit even if the base changes");
   assert.equal(activities[0]!.metadata.baseSha, input.baseSha);
-  await openDefenseAuditNotice(tx, { ...input, headSha: "d".repeat(40) });
-  await openDefenseAuditNotice(tx, { ...input, readinessTaskId: "readiness-task-2" });
+  await recordDefenseAudit(tx, { ...input, headSha: "d".repeat(40) });
+  await recordDefenseAudit(tx, { ...input, readinessTaskId: "readiness-task-2" });
   assert.equal(activities.length, 3, "different heads and readiness tasks have their own audits");
 });
 

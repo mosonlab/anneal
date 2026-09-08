@@ -479,12 +479,13 @@ test("a defense-list diff authorizes the merge and leaves one audit activity beh
   const audits = await db.taskActivity.findMany({ where: {
     taskId: seeded.readiness.id,
     actorType: "control-plane",
-    metadata: { path: ["kind"], equals: "defenseAudit" },
+    metadata: { path: ["kind"], equals: "mergeTail.defenseAudit" },
   } });
   assert.equal(audits.length, 1);
   const audit = audits[0]!;
   assert.deepEqual(audit.metadata, {
-    kind: "defenseAudit",
+    kind: "mergeTail.defenseAudit",
+    schemaVersion: 1,
     headSha: HEAD,
     baseSha: BASE,
     triggers: [{ path: "scripts/merge-gate.sh", reason: "merge-tail-machinery" }],
@@ -517,7 +518,7 @@ test("a re-evaluated head writes the audit activity once", async () => {
     taskId: seeded.readiness.id,
     actorType: "control-plane",
     AND: [
-      { metadata: { path: ["kind"], equals: "defenseAudit" } },
+      { metadata: { path: ["kind"], equals: "mergeTail.defenseAudit" } },
       { metadata: { path: ["headSha"], equals: HEAD } },
     ],
   } }), 1);

@@ -18,8 +18,8 @@ Retired:
   review-driven follow-up cards. Defense-list detection survives but is
   audit-only: when a diff touches a defense-list path, merge readiness writes
   one control-plane TaskActivity on the readiness Step naming the exact range,
-  triggered paths, and reasons. Its metadata has kind `defenseAudit` and
-  carries `headSha`, `baseSha`, and `triggers`; it is idempotent for
+  triggered paths, and reasons. Its metadata has kind `mergeTail.defenseAudit`
+  and `schemaVersion: 1`, and carries `headSha`, `baseSha`, and `triggers`; it is idempotent for
   `(readinessTaskId, headSha)`, creates no Inbox message, and the merge
   proceeds unblocked. Nothing in the tail blocks on a review any more. (This
   is unrelated to the in-chain review template steps `code-review-sol` and
