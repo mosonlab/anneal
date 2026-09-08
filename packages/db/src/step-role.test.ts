@@ -26,7 +26,6 @@ const EXPECTED_ROLES: Readonly<Record<string, StepRole>> = {
   "revised-plan": "revised-plan",
   "must-fix": "must-fix",
   implementation: "implementation",
-  "sol-findings": "review-findings",
   "review-findings": "review-findings",
   "blind-findings": "blind-findings",
   "fixed-implementation": "fixed-implementation",
@@ -37,6 +36,11 @@ const EXPECTED_ROLES: Readonly<Record<string, StepRole>> = {
   "merge-result": "integrator",
 };
 
+// The first direct legacy generation is the persisted graph whose review kind
+// predates the model-neutral review output contract. Keep the fixture as the
+// source of this historical kind so this test does not re-register it.
+const legacyReviewOutputKind = LEGACY_TEMPLATE_GENERATIONS["direct-engineer-workflow"][0]!.shape[1]!.outputKind;
+
 for (const [templateName, generations] of Object.entries(LEGACY_TEMPLATE_GENERATIONS)) {
   for (const generation of generations) {
     test(`${templateName} ${generation.marker} exposes every registered Step role`, () => {
@@ -46,7 +50,11 @@ for (const [templateName, generations] of Object.entries(LEGACY_TEMPLATE_GENERAT
         const generation = stepGeneration({ outputKind });
         assert.equal(stepGeneration({ outputKind, taskTemplateName: persistedName }), generation);
         assert.equal(stepGeneration({ outputKind, taskTemplate: { name: persistedName } }), generation);
-        assert.equal(stepRole({ outputKind, taskTemplateName: persistedName }), EXPECTED_ROLES[outputKind]);
+        if (outputKind === legacyReviewOutputKind) {
+          assert.equal(stepRole({ outputKind, taskTemplateName: persistedName }), null);
+        } else {
+          assert.equal(stepRole({ outputKind, taskTemplateName: persistedName }), EXPECTED_ROLES[outputKind]);
+        }
       }
       const implementation = { outputKind: "implementation", taskTemplate: { name: persistedName } };
       assert.equal(isCompoundImplementationStep(implementation), templateName === "compound-engineer-workflow");
@@ -75,6 +83,10 @@ test("role normalization is generation-independent and unknown output kinds have
   assert.equal(stepGeneration({ outputKind: "revalidation-v99" }), "v99");
   assert.equal(stepRole({ outputKind: "unregistered-v2" }), null);
   assert.equal(stepGeneration({ outputKind: "unregistered-v2" }), "v2");
+});
+
+test("the historical review output kind is refused as an unknown Step role", () => {
+  assert.equal(stepRole({ outputKind: legacyReviewOutputKind }), null);
 });
 
 test("role predicates ignore ordinals and template generations", () => {
@@ -119,8 +131,6 @@ test("seed-era identities select implementation guards by canonical family", () 
       const step = { taskTemplate, outputKind: "implementation" };
       assert.equal(isCompoundImplementationStep(step), canonicalName === "compound-engineer-workflow");
       assert.equal(isDirectImplementationStep(step), canonicalName === "direct-engineer-workflow");
-      assert.equal(isCompoundImplementationStep({ ...step, outputKind: "sol-findings" }), false);
-      assert.equal(isDirectImplementationStep({ ...step, outputKind: "sol-findings" }), false);
     }
   }
 });

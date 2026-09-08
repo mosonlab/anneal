@@ -9,6 +9,16 @@ written.
 
 ## Unreleased
 
+- Retired the temporary `sol-findings` execution alias for Step roles, repair
+  evidence and prior outputs, and PR handoff. Execution uses `review-findings`;
+  ordinary staffing carry reports the retired kind as unknown. Historical
+  Tasks, Runs, outputs, and reports remain readable without rewriting or deleting
+  rows, and template adoption and rollover mappings remain supported. The
+  retirement boundary was established on 2026-09-08: of 280 Chains carrying the
+  old kind, the only three unarchived unfinished Chains (word-factory
+  `3cd7177f`, `21cc2d0b`, `bb60e911`) were archived and re-created from current
+  templates. The 103 archived unfinished Chains are abandoned with no supported
+  retry or resume path; archived completed Chains remain readable.
 - Defense-list merge audits are recorded as one control-plane TaskActivity on
   the readiness Step per `(readinessTaskId, headSha)`, with the exact range,
   triggered paths, reasons, and `headSha`, `baseSha`, and `triggers` metadata;

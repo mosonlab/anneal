@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  LEGACY_TEMPLATE_GENERATIONS,
   type Marker,
   MergeRecoveryStatus,
   type Prisma,
@@ -12,6 +13,7 @@ import {
 
 import {
   activeRepairRecoverySourceRun,
+  createMergeTailRepairTask,
   handleRegressionCompletion,
   repairBindingMismatchAtOpen,
   recordDefenseAudit,
@@ -71,6 +73,114 @@ const recoveryRow = (overrides: Record<string, unknown> = {}) => ({
 const recoveryTx = (row: Record<string, unknown> | null) => ({
   mergeRecoveryAttempt: { findFirst: async () => row },
 } as unknown as Prisma.TransactionClient);
+
+test("review-fix refuses an unregistered prior output before creating a repair task", async () => {
+  const retiredReviewKind = LEGACY_TEMPLATE_GENERATIONS["direct-engineer-workflow"]
+    .find(({ marker }) => marker === "pre-model-neutral-review-output")?.shape
+    .find(({ name }) => name === "Code review")?.outputKind;
+  assert.ok(retiredReviewKind);
+
+  const taskCreates: unknown[] = [];
+  const outputQueries: Array<Record<string, unknown>> = [];
+  const tx = {
+    mergeRecoveryAttempt: { findFirst: async () => null },
+    agent: { findFirst: async () => ({ id: "repair-agent" }) },
+    agentRepoAccess: { findFirst: async () => ({ id: "repo-grant" }) },
+    taskStepOutput: {
+      findMany: async (query: Record<string, unknown>) => {
+        outputQueries.push(query);
+        return [{ kind: retiredReviewKind }];
+      },
+    },
+    task: { create: async (args: unknown) => { taskCreates.push(args); return { id: "repair-task" }; } },
+  } as unknown as Prisma.TransactionClient;
+
+  const result = await createMergeTailRepairTask(tx, {
+    regressionTask: {
+      id: "regression-task",
+      projectId: "project",
+      repoId: "repo",
+      templateId: "template",
+      chainId: "chain",
+      chainIndex: 5,
+      targetBranch: "main",
+    },
+    sourceRun: { id: "source-run", branch: "agentos/repair" },
+    assignee: { kind: "agent", agentId: "repair-agent", label: "senior-dev-astra-medium" },
+    repairKind: "review-fix",
+    headSha: "a".repeat(40),
+    baseHeadSha: "b".repeat(40),
+    summary: "review failure",
+    now: new Date(),
+  });
+
+  assert.deepEqual(result, {
+    refusal: `unknown-kind: review-fix prior output ${retiredReviewKind} has no registered Step role`,
+  });
+  assert.equal(taskCreates.length, 0);
+  assert.equal(outputQueries.length, 1);
+  const firstQuery = outputQueries[0];
+  assert.deepEqual((firstQuery?.where as Record<string, unknown>)?.kind, {
+    notIn: ["spec", "implementation", "review-findings", "blind-findings", "fixed-implementation"],
+  });
+});
+
+test("review-fix creates a repair despite unrelated custom prior outputs", async () => {
+  const agent = { id: "repair-agent", name: "senior-dev-astra-medium", model: "claude-sonnet", runnerPreference: "CLAUDE", archivedAt: null };
+  let createdTask: Record<string, unknown> = {};
+  const runCreates: unknown[] = [];
+  const taskCreates: unknown[] = [];
+  const outputQueries: Array<Record<string, unknown>> = [];
+  const tx = {
+    mergeRecoveryAttempt: { findFirst: async () => null },
+    $queryRaw: async () => [{ id: agent.id }],
+    agent: { findFirst: async () => agent, findUnique: async () => agent },
+    taskActivity: { findMany: async () => [], create: async () => ({}) },
+    run: { findFirst: async () => null, create: async (args: unknown) => { runCreates.push(args); return { id: "repair-run" }; } },
+    agentRepoAccess: { findFirst: async () => ({ id: "repo-grant" }) },
+    taskStepOutput: {
+      findMany: async (query: Record<string, unknown>) => {
+        outputQueries.push(query);
+        return outputQueries.length === 1 ? [{ kind: "result" }, { kind: "notes" }] : [];
+      },
+    },
+    task: {
+      create: async ({ data }: { data: Record<string, unknown> }) => {
+        taskCreates.push(data);
+        createdTask = { ...data, id: "repair-task", assigneeAgent: agent, repo: { defaultBranch: "main" },
+          templateStep: null, chainId: null, runs: [], archivedAt: null };
+        return createdTask;
+      },
+      findUnique: async () => createdTask,
+      update: async () => ({}),
+    },
+  } as unknown as Prisma.TransactionClient;
+
+  const result = await createMergeTailRepairTask(tx, {
+    regressionTask: {
+      id: "regression-task",
+      projectId: "project",
+      repoId: "repo",
+      templateId: "template",
+      chainId: "chain",
+      chainIndex: 5,
+      targetBranch: "main",
+    },
+    sourceRun: { id: "source-run", branch: "agentos/repair" },
+    assignee: { kind: "agent", agentId: "repair-agent", label: "senior-dev-astra-medium" },
+    repairKind: "review-fix",
+    headSha: "a".repeat(40),
+    baseHeadSha: "b".repeat(40),
+    summary: "review failure",
+    now: new Date(),
+  });
+
+  assert.deepEqual(result, { taskId: "repair-task" });
+  assert.equal(taskCreates.length, 1);
+  assert.equal(runCreates.length, 1);
+  assert.equal(outputQueries.length, 2);
+  assert.doesNotMatch(String(createdTask.description), /\(notes\)|\(result\)/);
+});
 
 test("repair completion carries context only for a complete active recovery", async () => {
   assert.deepEqual(await activeRepairRecoverySourceRun(recoveryTx(recoveryRow()), {

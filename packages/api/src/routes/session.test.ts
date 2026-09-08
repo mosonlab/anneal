@@ -137,9 +137,7 @@ test("GET /session/runs/:runId/status projects the decided output evidence", asy
 
 for (const [templateName, reviewKind, persistedKind] of [
   ["pr-engineer-workflow", "review-findings", "review-findings"],
-  ["pr-engineer-workflow-legacy-pre-model-neutral-review-output-row", "sol-findings", "sol-findings"],
-  ["pr-engineer-workflow", "review-findings", "sol-findings"],
-  ["pr-engineer-workflow-legacy-pre-model-neutral-review-output-row", "sol-findings", "review-findings"],
+  ["pr-engineer-workflow", "review-findings", "blind-findings"],
 ] as const) {
   test(`PR workflow ${templateName} checks ${persistedKind} against ${reviewKind} handoff through the current step`, async () => {
     await withTokens(async () => {
@@ -236,7 +234,7 @@ for (const [templateName, reviewKind, persistedKind] of [
       assert.equal(where.chainId, "chain-1");
       assert.deepEqual(where.chainIndex, { lte: 4 });
       assert.deepEqual(where.templateStep, {
-        outputKind: { in: ["implementation", "review-findings", "sol-findings", "blind-findings", "fixed-implementation"] },
+        outputKind: { in: ["implementation", "review-findings", "blind-findings", "fixed-implementation"] },
         taskTemplate: { name: templateName },
       });
       assert.deepEqual(where.stepOutput, { isNot: null });

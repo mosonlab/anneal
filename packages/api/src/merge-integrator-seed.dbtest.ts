@@ -56,6 +56,11 @@ after(async () => { await db.$disconnect(); });
 
 const DB_DIRECTORY = fileURLToPath(new URL("../../db", import.meta.url));
 
+const retiredReviewOutputKind = LEGACY_TEMPLATE_GENERATIONS[DIRECT_TEMPLATE_NAME]
+  .find(({ marker }) => marker === "pre-model-neutral-review-output")?.shape
+  .find(({ name }) => name === "Code review")?.outputKind;
+if (!retiredReviewOutputKind) throw new Error("the pre-model-neutral generation must define a review output kind");
+
 const runScript = async (script: string): Promise<{ code: number; output: string }> => {
   try {
     const { stdout, stderr } = await execFileAsync(
@@ -207,14 +212,14 @@ const restoreRetiredReviewContract = async (templateId: string): Promise<void> =
   const steps = await db.taskTemplateStep.findMany({ where: { taskTemplateId: templateId } });
   for (const step of steps) {
     await db.taskTemplateStep.update({ where: { id: step.id }, data: {
-      outputKind: step.outputKind === "review-findings" ? "sol-findings" : step.outputKind,
-      priorOutputKinds: step.priorOutputKinds.map((kind) => kind === "review-findings" ? "sol-findings" : kind),
-      prompt: step.prompt.replaceAll("review-findings", "sol-findings").replaceAll("the code review report", "the Sol report"),
+      outputKind: step.outputKind === "review-findings" ? retiredReviewOutputKind : step.outputKind,
+      priorOutputKinds: step.priorOutputKinds.map((kind) => kind === "review-findings" ? retiredReviewOutputKind : kind),
+      prompt: step.prompt.replaceAll("review-findings", retiredReviewOutputKind).replaceAll("the code review report", "the Sol report"),
     } });
   }
   await Promise.all([
     db.taskTemplateStep.updateMany({
-      where: { taskTemplateId: templateId, outputKind: "sol-findings" },
+      where: { taskTemplateId: templateId, outputKind: retiredReviewOutputKind },
       data: { name: "Code review (Sol)" },
     }),
     db.taskTemplateStep.updateMany({
@@ -479,7 +484,7 @@ test("canonical sync installs the reviewed PR prompt generation while instantiat
   assert.deepEqual(
     snapshot.map(({ id: _id, prompt: _prompt, name: _name, ...shape }) => ({
       ...shape,
-      outputKind: shape.outputKind === "sol-findings" ? "review-findings" : shape.outputKind,
+      outputKind: shape.outputKind === retiredReviewOutputKind ? "review-findings" : shape.outputKind,
     })),
     successor.steps.map((step) => ({
       layer: step.layer,

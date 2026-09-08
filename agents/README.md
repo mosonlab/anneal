@@ -173,8 +173,8 @@ with; archived roles are never assigned to new tasks or templates.
 
 New canonical Chains use the model-neutral `review-findings` output kind.
 The `pre-model-neutral-review-output` rollover retains old template, Step, Task,
-and output rows with their original `sol-findings` contract; only the new
-template receives remapped staffing profile entries. This compatibility is
-transitional: retire execution support only after legacy continuation and retry
-obligations end, and retire upgrade mappings only when supported installations
-no longer need them. Historical reports retain their original kind.
+and output rows with their original `sol-findings` kind; only the new
+template receives remapped staffing profile entries. Execution support for that
+kind is retired: it is no longer recognized for Step roles, repair evidence,
+or PR handoff. Template adoption and rollover still upgrade older installations.
+Historical Tasks, Runs, outputs, and reports retain their original kind and text.

@@ -29,8 +29,6 @@ const OUTPUT_KIND_ROLES: Readonly<Record<string, StepRole>> = {
   "must-fix": "must-fix",
   implementation: "implementation",
   "review-findings": "review-findings",
-  // Persisted Steps retain their exact legacy output contract.
-  "sol-findings": "review-findings",
   "blind-findings": "blind-findings",
   "fixed-implementation": "fixed-implementation",
   documentation: "documentation",
