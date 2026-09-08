@@ -45,7 +45,7 @@ import { mergeTrainReadinessTick, pendingMergeTrains } from "./merge-train-readi
 
 import { lockTaskMutationRows } from "./task-write.js";
 import { type DaemonSnapshot } from "./runners.js";
-import { openDefenseAuditNotice, stopMergeTail } from "./merge-tail-actions.js";
+import { recordDefenseAudit, stopMergeTail } from "./merge-tail-actions.js";
 import {
   adoptRecoveryHead,
   awaitAuthorization,
@@ -1035,7 +1035,7 @@ const authorizeReadinessSettlement = (
       });
       await tx.task.update({ where: { id: regression.id }, data: { failureReason: null } });
       if (decision.auditTriggers.length > 0) {
-        await openDefenseAuditNotice(tx, {
+        await recordDefenseAudit(tx, {
           readinessTaskId: readiness.id,
           headSha: decision.headSha,
           baseSha: decision.baseSha,

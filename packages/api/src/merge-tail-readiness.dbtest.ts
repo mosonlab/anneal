@@ -464,7 +464,7 @@ test("clean exact-head readiness authorizes and queues mechanical merge", async 
   assert.equal((await leaseHoldMarkers(seeded.project.id)).length, 0, "retained authorization is not measured before its consumer releases");
 });
 
-test("a defense-list diff authorizes the merge and leaves one audit message behind", async () => {
+test("a defense-list diff authorizes the merge and leaves one audit activity behind", async () => {
   const seeded = await seedReadiness();
   const guarded = reader([{ filename: "scripts/merge-gate.sh", previousFilename: null, patch: "@@ -1 +1 @@\n-old\n+new" }]);
   assert.deepEqual(await readinessTick(db, guarded, new Date(), 5, releaseChainLease, runWithMergeLease, executorsOnline), { claimed: 1, authorized: 1, requeued: 0, stopped: 0 });
@@ -475,18 +475,32 @@ test("a defense-list diff authorizes the merge and leaves one audit message behi
   assert.equal(await db.run.count({ where: { taskId: seeded.integrator.id } }), 1);
   assert.equal(await db.task.count({ where: { name: "Autonomous merge tail: independent review" } }), 0);
 
-  const audit = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.readiness.id } });
-  assert.equal(audit.dedupeKey, `defense-audit:${seeded.readiness.id}:${HEAD}`);
+  const audits = await db.taskActivity.findMany({ where: {
+    taskId: seeded.readiness.id,
+    actorType: "control-plane",
+    metadata: { path: ["kind"], equals: "mergeTail.defenseAudit" },
+  } });
+  assert.equal(audits.length, 1);
+  const audit = audits[0]!;
+  assert.deepEqual(audit.metadata, {
+    kind: "mergeTail.defenseAudit",
+    schemaVersion: 1,
+    headSha: HEAD,
+    baseSha: BASE,
+    triggers: [{ path: "scripts/merge-gate.sh", reason: "merge-tail-machinery" }],
+  });
+  assert.ok(audit.body.includes(`Exact range ${BASE}..${HEAD}.`));
+  assert.equal(await db.inboxMessage.count({ where: { dedupeKey: { startsWith: "defense-audit:" } } }), 0);
   assert.match(audit.body, /^Merge proceeded with defense-list changes/u);
   assert.match(audit.body, /- scripts\/merge-gate\.sh \(merge-tail-machinery\)/u);
 });
 
-test("a re-evaluated head writes the audit message once rather than raising P2002", async () => {
+test("a re-evaluated head writes the audit activity once", async () => {
   const seeded = await seedReadiness();
   const guarded = reader([{ filename: "scripts/merge-gate.sh", previousFilename: null, patch: "@@ -1 +1 @@\n-old\n+new" }]);
   assert.equal((await readinessTick(db, guarded, new Date(), 5, releaseChainLease, runWithMergeLease, executorsOnline)).authorized, 1);
   // Same readiness task, same exact head: the second authorization leaves the
-  // existing digest row alone instead of failing inside its own transaction.
+  // existing activity alone inside the authorization transaction.
   await db.task.update({ where: { id: seeded.readiness.id }, data: { status: TaskStatus.TODO, failureReason: null } });
   const mergeRuns = await db.run.findMany({
     where: { taskId: seeded.integrator.id },
@@ -499,7 +513,15 @@ test("a re-evaluated head writes the audit message once rather than raising P200
   } })).count, 1);
   await db.run.deleteMany({ where: { taskId: seeded.integrator.id } });
   assert.equal((await readinessTick(db, guarded, new Date(), 5, releaseChainLease, runWithMergeLease, executorsOnline)).authorized, 1);
-  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.readiness.id } }), 1);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: seeded.readiness.id,
+    actorType: "control-plane",
+    AND: [
+      { metadata: { path: ["kind"], equals: "mergeTail.defenseAudit" } },
+      { metadata: { path: ["headSha"], equals: HEAD } },
+    ],
+  } }), 1);
+  assert.equal(await db.inboxMessage.count({ where: { dedupeKey: { startsWith: "defense-audit:" } } }), 0);
 });
 
 test("base drift invalidates a head-bound PASS and returns the chain to regression", async () => {

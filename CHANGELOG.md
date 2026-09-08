@@ -9,6 +9,10 @@ written.
 
 ## Unreleased
 
+- Defense-list merge audits are recorded as one control-plane TaskActivity on
+  the readiness Step per `(readinessTaskId, headSha)`, with the exact range,
+  triggered paths, reasons, and `headSha`, `baseSha`, and `triggers` metadata;
+  they no longer create Inbox messages.
 - Briefs for cards dispatched after a predecessor now state premises as of
   that predecessor's merge, name its card or branch, and avoid "until it lands"
   language; dependency qualification checks those premises against its outcome.
