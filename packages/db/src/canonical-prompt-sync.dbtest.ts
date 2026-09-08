@@ -50,7 +50,10 @@ const databaseUrl = (() => {
   return url.href;
 })();
 const command = (args: string[]) => {
-  const result = spawnSync("npx", args, {
+  const isTsxScript = args[0] === "tsx";
+  const result = spawnSync(isTsxScript ? process.execPath : "npx", isTsxScript
+    ? ["--import", "tsx", ...args.slice(1)]
+    : args, {
     cwd: packageRoot,
     encoding: "utf8",
     env: { ...process.env, DATABASE_URL: databaseUrl },

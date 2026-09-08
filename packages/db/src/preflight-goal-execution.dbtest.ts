@@ -67,7 +67,7 @@ const urlFor = (schema: string): string => {
 interface Outcome { status: number | null; output: string }
 
 const runPreflight = (schema: string, extra: Record<string, string> = {}): Outcome => {
-  const result = spawnSync("npx", ["tsx", "prisma/preflight-goal-execution.ts"], {
+  const result = spawnSync(process.execPath, ["--import", "tsx", "prisma/preflight-goal-execution.ts"], {
     cwd: packageRoot,
     encoding: "utf8",
     env: {
