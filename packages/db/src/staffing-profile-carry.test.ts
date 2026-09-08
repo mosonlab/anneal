@@ -7,6 +7,9 @@ import {
   type StaffingProfileCarrySource,
   type StaffingProfileCarryTarget,
 } from "./staffing-profile-carry.js";
+import { LEGACY_TEMPLATE_GENERATIONS } from "./canonical-template-transition.js";
+
+const legacyReviewOutputKind = LEGACY_TEMPLATE_GENERATIONS["direct-engineer-workflow"][0]!.shape[1]!.outputKind;
 
 /** The target graph, written as the kinds a chain must run. */
 const required = (...outputKinds: string[]): StaffingProfileCarryTarget[] =>
@@ -189,16 +192,26 @@ test("the dedicated merge-tail repair Agent carries across a canonical rollover"
 });
 
 
-test("canonical review rename carries staffing without mutating the retired profile", () => {
-  const source = profile("Review", [{ outputKind: "sol-findings", assigneeAgentId: "operator-agent", include: null }]);
+test("an unregistered historical review output kind is dropped and reported", () => {
+  const plan = planStaffingProfileCarry(
+    [profile("Review", [{ outputKind: legacyReviewOutputKind, assigneeAgentId: "operator-agent", include: null }])],
+    required("review-findings"),
+  );
+  assert.deepEqual(plan.profiles[0]!.entries, []);
+  assert.deepEqual(plan.dropped, [{ profileName: "Review", outputKind: legacyReviewOutputKind, reason: "unknown-kind" }]);
+  assert.match(plan.reportLines[0]!, /dropped; the new graph has no step producing it/u);
+});
+
+test("a registered custom rename carries staffing without mutating the retired profile", () => {
+  const source = profile("Review", [{ outputKind: "historical-review", assigneeAgentId: "operator-agent", include: null }]);
   const before = JSON.stringify(source);
-  const plan = planStaffingProfileCarry([source], required("review-findings"), { "sol-findings": "review-findings" });
+  const plan = planStaffingProfileCarry([source], required("review-findings"), { "historical-review": "review-findings" });
   assert.deepEqual(plan.profiles[0]!.entries, [{ outputKind: "review-findings", assigneeAgentId: "operator-agent", include: null }]);
   assert.deepEqual(plan.dropped, []);
   assert.equal(JSON.stringify(source), before);
   const collision = planStaffingProfileCarry([
     profile("Both", [...source.entries, { outputKind: "review-findings", assigneeAgentId: "exact-agent", include: null }]),
-  ], required("review-findings"), { "sol-findings": "review-findings" });
+  ], required("review-findings"), { "historical-review": "review-findings" });
   assert.equal(collision.profiles[0]!.entries[0]!.assigneeAgentId, "exact-agent");
   assert.equal(collision.dropped[0]!.reason, "ambiguous-kind");
 });
