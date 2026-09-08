@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
 
-import { PR_TEMPLATE_NAME, type PrHandoffOutput } from "@anneal/db";
+import {
+  LEGACY_TEMPLATE_GENERATIONS, PR_TEMPLATE_NAME, templateRolloverName,
+  type PrHandoffOutput,
+} from "@anneal/db";
 
 import type { ExitEvidence } from "./adapters.js";
 import type { RunnerConfig } from "./config.js";
@@ -39,8 +42,7 @@ const canonicalSha = (character: string): string => character.repeat(40);
 const canonicalBaseSha = canonicalSha("a");
 const canonicalImplementationSha = canonicalSha("b");
 const canonicalFixedSha = canonicalSha("c");
-const legacyPrTemplateName = `${PR_TEMPLATE_NAME}-legacy-model-neutral-review-step-names-delivery-test`;
-
+const legacyPrTemplateName = templateRolloverName(PR_TEMPLATE_NAME, "model-neutral-review-step-names", "delivery-test");
 const canonicalDescription = (
   brief = "Ship PR\nThe complete feature brief continues here.",
   prompt = "Canonical template step prompt that must not become the PR goal.",
@@ -96,7 +98,7 @@ const canonicalFinalOutputs = (
   baseSha = canonicalBaseSha,
   implementationSha = canonicalImplementationSha,
   fixedSha = canonicalFixedSha,
-  reviewKind: "review-findings" | "sol-findings" = "review-findings",
+  reviewKind: PrHandoffOutput["kind"] = "review-findings",
 ): PrHandoffOutput[] => [
   canonicalImplementationOutput(implementationSha, baseSha),
   {
@@ -266,30 +268,29 @@ test("canonical PR final delivery publishes a clean head and the complete review
   assert.equal(edit.args.at(-1), expectedBody);
 });
 
-test("legacy canonical PR final delivery accepts sol-findings and renders the neutral review label", async () => {
-  let body = "";
-  const fake: CommandRunner = async (executable, args) => {
-    if (executable === "git" && args[0] === "ls-tree") return "";
-    if (executable === "gh" && args[1] === "list") {
-      return JSON.stringify([{ url: "https://github.com/acme/app/pull/9", number: 9 }]);
-    }
-    if (executable === "gh" && args[1] === "edit") { body = args.at(-1)!; return ""; }
-    if (executable === "gh" && args[1] === "view") return body;
-    return "";
-  };
+test("canonical PR final delivery refuses a retired review output kind before publication", async () => {
+  const retiredReviewKind = LEGACY_TEMPLATE_GENERATIONS[PR_TEMPLATE_NAME]
+    .flatMap(({ shape }) => shape)
+    .find(({ name }) => name === "Code review")?.outputKind;
+  assert.ok(retiredReviewKind);
+  assert.notEqual(retiredReviewKind, "review-findings");
+  const outputs = canonicalFinalOutputs();
+  outputs[1] = { ...outputs[1]!, kind: retiredReviewKind as unknown as PrHandoffOutput["kind"] };
+  const calls: string[] = [];
   const result = await deliverWorkspace(
     config,
-    canonicalClaim("fixed-implementation", "task-fixed-legacy", 4, legacyPrTemplateName),
+    canonicalClaim("fixed-implementation", "task-fixed", 4),
     { ...workspace, baseSha: canonicalImplementationSha },
     {
-      command: fake,
+      command: async (executable, args) => { calls.push(`${executable} ${args.join(" ")}`); return ""; },
       headSha: canonicalFixedSha,
-      prWorkflowOutputs: canonicalFinalOutputs(canonicalBaseSha, canonicalImplementationSha, canonicalFixedSha, "sol-findings"),
+      prWorkflowOutputs: outputs,
     },
   );
-  assert.equal(result.pushStatus, "SUCCEEDED");
-  assert.match(body, /### Code review findings/u);
-  assert.doesNotMatch(body, /Sol findings/u);
+  assert.equal(result.pushStatus, "FAILED");
+  assert.equal(result.failure?.operation, "canonical PR output validation");
+  assert.match(result.pushError ?? "", /missing required review-findings canonical output evidence/u);
+  assert.deepEqual(calls, []);
 });
 
 test("legacy canonical PR final delivery accepts review-findings and preserves the handoff kind", async () => {

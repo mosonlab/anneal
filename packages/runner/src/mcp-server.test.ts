@@ -149,7 +149,7 @@ test("task_output reveals predecessor outputs only in the successful platform re
     status: 200,
     body: JSON.stringify({
       id: "output-1",
-      predecessorOutputs: [{ kind: "sol-findings", body: "SOL-1", commitSha: "a".repeat(40), task: { name: "Review", chainIndex: 2 } }],
+      predecessorOutputs: [{ kind: "review-findings", body: "SOL-1", commitSha: "a".repeat(40), task: { name: "Review", chainIndex: 2 } }],
     }),
   }), async (credentials) => {
     const result = await invokeTool(credentials, "task_output", { kind: "must-fix", body: "independent findings" });

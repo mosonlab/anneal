@@ -72,7 +72,7 @@ const answerWith = (task: unknown): (() => void) => {
 };
 
 test("session status reads the decided output evidence without re-deciding it", async () => {
-  const outputs = ["implementation", "sol-findings", "blind-findings", "fixed-implementation"]
+  const outputs = ["implementation", "review-findings", "blind-findings", "fixed-implementation"]
     .map((kind, index) => ({
       taskId: `task-${kind}`,
       chainIndex: index + 1,
