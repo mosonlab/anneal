@@ -24,16 +24,12 @@ import {
 import { writeMarker } from "./merge-tail-markers.js";
 import {
   attemptRunBirth,
-  CompoundImplementationAssigneeError,
-  errorForOpenRunRefusal,
-  isWorkflowRefusalError,
+  settleRunBirthRefusal,
   type IntegratorStopBypass,
   WorkflowRefusalError,
   enqueueTaskRunInternal,
   gateQuestion,
   isCompoundImplementationStep,
-  parksInsteadOfRaising,
-  runBirthRefusalMetadata,
 } from "./run-open.js";
 
 type Tx = Prisma.TransactionClient;
@@ -376,27 +372,12 @@ const dispatchBoundSuccessor = async (
     return;
   }
   if (attempt.outcome === "refused") {
-    const refusal = attempt.refusal;
-    switch (refusal.disposition) {
-      case "held":
-        await tx.taskActivity.create({ data: {
-          taskId: successor.id,
-          actorType: "control-plane",
-          body: `Bound predecessor completed; ${refusal.message}`,
-        } });
-        return;
-      // A bound dispatch owns no stop record of its own, so a stop reads here
-      // exactly as any other fault: the successor is parked for an operator.
-      case "stopped":
-      case "fault":
-        await parkBoundSuccessor(tx, predecessor, successor, refusal.message,
-          runBirthRefusalMetadata(refusal));
-        return;
-      default: {
-        const unhandled: never = refusal.disposition;
-        return unhandled;
-      }
-    }
+    const settlement = await settleRunBirthRefusal(tx, {
+      taskId: successor.id, refusal: attempt.refusal, mode: "park", now,
+      origin: { kind: "bound-dispatch", ...boundDispatchMetadata(predecessor, successor) },
+    });
+    if (settlement.kind === "raise") throw settlement.error;
+    return;
   }
   await boundSuccessorQueuedActivity(tx, predecessor, successor, "queued", attempt.run.id);
 };
@@ -519,35 +500,6 @@ type ChainSuccessorOptions = {
   mergeTailRequeue?: boolean;
   /** The recovery Regression Run whose genuine repair caused that hop. */
   mergeTailRecoverySourceRunId?: string;
-};
-
-const parkStoppedIntegratorSuccessor = async (
-  tx: Tx,
-  predecessor: ChainTask,
-  successor: ChainSuccessor,
-  stopped: NonNullable<Awaited<ReturnType<typeof stopStateFor>>>,
-  sourceRunId: string | null,
-): Promise<{ nextTaskId: string; gated: false }> => {
-  await tx.task.update({
-    where: { id: successor.id },
-    data: {
-      status: TaskStatus.REVIEW,
-      failureReason: `Merge integrator stopped on ${stopped.stop.condition}; predecessor success preserved and successor not activated`,
-    },
-  });
-  await tx.taskActivity.create({
-    data: {
-      taskId: successor.id,
-      actorType: "control-plane",
-      body: `Predecessor ${predecessor.name} completed successfully and was preserved; successor not activated because merge integrator stopped on ${stopped.stop.condition}`,
-      metadata: {
-        condition: stopped.stop.condition,
-        sourceRunId,
-        sourceStopId: stopped.stop.stopId,
-      },
-    },
-  });
-  return { nextTaskId: successor.id, gated: false };
 };
 
 const chainLayerOf = (task: { chainLayer?: number | null; chainIndex: number | null }): number | null => layerOf({
@@ -826,60 +778,14 @@ const activateChainSuccessorInternal = async (
     ));
     if (attempt.outcome === "already-queued") continue;
     if (attempt.outcome === "refused") {
-      const refusal = attempt.refusal;
-      switch (refusal.disposition) {
-        case "held":
-          await tx.taskActivity.create({ data: {
-            taskId: successor.id,
-            actorType: "control-plane",
-            body: `Predecessor layer completed; ${refusal.message}`,
-          } });
-          continue;
-        case "stopped": {
-          const stoppedAfterRollback = await stopStateFor(tx, successor.id);
-          if (stoppedAfterRollback) {
-            await parkStoppedIntegratorSuccessor(
-              tx,
-              current,
-              successor,
-              stoppedAfterRollback,
-              options.sourceRunId ?? null,
-            );
-            continue;
-          }
-          throw errorForOpenRunRefusal(refusal);
-        }
-        case "fault":
-          // A spend cap parks the successor even where the caller asked to
-          // raise: raising rolls back the activation transaction, so the park
-          // below — the only record of which cap refused the attempt — would
-          // never reach the operator who has to raise it.
-          if (options.onRefusal === "raise" && !parksInsteadOfRaising(refusal)) {
-            // A compound implementation step is bound to one Agent by
-            // construction, so a refusal carrying no error of its own is that
-            // invariant failing. The operator's answer is the compound-assignee
-            // refusal rather than a bare invalid-request.
-            const error = errorForOpenRunRefusal(refusal);
-            throw compoundImplementation && isWorkflowRefusalError(error)
-              ? new CompoundImplementationAssigneeError()
-              : error;
-          }
-          break;
-        default: {
-          const unhandled: never = refusal.disposition;
-          return unhandled;
-        }
-      }
-      await tx.task.update({
-        where: { id: successor.id },
-        data: { status: TaskStatus.REVIEW, failureReason: refusal.message },
+      const settlement = await settleRunBirthRefusal(tx, {
+        taskId: successor.id, refusal: attempt.refusal, mode: options.onRefusal ?? "park", now,
+        origin: {
+          kind: "chain-activation", predecessorName: current.name,
+          sourceRunId: options.sourceRunId ?? null, compoundImplementation,
+        },
       });
-      await tx.taskActivity.create({ data: {
-        taskId: successor.id,
-        actorType: "control-plane",
-        body: `Predecessor layer completed but Run birth was refused: ${refusal.message}`,
-        metadata: runBirthRefusalMetadata(refusal),
-      } });
+      if (settlement.kind === "raise") throw settlement.error;
       continue;
     }
     if (options.mergeTailRequeue

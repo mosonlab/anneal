@@ -1,11 +1,11 @@
 import {
+  settleRunBirthRefusal,
   ACTIVE_RUN_STATUSES,
   AssigneeType,
   chainControlReadProjection,
   chainRunHistoryRefusal,
   deleteChain,
   enqueueTaskRunInternal,
-  errorForOpenRunRefusal,
   gateSlotOf,
   MERGE_INTEGRATOR_KIND,
   holdChain,
@@ -20,10 +20,8 @@ import {
   mergeRecoveryPhase,
   observedChainPullRequests,
   openRun,
-  parksInsteadOfRaising,
   Prisma,
   projectMergeOutcome,
-  recordRunBirthRefusal,
   requestConfirmationCard,
   resumeChain,
   runOwnsMergeOutcome,
@@ -619,13 +617,10 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         && stepRole(task.templateStep) === "regression";
       const opened = await openRun(tx, taskId, { kind: "retry", readyAt: now });
       if (!opened.ok) {
-        // Retry has no park of its own — a refused retry ordinarily leaves the
-        // task exactly as the operator found it. A spend cap is the exception:
-        // it is the operator's own limit, and the REVIEW naming the cap and the
-        // total is the only thing that says which cap to raise.
-        if (parksInsteadOfRaising(opened.refusal)) {
-          await recordRunBirthRefusal(tx, taskId, opened.refusal);
-        }
+        const settlement = await settleRunBirthRefusal(tx, {
+          taskId, refusal: opened.refusal, mode: "raise", origin: { kind: "retry" }, now,
+        });
+        if (settlement.kind === "raise") throw settlement.error;
         return opened.refusal;
       }
       const run = opened.run;
@@ -664,8 +659,10 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         // its family is what maps to this route's status code.
         const opened = await enqueueTaskRunInternal(tx, taskId, new Date(), null);
         if (!opened.ok) {
-          if (!parksInsteadOfRaising(opened.refusal)) throw errorForOpenRunRefusal(opened.refusal);
-          await recordRunBirthRefusal(tx, taskId, opened.refusal);
+          const settlement = await settleRunBirthRefusal(tx, {
+            taskId, refusal: opened.refusal, mode: "raise", origin: { kind: "request" }, now: new Date(),
+          });
+          if (settlement.kind === "raise") throw settlement.error;
           return opened.refusal;
         }
         const run = opened.run;

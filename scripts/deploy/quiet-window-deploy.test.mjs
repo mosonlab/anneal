@@ -128,6 +128,8 @@ const controlPlaneFetch = ({ commit, registry, onRequest = () => undefined }) =>
   throw new Error(`unexpected-request-${url}`);
 };
 const REPOSITORY_ROOT = fileURLToPath(new URL("../..", import.meta.url));
+const stableDescription = async (label) =>
+  `state = running\n/usr/bin/node ${join(REPOSITORY_ROOT, "shared/bin/agentos-service-wrapper.mjs")} ${label}\n`;
 const EXPECTED_RUNTIME_PATHS = RUNTIME_TOOL_FILES
   .map(({ destination }) => `packages/runner/dist/runtime-tools/${destination}`)
   .sort();
@@ -1262,25 +1264,20 @@ test("the deploy host restarts and restores every Linux unit in inventory order"
     platform: "linux",
     restart: async (label, options) => { calls.push({ label, options }); },
     isRunning: async () => true,
-    describe: async () => "",
+    describe: stableDescription,
   };
-  let recoveryVerified = false;
   let observations = 0;
   const host = createDeployHost({
     serviceControl,
     environment: controlPlaneEnvironment(),
     observationWindowMs: 0,
     fetchImpl: controlPlaneFetch({
-      commit: revisions.to,
+      commit: revisions.from,
       registry: () => runnerRegistry({
         commit: revisions.from,
         lastSeenAt: new Date(1_800_000_000_000 + (observations += 1) * 1_000).toISOString(),
       }),
     }),
-    verifyRecoveredServices: async (control) => {
-      assert.equal(control, serviceControl);
-      recoveryVerified = true;
-    },
   });
   const attempt = openDeploymentAttempt({
     deployRoot: "/fixture",
@@ -1297,7 +1294,6 @@ test("the deploy host restarts and restores every Linux unit in inventory order"
   await host.restorePreviousServices(attempt);
   assert.deepEqual(calls.map(({ label }) => label), SERVICE_LABELS);
   assert.deepEqual(calls.map(({ options }) => options.reason), SERVICE_LABELS.map(() => "previous-service-restore-failed"));
-  assert.equal(recoveryVerified, true);
 });
 
 test("runner deploy host restarts only local runners and verifies a newer target-build registration", async () => {
@@ -1327,7 +1323,7 @@ test("runner deploy host restarts only local runners and verifies a newer target
       platform: "darwin",
       restart: async (label) => { restarts.push(label); },
       isRunning: async () => true,
-      describe: async () => "state = running",
+      describe: stableDescription,
     },
     fetchImpl: async (url, options) => {
       requests.push({ url, authorization: options.headers.authorization });
@@ -1370,7 +1366,7 @@ test("runner target is re-read after the barrier and a changed control plane sto
       platform: "darwin",
       restart: async () => {},
       isRunning: async () => true,
-      describe: async () => "state = running",
+      describe: stableDescription,
     },
     fetchImpl: async (url) => {
       assert.equal(url, "http://127.0.0.1:3000/version");
@@ -1423,8 +1419,7 @@ test("runner rollback proves every previous-build runner registered after its re
     let reads = 0;
     const host = createDeployHost({
       environment,
-      serviceControl: { platform: "darwin", restart: async () => {}, isRunning: async () => true, describe: async () => "state = running" },
-      verifyRecoveredServices: async () => {},
+      serviceControl: { platform: "darwin", restart: async () => {}, isRunning: async () => true, describe: stableDescription },
       fetchImpl: async () => ({ ok: true, json: async () => reads++ === 0 ? beforePayload : payload }),
       serviceVerificationTimeoutMs: 5,
       serviceVerificationWait: () => new Promise((resolveWait) => setTimeout(resolveWait, 1)),
@@ -1445,9 +1440,8 @@ test("runner rollback proves every previous-build runner registered after its re
       platform: "darwin",
       restart: async (label) => { restarts.push(label); },
       isRunning: async () => true,
-      describe: async () => "state = running",
+      describe: stableDescription,
     },
-    verifyRecoveredServices: async () => {},
     fetchImpl: async () => ({
       ok: true,
       json: async () => reads++ === 0 ? beforePayload : { daemons: [daemon("mac-runner-1"), daemon("mac-runner-2")] },
@@ -1467,7 +1461,7 @@ test("control-plane verification fails naming a local runner that never register
       platform: "linux",
       restart: async () => {},
       isRunning: async () => true,
-      describe: async () => "",
+      describe: stableDescription,
     },
     fetchImpl: controlPlaneFetch({
       commit: revisions.to,
@@ -1510,7 +1504,7 @@ test("control-plane verification fails when a unit dies inside the observation w
         if (label === "com.agentos.api") samples += 1;
         return !(samples > 1 && label === "com.agentos.runner-2");
       },
-      describe: async () => "",
+      describe: stableDescription,
     },
     fetchImpl: controlPlaneFetch({
       commit: revisions.to,
@@ -1557,7 +1551,7 @@ test("both roles pass only after the API, every runner and the whole window stay
         platform: "linux",
         restart: async () => {},
         isRunning: async () => true,
-        describe: async () => "",
+        describe: stableDescription,
       },
       fetchImpl: controlPlaneFetch({
         commit: revisions.to,
@@ -1598,12 +1592,11 @@ test("control-plane rollback fails when a local runner does not re-register", as
   let reads = 0;
   const host = createDeployHost({
     environment,
-    verifyRecoveredServices: async () => {},
     serviceControl: {
       platform: "linux",
       restart: async () => {},
       isRunning: async () => true,
-      describe: async () => "",
+      describe: stableDescription,
     },
     fetchImpl: controlPlaneFetch({
       commit: revisions.from,
@@ -1644,7 +1637,7 @@ test("the observation window defaults to twenty seconds and is environment-overr
   );
 });
 
-test("rollback re-proves liveness, wrapper binding, and prior API identity on both platforms", async (t) => {
+test("preactivation proves liveness, wrapper binding, and current API identity on both platforms", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "agentos-rollback-proof-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const release = "a".repeat(40);
@@ -1667,20 +1660,6 @@ test("rollback re-proves liveness, wrapper binding, and prior API identity on bo
   const fetchImpl = async (url) => url.endsWith("/health")
     ? { ok: true }
     : { ok: true, json: async () => ({ commit: release, dirty: false }) };
-  let observations = 0;
-  const hostFetch = controlPlaneFetch({
-    commit: release,
-    registry: () => runnerRegistry({
-      commit: release,
-      lastSeenAt: new Date(1_800_000_000_000 + (observations += 1) * 1_000).toISOString(),
-    }),
-  });
-  const rollbackAttempt = openDeploymentAttempt({
-    deployRoot: "/fixture",
-    targetCommit: "b".repeat(40),
-    transactionId: "rollback-proof",
-  });
-  rollbackAttempt.establish({ revisions: { from: release, to: "b".repeat(40) } });
   assert.equal(resolveServiceInvocation({
     repositoryRoot: root,
     label: "com.agentos.api",
@@ -1698,23 +1677,12 @@ test("rollback re-proves liveness, wrapper binding, and prior API identity on bo
         return `${platform === "darwin" ? "state = running\n" : ""}/usr/bin/node ${wrapper} ${label}\n`;
       },
     };
-    const host = createDeployHost({
-      serviceControl: control,
-      environment: controlPlaneEnvironment(),
-      observationWindowMs: 0,
-      fetchImpl: hostFetch,
-      verifyRecoveredServices: (serviceControl) => {
-        assert.equal(existsSync(join(root, "current")), true);
-        return verifyStableServicePaths(serviceControl, {
-          repositoryRoot: root,
-          environment: { DEPLOY_NODE_BINARY: "/usr/bin/node" },
-          fetchImpl,
-        });
-      },
+    await verifyStableServicePaths(control, {
+      repositoryRoot: root,
+      environment: { DEPLOY_NODE_BINARY: "/usr/bin/node" },
+      fetchImpl,
     });
-    await host.restorePreviousServices(rollbackAttempt);
     const expected = [
-      ...SERVICE_LABELS.map((label) => ["restart", label]),
       ...SERVICE_LABELS.flatMap((label) => platform === "linux"
         ? [["is-active", label], ["show", label]]
         : [["show", label]]),
@@ -1728,21 +1696,12 @@ test("rollback re-proves liveness, wrapper binding, and prior API identity on bo
       isRunning: async () => failure !== "inactive",
       describe: async (label) => `/usr/bin/node ${failure === "wrong-wrapper" ? "/wrong/wrapper.mjs" : wrapper} ${label}\n`,
     };
-    const host = createDeployHost({
-      serviceControl: control,
-      environment: controlPlaneEnvironment(),
-      observationWindowMs: 0,
-      fetchImpl: hostFetch,
-      serviceVerificationTimeoutMs: 5,
-      serviceVerificationWait: async () => {},
-      verifyRecoveredServices: (serviceControl) => verifyStableServicePaths(serviceControl, {
+    await assert.rejects(
+      verifyStableServicePaths(control, {
         repositoryRoot: root,
         environment: { DEPLOY_NODE_BINARY: "/usr/bin/node" },
         fetchImpl,
       }),
-    });
-    await assert.rejects(
-      host.restorePreviousServices(rollbackAttempt),
       /service-start-failed:com\.agentos\.api/u,
     );
   }
@@ -1757,7 +1716,7 @@ test("a Linux service-control denial aborts restart traversal", async () => {
       throw new DeployFailure("service-control-denied", `${label}.service`);
     },
     isRunning: async () => true,
-    describe: async () => "",
+    describe: stableDescription,
   };
   const host = createDeployHost({
     serviceControl,
@@ -2845,7 +2804,7 @@ test("the quiet-window wait, its alert and its recorded distribution are one pat
   const barrier = { release: async () => undefined };
   let polls = 0;
   const host = createDeployHost({
-    serviceControl: { platform: "linux", restart: async () => undefined, isRunning: async () => true, describe: async () => "" },
+    serviceControl: { platform: "linux", restart: async () => undefined, isRunning: async () => true, describe: stableDescription },
     environment: controlPlaneEnvironment(),
     // Every poll is over budget, so only the alert interval can hold the
     // notification to one.
@@ -2880,7 +2839,7 @@ test("the quiet-window wait, its alert and its recorded distribution are one pat
 test("a misconfigured wait budget refuses before the deploy builds anything", () => {
   assert.throws(
     () => createDeployHost({
-      serviceControl: { platform: "linux", restart: async () => undefined, isRunning: async () => true, describe: async () => "" },
+      serviceControl: { platform: "linux", restart: async () => undefined, isRunning: async () => true, describe: stableDescription },
       environment: controlPlaneEnvironment({ QUIET_WINDOW_WAIT_BUDGET_MINUTES: "0" }),
     }),
     (error) => error instanceof DeployFailure
@@ -2965,7 +2924,7 @@ const spawnRecordingHost = (t, { transactionId }) => {
   const environment = { ...process.env, PRISMA_HIDE_UPDATE_MESSAGE: "0", DEPLOY_TEST_SENTINEL: "preserved" };
   const host = createDeployHost({
     environment,
-    serviceControl: { platform: "darwin", restart: async () => {}, isRunning: async () => true, describe: async () => "" },
+    serviceControl: { platform: "darwin", restart: async () => {}, isRunning: async () => true, describe: stableDescription },
     readMigrationTail: async () => {
       const tail = `tail-${migrationTails.length}`;
       migrationTails.push(tail);
@@ -3029,32 +2988,87 @@ test("canonical prompt sync uses the host command seam", async (t) => {
   assert.ok(spawns[0].args.includes("packages/db/prisma/sync-canonical-prompts.ts"));
 });
 
-for (const regression of ["unit", "api"]) {
-  test(`rollback detects ${regression} regression during its observation window`, async () => {
-    let samples = 0;
-    let observations = 0;
-    const host = createDeployHost({
-      environment: controlPlaneEnvironment(),
-      observationWindowMs: 10,
-      serviceVerificationWait: async () => {},
-      serviceControl: { platform: "linux", restart: async () => {} },
-      verifyRecoveredServices: async () => {
-        if (++samples > 1) throw new DeployFailure("service-wrapper-verification-failed",
-          regression === "unit" ? "service-start-failed:com.agentos.runner" : "service-readiness-failed:com.agentos.api");
+// Both directions cross the host seam with the same adapter fixture.
+const releaseProofFixture = ({ direction, platform = "linux", windowMs = 0, regression = null, wrongCommit = false, inspectionFailure = null }) => {
+  const commit = direction === "forward" ? revisions.to : revisions.from;
+  const failureReason = direction === "forward" ? "service-verification-failed" : "previous-service-verification-failed";
+  let samples = 0;
+  let observations = 0;
+  const requests = [];
+  const host = createDeployHost({
+    environment: controlPlaneEnvironment(),
+    observationWindowMs: windowMs,
+    serviceVerificationTimeoutMs: 100,
+    serviceVerificationWait: async () => {},
+    serviceControl: {
+      platform,
+      restart: async () => {},
+      isRunning: async (label) => {
+        if (inspectionFailure !== null) throw inspectionFailure;
+        if (label === SERVICE_LABELS[0]) samples += 1;
+        if (regression === "inspection" && samples > 1) {
+          throw new DeployFailure("service-inspection-timeout", label);
+        }
+        return !(regression === "unit" && samples > 1 && label === "com.agentos.runner");
       },
-      fetchImpl: controlPlaneFetch({ commit: revisions.from, registry: () => runnerRegistry({
-        commit: revisions.from,
-        lastSeenAt: new Date(1_800_000_000_000 + ++observations * 1_000).toISOString(),
-      }) }),
-    });
-    const attempt = openDeploymentAttempt({ deployRoot: "/fixture", targetCommit: revisions.to, transactionId: "rollback-regression" });
-    attempt.establish({ revisions });
-    await assert.rejects(host.restorePreviousServices(attempt),
-      (error) => error.reason === "previous-service-verification-failed"
-        && error.detail.includes("observation-window-regressed")
-        && error.detail.includes(regression === "unit" ? "com.agentos.runner" : "com.agentos.api"));
-    assert.equal(samples, 2);
+      describe: async (label) => regression === "wrapper" && samples > 1
+        ? `/wrong/wrapper.mjs ${label}` : stableDescription(label),
+    },
+    fetchImpl: async (url, options) => {
+      requests.push(url);
+      return controlPlaneFetch({
+        commit: wrongCommit || (regression === "api" && samples > 1) ? "f".repeat(40) : commit,
+        registry: () => runnerRegistry({
+          commit,
+          lastSeenAt: new Date(1_800_000_000_000 + ++observations * 1_000).toISOString(),
+          overrides: regression === "runner" && samples > 1 ? { [LOCAL_RUNNER_IDS[0]]: { online: false } } : {},
+        }),
+      })(url, options);
+    },
   });
+  const attempt = openDeploymentAttempt({ deployRoot: "/fixture", targetCommit: revisions.to, transactionId: `release-proof-${direction}` });
+  attempt.establish({ revisions });
+  return {
+    failureReason, requests, samples: () => samples,
+    verify: async () => {
+      if (direction === "rollback") return host.restorePreviousServices(attempt);
+      attempt.establish(await host.restartServices());
+      return host.verifyServices(attempt);
+    },
+  };
+};
+
+for (const direction of ["forward", "rollback"]) {
+  for (const platform of ["linux", "darwin"]) {
+    test(`${direction} proves the named release on ${platform}`, async () => {
+      const proof = releaseProofFixture({ direction, platform });
+      await proof.verify();
+      assert.equal(proof.samples(), 1);
+      assert.ok(proof.requests.some((url) => url.endsWith("/health")));
+      assert.ok(proof.requests.some((url) => url.endsWith("/version")));
+      assert.equal(proof.requests.filter((url) => url.endsWith("/runners")).length, 2);
+    });
+  }
+  test(`${direction} rejects an API answering on the wrong commit`, async () => {
+    const proof = releaseProofFixture({ direction, wrongCommit: true });
+    await assert.rejects(proof.verify(), (error) => error.reason === proof.failureReason
+      && error.detail === `health-200-version-200-commit-${"f".repeat(40)}`);
+  });
+  for (const reason of ["service-control-denied", "service-control-failed:is-active:com.agentos.api", "deploy-interrupted"]) {
+    test(`${direction} preserves fatal ${reason} without retrying`, async () => {
+      const inspectionFailure = new DeployFailure(reason, "inspection-refused");
+      const proof = releaseProofFixture({ direction, inspectionFailure });
+      await assert.rejects(proof.verify(), (error) => error === inspectionFailure);
+    });
+  }
+  for (const regression of ["unit", "api", "wrapper", "runner", "inspection"]) {
+    test(`${direction} detects ${regression} regression during its observation window`, async () => {
+      const proof = releaseProofFixture({ direction, windowMs: 10, regression });
+      await assert.rejects(proof.verify(), (error) => error.reason === proof.failureReason
+        && error.detail.includes("observation-window-regressed"));
+      assert.equal(proof.samples(), 2);
+    });
+  }
 }
 
 test("observation overrides reject overflow and durations beyond five minutes", () => {
@@ -3221,7 +3235,7 @@ const drainFixture = ({
     },
   };
   const host = createDeployHost({
-    serviceControl: { platform: "linux", restart: async () => undefined, isRunning: async () => true, describe: async () => "" },
+    serviceControl: { platform: "linux", restart: async () => undefined, isRunning: async () => true, describe: stableDescription },
     environment: controlPlaneEnvironment(),
     waitBudgetMs,
     allowWait,

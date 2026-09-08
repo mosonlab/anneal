@@ -25,6 +25,13 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  serviceDefinition, runnerCountEnvironment, systemdEnvironmentEscape,
+  renderSystemdEnvironment, systemdDirectiveToken, systemdPathDirective,
+  renderSystemdTemplate, hasExactDirective, directiveCount,
+} from "./service-definition.mjs";
+export { systemdEnvironmentEscape, renderSystemdEnvironment };
+
 import { resolveServicePlatform } from "./service-platform.mjs";
 import { SYSTEMCTL_PATH, SYSTEMD_CONTROL_VERBS, systemdControlArgv } from "./service-control.mjs";
 import { DEFAULT_DEPLOY_ROLE, resolveDeployRole } from "./deploy-role.mjs";
@@ -52,7 +59,7 @@ import {
   workspaceDependencyPaths,
 } from "./release-artifacts.mjs";
 import { assembleReleaseDirectory } from "./release-directory.mjs";
-import { activateReleasePointer } from "./release-pointer.mjs";
+import { activateReleasePointer, RELEASE_POINTER_NAMES } from "./release-pointer.mjs";
 import { DeployFailure } from "./quiet-window-lib.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -63,8 +70,6 @@ const LABEL = "com.agentos.auto-deploy";
 // service inventory entry, so its names are spelled through the same helpers.
 const AUTO_DEPLOY_UNIT = unitNameForLabel(LABEL);
 const AUTO_DEPLOY_TIMER = `${LABEL}.timer`;
-const SERVICE_TEMPLATE = join(SCRIPT_DIR, "com.agentos.service.plist.in");
-const SYSTEMD_SERVICE_TEMPLATE = join(SCRIPT_DIR, "com.agentos.service.unit.in");
 const SYSTEMD_AUTO_DEPLOY_TEMPLATE = join(SCRIPT_DIR, "com.agentos.auto-deploy.unit.in");
 const SYSTEMD_AUTO_DEPLOY_TIMER_TEMPLATE = join(SCRIPT_DIR, "com.agentos.auto-deploy.timer.in");
 const SERVICE_WRAPPER_SOURCE = join(SCRIPT_DIR, "launchd-service-wrapper.mjs");
@@ -302,10 +307,6 @@ export const verifyBackupConfiguration = (backup, execute = execFileSync) => {
   });
 };
 
-const runnerCountEnvironment = (runnerCount) => runnerCount === undefined || runnerCount === DEFAULT_RUNNER_COUNT
-  ? {}
-  : { AGENTOS_RUNNER_COUNT: String(runnerCount) };
-
 const runnerIdPrefixEnvironment = (runnerIdPrefix) => runnerIdPrefix === undefined || runnerIdPrefix === ""
   ? {}
   : { AGENTOS_RUNNER_ID_PREFIX: runnerIdPrefix };
@@ -378,7 +379,7 @@ export const bootstrapCurrentRelease = ({
   const root = realpathSync(resolve(repositoryRoot ?? REPOSITORY_ROOT));
   const sharedEnvironment = join(root, "shared", ".env");
   if (!existsSync(sharedEnvironment)) throw new Error("shared-environment-missing");
-  if (existsSync(join(root, "current"))) {
+  if (existsSync(join(root, RELEASE_POINTER_NAMES.current))) {
     const current = resolveCurrentRelease({ repositoryRoot: root });
     return Object.freeze({
       releaseName: current.releaseIdentity,
@@ -454,58 +455,6 @@ export const servicePlistValues = ({
   });
 };
 
-export const renderServiceLaunchdPlist = (template, values) => {
-  const replacements = {
-    __LABEL__: values.label,
-    __NODE_BINARY__: values.nodeBinary,
-    __WRAPPER_PATH__: values.wrapperPath,
-    __REPOSITORY_ROOT__: values.repositoryRoot,
-    __SHARED_ROOT__: values.sharedRoot,
-    __SHARED_ENV_FILE__: values.sharedEnvironmentPath,
-    __PATH__: values.path,
-    __STDOUT_PATH__: values.stdoutPath,
-    __STDERR_PATH__: values.stderrPath,
-  };
-  let rendered = template;
-  for (const [placeholder, value] of Object.entries(replacements)) rendered = rendered.replaceAll(placeholder, xml(value));
-  const runnerEnvironmentValues = {
-    ...(values.runnerId ? {
-      RUNNER_ID: values.runnerId,
-      ...(values.runnerPath ? { RUNNER_PATH: values.runnerPath } : {}),
-    } : {}),
-    ...runnerCountEnvironment(values.runnerCount),
-  };
-  const runnerEnvironment = Object.entries(runnerEnvironmentValues)
-    .map(([key, value]) => `    <key>${xml(key)}</key>\n    <string>${xml(value)}</string>`)
-    .join("\n");
-  rendered = rendered.replaceAll("__RUNNER_ENVIRONMENT__", runnerEnvironment);
-  if (/__[A-Z_]+__/u.test(rendered)) throw new Error("launchd-service-template-has-unresolved-placeholder");
-  return rendered;
-};
-
-/**
- * The service unit deliberately receives the same environment dictionary as
- * the LaunchAgent plist.  Keep this conversion in one place so a new
- * environment key cannot silently land in only one platform's definition.
- */
-export const serviceEnvironmentValues = (values) => Object.freeze({
-  PATH: values.path,
-  DEPLOY_NODE_BINARY: values.nodeBinary,
-  AGENTOS_REPOSITORY_ROOT: values.repositoryRoot,
-  AGENTOS_SHARED_ROOT: values.sharedRoot,
-  AGENTOS_SHARED_ENV_FILE: values.sharedEnvironmentPath,
-  AGENTOS_CURRENT_POINTER: "current",
-  AGENTOS_RELEASES_DIRECTORY: "releases",
-  AGENTOS_SERVICE_LABEL: values.label,
-  ...runnerCountEnvironment(values.runnerCount),
-  ...(values.runnerId
-    ? {
-        RUNNER_ID: values.runnerId,
-        ...(values.runnerPath ? { RUNNER_PATH: values.runnerPath } : {}),
-      }
-    : {}),
-});
-
 export const autoDeployEnvironmentValues = (values) => Object.freeze({
   AGENTOS_REPOSITORY_ROOT: values.repositoryRoot,
   PATH: values.path,
@@ -529,74 +478,6 @@ export const autoDeployEnvironmentValues = (values) => Object.freeze({
         DEPLOY_CONTAINER_PG_DUMP_BINARY: values.backup.pgDumpBinary,
       }),
 });
-
-/** Escape a value for systemd's Environment= parser. Quoting every value
- * keeps whitespace data intact; percent is doubled because systemd expands
- * specifiers while loading unit definitions. */
-export const systemdEnvironmentEscape = (value, key = "environment") => {
-  if (typeof value !== "string" || value.includes("\0") || value.includes("\n") || value.includes("\r")) {
-    throw new Error(`systemd-environment-value-invalid:${key}`);
-  }
-  return value
-    .replaceAll("\\", "\\\\")
-    .replaceAll('"', '\\"')
-    .replaceAll("%", "%%");
-};
-
-const systemdDirectiveToken = (value, key) => {
-  if (typeof value !== "string" || value === "" || /[\0\n\r]/u.test(value)) {
-    throw new Error(`systemd-directive-value-invalid:${key}`);
-  }
-  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("%", "%%")}"`;
-};
-
-// WorkingDirectory's path parser treats surrounding quotes as path bytes on
-// older supported systemd releases, so escape whitespace without quoting it.
-const systemdPathDirective = (value, key) => {
-  if (typeof value !== "string" || value === "" || /[\0\n\r]/u.test(value)) {
-    throw new Error(`systemd-directive-value-invalid:${key}`);
-  }
-  return value
-    .replaceAll("\\", "\\\\")
-    .replaceAll("\t", "\\t")
-    .replaceAll(" ", "\\x20")
-    .replaceAll('"', '\\"')
-    .replaceAll("%", "%%");
-};
-
-export const renderSystemdEnvironment = (values) => Object.entries(values)
-  .map(([key, value]) => {
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(key)) throw new Error(`systemd-environment-key-invalid:${key}`);
-    return `Environment=${key}="${systemdEnvironmentEscape(value, key)}"`;
-  })
-  .join("\n");
-
-const renderSystemdTemplate = (template, replacements, unresolvedReason) => {
-  let rendered = template;
-  for (const [placeholder, value] of Object.entries(replacements)) {
-    rendered = rendered.replaceAll(placeholder, value);
-  }
-  if (/__[A-Z_]+__/u.test(rendered)) throw new Error(unresolvedReason);
-  return rendered;
-};
-
-export const renderServiceSystemdUnit = (
-  template = readFileSync(SYSTEMD_SERVICE_TEMPLATE, "utf8"),
-  values,
-) => {
-  if (typeof values?.serviceUser !== "string" || values.serviceUser === "") {
-    throw new Error("systemd-service-user-required");
-  }
-  if (values.serviceUser === "root") throw new Error("systemd-service-user-root");
-  return renderSystemdTemplate(template, {
-    __LABEL__: values.label,
-    __NODE_BINARY__: systemdDirectiveToken(values.nodeBinary, "node-binary"),
-    __WRAPPER_PATH__: systemdDirectiveToken(values.wrapperPath, "wrapper-path"),
-    __REPOSITORY_ROOT__: systemdPathDirective(values.repositoryRoot, "repository-root"),
-    __SERVICE_USER__: values.serviceUser,
-    __ENVIRONMENT__: renderSystemdEnvironment(serviceEnvironmentValues(values)),
-  }, "systemd-service-template-has-unresolved-placeholder");
-};
 
 const withoutLegacySystemdRunnerCount = (definition) => {
   const matches = [...definition.matchAll(/^Environment=AGENTOS_RUNNER_COUNT="([0-9]+)"\n/gmu)];
@@ -633,62 +514,6 @@ export const renderAutoDeploySystemdTimer = (
   template = readFileSync(SYSTEMD_AUTO_DEPLOY_TIMER_TEMPLATE, "utf8"),
 ) => renderSystemdTemplate(template, {}, "systemd-auto-deploy-timer-has-unresolved-placeholder");
 
-const hasExactDirective = (text, directive, value) => {
-  const escaped = value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-  return new RegExp(`^${directive}=${escaped}$`, "mu").test(text);
-};
-
-const directiveCount = (text, directive) => (text.match(new RegExp(`^${directive}=`, "gmu")) ?? []).length;
-
-/** Validate the subset of unit syntax that protects the activation boundary.
- * systemd-analyze is an optional stronger parser in the test harness; these
- * checks are always available on both operator platforms. */
-export const verifySystemdServiceDefinitions = (definitions, inventory) => {
-  if (!definitions || !isGeneratedServiceInventory(inventory) || inventory.labels.length === 0) {
-    throw new Error("systemd-service-inventory-invalid");
-  }
-  for (const label of inventory.labels) {
-    const rendered = definitions[label];
-    if (typeof rendered !== "string") throw new Error(`systemd-service-definition-missing:${label}`);
-    if (/__[A-Z_]+__/u.test(rendered)) throw new Error(`systemd-service-definition-unresolved:${label}`);
-    if (!hasExactDirective(rendered, "SyslogIdentifier", label)
-        || !new RegExp(`^ExecStart=.*(?:^|\\s)${label}(?:\\s|$)`, "mu").test(rendered)) {
-      throw new Error(`systemd-service-definition-label-mismatch:${label}`);
-    }
-    if (!rendered.includes("AGENTOS_CURRENT_POINTER") || !rendered.includes("Environment=AGENTOS_CURRENT_POINTER=\"current\"")) {
-      throw new Error(`systemd-service-definition-current-pointer-missing:${label}`);
-    }
-    if (/^Environment=[^=\s]+=""$/mu.test(rendered)) {
-      throw new Error(`systemd-service-definition-empty-assignment:${label}`);
-    }
-    const required = [
-      ["Type", "simple"],
-      ["Restart", "always"],
-      ["RestartSec", "10"],
-      ["StandardOutput", "journal"],
-      ["StandardError", "journal"],
-      ["After", "network-online.target"],
-      ["Wants", "network-online.target"],
-      ["WantedBy", "multi-user.target"],
-    ];
-    for (const [directive, value] of required) {
-      if (directiveCount(rendered, directive) !== 1 || !hasExactDirective(rendered, directive, value)) {
-        throw new Error(`systemd-service-definition-directive-missing:${label}:${directive}`);
-      }
-    }
-    if (directiveCount(rendered, "User") !== 1 || !/^User=(?!root$)\S+$/mu.test(rendered)) {
-      throw new Error(`systemd-service-definition-user-invalid:${label}`);
-    }
-    for (const directive of ["WorkingDirectory", "ExecStart", "SyslogIdentifier"]) {
-      if (directiveCount(rendered, directive) !== 1) {
-        throw new Error(`systemd-service-definition-directive-missing:${label}:${directive}`);
-      }
-    }
-    if (/^EnvironmentFile=/mu.test(rendered)) throw new Error(`systemd-service-environment-file-forbidden:${label}`);
-  }
-  return true;
-};
-
 export const verifySystemdAutoDeployDefinitions = ({ service, timer }) => {
   for (const [name, rendered] of [["service", service], ["timer", timer]]) {
     if (typeof rendered !== "string") throw new Error(`systemd-auto-deploy-definition-missing:${name}`);
@@ -714,33 +539,6 @@ export const verifySystemdAutoDeployDefinitions = ({ service, timer }) => {
     }
   }
   if (/^EnvironmentFile=/mu.test(service)) throw new Error("systemd-auto-deploy-environment-file-forbidden");
-  return true;
-};
-
-/** Verify the complete rendered inventory before any LaunchAgent file is
- * touched. The checks intentionally inspect the launchd contract itself, not
- * only the source inputs: a plist that still contains a source checkout path
- * or an unresolved placeholder must never reach launchctl. */
-export const verifyServicePlistDefinitions = (definitions, inventory) => {
-  if (!definitions || !isGeneratedServiceInventory(inventory) || inventory.labels.length === 0) {
-    throw new Error("launchd-service-inventory-invalid");
-  }
-  for (const label of inventory.labels) {
-    const rendered = definitions[label];
-    if (typeof rendered !== "string") throw new Error(`launchd-service-definition-missing:${label}`);
-    if (/__[A-Z_]+__/u.test(rendered)) throw new Error(`launchd-service-definition-unresolved:${label}`);
-    if (!new RegExp(`<key>Label</key>\\s*<string>${xml(label)}</string>`, "u").test(rendered)) {
-      throw new Error(`launchd-service-definition-label-mismatch:${label}`);
-    }
-    if (!rendered.includes("<key>ProgramArguments</key>")) throw new Error(`launchd-service-definition-program-missing:${label}`);
-    if (!rendered.includes("AGENTOS_REPOSITORY_ROOT") || !rendered.includes("AGENTOS_SHARED_ROOT")) {
-      throw new Error(`launchd-service-definition-path-environment-missing:${label}`);
-    }
-    if (!rendered.includes("AGENTOS_CURRENT_POINTER") || !rendered.includes("<string>current</string>")) {
-      throw new Error(`launchd-service-definition-current-pointer-missing:${label}`);
-    }
-    if (/<string>\s*<\/string>/u.test(rendered)) throw new Error(`launchd-service-definition-empty-string:${label}`);
-  }
   return true;
 };
 
@@ -841,21 +639,20 @@ const renderMigratedServicePlist = ({ sourcePath, values }) => {
     if (!Object.hasOwn(original, "EnvironmentVariables")) {
       setPlistValue(temporary, false, "EnvironmentVariables", "-dictionary");
     }
-    const controlled = {
-      DEPLOY_NODE_BINARY: values.nodeBinary,
-      AGENTOS_REPOSITORY_ROOT: values.repositoryRoot,
-      AGENTOS_SHARED_ROOT: values.sharedRoot,
-      AGENTOS_SHARED_ENV_FILE: values.sharedEnvironmentPath,
-      AGENTOS_CURRENT_POINTER: "current",
-      AGENTOS_RELEASES_DIRECTORY: "releases",
-      AGENTOS_SERVICE_LABEL: values.label,
-    };
-    if (!Object.hasOwn(environment, "PATH")) controlled.PATH = values.path;
-    if (values.runnerId) {
-      controlled.RUNNER_ID = values.runnerId;
-      if (values.runnerPath && (typeof environment.RUNNER_PATH !== "string" || environment.RUNNER_PATH === "")) {
-        controlled.RUNNER_PATH = values.runnerPath;
-      }
+    // Migration preserves operator-owned paths and removes legacy inventory keys.
+    const definition = serviceDefinition({
+      ...values,
+      runnerCount: undefined,
+      path: Object.hasOwn(environment, "PATH") ? environment.PATH : values.path,
+      runnerPath: typeof environment.RUNNER_PATH === "string" && environment.RUNNER_PATH !== ""
+        ? environment.RUNNER_PATH : values.runnerPath,
+    });
+    // Preserve the mutation order for plutil/plistlib as well as the values.
+    const { PATH, RUNNER_ID, RUNNER_PATH, ...controlled } = definition.keys;
+    if (!Object.hasOwn(environment, "PATH")) controlled.PATH = PATH;
+    if (RUNNER_ID) controlled.RUNNER_ID = RUNNER_ID;
+    if (RUNNER_PATH && (typeof environment.RUNNER_PATH !== "string" || environment.RUNNER_PATH === "")) {
+      controlled.RUNNER_PATH = RUNNER_PATH;
     }
     for (const [key, value] of Object.entries(controlled)) {
       setPlistValue(temporary, Object.hasOwn(environment, key), `EnvironmentVariables.${key}`, "-string", value);
@@ -867,23 +664,24 @@ const renderMigratedServicePlist = ({ sourcePath, values }) => {
       if (Object.hasOwn(environment, key)) execPlist(["-remove", `EnvironmentVariables.${key}`, temporary], { stdio: "ignore" });
     }
     execPlist(["-convert", "xml1", temporary], { stdio: ["ignore", "ignore", "pipe"] });
-    return readFileSync(temporary, "utf8");
+    const rendered = readFileSync(temporary, "utf8");
+    definition.verify("launchd", rendered);
+    return { definition, rendered };
   } finally {
     rmSync(temporaryRoot, { recursive: true, force: true });
   }
 };
 
-export const renderServicePlists = ({
-  template = readFileSync(SERVICE_TEMPLATE, "utf8"),
-  inventory,
-  ...values
-} = {}) => {
-  const rendered = Object.fromEntries(inventory.labels.map((label) => [
-    label,
-    renderServiceLaunchdPlist(template, servicePlistValues({ label, inventory, ...values })),
-  ]));
-  verifyServicePlistDefinitions(rendered, inventory);
-  return Object.freeze(rendered);
+export const renderServicePlists = ({ inventory, ...values } = {}) => {
+  if (!isGeneratedServiceInventory(inventory) || inventory.labels.length === 0) {
+    throw new Error("launchd-service-inventory-invalid");
+  }
+  return Object.freeze(Object.fromEntries(inventory.labels.map((label) => {
+    const definition = serviceDefinition(servicePlistValues({ label, inventory, ...values }));
+    const rendered = definition.render("launchd");
+    definition.verify("launchd", rendered);
+    return [label, rendered];
+  })));
 };
 
 const sha256 = (contents) => createHash("sha256").update(contents).digest("hex");
@@ -1339,7 +1137,7 @@ const readStageEntries = ({
     wrapper,
   });
   for (const item of inventory.entries) {
-    const expected = renderServiceSystemdUnit(readFileSync(SYSTEMD_SERVICE_TEMPLATE, "utf8"), expectedDefinitions[item.label]);
+    const expected = serviceDefinition(expectedDefinitions[item.label]).render("systemd");
     const entry = manifest.entries.find((candidate) => candidate.label === item.label);
     const normalizedExpected = withoutLegacySystemdRunnerCount(expected);
     if (entry.preserved) {
@@ -1683,17 +1481,6 @@ const systemdInstallerReport = ({ unitDirectory, units, staging }) => [
   ["staging", staging],
 ];
 
-/** The `RUNNER_PATH` a rendered definition carries, or null when it carries
- * none and the wrapper's `shared/.env` value therefore reaches the runner. */
-const renderedRunnerPath = (definition) => {
-  const match = /<key>RUNNER_PATH<\/key>\s*<string>([^<]*)<\/string>/u.exec(definition);
-  if (!match) return null;
-  return match[1]
-    .replaceAll("&lt;", "<").replaceAll("&gt;", ">")
-    .replaceAll("&quot;", "\"").replaceAll("&apos;", "'")
-    .replaceAll("&amp;", "&");
-};
-
 /** The plan an operator reads before `--apply`. Every runner definition names
  * where its effective RUNNER_PATH comes from, so a value that would defeat
  * `shared/.env` is visible before it is written. */
@@ -1793,9 +1580,9 @@ const systemdStagePlan = ({
   });
   const unitDefinitions = Object.freeze(Object.fromEntries(inventory.labels.map((label) => [
     label,
-    renderServiceSystemdUnit(readFileSync(SYSTEMD_SERVICE_TEMPLATE, "utf8"), rendered[label]),
+    serviceDefinition(rendered[label]).render("systemd"),
   ])));
-  verifySystemdServiceDefinitions(unitDefinitions, inventory);
+  for (const label of inventory.labels) serviceDefinition(rendered[label]).verify("systemd", unitDefinitions[label]);
   const unitPaths = inventory.entries.map(({ unitName }) => join(resolvedUnitDirectory, unitName));
   if (!apply) return serviceInstallerOutcome({
     platform: "linux",
@@ -2529,7 +2316,7 @@ export const installLaunchdServices = ({
   if (previous && previous.inventory.runnerIdPrefix !== runnerIdPrefix) {
     throw new Error("launchd-runner-id-prefix-manifest-mismatch");
   }
-  const rendered = Object.freeze(Object.fromEntries(inventory.entries.map(({ label, plistName }) => {
+  const definitions = Object.fromEntries(inventory.entries.map(({ label, plistName }) => {
     const values = servicePlistValues({
       label,
       inventory,
@@ -2543,18 +2330,23 @@ export const installLaunchdServices = ({
       wrapperPath: wrapper,
     });
     const destination = join(launchAgents, plistName);
-    return [label, existsSync(destination) && replaceExisting
-      ? renderMigratedServicePlist({ sourcePath: destination, values })
-      : renderServiceLaunchdPlist(readFileSync(SERVICE_TEMPLATE, "utf8"), values)];
-  })));
-  verifyServicePlistDefinitions(rendered, inventory);
+    if (existsSync(destination) && replaceExisting) {
+      return [label, renderMigratedServicePlist({ sourcePath: destination, values })];
+    }
+    const definition = serviceDefinition(values);
+    const rendered = definition.render("launchd");
+    definition.verify("launchd", rendered);
+    return [label, { definition, rendered }];
+  }));
+  const rendered = Object.freeze(Object.fromEntries(Object.entries(definitions)
+    .map(([label, { rendered }]) => [label, rendered])));
   // The source an operator reads is the one that will actually reach the
   // runner, so it comes from the definition about to be written: a migrated
   // plist that keeps its own inline RUNNER_PATH defeats shared/.env no matter
   // what the plan resolved.
   const runnerPathSources = runnerPathPlan
     ? inventory.entries.filter(({ runnerId }) => runnerId).map(({ label }) => {
-      const inline = renderedRunnerPath(rendered[label]);
+      const inline = definitions[label].definition.keys.RUNNER_PATH ?? null;
       return {
         label,
         source: inline === null
@@ -2850,7 +2642,7 @@ export const installLaunchd = (args, context = {}) => {
     const npmBinary = context.npmBinary ? realpathSync(context.npmBinary) : requiredBinary("npm");
     const values = {
       nodeBinary,
-      deployScript: join(root, "current/scripts/deploy/quiet-window-deploy.mjs"),
+      deployScript: join(root, RELEASE_POINTER_NAMES.current, "scripts/deploy/quiet-window-deploy.mjs"),
       repositoryRoot: root,
       sourceRemote: context.sourceRemote ?? execFileSync(gitBinary, ["-C", root, "remote", "get-url", "origin"], {
         encoding: "utf8",
@@ -2906,7 +2698,7 @@ export const installLaunchd = (args, context = {}) => {
   const npmBinary = requiredBinary("npm");
   const values = {
     nodeBinary,
-    deployScript: join(realpathSync(REPOSITORY_ROOT), "current/scripts/deploy/quiet-window-deploy.mjs"),
+    deployScript: join(realpathSync(REPOSITORY_ROOT), RELEASE_POINTER_NAMES.current, "scripts/deploy/quiet-window-deploy.mjs"),
     repositoryRoot: realpathSync(REPOSITORY_ROOT),
     sourceRemote: execFileSync(gitBinary, ["-C", REPOSITORY_ROOT, "remote", "get-url", "origin"], {
       encoding: "utf8",
@@ -3016,7 +2808,7 @@ const autoDeployDefinitionValues = ({
   backup,
   serviceUser,
   repositoryRoot: root,
-  deployScript: join(root, "current/scripts/deploy/quiet-window-deploy.mjs"),
+  deployScript: join(root, RELEASE_POINTER_NAMES.current, "scripts/deploy/quiet-window-deploy.mjs"),
   runnerCount,
   runnerIdPrefix,
   deployRole,

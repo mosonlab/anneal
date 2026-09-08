@@ -73,9 +73,11 @@ export {
   enqueueTaskRun,
   enqueueTaskRunInternal,
   errorForOpenRunRefusal,
-  parksInsteadOfRaising,
-  recordRunBirthRefusal,
   runBirthRefusalMetadata,
+  runBirthRefusalDecision,
+  settleRunBirthRefusal,
+  type RunBirthRefusalOrigin,
+  type RunBirthRefusalSettlement,
   EXTERNAL_FAILURE_REFUND_CAP,
   gateQuestion,
   isArchivedAssigneeError,
@@ -151,3 +153,5 @@ export * from "./chain-control.js";
 export { parseLocalApiDestination } from "./local-origin.js";
 
 export { executorOfflineDetail, latestExecutorOfflineMarker, openEpisodeStart, closeExecutorOfflineEpisodeTx } from "./merge-tail-markers.js";
+
+export * from "./task-write.js";

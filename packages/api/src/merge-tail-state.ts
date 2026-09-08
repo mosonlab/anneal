@@ -1,17 +1,14 @@
 import {
+  settleRunBirthRefusal,
   MERGE_EXECUTOR_OFFLINE_REASON,
   attemptRunBirth,
   closeIntegratorQuestions,
   enqueueTaskRunInternal,
-  errorForOpenRunRefusal,
   MERGE_RECOVERY_CLASS_SETTLE,
   MERGE_RECOVERY_RETRY_CLASS_ENUM,
-  parksInsteadOfRaising,
-  recordRunBirthRefusal,
   MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
   openRun,
-  runBirthRefusalMetadata,
   Prisma,
   TaskStatus,
   recordReadinessRequeue,
@@ -212,18 +209,12 @@ export const requeueMergeTailRun = async (tx: DbTx, taskId: string, now: Date, r
     kind: "merge-tail-requeue", readyAt: now, budgetGrant: 1, ...(readinessBaseDrift ? { readinessBaseDrift: true } : {}),
   }));
   if (attempt.outcome === "refused") {
-    const { refusal } = attempt;
-    if (refusal.disposition !== "held") {
-      await tx.task.update({
-        where: { id: taskId },
-        data: { status: TaskStatus.REVIEW, failureReason: refusal.message },
-      });
-    }
-    await tx.taskActivity.create({ data: {
-      taskId, actorType: "control-plane",
-      body: `Merge-tail target was not queued: ${refusal.message}`,
-      metadata: runBirthRefusalMetadata(refusal),
-    } });
+    const settlement = await settleRunBirthRefusal(tx, {
+      taskId, refusal: attempt.refusal, mode: "park", now,
+      origin: { kind: "automatic", activityPrefix: "Merge-tail target was not queued" },
+    });
+    if (settlement.kind === "raise") throw settlement.error;
+    return { ...attempt, settlement };
   }
   return attempt;
 };
@@ -300,7 +291,7 @@ export const enterRepair = async (
   }
   const attempt = requeue ? await requeueMergeTailRun(tx, context.regressionTaskId, input.now, requeue.baseDrift) : null;
   if (attempt && attempt.outcome !== "opened") {
-    if (attempt.outcome === "refused" && attempt.refusal.disposition !== "held") {
+    if (attempt.outcome === "refused" && attempt.settlement.kind === "parked") {
       await transitionMergeRecovery(tx, input.aggregateId, MergeRecoveryStatus.BLOCKED_DOWNSTREAM, {
         failureReason: attempt.refusal.message, endedAt: input.now,
       });
@@ -325,8 +316,10 @@ export const enterRepair = async (
       input.budgetGrant === 1 ? { budgetGrant: 1 } : {},
     );
     if (!opened.ok) {
-      if (!parksInsteadOfRaising(opened.refusal)) throw errorForOpenRunRefusal(opened.refusal);
-      await recordRunBirthRefusal(tx, context.regressionTaskId, opened.refusal);
+      const settlement = await settleRunBirthRefusal(tx, {
+        taskId: context.regressionTaskId, refusal: opened.refusal, mode: "raise", origin: { kind: "request" }, now: input.now,
+      });
+      if (settlement.kind === "raise") throw settlement.error;
       await transitionMergeRecovery(tx, input.aggregateId, MergeRecoveryStatus.BLOCKED_DOWNSTREAM, {
         failureReason: opened.refusal.message, endedAt: input.now,
       });

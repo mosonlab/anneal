@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import {
   ACTIVE_RUN_STATUSES,
   basePublishedStamp,
-  CleanupStatus, FailureClass, leaseLossRefundDecision, openRun, resolveRunBranches, runBirthRefusalMetadata,
+  CleanupStatus, FailureClass, leaseLossRefundDecision, openRun, resolveRunBranches, settleRunBirthRefusal,
   runOwnedHead, RunStatus,
   SessionExecutionStatus, type Prisma, type PrismaClient,
 } from "@anneal/db";
@@ -525,31 +525,13 @@ export const repairReplacementAfterSalvage = async (
     // invalidated a claim, so it is one of the refunds the bound counts.
     const opened = await openRun(tx, run.taskId, { kind: "claim-invalidated", sourceRunId: refund.sourceRunId, readyAt: revokedAt });
     if (!opened.ok) {
-      const refusal = opened.refusal;
-      switch (refusal.disposition) {
-        case "held":
-          // The stale clone is revoked, but Hold owns when the next Run may
-          // exist. Ordinary completion/Resume activation will enqueue from the
-          // durable salvage base after the barrier is released.
-          return "repaired";
-        case "stopped":
-        case "fault":
-          await tx.task.update({
-            where: { id: run.taskId },
-            data: { status: "REVIEW", failureReason: refusal.message },
-          });
-          await tx.taskActivity.create({ data: {
-            taskId: run.taskId,
-            actorType: "control-plane",
-            body: `Late-salvage replacement was revoked and not requeued: ${refusal.message}`,
-            metadata: runBirthRefusalMetadata(refusal),
-          } });
-          return "repaired";
-        default: {
-          const unhandled: never = refusal.disposition;
-          return unhandled;
-        }
-      }
+      const settlement = await settleRunBirthRefusal(tx, {
+        taskId: run.taskId, refusal: opened.refusal, mode: "park", now: revokedAt,
+        origin: { kind: "automatic", activityPrefix: "Late-salvage replacement was revoked and not requeued" },
+      });
+      if (settlement.kind === "raise") throw settlement.error;
+      // The stale clone was revoked. Hold still owns when a replacement may run.
+      return "repaired";
     }
     return "requeued";
   } else if (replacement.status !== RunStatus.QUEUED) {
