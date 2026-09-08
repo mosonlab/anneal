@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { deriveUsageColumns, extractUsage, sumSessionUsage, sumUsage } from "./usage.js";
+import { deriveUsageColumns, extractUsage, sumSessionEventUsage, sumSessionUsage, sumUsage } from "./usage.js";
 
 type StoredSessionEvent = {
   child: string;
@@ -204,3 +204,37 @@ for (const sessionId of [undefined, "", 123]) {
     }
   });
 }
+
+for (const resumedCost of [0.556285, 12]) {
+  test(`sumSessionEventUsage adds resumed process totals regardless of counter direction (${resumedCost})`, () => {
+    const first = claudeResult("same-session", 7.69342375, 100, 10);
+    const final = (payload: unknown) => ({ type: "FINAL_OUTPUT", payload });
+    const events = [
+      // Legacy events before the first recorded start still count.
+      final(first),
+      final({ ...first, uuid: "different-result", origin: { kind: "task-notification" } }),
+      { type: "PROCESS_STARTED", payload: {} },
+      final({ type: "result", session_id: "same-session", total_cost_usd: 0, modelUsage: {},
+        origin: { kind: "task-notification" } }),
+      final(claudeResult("same-session", resumedCost, 200, 20)),
+      final(claudeResult("fresh-session", 1, 50, 5)),
+      // A failed launch with no final output cannot erase completed usage.
+      { type: "PROCESS_STARTED", payload: {} },
+      { type: "PROVIDER_RAW", payload: claudeResult("same-session", 999, 999, 999) },
+    ];
+    const actual = deriveUsageColumns(sumSessionEventUsage(events));
+    assert.equal(actual.inputTokens, 350);
+    assert.equal(actual.outputTokens, 35);
+    assert.equal(actual.costUsd?.toNumber(), Number((7.69342375 + resumedCost + 1).toFixed(4)));
+    assert.deepEqual(deriveUsageColumns(sumSessionEventUsage(events)), actual);
+  });
+}
+
+test("sumSessionEventUsage respects latest cost within a process without guessing resets", () => {
+  const events = [
+    { type: "FINAL_OUTPUT", payload: claudeResult("same", 8, 100, 10) },
+    { type: "FINAL_OUTPUT", payload: { type: "result", session_id: "same", total_cost_usd: 0,
+      origin: { kind: "task-notification" } } },
+  ];
+  assert.equal(deriveUsageColumns(sumSessionEventUsage(events)).costUsd?.toString(), "0");
+});

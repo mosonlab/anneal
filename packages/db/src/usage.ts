@@ -102,8 +102,8 @@ const canonicalInputTokens = (uncached: number | null, cached: number | null): n
  * object is snake_case and describes ONE model, the primary one.
  *
  * In the single-invocation captures transcribed in `usage.test.ts`, top-level
- * `usage` equals `modelUsage["claude-opus-5"]` field for field. On resume,
- * `modelUsage` is session-cumulative while top-level `usage` remains per
+ * `usage` equals `modelUsage["claude-opus-5"]` field for field. Across results,
+ * `modelUsage` is process-cumulative while top-level `usage` remains per
  * invocation; `sumSessionUsage` reconciles snapshots and later fallback usage.
  * Adding both sources from one event double-counts the primary model, while
  * reading only top-level usage drops secondary models. This branch is therefore
@@ -257,7 +257,7 @@ type DecodedUsage = {
   cacheSplit: ExtractedCacheSplit;
   /**
    * Claude's `usage` object is per invocation. Keep it separate from the
-   * session-cumulative `modelUsage` breakdown so a payload-level aggregation
+   * process-cumulative `modelUsage` breakdown so a payload-level aggregation
    * can apply the provider's two different accounting rules without changing
    * the canonical one-payload result returned by `extractUsage`.
    */
@@ -543,20 +543,20 @@ type ClaudeSessionUsage = {
 };
 
 /**
- * Fold stored FINAL_OUTPUT payloads into one SessionUsage total.
+ * Fold FINAL_OUTPUT payloads from ONE provider process into a usage total.
  *
  * Claude's `result.total_cost_usd` and `result.modelUsage` are cumulative for
- * the provider conversation identified by `session_id`; the latest usable
- * value for each is therefore selected once per provider conversation. The
+ * each conversation within that process, identified by `session_id`; the latest
+ * usable value is therefore selected once per provider conversation. The
  * top-level `usage` object remains per invocation. It is summed when a Claude
  * payload has no usable model breakdown after the latest cumulative snapshot
  * (the same fallback used by `extractUsage`); a new snapshot replaces those
  * earlier increments. Payloads without a provider session id retain the original
  * additive behavior used by Codex and PI.
  *
- * `payloads` must be in FINAL_OUTPUT sequence order. The recompute path reads
- * SessionEvent rows ordered by `seq`, and callers using this helper directly
- * should preserve that same order so "latest" has its provider meaning.
+ * `payloads` must be in FINAL_OUTPUT sequence order within one process. A resume
+ * starts a new process whose counters reset even when `session_id` is unchanged.
+ * Stored event callers must use `sumSessionEventUsage` to preserve that boundary.
  */
 export const sumSessionUsage = (payloads: readonly unknown[]): SessionUsage => {
   const ungrouped: SessionUsage[] = [];
@@ -595,6 +595,32 @@ export const sumSessionUsage = (payloads: readonly unknown[]): SessionUsage => {
   }
 
   return sumUsage(ungrouped);
+};
+
+/** Fold durable events in seq order. PROCESS_STARTED is recorded for each
+ * provider launch, including resume/remediation; session_id survives those
+ * launches but Claude's accounting counters do not. Notifications in one
+ * process may repeat the same cumulative totals with different result UUIDs.
+ *
+ * Events predating the first recorded start form an initial process. A start
+ * with no FINAL_OUTPUT contributes nothing. Never infer resets from falling
+ * counters: a later process may cost more than its predecessor.
+ */
+export const sumSessionEventUsage = (
+  events: readonly { type: string; payload: unknown }[],
+): SessionUsage => {
+  const processes: SessionUsage[] = [];
+  let payloads: unknown[] = [];
+  for (const event of events) {
+    if (event.type === "PROCESS_STARTED") {
+      processes.push(sumSessionUsage(payloads));
+      payloads = [];
+    } else if (event.type === "FINAL_OUTPUT") {
+      payloads.push(event.payload);
+    }
+  }
+  processes.push(sumSessionUsage(payloads));
+  return sumUsage(processes);
 };
 
 type DerivedUsage = {
@@ -702,14 +728,14 @@ export const sessionUsageLockKey = (sessionId: string): number => {
 };
 
 /**
- * Recompute a session's derived usage columns from its stored `FINAL_OUTPUT`
- * events and write absolute values. Returns true when it actually wrote.
+ * Recompute a session's derived usage columns from stored `FINAL_OUTPUT` and
+ * `PROCESS_STARTED` events. Write absolute values; return true when changed.
  *
  * `SessionEvent` is the source of truth and the five columns are a derived
  * cache, which is what makes this idempotent: replaying an already-ingested
  * batch converges instead of drifting, a resumed session accumulates for free
- * (each provider conversation's latest cumulative `FINAL_OUTPUT` is selected,
- * while fresh provider conversations still add), a write lost to a crash
+ * (each process/conversation's latest cumulative `FINAL_OUTPUT` is selected,
+ * then distinct processes and conversations add), a write lost to a crash
  * between `createMany` and here is repaired by the next ingest or by the
  * backfill, and no NULL column is ever used in arithmetic.
  *
@@ -742,11 +768,11 @@ const recomputeSessionUsageOnce = async (db: PrismaClient, sessionId: string): P
     await tx.$queryRaw`SELECT pg_advisory_xact_lock(${SESSION_USAGE_LOCK_CLASS}::int, ${sessionUsageLockKey(sessionId)}::int)::text AS locked`;
 
     const rows = await tx.sessionEvent.findMany({
-      where: { sessionId, type: "FINAL_OUTPUT" },
+      where: { sessionId, type: { in: ["FINAL_OUTPUT", "PROCESS_STARTED"] } },
       orderBy: { seq: "asc" },
-      select: { payload: true },
+      select: { type: true, payload: true },
     });
-    const derived = deriveUsageColumns(sumSessionUsage(rows.map((row) => row.payload)));
+    const derived = deriveUsageColumns(sumSessionEventUsage(rows));
     const current = await tx.session.findUnique({
       where: { id: sessionId },
       select: {

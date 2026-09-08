@@ -112,7 +112,7 @@ test("0: the locked recompute runs at all against a real database", async () => 
 
 /* -------------------------------------------------------------- test 0b */
 
-test("0b: resumed Claude results use one cumulative total per provider session", async () => {
+test("0b: Claude notifications count once and resumed process totals survive recomputation", async () => {
   const seeded = await seedSession("claude-resume-usage");
   const result = {
     type: "result",
@@ -124,9 +124,12 @@ test("0b: resumed Claude results use one cumulative total per provider session",
     },
   };
 
-  // Claude emits the same session-cumulative result after each --resume. The
-  // old fold added every row, producing four times these values.
-  for (let seq = 1; seq <= 4; seq += 1) await addFinalOutput(seeded, seq, result);
+  // Task notifications repeat one process cumulative result with distinct UUIDs.
+  // They do not represent separate resume launches.
+  for (let seq = 1; seq <= 4; seq += 1) {
+    await addFinalOutput(seeded, seq, { ...result, uuid: `result-${seq}`,
+      ...(seq === 1 ? {} : { origin: { kind: "task-notification" } }) });
+  }
 
   assert.equal(await recomputeSessionUsage(db, seeded.session.id), true);
   const columns = await storedColumns(seeded.session.id);
@@ -142,6 +145,21 @@ test("0b: resumed Claude results use one cumulative total per provider session",
   assert.equal(unchanged.outputTokens, 20);
   assert.equal(unchanged.totalTokens, 120);
   assert.equal(unchanged.costUsd?.toString(), "1.25");
+
+  await db.sessionEvent.create({ data: {
+    sessionId: seeded.session.id, runId: seeded.run.id, seq: 5,
+    source: "RUNNER", type: "PROCESS_STARTED", payload: {},
+  } });
+  await addFinalOutput(seeded, 6, { ...result, total_cost_usd: 0, modelUsage: {},
+    usage: { input_tokens: 0, output_tokens: 0 }, origin: { kind: "task-notification" } });
+  await addFinalOutput(seeded, 7, { ...result, total_cost_usd: 0.5,
+    modelUsage: { "claude-opus-5": { inputTokens: 30, outputTokens: 10, costUSD: 0.5 } } });
+  assert.equal(await recomputeSessionUsage(db, seeded.session.id), true);
+  const resumed = await storedColumns(seeded.session.id);
+  assert.equal(resumed.costUsd?.toString(), "1.75");
+  assert.equal(resumed.inputTokens, 130);
+  assert.equal(resumed.outputTokens, 30);
+  assert.equal(await recomputeSessionUsage(db, seeded.session.id), false);
 });
 
 /* -------------------------------------------------------------- test 1 */
