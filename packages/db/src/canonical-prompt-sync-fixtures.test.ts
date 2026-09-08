@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { restorePreOptionalReviewPrompt, restorePreTierRevalidationPrompt } from "./canonical-prompt-sync-fixtures.js";
+import { restorePreFrozenRegressionPrompt, restorePreOptionalReviewPrompt, restorePreTierRevalidationPrompt } from "./canonical-prompt-sync-fixtures.js";
 import { LEGACY_TEMPLATE_GENERATIONS, templatePromptGenerationDigest } from "./canonical-template-transition.js";
 import { loadAllTemplateStepSources } from "./template-sources.js";
 
@@ -24,3 +24,11 @@ for (const marker of ["pre-runner-provided-regression-tooling", "pre-optional-re
     }
   });
 }
+
+test("sync fixtures reconstruct the registered pre-frozen-regression-baseline generation", async () => {
+  const sources = await loadAllTemplateStepSources();
+  for (const name of ["direct-engineer-workflow", "compound-engineer-workflow"] as const) {
+    const steps = sources.get(name)!.map((step) => ({ ...step, prompt: restorePreFrozenRegressionPrompt(step.prompt) }));
+    assert.equal(templatePromptGenerationDigest(steps), LEGACY_TEMPLATE_GENERATIONS[name].find((generation) => generation.marker === "pre-frozen-regression-baseline")!.promptDigest, name);
+  }
+});

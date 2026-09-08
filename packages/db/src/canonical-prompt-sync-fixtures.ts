@@ -1,9 +1,23 @@
 /**
- * Prompt-only rollover fixtures must restore every prompt byte from before
- * optional review omission, not just the older Regression script path. The
- * generation digest authenticates the whole template.
+ * Restore the Regression bytes retired by the frozen-baseline rollover before
+ * applying older fixture transformations. Every historical generation digest
+ * authenticates the whole template, including this mechanical handoff.
  */
-export const restorePreOptionalReviewPrompt = (prompt: string): string => prompt
+export const restorePreFrozenRegressionPrompt = (prompt: string): string => prompt
+  .replace(
+    "The platform script owns prepare-time refresh/merge, gate dispatch and retries,\nverdict transcription, and the final `regression-verification-v2` task output.\nMerge readiness checks the latest target under the Merge Lease before authorizing\nthe exact merge.",
+    "The platform script owns refresh/merge, merge-lease operations, gate dispatch\nand retries, verdict transcription, and the final `regression-verification-v2`\ntask output.",
+  )
+  .replace(
+    "finding id in every present report, and verify that the approved specification\nis preserved without a new defect. Run focused regressions for the findings and\nchanged behavior; the Merge gate owns full workspace and repository suites.",
+    "finding id in every present report, rerun focused regressions, and verify that the approved\nspecification is preserved without a new defect.",
+  )
+  .replace(
+    "A finalize exit 0 means the script persisted `pass` or `gate-fail` for the head\nand baseline frozen by prepare; report the bounded `REGRESSION FINALIZE` status\nline it printed. Any nonzero script exit fails the run loudly.\nThe script persists the one allowed v2 outcome; never call `task_output` for\nthis step or write a report file.",
+    "A finalize exit 0 means the script persisted exactly one of `pass`, `gate-fail`,\nor `refresh-conflict`; report the bounded `REGRESSION FINALIZE` status line it\nprinted. A finalize exit 77 means the script integrated a newer target head\noutside the lease. Repeat the full semantic verification against that refreshed\ntree, then run either `review-fail` or `finalize` again. Any other nonzero script\nexit fails the run loudly. The script persists the one allowed v2 outcome;\nnever call `task_output` for this step or write a report file.",
+  );
+
+export const restorePreOptionalReviewPrompt = (prompt: string): string => restorePreFrozenRegressionPrompt(prompt)
   .replaceAll("review-findings", "sol-findings")
   .replaceAll("the code review report", "the Sol report")
   // Every registered generation predates the salvage-resume rollover, so the
