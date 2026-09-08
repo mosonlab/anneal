@@ -49,13 +49,10 @@ export const releaseMergeReadinessGate = async (
     where: { id: input.task.id },
     data: { status: TaskStatus.TODO, failureReason: null },
   });
-  await writeMarker(tx, input.task.id, "readiness", {
+  await writeMarker(tx, input.task.id, "readiness", "queued", {
     actorType: "control-plane",
     body: "Predecessor layer completed; server-side merge readiness queued",
-    metadata: {
-      state: "queued",
-      sourceRunId: input.sourceRunId,
-    },
+    metadata: { sourceRunId: input.sourceRunId },
   });
 };
 

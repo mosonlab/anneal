@@ -158,27 +158,22 @@ export const reserveMergeTrainTask = async (
   } });
 
   const markerMetadata = {
-    state: "acquiring",
     trainTaskId: task.id,
     regressionTaskId: input.regressionTaskId,
     baseSha: input.baseSha,
     width,
     candidates: [...input.candidates],
   };
-  await writeMarker(tx, task.id, "train", {
+  await writeMarker(tx, task.id, "train", "acquiring", {
     actorType: "control-plane",
     body: `Merge train reserved with ${input.candidates.length} candidate${input.candidates.length === 1 ? "" : "s"}`,
     metadata: markerMetadata,
   });
   for (const [index, candidate] of input.candidates.entries()) {
-    await writeMarker(tx, candidate.taskId, "train", {
+    await writeMarker(tx, candidate.taskId, "train", "acquiring", {
       actorType: "control-plane",
       body: `Merge train ${task.id} reserved at position ${index + 1}`,
-      metadata: {
-        state: "acquiring",
-        trainTaskId: task.id,
-        position: index + 1,
-      },
+      metadata: { trainTaskId: task.id, position: index + 1 },
     });
   }
   return { taskId: task.id };
@@ -196,12 +191,12 @@ export const enqueueMergeTrainTask = async (
   await tx.task.update({ where: { id: taskId }, data: { status: TaskStatus.TODO, failureReason: null } });
   const opened = await openRun(tx, taskId, { kind: "task-created", readyAt: now });
   if (!opened.ok) throw errorForOpenRunRefusal(opened.refusal);
-  await writeMarker(tx, taskId, "train", { actorType: "control-plane", body: "Merge lease acquired; train Run queued",
-    metadata: { ...parsed.marker.raw, state: "queued" } });
+  await writeMarker(tx, taskId, "train", "queued", { actorType: "control-plane",
+    body: "Merge lease acquired; train Run queued", metadata: { ...parsed.marker.raw } });
   for (const [index, candidate] of parsed.marker.candidates.entries()) {
-    await writeMarker(tx, candidate.taskId, "train", { actorType: "control-plane",
+    await writeMarker(tx, candidate.taskId, "train", "queued", { actorType: "control-plane",
       body: `Merge train ${taskId} queued at position ${index + 1}`,
-      metadata: { state: "queued", trainTaskId: taskId, position: index + 1 } });
+      metadata: { trainTaskId: taskId, position: index + 1 } });
   }
   return { runId: opened.run.id };
 };

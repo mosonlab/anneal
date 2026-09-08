@@ -5,9 +5,11 @@ import { MergeRecoveryStatus, type MergeRecoveryAttempt, type Prisma } from "@pr
 
 import { MERGE_TAIL_KIND } from "./merge-tail.js";
 import {
+  MARKER_STATES,
   MERGE_TAIL_MARKER_SCAN,
   latestMarker,
   mergeTrainClaimMetadata,
+  mergeTrainConcluded,
   markerFromMetadata,
   parseMergeTrainMarker,
   readMarkerHistory,
@@ -16,6 +18,7 @@ import {
   recoveryContext,
   writeMarker,
   type Marker,
+  type MarkerKind,
 } from "./merge-tail-markers.js";
 
 type Row = { actorType?: string; metadata: unknown };
@@ -151,23 +154,73 @@ test("merge-train markers qualify the full claim payload and sparse readiness ma
 });
 
 test("latestMarker selects from the newest end", () => {
-  const markers: Marker[] = [
-    { kind: "repairResult", state: "failed", regressionTaskId: "reg-2", raw: {} } as Marker,
-    { kind: "readiness", state: null, regressionTaskId: "reg-1", raw: {} } as Marker,
-    { kind: "repairResult", state: "queued", regressionTaskId: "reg-0", raw: {} } as Marker,
-  ];
+  const markers = [
+    marker("repairResult", { state: "failed", regressionTaskId: "reg-2" }),
+    marker("readiness", { regressionTaskId: "reg-1" }),
+    marker("repairResult", { state: "invalid-output", regressionTaskId: "reg-0" }),
+  ].map((row) => markerFromMetadata(row.metadata as never)!);
 
   assert.equal(latestMarker(markers, "repairResult")?.state, "failed");
-  assert.equal(latestMarker(markers, "repairResult", "queued")?.regressionTaskId, "reg-0");
+  assert.equal(latestMarker(markers, "repairResult", "invalid-output")?.regressionTaskId, "reg-0");
   assert.equal(latestMarker(markers, "repairAttempt"), null);
 });
 
-test("writeMarker owns the kind and the schema version", async () => {
+/**
+ * The roster is the seam: a writer cannot spell a state outside its kind's
+ * union, and a persisted row that carries one is not that kind's marker.
+ */
+test("every declared state parses under its kind, and no other string does", () => {
+  for (const [name, states] of Object.entries(MARKER_STATES)) {
+    const kind = name as MarkerKind;
+    const stateless = markerFromMetadata({ kind: MERGE_TAIL_KIND[kind], schemaVersion: 1 });
+    assert.equal(stateless?.kind, kind, `${kind} must parse without a state`);
+    assert.equal(stateless?.state, null);
+
+    for (const state of states) {
+      const parsed = markerFromMetadata({ kind: MERGE_TAIL_KIND[kind], schemaVersion: 1, state });
+      assert.equal(parsed?.state, state, `${kind} must parse its own state ${state}`);
+      assert.equal(latestMarker([parsed!], kind, state as never)?.state, state);
+      assert.equal(latestMarker([parsed!], kind, "no-such-state" as never), null);
+    }
+
+    assert.equal(
+      markerFromMetadata({ kind: MERGE_TAIL_KIND[kind], schemaVersion: 1, state: "no-such-state" }),
+      null,
+      `${kind} must refuse a state outside its roster`,
+    );
+  }
+});
+
+test("a state belonging to another kind is refused", () => {
+  assert.equal(markerFromMetadata({ kind: MERGE_TAIL_KIND.repairAttempt, state: "failed" }), null);
+  assert.equal(markerFromMetadata({ kind: MERGE_TAIL_KIND.readiness, state: "settled" }), null);
+  assert.equal(markerFromMetadata({ kind: MERGE_TAIL_KIND.train, state: "authorized" }), null);
+});
+
+test("a concluded train is the one question its state answers for the completion path", () => {
+  const train = (state: string) => markerFromMetadata({
+    kind: MERGE_TAIL_KIND.train, schemaVersion: 1, state, trainTaskId: "train-1",
+  }) as Marker<"train">;
+
+  assert.equal(mergeTrainConcluded(train("settled")), true);
+  assert.equal(mergeTrainConcluded(train("aborted")), true);
+  assert.equal(mergeTrainConcluded(train("queued")), false);
+  assert.equal(mergeTrainConcluded(train("acquiring")), false);
+  assert.equal(mergeTrainConcluded(null), false);
+});
+
+test("writeMarker owns the kind, the state and the schema version", async () => {
   const { tx, writes } = recordingTx([]);
-  await writeMarker(tx, "task-1", "repairResult", {
+  await writeMarker(tx, "task-1", "repairResult", "failed", {
     actorType: "control-plane",
     body: "repair finished",
-    metadata: { kind: "mergeTail.notAKind", state: "failed", repairTaskId: "repair-1" },
+    metadata: { kind: "mergeTail.notAKind", state: "invalid-output", repairTaskId: "repair-1" },
+  });
+  // A kind whose rows carry no state writes none.
+  await writeMarker(tx, "task-1", "repairAttempt", null, {
+    actorType: "control-plane",
+    body: "repair queued",
+    metadata: { repairTaskId: "repair-1" },
   });
 
   assert.deepEqual(writes, [{
@@ -178,6 +231,15 @@ test("writeMarker owns the kind and the schema version", async () => {
       schemaVersion: 1,
       kind: MERGE_TAIL_KIND.repairResult,
       state: "failed",
+      repairTaskId: "repair-1",
+    },
+  }, {
+    taskId: "task-1",
+    actorType: "control-plane",
+    body: "repair queued",
+    metadata: {
+      schemaVersion: 1,
+      kind: MERGE_TAIL_KIND.repairAttempt,
       repairTaskId: "repair-1",
     },
   }]);

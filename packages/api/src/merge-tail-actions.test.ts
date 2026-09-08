@@ -348,6 +348,7 @@ const repairAttempt = (repairKind: "refresh-conflict" | "gate-fix" | "review-fix
   repairTaskId: "repair-1",
   readinessTaskId: null,
   repairKind,
+  targetHeadSha: null,
   headSha: "a".repeat(40),
   baseHeadSha: "b".repeat(40),
   baseSha: null,

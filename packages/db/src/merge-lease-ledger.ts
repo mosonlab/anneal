@@ -44,12 +44,11 @@ const writeOpenProjection = async (tx: Tx, event: MergeLeaseEvent): Promise<void
     if (!event.handedOffRunId || !event.handedOffAt) {
       throw new Error(`Merge Lease handoff event ${event.id} has an invalid shape`);
     }
-    await writeMarker(tx, event.owningTaskId, "leaseHandoff", {
+    await writeMarker(tx, event.owningTaskId, "leaseHandoff", "pending", {
       actorType: "control-plane",
       body: `Chain Lease handed to queued Run ${event.handedOffRunId}`,
       metadata: {
         ledgerId: event.id,
-        state: "pending",
         chainId: event.chainId,
         toRunId: event.handedOffRunId,
         handedOffAt: event.handedOffAt.toISOString(),
@@ -60,12 +59,11 @@ const writeOpenProjection = async (tx: Tx, event: MergeLeaseEvent): Promise<void
   if (event.state !== MergeLeaseEventState.RELEASE_DEFERRED || !event.deferredAt || !event.failureDetail) {
     throw new Error(`Merge Lease deferral event ${event.id} has an invalid shape`);
   }
-  await writeMarker(tx, event.owningTaskId, "leaseRelease", {
+  await writeMarker(tx, event.owningTaskId, "leaseRelease", "release-deferred", {
     actorType: "control-plane",
     body: `Merge Lease release deferred for chain ${event.chainId}: ${event.failureDetail}`,
     metadata: {
       ledgerId: event.id,
-      state: "release-deferred",
       projectId: event.projectId,
       chainId: event.chainId,
       taskId: event.owningTaskId,
@@ -79,14 +77,13 @@ const writeTerminalProjection = async (tx: Tx, event: MergeLeaseEvent, reason?: 
   if (!event.settledAt) throw new Error(`Terminal Merge Lease event ${event.id} has no settlement time`);
   const state = event.state === MergeLeaseEventState.RELEASED ? "released" : "invalid";
   if (event.handedOffRunId) {
-    await writeMarker(tx, event.owningTaskId, "leaseHandoff", {
+    await writeMarker(tx, event.owningTaskId, "leaseHandoff", state, {
       actorType: "control-plane",
       body: reason ?? (state === "released"
         ? event.failureDetail ?? `Queued Run ${event.handedOffRunId} did not consume its Chain Lease handoff`
         : `Invalid Chain Lease handoff for queued Run ${event.handedOffRunId}: ${event.failureDetail ?? "invalid target"}`),
       metadata: {
         ledgerId: event.id,
-        state,
         chainId: event.chainId,
         toRunId: event.handedOffRunId,
         ...(state === "released"
@@ -97,14 +94,13 @@ const writeTerminalProjection = async (tx: Tx, event: MergeLeaseEvent, reason?: 
     return;
   }
   if (event.deferredAt) {
-    await writeMarker(tx, event.owningTaskId, "leaseRelease", {
+    await writeMarker(tx, event.owningTaskId, "leaseRelease", state, {
       actorType: "control-plane",
       body: state === "released"
         ? `Deferred Merge Lease release completed for chain ${event.chainId}`
         : `Deferred Merge Lease release invalid for chain ${event.chainId}: ${event.failureDetail ?? "invalid target"}`,
       metadata: {
         ledgerId: event.id,
-        state,
         projectId: event.projectId,
         chainId: event.chainId,
         taskId: event.owningTaskId,
@@ -324,7 +320,7 @@ const writeHoldProjection = async (
   event: MergeLeaseEvent,
   evidence: LeaseSettlementEvidence,
 ): Promise<void> => {
-  await writeMarker(tx, taskId, "leaseHold", {
+  await writeMarker(tx, taskId, "leaseHold", null, {
     actorType: "control-plane",
     body: `Chain Lease released after ${evidence.heldForSeconds} seconds`,
     metadata: {

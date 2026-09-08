@@ -682,9 +682,9 @@ export const replayRecoveryAuthorizations = async (
             await openRecoveryQuestion(tx, pending.integratorTaskId, pending.sourceStopId, {
               revalidations: pending.revalidations, ceiling: false,
             });
-            await writeMarker(tx, pending.integratorTaskId, "baseDriftRecovery", {
+            await writeMarker(tx, pending.integratorTaskId, "baseDriftRecovery", "question-opened", {
               actorType: "control-plane", body: exhausted ? "Automatic recovery allowance exhausted" : "Pending authorization refused",
-              metadata: { state: "question-opened", aggregateId: pending.id, spent },
+              metadata: { aggregateId: pending.id, spent },
             });
             return false;
           }

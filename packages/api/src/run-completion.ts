@@ -22,7 +22,7 @@ import {
   isRegressionVerificationOutputKind,
   lockChainRows,
   lockRunRow,
-  MERGE_TAIL_KIND,
+  writeMarker,
   MergeLeaseEventState,
   mechanicalPrincipalRefusal,
   openRun,
@@ -252,12 +252,10 @@ const activateMergeTailTarget = async (
   }
   if (isMergeReadinessStep(target.templateStep)) {
     // Readiness runs on the server worker, which only claims TODO/DOING.
-    await tx.taskActivity.create({ data: {
-      taskId,
+    await writeMarker(tx, taskId, "readiness", "queued", {
       actorType: "control-plane",
       body: "Merge-tail readiness target queued for server worker",
-      metadata: { kind: MERGE_TAIL_KIND.readiness, schemaVersion: 1, state: "queued" },
-    } });
+    });
     return;
   }
   if (target.assigneeAgent?.archivedAt) {

@@ -209,10 +209,7 @@ test("the exception requeue limit defaults to three and refuses an unusable valu
 });
 
 test("an exception requeue returns readiness to TODO and records the retry", async () => {
-  const {
-    READINESS_EXCEPTION_REQUEUE_STATE,
-    requeueReadinessExceptionSettlement,
-  } = await import("./merge-readiness-worker.js");
+  const { requeueReadinessExceptionSettlement } = await import("./merge-readiness-worker.js");
   const { MERGE_TAIL_KIND, TaskStatus } = await import("@anneal/db");
   const updates: Array<{ where: { id: string }; data: Record<string, unknown> }> = [];
   const activities: Array<Record<string, unknown>> = [];
@@ -253,7 +250,7 @@ test("an exception requeue returns readiness to TODO and records the retry", asy
   assert.match(String(activities[0]?.body), /Merge readiness requeued after evaluation exception 2 of 3: readiness evaluation exception: terminated/u);
   const metadata = activities[0]?.metadata as Record<string, unknown>;
   assert.equal(metadata.kind, MERGE_TAIL_KIND.readiness);
-  assert.equal(metadata.state, READINESS_EXCEPTION_REQUEUE_STATE);
+  assert.equal(metadata.state, "requeued-exception");
   assert.equal(metadata.reason, "readiness evaluation exception: terminated");
   assert.equal(metadata.requeue, 2);
   assert.equal(metadata.limit, 3);

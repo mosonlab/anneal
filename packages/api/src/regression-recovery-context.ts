@@ -1,5 +1,5 @@
 import {
-  asJsonObject,
+  markerFromMetadata,
   MERGE_TAIL_KIND,
   Prisma,
 } from "@anneal/db";
@@ -29,9 +29,10 @@ const contextFromMetadata = (
   metadata: Prisma.JsonValue | null | undefined,
   runId: string,
 ): RegressionRecoveryContext | null => {
-  const raw = asJsonObject(metadata);
-  if (!raw || raw.kind !== MERGE_TAIL_KIND.baseDriftRecovery || raw.state !== "queued"
-    || raw.recoveryRunId !== runId || !text(raw.currentBaseSha) || !text(raw.authorizedHeadSha)
+  const marker = markerFromMetadata(metadata);
+  if (marker?.kind !== "baseDriftRecovery" || marker.state !== "queued") return null;
+  const { raw } = marker;
+  if (raw.recoveryRunId !== runId || !text(raw.currentBaseSha) || !text(raw.authorizedHeadSha)
     || !text(raw.recoveryRunId) || !Object.hasOwn(raw, "priorOutput")) return null;
   const output = priorOutput(raw.priorOutput);
   if (output === undefined) return null;

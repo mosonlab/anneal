@@ -135,11 +135,10 @@ export const ensureRecoveryValidation = async (
       endedAt: null,
       ...validationData(input.identity),
     });
-    await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", {
+    await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", "legacy-validation-reopened", {
       actorType: "control-plane",
       body: `Automatic pre-merge base-drift validation reopened legacy refusal for stop ${input.sourceStopId}`,
       metadata: {
-        state: "legacy-validation-reopened",
         aggregateId: existing.id,
         sourceStopId: input.sourceStopId,
       },
@@ -341,7 +340,6 @@ export const enterRepair = async (
     ...context,
     currentBaseSha: input.currentBaseSha,
     recoveryRunId: run.id,
-    state: requeue ? "readiness-requeued" : "queued",
     ...(!requeue ? { priorOutput } : {}),
   };
   if (requeue) {
@@ -354,11 +352,10 @@ export const enterRepair = async (
       { taskId: context.integratorTaskId, actorType: "control-plane", body, metadata: requeueMetadata },
       { taskId: context.regressionTaskId, actorType: "control-plane", body, metadata: requeueMetadata },
     ] });
-    await writeMarker(tx, context.regressionTaskId, "readiness", {
+    await writeMarker(tx, context.regressionTaskId, "readiness", "requeued-regression", {
       actorType: "control-plane",
       body: `Merge readiness returned to regression: ${requeue.reason}; ${requeue.staleBaseSha} -> ${input.currentBaseSha}`,
       metadata: {
-        state: "requeued-regression",
         reason: requeue.reason,
         staleBaseSha: requeue.staleBaseSha,
         currentBaseSha: input.currentBaseSha,
@@ -377,12 +374,12 @@ export const enterRepair = async (
       baseDrift: requeue.baseDrift,
     });
   } else {
-    await writeMarker(tx, context.integratorTaskId, "baseDriftRecovery", {
+    await writeMarker(tx, context.integratorTaskId, "baseDriftRecovery", "queued", {
       actorType: "control-plane",
       body,
       metadata,
     });
-    await writeMarker(tx, context.regressionTaskId, "baseDriftRecovery", {
+    await writeMarker(tx, context.regressionTaskId, "baseDriftRecovery", "queued", {
       actorType: "control-plane",
       body: `Automatic base-drift recovery ${String(context.attempt)} verifies ${context.authorizedHeadSha} against current base ${input.currentBaseSha}`,
       metadata,
@@ -437,9 +434,9 @@ export const blockDownstream = async (
     data: { status: TaskStatus.REVIEW, failureReason: body },
   });
   const dedupeKey = `merge-base-drift-recovery-tail-stop:${recovery.sourceStopId}:${input.phase}:${recovery.recoveryRunId}`;
-  const metadata = { ...recovery, state: "tail-stopped", phase: input.phase, reason: input.reason, dedupeKey };
+  const metadata = { ...recovery, phase: input.phase, reason: input.reason, dedupeKey };
   for (const taskId of [recovery.integratorTaskId, recovery.regressionTaskId]) {
-    await writeMarker(tx, taskId, "baseDriftRecovery", { actorType: "control-plane", body, metadata });
+    await writeMarker(tx, taskId, "baseDriftRecovery", "tail-stopped", { actorType: "control-plane", body, metadata });
   }
   await stopNotice(tx, { taskId: recovery.regressionTaskId, body, dedupeKey,
     reopen: input.phase === "readiness" && input.reason.startsWith(`${MERGE_EXECUTOR_OFFLINE_REASON}:`) });
@@ -490,10 +487,10 @@ export const reopenAfterHeadAdoption = async (
     aggregateId: input.recovery.aggregateId,
     sourceStopId: input.recovery.sourceStopId,
     recoveryRunId: input.recovery.recoveryRunId,
-    state: "reopened-head-adoption",
   };
   for (const taskId of [input.recovery.integratorTaskId, input.recovery.regressionTaskId]) {
-    await writeMarker(tx, taskId, "baseDriftRecovery", { actorType: "control-plane", body, metadata });
+    await writeMarker(tx, taskId, "baseDriftRecovery", "reopened-head-adoption", {
+      actorType: "control-plane", body, metadata });
   }
   return true;
 };
@@ -546,11 +543,10 @@ export const exhaust = async (
       ? `Automatic base-drift recovery refused: ${input.reason}`
       : input.reason,
   } });
-  await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", {
+  await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", input.state, {
     actorType: "control-plane",
     body,
     metadata: {
-      state: input.state,
       ...input.markerMetadata,
       integratorTaskId: input.integratorTaskId,
       sourceStopId: input.sourceStopId,
@@ -613,14 +609,13 @@ export const recordRecoveryRetry = async (
     ? `${String(decision.classAttempt)}/${String(input.maxValidationAttempts)}`
     : String(decision.classAttempt);
   const classChanged = previousClass !== null && previousClass !== nextClass;
-  await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", {
+  await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", "classification-retry", {
     actorType: "control-plane",
     body: `Automatic pre-merge base-drift classification deferred as ${decision.retryClass}`
       + ` (attempt ${budget}, ${formatElapsed(decision.elapsedMs)} in class,`
       + ` ${decision.nextEligibleAt ? `next eligible ${decision.nextEligibleAt.toISOString()}` : "eligible now"})`
       + `: ${decision.reason}`,
     metadata: {
-      state: "classification-retry",
       integratorTaskId: input.integratorTaskId,
       sourceStopId: input.sourceStopId,
       retryClass: decision.retryClass,
@@ -691,11 +686,10 @@ export const retireLegacyRefusal = async (
     status: TaskStatus.REVIEW,
     failureReason: `Automatic base-drift recovery refused: ${input.reason}`,
   } });
-  await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", {
+  await writeMarker(tx, input.integratorTaskId, "baseDriftRecovery", "legacy-refusal-retired", {
     actorType: "control-plane",
     body: retiredReason,
     metadata: {
-      state: "legacy-refusal-retired",
       integratorTaskId: input.integratorTaskId,
       sourceStopId: input.sourceStopId,
       priorReason: input.priorReason,

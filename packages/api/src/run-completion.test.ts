@@ -622,7 +622,7 @@ test("completeRun applies and caps EXECUTE model-capacity refunds", async () => 
 test("a retryable detached repair whose retry is refused keeps ordinary task failure settlement", async () => {
   const harness = statefulCompletionHarness({ opensPullRequest: false });
   harness.activities.push({ taskId: "task-refunds", actorType: "control-plane", body: "Repair opened",
-    metadata: { kind: "mergeTail.repairAttempt", schemaVersion: 1, state: "opened",
+    metadata: { kind: "mergeTail.repairAttempt", schemaVersion: 1,
       regressionTaskId: "parent-regression", repairTaskId: "task-refunds", repairKind: "gate-fix",
       headSha: baseSha, baseHeadSha: "6".repeat(40) },
   });
@@ -709,7 +709,7 @@ for (const repairKind of ["refresh-conflict", "review-fix", "gate-fix"]) {
         assigneeAgent: { id: "agent-1", name: "Repair agent", archivedAt: null },
       }, scenario.endsWith("result") ? { runId: scenario === "result" ? "run-1" : "older-run", body: "result" } : null);
       harness.activities.push({ taskId: "task-refunds", actorType: "control-plane", body: "Repair opened",
-        metadata: { kind: "mergeTail.repairAttempt", schemaVersion: 1, state: "opened",
+        metadata: { kind: "mergeTail.repairAttempt", schemaVersion: 1,
           regressionTaskId: "parent-regression", repairTaskId: "task-refunds", repairKind,
           headSha: baseSha, baseHeadSha: "6".repeat(40) },
       });

@@ -81,7 +81,7 @@ export const recordMergeTailRequeue = async (
   tx: DbTx,
   input: { taskId: string; runId: string; recoverySourceRunId?: string },
 ): Promise<void> => {
-  await writeMarker(tx, input.taskId, "requeue", {
+  await writeMarker(tx, input.taskId, "requeue", null, {
     actorType: "control-plane",
     body: `Merge-tail target requeued with one budget grant (Run ${input.runId})`,
     metadata: {
@@ -631,10 +631,10 @@ export async function stopMergeTail(
       });
     }
     if (!recovery && input.phase === "regression") {
-      await writeMarker(tx, input.regressionTaskId, "regression", {
+      await writeMarker(tx, input.regressionTaskId, "regression", "stopped", {
         actorType: "control-plane",
         body: `Regression did not advance: ${input.reason}`,
-        metadata: { state: "stopped", reason: input.reason },
+        metadata: { reason: input.reason },
       });
       await openMergeTailStopNotice(tx, {
         taskId: input.regressionTaskId,
@@ -644,10 +644,10 @@ export async function stopMergeTail(
       });
     }
     if (input.phase === "readiness") {
-      await writeMarker(tx, input.regressionTaskId, "readiness", {
+      await writeMarker(tx, input.regressionTaskId, "readiness", "stopped", {
         actorType: "control-plane",
         body: `Merge readiness stopped at regression: ${input.reason}`,
-        metadata: { state: "stopped", reason: input.reason },
+        metadata: { reason: input.reason },
       });
       if (!recovery) {
         const dedupeKey = `merge-readiness-stop:${input.readinessTaskId}:${createHash("sha256").update(input.reason).digest("hex")}`;
@@ -666,7 +666,7 @@ export async function stopMergeTail(
       where: { id: input.regressionTaskId },
       data: { status: TaskStatus.REVIEW, failureReason: input.reason },
     });
-    await writeMarker(tx, input.regressionTaskId, "repairResult", {
+    await writeMarker(tx, input.regressionTaskId, "repairResult", "failed", {
       actorType: "control-plane",
       body: `Automatic ${input.repairKind} attempt failed: ${input.startHeadSha} -> ${input.resolvedHeadSha ?? "no-delivered-head"}`,
       metadata: {
@@ -675,7 +675,6 @@ export async function stopMergeTail(
         startHeadSha: input.startHeadSha,
         targetHeadSha: input.targetHeadSha,
         resolvedHeadSha: input.resolvedHeadSha,
-        state: "failed",
       },
     });
     await openMergeTailStopNotice(tx, {
@@ -849,7 +848,7 @@ export const settleMergeTailCompletion = async (
       // The rejection is recorded on the repair task too: the resolver's own
       // card is where an operator looks, and the key names the field that
       // failed so nobody has to read the parser to find out.
-      await writeMarker(tx, input.task.id, "repairResult", {
+      await writeMarker(tx, input.task.id, "repairResult", "invalid-output", {
         actorType: "control-plane",
         body: `Resolver output rejected on ${bindingError.key}: ${bindingError.reason}`,
         metadata: {
@@ -859,12 +858,11 @@ export const settleMergeTailCompletion = async (
           startHeadSha: expectedStart,
           targetHeadSha: expectedTarget,
           resolvedHeadSha: input.body.headSha ?? null,
-          state: "invalid-output",
           reason: bindingError.reason,
           rejectedKey: bindingError.key,
         },
       });
-      await writeMarker(tx, repairMarker.regressionTaskId, "repairResult", {
+      await writeMarker(tx, repairMarker.regressionTaskId, "repairResult", "invalid-output", {
         actorType: "control-plane",
         body: `Automatic refresh-conflict attempt stopped: ${reason}`,
         metadata: {
@@ -873,7 +871,6 @@ export const settleMergeTailCompletion = async (
           startHeadSha: expectedStart,
           targetHeadSha: expectedTarget,
           resolvedHeadSha: input.body.headSha ?? null,
-          state: "invalid-output",
           reason: bindingError.reason,
           rejectedKey: bindingError.key,
         },
@@ -904,7 +901,7 @@ export const settleMergeTailCompletion = async (
       reason,
     });
   } else if (!repairUnable) {
-    await writeMarker(tx, repairMarker.regressionTaskId, "repairResult", {
+    await writeMarker(tx, repairMarker.regressionTaskId, "repairResult", null, {
       actorType: "control-plane",
       body: `Automatic ${String(repairMarker.repairKind)} attempt completed: ${String(repairMarker.headSha)} -> ${resolvedHeadSha ?? "missing-head"}`,
       metadata: {
@@ -1060,7 +1057,7 @@ export const createMergeTailRepairTask = async (
   // above, so the Run is born publishing onto the chain head it repairs.
   const opened = await openRun(tx, task.id, { kind: "merge-tail-repair", readyAt: input.now });
   if (!opened.ok) throw errorForOpenRunRefusal(opened.refusal);
-  await writeMarker(tx, regressionTask.id, "repairAttempt", {
+  await writeMarker(tx, regressionTask.id, "repairAttempt", null, {
     actorType: "control-plane",
     body: `Automatic ${input.repairKind} attempt queued at chain head ${input.headSha} against ${input.baseHeadSha}`,
     metadata: {
@@ -1071,7 +1068,7 @@ export const createMergeTailRepairTask = async (
       baseHeadSha: input.baseHeadSha,
     },
   });
-  await writeMarker(tx, task.id, "repairAttempt", {
+  await writeMarker(tx, task.id, "repairAttempt", null, {
     actorType: "control-plane",
     body: `Automatic ${input.repairKind} attempt for regression task ${regressionTask.id}`,
     metadata: {
@@ -1201,7 +1198,7 @@ export const handleRegressionCompletion = async (
     if (qualified.status === "refused") return stop(qualified.reason);
     verdict = qualified.verdict;
   }
-  const recordVerdict = () => writeMarker(tx, input.task.id, "regression", {
+  const recordVerdict = () => writeMarker(tx, input.task.id, "regression", null, {
     actorType: "control-plane",
     body: `Regression ${verdict.outcome} recorded for chain head ${verdict.headSha} against target ${verdict.baseHeadSha}`,
     metadata: { ...verdict },

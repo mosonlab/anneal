@@ -242,8 +242,8 @@ const finishTrainMarker = async (
   summary: string,
   now: Date,
 ): Promise<void> => {
-  await writeMarker(tx, train.taskId, "train", { actorType: "control-plane", body: summary,
-    metadata: { state, trainTaskId: train.taskId, regressionTaskId: train.regressionTaskId,
+  await writeMarker(tx, train.taskId, "train", state, { actorType: "control-plane", body: summary,
+    metadata: { trainTaskId: train.taskId, regressionTaskId: train.regressionTaskId,
       baseSha: train.baseSha, width: train.width, candidates: train.candidates, reason: summary } });
   // The terminal state and the release obligation commit together. If the
   // process exits after this transaction but before the external release,
@@ -270,9 +270,10 @@ const candidateSettlementMarker = async (
   details: { verdict?: string; predecessorOid?: string } = {},
 ): Promise<void> => {
   const candidate = train.candidates[position - 1]!;
-  await writeMarker(tx, candidate.taskId, "train", { actorType: "control-plane",
+  await writeMarker(tx, candidate.taskId, "train", settlement === "aborted" ? "aborted" : "settled", {
+    actorType: "control-plane",
     body: `Merge train ${train.taskId}, position ${position}: ${settlement}${reason ? `; ${reason}` : ""}`,
-    metadata: { state: settlement === "aborted" ? "aborted" : "settled", trainTaskId: train.taskId, position,
+    metadata: { trainTaskId: train.taskId, position,
       settlement: details.verdict ?? settlement, outcome: settlement,
       ...(details.predecessorOid ? { predecessorOid: details.predecessorOid } : {}), ...(reason ? { reason } : {}) } });
 };

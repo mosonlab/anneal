@@ -25,14 +25,50 @@ export type MarkerKind = keyof typeof MERGE_TAIL_KIND;
 const TRUSTED_MARKER_KINDS = new Set<MarkerKind>(["train", "leaseContention", "executorOffline"]);
 
 /**
- * A merge-tail marker with its persisted fields already narrowed. Callers read
- * these instead of re-deriving them from `metadata`: the `typeof x === "string"`
- * guard that used to follow every `asJsonObject` call lives here now. `raw` is
- * the untouched object for the fields no reader has needed yet.
+ * Every state each kind may carry, declared once. `state` is the field readers
+ * branch on, so the module owns it for the same reason it owns `kind`: a writer
+ * has no way to spell a state no reader matches, and a reader has no way to ask
+ * for one no writer records. Kinds whose rows carry no state have an empty
+ * roster and are written with `null`.
+ *
+ * These strings are persisted in live `TaskActivity` rows. Renaming one is a
+ * data migration, not a rename.
  */
-export type Marker = {
-  kind: MarkerKind;
-  state: string | null;
+export const MARKER_STATES = {
+  baseDriftRecovery: [
+    "authorization-replay-refused", "authorization-replayed", "authorization-withheld",
+    "class-revalidated", "classification-retry", "exhausted", "external-failure-pending",
+    "ineligible", "legacy-refusal-retired", "legacy-validation-reopened", "question-opened",
+    "queued", "reopened-head-adoption", "tail-stopped", "transport-ceiling",
+    "validation-budget", "waiting-ceiling",
+  ],
+  executorOffline: ["requeued-executor-offline"],
+  leaseContention: ["alerted", "contended", "resolved", "unreachable"],
+  leaseHandoff: ["invalid", "pending", "released"],
+  leaseHold: [],
+  leaseRelease: ["invalid", "release-deferred", "released"],
+  readiness: [
+    "authorized", "executor-offline-closed", "executor-offline-rearmed",
+    "lease-transport-deferred", "queued", "requeued-executor-offline",
+    "requeued-executor-unobservable", "requeued-exception", "requeued-regression", "stopped",
+  ],
+  regression: ["stopped"],
+  repairAttempt: [],
+  repairResult: ["failed", "handoff-invalid", "invalid-output"],
+  requeue: [],
+  train: ["aborted", "acquiring", "queued", "settled"],
+} as const satisfies Record<MarkerKind, readonly string[]>;
+
+/** The states `kind` may carry; `never` for a kind whose rows carry none. */
+export type MarkerState<K extends MarkerKind> = (typeof MARKER_STATES)[K][number];
+
+const STATE_ROSTER = new Map<MarkerKind, ReadonlySet<string>>(
+  (Object.entries(MARKER_STATES) as Array<[MarkerKind, readonly string[]]>)
+    .map(([kind, states]) => [kind, new Set(states)]),
+);
+
+/** The bindings every kind narrows the same way. */
+type MarkerFields = {
   regressionTaskId: string | null;
   repairTaskId: string | null;
   readinessTaskId: string | null;
@@ -41,10 +77,24 @@ export type Marker = {
   baseHeadSha: string | null;
   baseSha: string | null;
   startHeadSha: string | null;
+  targetHeadSha: string | null;
   resolvedHeadSha: string | null;
   recoverySourceStopId: string | null;
   raw: Record<string, unknown>;
 };
+
+/**
+ * A merge-tail marker with its persisted fields already narrowed. Callers read
+ * these instead of re-deriving them from `metadata`: the `typeof x === "string"`
+ * guard that used to follow every `asJsonObject` call lives here now. `raw` is
+ * the untouched object for the fields no reader has needed yet.
+ *
+ * `kind` discriminates, so a marker read for one kind carries only that kind's
+ * states and a comparison against any other state does not compile.
+ */
+export type Marker<K extends MarkerKind = MarkerKind> = {
+  [P in K]: MarkerFields & { kind: P; state: MarkerState<P> | null };
+}[K];
 
 const KIND_BY_VALUE = new Map<string, MarkerKind>(
   (Object.entries(MERGE_TAIL_KIND) as Array<[MarkerKind, string]>).map(([name, value]) => [value, name]),
@@ -54,13 +104,21 @@ const text = (raw: Record<string, unknown>, field: string): string | null => (
   typeof raw[field] === "string" ? raw[field] : null
 );
 
+/**
+ * Parse one persisted row. A row whose `state` is a string outside its kind's
+ * roster is not a marker this code can act on, the same answer
+ * `parseMergeTrainMarker` gives for an unknown train state: admitting it would
+ * let it answer "this row carries no state", which is a different marker.
+ */
 export const markerFromMetadata = (metadata: Prisma.JsonValue | null | undefined): Marker | null => {
   const raw = asJsonObject(metadata);
   const kind = raw && typeof raw.kind === "string" ? KIND_BY_VALUE.get(raw.kind) : undefined;
   if (!raw || !kind) return null;
+  const state = text(raw, "state");
+  if (state !== null && !STATE_ROSTER.get(kind)!.has(state)) return null;
   return {
     kind,
-    state: text(raw, "state"),
+    state,
     regressionTaskId: text(raw, "regressionTaskId"),
     repairTaskId: text(raw, "repairTaskId"),
     readinessTaskId: text(raw, "readinessTaskId"),
@@ -69,14 +127,15 @@ export const markerFromMetadata = (metadata: Prisma.JsonValue | null | undefined
     baseHeadSha: text(raw, "baseHeadSha"),
     baseSha: text(raw, "baseSha"),
     startHeadSha: text(raw, "startHeadSha"),
+    targetHeadSha: text(raw, "targetHeadSha"),
     resolvedHeadSha: text(raw, "resolvedHeadSha"),
     recoverySourceStopId: text(raw, "recoverySourceStopId"),
     raw,
-  };
+  } as Marker;
 };
 
-const MERGE_TRAIN_MARKER_STATES = new Set(["acquiring", "queued", "settled", "aborted"] as const);
-export type MergeTrainMarkerState = "acquiring" | "queued" | "settled" | "aborted";
+export type MergeTrainMarkerState = MarkerState<"train">;
+const MERGE_TRAIN_MARKER_STATES: ReadonlySet<string> = STATE_ROSTER.get("train")!;
 
 /** The durable lifecycle binding carried by a `mergeTail.train` marker. */
 export type MergeTrainMarker = {
@@ -144,7 +203,7 @@ export const parseMergeTrainMarker = (
     : null;
   if (!raw || raw.kind !== MERGE_TAIL_KIND.train) return { status: "invalid", reason: "not a merge-train marker" };
   if (raw.schemaVersion !== MERGE_TAIL_SCHEMA_VERSION) return { status: "invalid", reason: "unsupported merge-train marker schemaVersion" };
-  if (typeof raw.state !== "string" || !MERGE_TRAIN_MARKER_STATES.has(raw.state as MergeTrainMarkerState)) {
+  if (typeof raw.state !== "string" || !MERGE_TRAIN_MARKER_STATES.has(raw.state)) {
     return { status: "invalid", reason: "invalid merge-train marker state" };
   }
   if (!hasText(raw.trainTaskId)) return { status: "invalid", reason: "merge-train marker has no trainTaskId" };
@@ -270,11 +329,11 @@ export const readMarkerHistory = async (tx: Tx, taskId: string): Promise<Marker[
  * duration -- a contention episode outlives 30 minutes of other writes -- is
  * read this way instead.
  */
-export const readLatestMarker = async (
+export const readLatestMarker = async <K extends MarkerKind>(
   tx: Tx,
   taskId: string,
-  kind: MarkerKind,
-): Promise<Marker | null> => {
+  kind: K,
+): Promise<Marker<K> | null> => {
   const actorFilter = TRUSTED_MARKER_KINDS.has(kind)
     ? { actorType: "control-plane" as const }
     : {};
@@ -287,12 +346,26 @@ export const readLatestMarker = async (
     select: { metadata: true },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
   });
-  return row ? markerFromMetadata(row.metadata) : null;
+  const marker = row ? markerFromMetadata(row.metadata) : null;
+  return marker?.kind === kind ? marker as Marker<K> : null;
 };
 
-/** The newest marker of `kind`, optionally restricted to one `state`. */
-export const latestMarker = (markers: Marker[], kind: MarkerKind, state?: string): Marker | null => (
-  markers.find((marker) => marker.kind === kind && (state === undefined || marker.state === state)) ?? null
+/**
+ * The newest marker of `kind`, optionally restricted to one `state`. Both
+ * arguments are checked against the roster, so this is where a reader asks the
+ * typed question rather than comparing `marker.state` to a bare string.
+ */
+export const latestMarker = <K extends MarkerKind>(
+  markers: Marker[], kind: K, state?: MarkerState<K>,
+): Marker<K> | null => (
+  (markers.find((marker) => (
+    marker.kind === kind && (state === undefined || marker.state === state)
+  )) ?? null) as Marker<K> | null
+);
+
+/** A train marker whose train has finished, either by settling or by aborting. */
+export const mergeTrainConcluded = (marker: Marker<"train"> | null | undefined): boolean => (
+  marker?.state === "settled" || marker?.state === "aborted"
 );
 
 export type MarkerWrite = {
@@ -302,13 +375,16 @@ export type MarkerWrite = {
 };
 
 /**
- * Records one marker. `kind` and `schemaVersion` are the module's to write, so
- * a caller cannot record a marker under a kind string that no reader matches.
+ * Records one marker. `kind`, `state` and `schemaVersion` are the module's to
+ * write, so a caller cannot record a marker under a kind string that no reader
+ * matches, nor under a state outside that kind's roster. Kinds whose rows carry
+ * no state pass `null`.
  */
-export const writeMarker = async (
+export const writeMarker = async <K extends MarkerKind>(
   tx: Tx,
   taskId: string,
-  kind: MarkerKind,
+  kind: K,
+  state: MarkerState<K> | null,
   payload: MarkerWrite,
 ): Promise<void> => {
   await tx.taskActivity.create({ data: {
@@ -318,6 +394,7 @@ export const writeMarker = async (
     metadata: {
       schemaVersion: MERGE_TAIL_SCHEMA_VERSION,
       ...payload.metadata,
+      ...(state === null ? {} : { state }),
       kind: MERGE_TAIL_KIND[kind],
     } as Prisma.InputJsonObject,
   } });
@@ -426,11 +503,9 @@ export const closeExecutorOfflineEpisodeTx = async (
     where: { id: marker.id },
     data: { metadata: { ...metadata, episodeClosed: true } },
   });
-  await tx.taskActivity.create({ data: {
-    taskId: readinessTaskId,
+  await writeMarker(tx, readinessTaskId, "readiness", "executor-offline-closed", {
     actorType: "control-plane",
     body: `Merge readiness executor-offline episode ended: ${observation}`,
-    metadata: { kind: MERGE_TAIL_KIND.readiness, state: "executor-offline-closed", observation },
-  } });
-
+    metadata: { observation },
+  });
 };
