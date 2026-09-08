@@ -987,7 +987,7 @@ export const createMergeTailRepairTask = async (
   // review-fix that must trace their finding ids. Planning-stage and
   // documentation outputs repair nothing and stay out.
   const repairPriorOutputKinds = input.repairKind === "review-fix"
-    ? ["spec", "implementation", "review-findings", "sol-findings", "blind-findings", "fixed-implementation"]
+    ? ["spec", "implementation", "review-findings", "blind-findings", "fixed-implementation"]
     : input.repairKind === "gate-fix"
       ? ["spec", "implementation", "fixed-implementation"]
       : ["spec", "implementation"];
