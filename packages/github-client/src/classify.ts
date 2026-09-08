@@ -1,5 +1,3 @@
-import { isDeterministicAccessRefusal, isTransientTransportFailure } from "@anneal/db/transport-vocabulary";
-
 /**
  * One vocabulary for the only question a failed GitHub write raises: **did it
  * land?**
@@ -25,13 +23,51 @@ import { isDeterministicAccessRefusal, isTransientTransportFailure } from "@anne
  * refusal `lost` costs one extra read. Neither costs a duplicate write.
  */
 
-// A write can lose its response without a transport-specific symptom. These
-// ambiguous terms require read-back here, but do not justify a Run refund.
-const WRITE_RESPONSE_UNCERTAINTY_PATTERNS = [
+/**
+ * The platform answered "no" for a reason that a second identical request
+ * cannot change. Checked before the lost patterns, because a credential error
+ * delivered over a flaky link still contains the word "connection" often
+ * enough to matter.
+ */
+const DETERMINISTIC_REFUSAL_PATTERNS = [
+  /authentication failed/i,
+  /bad credentials/i,
+  /could not read Username/i,
+  /permission denied/i,
+  /\bforbidden\b/i,
+  /\bunauthorized\b/i,
+  /HTTP(?: response)?\s*(?:401|403)\b/i,
+  /status(?: code)?\s*(?:401|403)\b/i,
+  /resource not accessible/i,
+] as const;
+
+/**
+ * The response never arrived, arrived truncated, or arrived as something other
+ * than an answer. Every one of these is compatible with the write having been
+ * committed.
+ */
+const LOST_RESPONSE_PATTERNS = [
+  /unexpected EOF/i,
   /\bEOF\b/,
+  /SSL_ERROR_SYSCALL/i,
+  /socket hang ?up/i,
+  /connection (?:reset|closed|timed out|lost|aborted)/i,
+  /ECONNRESET/i,
+  /ECONNABORTED/i,
+  /EPIPE/i,
+  /ETIMEDOUT/i,
+  /EAI_AGAIN/i,
+  /ENETUNREACH/i,
+  /ENETDOWN/i,
+  /\bETIMEOUT\b/i,
   /timed out/i,
   /\bAbortError\b/,
   /\baborted\b/i,
+  /HTTP(?: response)?\s*(?:408|425|429|5\d\d)\b/i,
+  /status(?: code)?\s*(?:408|425|429|5\d\d)\b/i,
+  /502 Bad Gateway/i,
+  /503 Service Unavailable/i,
+  /504 Gateway Timeout/i,
 ] as const;
 
 const messageOf = (subject: unknown): string =>
@@ -39,7 +75,7 @@ const messageOf = (subject: unknown): string =>
 
 /** True when the far side answered, and the answer cannot be changed by asking again. */
 export const isDeterministicRefusal = (subject: unknown): boolean =>
-  isDeterministicAccessRefusal(messageOf(subject));
+  DETERMINISTIC_REFUSAL_PATTERNS.some((pattern) => pattern.test(messageOf(subject)));
 
 /**
  * True when this error leaves the write's fate unknown. A deterministic refusal
@@ -47,9 +83,8 @@ export const isDeterministicRefusal = (subject: unknown): boolean =>
  */
 export const isLostResponse = (subject: unknown): boolean => {
   const message = messageOf(subject);
-  if (isDeterministicAccessRefusal(message)) return false;
-  return isTransientTransportFailure(message)
-    || WRITE_RESPONSE_UNCERTAINTY_PATTERNS.some((pattern) => pattern.test(message));
+  if (DETERMINISTIC_REFUSAL_PATTERNS.some((pattern) => pattern.test(message))) return false;
+  return LOST_RESPONSE_PATTERNS.some((pattern) => pattern.test(message));
 };
 
 /** The sentinel `HttpAttempt.status` for "the request produced no response at all". */

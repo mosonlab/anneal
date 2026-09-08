@@ -18,9 +18,6 @@
     "lint": "bash ../../scripts/host-proof-slot.sh lint @anneal/github-client -- /bin/sh -c 'biome lint . && eslint .'",
     "test": "bash ../../scripts/host-proof-slot.sh test @anneal/github-client -- node --conditions=development --import tsx --test ${AGENTOS_RUN_ID:+--test-concurrency=2} src/*.test.ts"
   },
-  "dependencies": {
-    "@anneal/db": "0.8.0"
-  },
   "devDependencies": {
     "@types/node": "^24.10.1",
     "tsx": "^4.20.6"
