@@ -3643,6 +3643,14 @@ test("wait exceeded sends informational Chinese text rather than a deploy failur
   assert.equal(notices[0].outcome, "info");
   assert.equal(autoDeployNoticeBody(notices[0]), "自动部署等待超时，已开始排空派发");
   assert.match(autoDeployNoticeBody({ outcome: "failure", reason: "build-failed", ...revisions }), /^\[auto-deploy\] failure:/u);
+  // The host is bounded by `;` before the detail, which carries a whole builder
+  // transcript and cannot be parsed past.
+  assert.match(
+    autoDeployNoticeBody({ outcome: "failure", reason: "build-failed", host: "runner-host-1", detail: "exit-1: fatal: x", ...revisions }),
+    /; reason=build-failed; host=runner-host-1; detail=exit-1: fatal: x$/u,
+  );
+  // A caller that names no host writes the shape every record before this one had.
+  assert.doesNotMatch(autoDeployNoticeBody({ outcome: "success", reason: "deployed", ...revisions }), /host=/u);
 });
 
 test("automatic cadence persists successful deployment time across ticks", async (t) => {

@@ -278,10 +278,15 @@ export const canonicalSyncNoticeRecord = (record, refusedLines) => ({
     : {}),
 });
 
-export const autoDeployNoticeBody = ({ outcome, reason, detail = "", from, to }) =>
+/** `host` sits between the reason and the free-form detail: the reason is the
+ * last field a reader can bound by `;`, and a failure detail carries a whole
+ * builder transcript after it. A record written before hosts were named omits
+ * the field, and the Inbox reads it as optional. */
+export const autoDeployNoticeBody = ({ outcome, reason, detail = "", from, to, host = "" }) =>
   outcome === "info" && reason === QUIET_WINDOW_WAIT_EXCEEDED_REASON
     ? "自动部署等待超时，已开始排空派发"
-    : `[auto-deploy] ${outcome}: ${from} -> ${to}; reason=${reason}${detail ? `; detail=${detail}` : ""}`;
+    : `[auto-deploy] ${outcome}: ${from} -> ${to}; reason=${reason}`
+      + `${host ? `; host=${host}` : ""}${detail ? `; detail=${detail}` : ""}`;
 
 const parseJson = (contents, reason) => {
   try {
@@ -668,7 +673,11 @@ export const autoDeployNoticeDedupeKey = (body, dedupeScope = null) =>
  * control-plane host and the runner-only hosts following it deploy the same
  * `from -> to`, so their notice bodies are identical: on one shared key the
  * follower's outcome is dropped as a duplicate, and the Inbox keeps reporting
- * whichever host wrote first. Scoping by host records each one. */
+ * whichever host wrote first. Scoping by host records each one.
+ *
+ * The body names the host too, for the operator reading the notice. This key
+ * stays independent of it: dedupe should not rest on a human-readable string
+ * keeping a particular field. */
 export const autoDeployNoticeHostScope = (host, dedupeScope = null) =>
   dedupeScope === null ? host : `${host}\n${dedupeScope}`;
 
@@ -680,7 +689,7 @@ export const autoDeployNoticeHostScope = (host, dedupeScope = null) =>
 const notify = async ({ outcome, reason, detail = "", from, to, dedupeScope = null, host = hostname() }) => {
   if (outcome === "success") throwIfInterrupted();
   const db = await database();
-  const body = autoDeployNoticeBody({ outcome, reason, detail, from, to });
+  const body = autoDeployNoticeBody({ outcome, reason, detail, from, to, host });
   const dedupeKey = autoDeployNoticeDedupeKey(body, autoDeployNoticeHostScope(host, dedupeScope));
   try {
     const chatId = process.env.FEISHU_DEFAULT_CHAT_ID;
