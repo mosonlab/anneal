@@ -1,3 +1,6 @@
+import { rm } from "node:fs/promises";
+import { resolve, sep } from "node:path";
+
 import {
   openControlPlane, type ClaimedTask, type CleanupStatus,
   type ControlPlane, type RunSessionClaim,
@@ -45,6 +48,34 @@ const runIdOf = (identity: WorkspaceDisposalIdentity): string =>
 
 const audit = (event: string, identity: WorkspaceDisposalIdentity, detail: Record<string, unknown>): void => {
   console.warn(JSON.stringify({ audit: "workspace-disposal", event, runId: runIdOf(identity), ...detail }));
+};
+
+const inside = (root: string, candidate: string): boolean => candidate.startsWith(`${root}${sep}`);
+
+export const claudeTranscriptDirectory = (config: RunnerConfig, workspacePath: string): string => {
+  const projectsRoot = resolve(config.home, ".claude", "projects");
+  const mangledWorkspacePath = workspacePath.replace(/[^A-Za-z0-9]/g, "-");
+  const transcriptDirectory = resolve(projectsRoot, mangledWorkspacePath);
+  if (!inside(projectsRoot, transcriptDirectory) || transcriptDirectory === projectsRoot) {
+    throw new Error("Refusing to remove a Claude transcript path outside the configured projects root");
+  }
+  return transcriptDirectory;
+};
+
+const removeClaudeTranscript = async (
+  config: RunnerConfig,
+  identity: WorkspaceDisposalIdentity,
+  workspacePath: string,
+): Promise<void> => {
+  const transcriptDirectory = claudeTranscriptDirectory(config, workspacePath);
+  try {
+    await rm(transcriptDirectory, { recursive: true, force: true });
+  } catch (error: unknown) {
+    audit("transcript-remove-failed", identity, {
+      path: transcriptDirectory,
+      error: errorMessage(error),
+    });
+  }
 };
 
 const failed = (reason: string, salvage: DeliveryResult | null = null): WorkspaceDisposal => ({
@@ -167,10 +198,11 @@ export const disposeWorkspace = async (
   if (policy.retain) return { cleanupStatus: "RETAINED", workspaceRetained: true, salvage };
   try {
     await cleanupWorkspace(config, workspace.path);
-    return { cleanupStatus: "SUCCEEDED", workspaceRetained: false, salvage };
   } catch (error: unknown) {
     const reason = errorMessage(error);
     audit("remove-failed", identity, { error: reason });
     return failed(reason, salvage);
   }
+  await removeClaudeTranscript(config, identity, workspace.path);
+  return { cleanupStatus: "SUCCEEDED", workspaceRetained: false, salvage };
 };
