@@ -83,6 +83,25 @@ test("a poll is bounded on the same terms as any other request", async () => {
   });
 });
 
+test("an aborted poll is cancellation rather than a timeout", async () => {
+  const controller = new AbortController();
+  await withFetch(async ({ init }) => {
+    const signal = init.signal;
+    return await new Promise<Response>((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+  }, async () => {
+    const pending = api.poll("/tasks?view=board", null, controller.signal);
+    controller.abort();
+    await assert.rejects(pending, (reason: unknown) => {
+      assert.ok(reason instanceof Error);
+      assert.equal(reason.name, "AbortError");
+      assert.equal(reason instanceof ApiError, false);
+      return true;
+    });
+  });
+});
+
 test("an ordinary transport failure is not reported as a timeout", async () => {
   await withFetch(async () => { throw new TypeError("Failed to fetch"); }, async () => {
     await assert.rejects(() => api.get("/projects"), (reason: unknown) => {

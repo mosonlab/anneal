@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { act } from "react";
 
 import { ApiError, api } from "../lib/api";
-import { installFetchFunction } from "./dom-harness";
+import { usePoll } from "../lib/hooks";
+import { installDom, installFetchFunction, reactDom } from "./dom-harness";
 
 type Call = { url: string; init: RequestInit };
 
@@ -93,4 +95,139 @@ test("a 204 is a change to nothing, not an unchanged poll", async () => {
   await withFetch([{ status: 204, etag: 'W/"e"' }], async () => {
     assert.deepEqual(await api.poll("/tasks", null), { changed: true, body: "", etag: 'W/"e"' });
   });
+});
+
+test("a pending poll is not repeated by the interval", async () => {
+  const { dom, container } = installDom();
+  const calls: RequestInit[] = [];
+  let release: ((response: Response) => void) | null = null;
+  const fetchHarness = installFetchFunction(async (_url, init = {}) => {
+    calls.push(init);
+    const signal = init.signal;
+    return await new Promise<Response>((resolve, reject) => {
+      release = resolve;
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+  });
+  let tick: (() => void) | null = null;
+  const originalSetInterval = dom.window.setInterval;
+  const originalClearInterval = dom.window.clearInterval;
+  Object.defineProperty(dom.window, "setInterval", { configurable: true, value: (run: () => void) => {
+    tick = run;
+    return 1;
+  } });
+  Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: () => undefined });
+
+  let snapshot: ReturnType<typeof usePoll<string>> | null = null;
+  const Probe = (): null => { snapshot = usePoll<string>("/tasks", 2_500); return null; };
+  const root = (await reactDom()).createRoot(container);
+  try {
+    await act(async () => root.render(<Probe />));
+    assert.equal(calls.length, 1);
+    await act(async () => tick?.());
+    assert.equal(calls.length, 1, "the timer leaves the in-flight request alone");
+    release?.(new Response(JSON.stringify("ready"), { status: 200 }));
+    await fetchHarness.settle();
+    assert.equal(snapshot?.data, "ready");
+    assert.equal(snapshot?.loading, false);
+  } finally {
+    await act(async () => root.unmount());
+    fetchHarness.dispose();
+    Object.defineProperty(dom.window, "setInterval", { configurable: true, value: originalSetInterval });
+    Object.defineProperty(dom.window, "clearInterval", { configurable: true, value: originalClearInterval });
+    dom.window.close();
+  }
+});
+
+test("unmount aborts a pending poll", async () => {
+  const { dom, container } = installDom();
+  let signal: AbortSignal | null = null;
+  const fetchHarness = installFetchFunction(async (_url, init = {}) => {
+    signal = init.signal ?? null;
+    const requestSignal = init.signal;
+    return await new Promise<Response>((_resolve, reject) => {
+      requestSignal?.addEventListener("abort", () => reject(requestSignal.reason), { once: true });
+    });
+  });
+  const Probe = (): null => { usePoll<string>("/tasks", null); return null; };
+  const root = (await reactDom()).createRoot(container);
+  try {
+    await act(async () => root.render(<Probe />));
+    assert.ok(signal);
+    await act(async () => root.unmount());
+    assert.equal(signal?.aborted, true, "cleanup aborts the request signal");
+    await fetchHarness.settle();
+  } finally {
+    fetchHarness.dispose();
+    dom.window.close();
+  }
+});
+
+test("a hidden one-shot poll reads on the first return and does not repeat", async () => {
+  const { dom, container } = installDom();
+  Object.defineProperty(dom.window.document, "hidden", { configurable: true, value: true });
+  const calls: RequestInit[] = [];
+  const fetchHarness = installFetchFunction(async (_url, init = {}) => {
+    calls.push(init);
+    return new Response(JSON.stringify("visible"), { status: 200 });
+  });
+  let snapshot: ReturnType<typeof usePoll<string>> | null = null;
+  const Probe = (): null => { snapshot = usePoll<string>("/tasks", null); return null; };
+  const root = (await reactDom()).createRoot(container);
+  try {
+    await act(async () => root.render(<Probe />));
+    assert.equal(calls.length, 0, "the initial hidden read waits for visibility");
+    Object.defineProperty(dom.window.document, "hidden", { configurable: true, value: false });
+    await act(async () => dom.window.document.dispatchEvent(new dom.window.Event("visibilitychange")));
+    await fetchHarness.settle();
+    assert.equal(calls.length, 1);
+    assert.equal(snapshot?.data, "visible");
+    Object.defineProperty(dom.window.document, "hidden", { configurable: true, value: true });
+    await act(async () => dom.window.document.dispatchEvent(new dom.window.Event("visibilitychange")));
+    Object.defineProperty(dom.window.document, "hidden", { configurable: true, value: false });
+    await act(async () => dom.window.document.dispatchEvent(new dom.window.Event("visibilitychange")));
+    await fetchHarness.settle();
+    assert.equal(calls.length, 1, "a completed one-shot poll stays one-shot");
+  } finally {
+    await act(async () => root.unmount());
+    fetchHarness.dispose();
+    dom.window.close();
+  }
+});
+
+test("reload keeps the existing result visible while a replacement is pending", async () => {
+  const { dom, container } = installDom();
+  let calls = 0;
+  let release: ((response: Response) => void) | null = null;
+  const fetchHarness = installFetchFunction(async (_url, init = {}) => {
+    calls += 1;
+    if (calls === 1) return new Response(JSON.stringify("board"), { status: 200 });
+    const signal = init.signal;
+    return await new Promise<Response>((resolve, reject) => {
+      release = resolve;
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+  });
+  let snapshot: ReturnType<typeof usePoll<string>> | null = null;
+  const Probe = (): null => { snapshot = usePoll<string>("/tasks", null); return null; };
+  const root = (await reactDom()).createRoot(container);
+  try {
+    await act(async () => root.render(<Probe />));
+    await fetchHarness.settle();
+    assert.equal(snapshot?.data, "board");
+    assert.equal(snapshot?.loading, false);
+    await act(async () => snapshot?.reload());
+    assert.equal(calls, 2);
+    assert.equal(snapshot?.data, "board");
+    assert.equal(snapshot?.loading, false, "reload does not hide the existing board");
+    release?.(new Response(JSON.stringify({ error: "down" }), { status: 503 }));
+    await fetchHarness.settle();
+    assert.equal(snapshot?.data, "board");
+    assert.equal(snapshot?.error?.status, 503, "a failed refresh remains visible with the held board");
+    assert.equal(snapshot?.loading, false);
+  } finally {
+    await act(async () => root.unmount());
+    fetchHarness.dispose();
+    dom.window.close();
+  }
 });

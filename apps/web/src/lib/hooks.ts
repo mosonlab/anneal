@@ -38,11 +38,13 @@ export const usePoll = <T>(path: string | null, intervalMs: number | null = POLL
   const generation = useRef(0);
   const renderedPath = useRef(path);
   const heldPath = useRef(path);
+  const hasResult = useRef(false);
   /** The serialization of whatever `data` currently holds, or `null` when the
    *  held value cannot be trusted to match the path being polled. */
   const held = useRef<string | null>(null);
   /** The validator that came with `held`, sent back as `If-None-Match`. */
   const tag = useRef<string | null>(null);
+  hasResult.current = data !== null || error !== null || lastSuccessAt !== null;
 
   // Effects run after paint. Advance the generation during render so the first
   // destination frame cannot expose source state and an old response resolving
@@ -82,11 +84,18 @@ export const usePoll = <T>(path: string | null, intervalMs: number | null = POLL
     held.current = null;
     tag.current = null;
     let cancelled = false;
-    setLoading(true);
+    let inFlight = false;
+    let readSucceeded = false;
+    const controller = new AbortController();
+    // Refreshing an already populated resource keeps the current view usable
+    // while its replacement is on the wire. A first read (or a new path) still
+    // owns the loading state, and an earlier error remains visible during retry.
+    setLoading(pathChanged || !hasResult.current);
     const load = async (): Promise<void> => {
-      if (document.hidden) return;
+      if (cancelled || inFlight || document.hidden) return;
+      inFlight = true;
       try {
-        const polled = await api.poll(path, tag.current);
+        const polled = await api.poll(path, tag.current, controller.signal);
         if (cancelled || !alive.current || generation.current !== requestGeneration) return;
         tag.current = polled.etag;
         if (polled.changed && polled.body !== held.current) {
@@ -95,17 +104,30 @@ export const usePoll = <T>(path: string | null, intervalMs: number | null = POLL
         }
         setError(null);
         setLastSuccessAt(new Date().toISOString());
+        readSucceeded = true;
       } catch (reason: unknown) {
         if (cancelled || !alive.current || generation.current !== requestGeneration) return;
         setError(reason instanceof ApiError ? reason : new ApiError(0, path, String(reason)));
       } finally {
+        inFlight = false;
         if (!cancelled && alive.current && generation.current === requestGeneration) setLoading(false);
       }
     };
+
+    let wasHidden = document.hidden;
+    const refreshOnVisibility = (): void => {
+      if (cancelled) return;
+      const becameVisible = wasHidden && !document.hidden;
+      wasHidden = document.hidden;
+      if (becameVisible && (intervalMs !== null || !readSucceeded)) void load();
+    };
+    document.addEventListener("visibilitychange", refreshOnVisibility);
     void load();
     const timer = intervalMs === null ? null : window.setInterval(() => void load(), intervalMs);
     return () => {
       cancelled = true;
+      controller.abort();
+      document.removeEventListener("visibilitychange", refreshOnVisibility);
       if (timer !== null) window.clearInterval(timer);
     };
   }, [path, intervalMs, nonce]);

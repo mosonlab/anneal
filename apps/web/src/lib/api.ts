@@ -63,22 +63,38 @@ export class ApiError extends Error {
   }
 }
 
-const transportError = (path: string, reason: unknown): ApiError => (
-  isTimeout(reason)
+type RequestContext = {
+  callerSignal: AbortSignal | null;
+  timeoutSignal: AbortSignal;
+};
+
+const isTimeout = (reason: unknown, context?: RequestContext): boolean => {
+  if (!(reason instanceof Error)) return false;
+  if (reason.name === "TimeoutError") return true;
+  // A response body read can report AbortError after the timeout signal fires.
+  // An AbortError from the caller is cancellation, not a client timeout.
+  return reason.name === "AbortError"
+    && context?.timeoutSignal.aborted === true
+    && context.callerSignal?.aborted !== true;
+};
+
+const transportError = (path: string, reason: unknown, context?: RequestContext): ApiError => (
+  isTimeout(reason, context)
     ? new ApiError(0, path, `No answer within ${REQUEST_TIMEOUT_MS / 1_000}s`, TIMEOUT_CODE)
     : new ApiError(0, path, reason instanceof Error ? reason.message : "Network error")
 );
 
-const responseText = async (response: Response, path: string): Promise<string> => {
+const responseText = async (response: Response, path: string, context?: RequestContext): Promise<string> => {
   try {
     return await response.text();
   } catch (reason: unknown) {
-    throw transportError(path, reason);
+    if (context?.callerSignal?.aborted === true) throw reason;
+    throw transportError(path, reason, context);
   }
 };
 
-const parseError = async (response: Response, path: string): Promise<ApiError> => {
-  const text = await responseText(response, path);
+const parseError = async (response: Response, path: string, context?: RequestContext): Promise<ApiError> => {
+  const text = await responseText(response, path, context);
   let detail = text;
   let code: string | null = null;
   let reason: string | null = null;
@@ -93,35 +109,38 @@ const parseError = async (response: Response, path: string): Promise<ApiError> =
   return new ApiError(response.status, path, detail.slice(0, 400) || `HTTP ${response.status}`, code, reason);
 };
 
-/** `AbortSignal.timeout` rejects the fetch with a `TimeoutError`. Chromium may
- *  report `AbortError` when the same signal expires during a response body
- *  read; this client installs no other abort source, so both names mean its
- *  request bound fired. */
-const isTimeout = (reason: unknown): boolean =>
-  reason instanceof Error && (reason.name === "TimeoutError" || reason.name === "AbortError");
+type RawResponse = { response: Response; context: RequestContext };
 
-const requestRaw = async (path: string, init?: RequestInit): Promise<Response> => {
+const requestRaw = async (path: string, init?: RequestInit): Promise<RawResponse> => {
+  const callerSignal = init?.signal ?? null;
+  const timeoutSignal = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const signal = callerSignal === null
+    ? timeoutSignal
+    : AbortSignal.any([callerSignal, timeoutSignal]);
+  const context: RequestContext = { callerSignal, timeoutSignal };
   try {
-    return await fetch(`${apiBase}${path}`, {
+    const response = await fetch(`${apiBase}${path}`, {
       ...init,
       // Every request is bounded, polls included: a poll that never settles
       // holds a connection and its state for the life of the page.
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      signal,
       headers: {
         "Content-Type": "application/json",
         ...init?.headers,
       },
     });
+    return { response, context };
   } catch (reason: unknown) {
-    throw transportError(path, reason);
+    if (callerSignal?.aborted === true) throw reason;
+    throw transportError(path, reason, context);
   }
 };
 
 const requestText = async (path: string, init?: RequestInit): Promise<string> => {
-  const response = await requestRaw(path, init);
-  if (!response.ok) throw await parseError(response, path);
-  if (response.status === 204) return "";
-  return responseText(response, path);
+  const raw = await requestRaw(path, init);
+  if (!raw.response.ok) throw await parseError(raw.response, path, raw.context);
+  if (raw.response.status === 204) return "";
+  return responseText(raw.response, path, raw.context);
 };
 
 /** One poll's answer: whether anything arrived, and the validator to send next
@@ -142,16 +161,18 @@ export type Polled = { changed: boolean; body: string; etag: string | null };
  * cached copy it would attach its own validator and hand back a synthesised 200,
  * and the caller could not tell a fresh payload from a replayed one.
  */
-const requestPolled = async (path: string, etag: string | null): Promise<Polled> => {
-  const response = await requestRaw(path, {
+const requestPolled = async (path: string, etag: string | null, signal?: AbortSignal): Promise<Polled> => {
+  const raw = await requestRaw(path, {
     cache: "no-store",
     ...(etag === null ? {} : { headers: { "If-None-Match": etag } }),
+    ...(signal === undefined ? {} : { signal }),
   });
+  const response = raw.response;
   const nextTag = response.headers.get("ETag");
   if (response.status === 304) return { changed: false, body: "", etag: nextTag ?? etag };
-  if (!response.ok) throw await parseError(response, path);
+  if (!response.ok) throw await parseError(response, path, raw.context);
   if (response.status === 204) return { changed: true, body: "", etag: nextTag };
-  return { changed: true, body: await responseText(response, path), etag: nextTag };
+  return { changed: true, body: await responseText(response, path, raw.context), etag: nextTag };
 };
 
 const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
@@ -161,7 +182,7 @@ const request = async <T>(path: string, init?: RequestInit): Promise<T> => {
 
 export const api = {
   get: <T>(path: string): Promise<T> => request<T>(path),
-  poll: (path: string, etag: string | null): Promise<Polled> => requestPolled(path, etag),
+  poll: (path: string, etag: string | null, signal?: AbortSignal): Promise<Polled> => requestPolled(path, etag, signal),
   post: <T>(path: string, body?: unknown): Promise<T> =>
     request<T>(path, { method: "POST", ...(body === undefined ? {} : { body: JSON.stringify(body) }) }),
   patch: <T>(path: string, body: unknown): Promise<T> => request<T>(path, { method: "PATCH", body: JSON.stringify(body) }),
