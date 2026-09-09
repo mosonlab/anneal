@@ -10,3 +10,12 @@
 - [0008 - Templates are immutable once used](0008-templates-are-immutable-once-used.md) — Accepted (2026-09-08).
 - [0009 - Review and repair shape](0009-review-and-repair-shape.md) — Accepted (2026-09-08).
 - [0010 - Cross-family review before dispatch](0010-cross-family-review-before-dispatch.md) — Accepted (2026-09-08).
+
+Entry uniqueness is checked against entry headings. A recursive full-text
+search also matches slugs in index links and cross-references; those link
+targets do not define additional entries. To find the defining heading for a
+Reference slug, use:
+
+```sh
+rg '^#{2,3} .*<slug>' docs/out-of-scope docs/adr
+```

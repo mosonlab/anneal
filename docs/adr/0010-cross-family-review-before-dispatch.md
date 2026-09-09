@@ -21,6 +21,10 @@ per Chain.
 missed causal chains that minutes of code reading overturned, and one outside
 review caught them all.
 
+#### Revisit when
+
+No condition recorded.
+
 ## Consequences
 
 - Dispatch waits for the cross-family review.

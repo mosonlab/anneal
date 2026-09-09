@@ -21,6 +21,10 @@ clone-then-edit, and the step graph is replaced as a whole by one atomic
 **Why:** Copy-on-write was deliberately not built. Instantiation re-reads and
 re-validates the template inside the locking transaction.
 
+#### Revisit when
+
+No condition recorded.
+
 ### K9 `prompt-only-changes-ride-rollover`
 
 A prompt revision on a step with history rides a registered generation
@@ -28,6 +32,10 @@ rollover. Unregistered prompt drift refuses deployment.
 
 **Why:** The generation registry carries prompt digests in both directions, so
 outgoing and successor prompts are pinned.
+
+#### Revisit when
+
+No condition recorded.
 
 ### K10 `review-step-base-pinning`
 
@@ -37,6 +45,10 @@ committed to the Chain branch.
 
 **Why:** This provides fetch-level isolation with fail-stop semantics and no
 branch-head fallback.
+
+#### Revisit when
+
+No condition recorded.
 
 ## Consequences
 
