@@ -8,6 +8,7 @@ import { NewTask } from "../components/new-task-panel";
 import { translate } from "../lib/i18n-core";
 import { ProjectProvider } from "../lib/project";
 import type { ChainProgress, TaskList } from "../lib/types";
+import { mountPage } from "./dom-harness";
 
 /* Same expected values as before batch 1; they now come from the `en`
  * dictionary rather than from a literal in the component (spec §7.20). */
@@ -77,6 +78,37 @@ test("the panel the head owns renders its first field", () => {
   assert.match(markup, new RegExp(en("newTask.title")));
   assert.match(markup, new RegExp(en("newTask.field.title.label")));
   assert.match(markup, /Implement feat\/inbox-search/);
+});
+
+test("creation options load only after opening the form and failures can be retried", async () => {
+  let refuse = true;
+  const page = await mountPage(
+    <ProjectProvider><TasksPageHead active="tasks" /></ProjectProvider>,
+    {
+      "/projects": [{ id: "p1", name: "Project" }],
+      "/projects/p1/agents": () => refuse
+        ? new Response('{"error":"Options unavailable"}', { status: 503 }) : [],
+      "/projects/p1/repos": [],
+      "/projects/p1/task-templates": [],
+    },
+  );
+  try {
+    assert.deepEqual(page.requests.map((request) => request.path), ["/projects"]);
+    await page.press(en("tasks.create"));
+    assert.ok(page.requests.some((request) => request.path === "/projects/p1/agents"));
+    assert.ok(page.requests.some((request) => request.path === "/projects/p1/repos"));
+    assert.match(page.container.textContent ?? "", /Options unavailable/);
+    assert.equal(page.container.querySelector("input"), null, "do not initialize a form with missing defaults");
+    refuse = false;
+    await page.press(en("common.retry"));
+    assert.ok(page.container.querySelector("input"), "the recovered form is usable");
+    const count = page.requests.length;
+    await page.press(en("common.cancel"));
+    assert.equal(page.container.querySelector("input"), null);
+    assert.equal(page.requests.length, count);
+  } finally {
+    await page.dispose();
+  }
 });
 
 /* ------------------------------------------------------------- the archive */

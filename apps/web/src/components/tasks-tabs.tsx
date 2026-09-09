@@ -1,5 +1,6 @@
 import { type ReactNode, useState } from "react";
 
+import { errorMessage } from "../lib/api";
 import { usePoll } from "../lib/hooks";
 import { useT } from "../lib/i18n";
 import { useProjectScope } from "../lib/project";
@@ -8,7 +9,7 @@ import type { Agent, Repo } from "../lib/types";
 import { IconPlus } from "./icons";
 import { NewTask } from "./new-task-panel";
 import {
-  PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, Segmented,
+  ErrorNotice, FullPanel, PAGE_ACTIONS, PAGE_HEAD, PAGE_HEAD_H1, PAGE_HEAD_SUBTITLE, PAGE_HEAD_TITLES, Segmented,
 } from "./ui";
 import { Button } from "./ui/button";
 
@@ -35,9 +36,10 @@ export const TasksPageHead = ({ active, onCreated }: {
   onCreated?: () => void;
 }): ReactNode => {
   const { projectId, project } = useProjectScope();
-  const { data: agents } = usePoll<Agent[]>(projectId === "" ? null : `/projects/${projectId}/agents`, 15_000);
-  const { data: repos } = usePoll<Repo[]>(projectId === "" ? null : `/projects/${projectId}/repos`, 15_000);
   const [creating, setCreating] = useState(false);
+  // These options belong to the creation form, not the board's first load.
+  const agents = usePoll<Agent[]>(!creating || projectId === "" ? null : `/projects/${projectId}/agents`, 15_000);
+  const repos = usePoll<Repo[]>(!creating || projectId === "" ? null : `/projects/${projectId}/repos`, 15_000);
   const t = useT();
   const tabs = TAB_KEYS.map((tab) => ({ value: tab.value, label: t(tab.labelKey) }));
 
@@ -56,8 +58,16 @@ export const TasksPageHead = ({ active, onCreated }: {
       <Segmented options={tabs} value={active} onChange={(value) => navigate(`/${value}`)} />
 
       {creating && projectId !== "" ? (
-        <NewTask projectId={projectId} project={project} agents={agents ?? []} repos={repos ?? []}
-          onClose={() => setCreating(false)} onCreated={() => onCreated?.()} />
+        agents.data === null || repos.data === null ? (
+          <FullPanel title={t("newTask.title")} onClose={() => setCreating(false)}>
+            {agents.error === null ? null : <ErrorNotice message={errorMessage(agents.error)} onRetry={agents.reload} />}
+            {repos.error === null ? null : <ErrorNotice message={errorMessage(repos.error)} onRetry={repos.reload} />}
+            {agents.error === null && repos.error === null ? <p role="status">{t("common.loading")}</p> : null}
+          </FullPanel>
+        ) : (
+          <NewTask key={projectId} projectId={projectId} project={project} agents={agents.data} repos={repos.data}
+            onClose={() => setCreating(false)} onCreated={() => onCreated?.()} />
+        )
       ) : null}
     </>
   );
