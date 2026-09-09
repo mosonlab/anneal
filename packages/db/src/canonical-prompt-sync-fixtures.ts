@@ -1,9 +1,18 @@
 /**
+ * Restore the `hard` tier Agent name the revalidation prompt carried before the
+ * tier's canonical role moved to `senior-dev-sol-high` (2026-09-09). Every
+ * registered generation predates that rollover, so the older fixtures apply
+ * it first.
+ */
+export const restorePreSolHighHardTierPrompt = (prompt: string): string => prompt
+  .replace("The current Agent is\n  `senior-dev-sol-high`.", "The current Agent is\n  `senior-dev-astra-low`.");
+
+/**
  * Restore the Regression bytes retired by the frozen-baseline rollover before
  * applying older fixture transformations. Every historical generation digest
  * authenticates the whole template, including this mechanical handoff.
  */
-export const restorePreFrozenRegressionPrompt = (prompt: string): string => prompt
+export const restorePreFrozenRegressionPrompt = (prompt: string): string => restorePreSolHighHardTierPrompt(prompt)
   .replace(
     "The platform script owns prepare-time refresh/merge, gate dispatch and retries,\nverdict transcription, and the final `regression-verification-v2` task output.\nMerge readiness checks the latest target under the Merge Lease before authorizing\nthe exact merge.",
     "The platform script owns refresh/merge, merge-lease operations, gate dispatch\nand retries, verdict transcription, and the final `regression-verification-v2`\ntask output.",

@@ -59,7 +59,7 @@ reason and check the listed not-a-reason cases before choosing a tier other than
   review or regression; for example, keeping an untested semantic intact
   across several providers' event handling. It is not a reason that the change
   is large, spans modules, or needs a lot of reading. The current Agent is
-  `senior-dev-astra-low`.
+  `senior-dev-sol-high`.
 - `hazard` — the failure the acceptance suite cannot witness: concurrency,
   transaction boundaries, lock or lease windows, cross-module contract
   migrations; or the change alters what the merge gate, merge automation, a

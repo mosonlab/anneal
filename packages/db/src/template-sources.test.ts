@@ -744,7 +744,7 @@ test("bare revalidation only selects v1 for complete historical Direct identitie
 test("registered Direct generations retain their historical revalidation protocol", () => {
   for (const generation of LEGACY_TEMPLATE_GENERATIONS[DIRECT_TEMPLATE_NAME]) {
     if (!generation.shape.some(({ outputKind }) => outputKind === "revalidation")) continue;
-    const expected = generation.marker === "pre-frozen-regression-baseline" ? "v2" : "v1";
+    const expected = ["pre-frozen-regression-baseline", "pre-sol-high-hard-tier"].includes(generation.marker) ? "v2" : "v1";
     const taskTemplateName = templateRolloverName(DIRECT_TEMPLATE_NAME, generation.marker, "row");
     assert.equal(canonicalOutputGeneration({ outputKind: "revalidation", taskTemplateName }), expected);
     assert.equal(canonicalOutputGeneration({ outputKind: "revalidation", taskTemplate: { name: taskTemplateName } }), expected);
