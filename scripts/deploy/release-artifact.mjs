@@ -11,6 +11,7 @@ import {
   workspaceDependencyPaths,
 } from "./release-artifacts.mjs";
 import { assembleReleaseDirectory, verifyReleaseDirectory } from "./release-directory.mjs";
+import { deployChildEnvironment } from "./quiet-window-command.mjs";
 import { DeployFailure } from "./quiet-window-lib.mjs";
 
 const SHA = /^[0-9a-f]{40}$/u;
@@ -278,12 +279,19 @@ const run = (program, args, options = {}) => {
         stdio: ["inherit", "inherit", "pipe"],
         maxBuffer: 10 * 1024 * 1024,
         ...spawnOptions,
+        // After the spread: the clone retry below and the escalation classifier
+        // both read this stderr, and both read English.
+        env: deployChildEnvironment(spawnOptions.env),
       });
       if (result.error || result.status !== 0) throw result;
       if (result.stderr) process.stderr.write(result.stderr);
       return result.stdout;
     }
-    return execFileSync(program, args, { stdio: "inherit", ...spawnOptions });
+    return execFileSync(program, args, {
+      stdio: "inherit",
+      ...spawnOptions,
+      env: deployChildEnvironment(spawnOptions.env),
+    });
   } catch (error) {
     // Captured stderr still belongs in the operator's log; classification is a
     // second reader of it, not its owner.
