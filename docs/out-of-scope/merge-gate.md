@@ -1,6 +1,6 @@
 # Merge-gate designs
 
-## affected-tests-only-gate
+## R4 affected-tests-only-gate
 
 ### Decision
 
@@ -20,7 +20,7 @@ concurrent groups) and by removing per-fixture process startup.
 
 No condition recorded.
 
-## gate-scheduling-target
+## R5 gate-scheduling-target
 
 ### Decision
 
@@ -41,7 +41,7 @@ memory.
 
 The work total changes materially.
 
-## decouple-lane-width-from-worker-capacity
+## R6 decouple-lane-width-from-worker-capacity
 
 ### Decision
 
@@ -62,7 +62,7 @@ The single derived constant.
 
 No condition recorded.
 
-## two-static-database-waves
+## R7 two-static-database-waves
 
 ### Decision
 
@@ -70,8 +70,7 @@ Database tests are not split into two static waves.
 
 ### Why
 
-The first implementation starved the small wave and made a four-core worker
-slower.
+The first implementation starved the small wave and made the worker slower.
 
 ### What exists instead
 
@@ -81,7 +80,7 @@ One pooled database wave.
 
 No condition recorded.
 
-## per-database-checkpoint-templates
+## R8 per-database-checkpoint-templates
 
 ### Decision
 

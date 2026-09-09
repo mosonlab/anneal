@@ -1,6 +1,6 @@
 # Runner-isolation designs
 
-## runner-sandbox-containment
+## R9 runner-sandbox-containment
 
 ### Decision
 
@@ -22,7 +22,7 @@ observation, and the shared-checkout guard `scripts/run-scope-guard.sh`.
 
 The deployment serves untrusted repositories or more than one tenant.
 
-## workspace-reclaim-mechanism
+## R10 workspace-reclaim-mechanism
 
 ### Decision
 
@@ -43,7 +43,7 @@ Manual cleanup.
 
 No condition recorded.
 
-## run-scope-bypass-credential
+## R11 run-scope-bypass-credential
 
 ### Decision
 
@@ -62,7 +62,7 @@ The parent-process check in `scripts/run-scope-guard.sh`.
 
 No condition recorded.
 
-## container-sandbox-and-library-shape
+## R12 container-sandbox-and-library-shape
 
 ### Decision
 

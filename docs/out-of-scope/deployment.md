@@ -1,6 +1,6 @@
 # Deployment designs
 
-## deployment-governance-regime
+## R16 deployment-governance-regime
 
 ### Decision
 
@@ -23,7 +23,7 @@ Artifact-based deployment with a small state ledger and migration as policy
 
 The deployment serves more than one operator.
 
-## delete-source-build-fallback
+## R17 delete-source-build-fallback
 
 ### Decision
 

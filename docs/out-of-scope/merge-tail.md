@@ -1,6 +1,6 @@
 # Merge-tail designs
 
-## merge-queue
+## R1 merge-queue
 
 ### Decision
 
@@ -22,7 +22,7 @@ two-parent check; after base drift only the gate re-runs, not semantic review.
 
 The merge train cannot keep main moving under the observed chain concurrency.
 
-## short-timeout-lease-requeue
+## R2 short-timeout-lease-requeue
 
 ### Decision
 
@@ -45,7 +45,7 @@ Blocking acquire.
 
 Lease waiting develops a long tail.
 
-## runs-release-or-steal-lease
+## R3 runs-release-or-steal-lease
 
 ### Decision
 

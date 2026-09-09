@@ -1,6 +1,6 @@
 # Data-model designs
 
-## data-model-additions
+## R13 data-model-additions
 
 ### Decision
 
@@ -25,7 +25,7 @@ Existing shapes.
 
 No condition recorded.
 
-## session-event-age-pruning
+## R14 session-event-age-pruning
 
 ### Decision
 
@@ -43,7 +43,7 @@ The cap.
 
 No condition recorded.
 
-## canonical-managed-flag
+## R15 canonical-managed-flag
 
 ### Decision
 

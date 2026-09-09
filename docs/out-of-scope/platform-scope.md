@@ -1,6 +1,6 @@
 # Platform-scope designs
 
-## native-windows-support
+## R18 native-windows-support
 
 ### Decision
 
@@ -24,7 +24,7 @@ WSL2 is the supported route, a documentation statement only.
 No condition recorded; this item is the lowest priority and is not a reason
 for other work.
 
-## transient-claim-rejection-latching
+## R19 transient-claim-rejection-latching
 
 ### Decision
 
