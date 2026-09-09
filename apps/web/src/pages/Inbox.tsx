@@ -80,9 +80,15 @@ const DeployStrip = ({ deploy }: { deploy: DeployNotice }): ReactNode => {
   const t = useT();
   return (
     <div className={cn(DEPLOY_STRIP, DEPLOY_TONE[deploy.outcome])}>
-      {deploy.outcome === "success"
-        ? t("inbox.deploy.success", { revision: deploy.revision, when: timeAgo(deploy.at) })
-        : t("inbox.deploy.failure", { revision: deploy.revision, when: timeAgo(deploy.at), reason: deploy.reason })}
+      {/* A hostname is a machine identifier, not prose: it stays out of the
+        * translated sentence and out of the message the operator reads aloud.
+        * Records written before hosts were named simply have none to show. */}
+      {deploy.host === null ? null : <span className="flex-none opacity-70">{deploy.host}</span>}
+      <span>
+        {deploy.outcome === "success"
+          ? t("inbox.deploy.success", { revision: deploy.revision, when: timeAgo(deploy.at) })
+          : t("inbox.deploy.failure", { revision: deploy.revision, when: timeAgo(deploy.at), reason: deploy.reason })}
+      </span>
     </div>
   );
 };

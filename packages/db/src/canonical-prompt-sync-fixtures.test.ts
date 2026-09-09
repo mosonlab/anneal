@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { restorePreFrozenRegressionPrompt, restorePreOptionalReviewPrompt, restorePreTierRevalidationPrompt } from "./canonical-prompt-sync-fixtures.js";
+import { restorePreFrozenRegressionPrompt, restorePreOptionalReviewPrompt, restorePreSolHighHardTierPrompt, restorePreTierRevalidationPrompt } from "./canonical-prompt-sync-fixtures.js";
 import { LEGACY_TEMPLATE_GENERATIONS, templatePromptGenerationDigest } from "./canonical-template-transition.js";
 import { loadAllTemplateStepSources } from "./template-sources.js";
 
@@ -31,4 +31,13 @@ test("sync fixtures reconstruct the registered pre-frozen-regression-baseline ge
     const steps = sources.get(name)!.map((step) => ({ ...step, prompt: restorePreFrozenRegressionPrompt(step.prompt) }));
     assert.equal(templatePromptGenerationDigest(steps), LEGACY_TEMPLATE_GENERATIONS[name].find((generation) => generation.marker === "pre-frozen-regression-baseline")!.promptDigest, name);
   }
+});
+
+test("sync fixtures reconstruct the registered pre-sol-high-hard-tier generation", async () => {
+  const sources = await loadAllTemplateStepSources();
+  const steps = sources.get("direct-engineer-workflow")!.map((step) => ({ ...step, prompt: restorePreSolHighHardTierPrompt(step.prompt) }));
+  assert.equal(
+    templatePromptGenerationDigest(steps),
+    LEGACY_TEMPLATE_GENERATIONS["direct-engineer-workflow"].find((generation) => generation.marker === "pre-sol-high-hard-tier")!.promptDigest,
+  );
 });

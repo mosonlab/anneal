@@ -96,7 +96,7 @@ operator configuration; an empty slot never falls through to another tier.
 | --- | --- | --- | --- |
 | `default` | Everything else. Acceptance that existing tests or grep can check stays here whatever it touches. | Crossing packages, touching web files, touching many files, landing in a sensitive directory, or an audit report once suggesting a stronger model. | `senior-dev-luna-max` |
 | `frontend` | The deliverable is a new page, a page redesign, or a new interaction or visual scheme. | Adding a field, wiring data, or changing copy on an existing component. | `frontend-dev-opus-medium` |
-| `hard` | A behavior that neither the brief nor an existing test pins down has to be defined by the implementer, and getting it wrong would not show in review or regression; for example, keeping an untested semantic intact across several providers' event handling. | The change is large, spans modules, or needs a lot of reading. | `senior-dev-astra-low` |
+| `hard` | A behavior that neither the brief nor an existing test pins down has to be defined by the implementer, and getting it wrong would not show in review or regression; for example, keeping an untested semantic intact across several providers' event handling. | The change is large, spans modules, or needs a lot of reading. | `senior-dev-sol-high` |
 | `hazard` | The failure the acceptance suite cannot witness: concurrency, transaction boundaries, lock or lease windows, or cross-module contract migrations; or the change alters what the merge gate, merge automation, a migration, or authorization does. | Merely touching those files without changing their behavior. | `senior-dev-astra-medium` |
 
 These tier criteria and not-a-reason lists are the text of record.

@@ -103,7 +103,7 @@ for that tier. The tier criteria and their not-a-reason lists are:
   review or regression; for example, keeping an untested semantic intact
   across several providers' event handling. A large change, a change that
   spans modules, or a change that needs a lot of reading is not a reason to
-  choose it. Its canonical Agent today is `senior-dev-astra-low`.
+  choose it. Its canonical Agent today is `senior-dev-sol-high`.
 - **hazard** — the failure the acceptance suite cannot witness: concurrency,
   transaction boundaries, lock or lease windows, or cross-module contract
   migrations; or the change alters what the merge gate, merge automation, a

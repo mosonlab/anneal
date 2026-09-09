@@ -56,6 +56,7 @@ import { buildReleaseArtifact, findReleaseArtifact, verifyReleaseArtifact } from
 import {
   autoDeployNoticeBody,
   autoDeployNoticeDedupeKey,
+  autoDeployNoticeHostScope,
   canonicalSyncNoticeRecord,
   canonicalSyncRefusedLines,
   createDeployHost,
@@ -2766,8 +2767,28 @@ test("an over-budget alert dedupes within its attempt and not across attempts", 
   // identical revisions and identical timing raises its own.
   assert.equal(keys[0], keys[1]);
   assert.notEqual(keys[0], keys[2]);
-  // An unscoped notice keys on its text alone, as every deploy outcome does.
+  // A notice carrying neither scope keys on its text alone.
   assert.notEqual(keys[0], autoDeployNoticeDedupeKey("[auto-deploy] failure: a -> b; reason=x"));
+});
+
+test("two hosts reporting the same deploy outcome each keep their own record", () => {
+  // A control plane and the runner-only host following it publish the same
+  // release, so both write this exact line.
+  const body = autoDeployNoticeBody({ outcome: "success", from: revisions.from, to: revisions.to, reason: "deployed" });
+  const controlPlane = autoDeployNoticeDedupeKey(body, autoDeployNoticeHostScope("control-plane-host"));
+  const follower = autoDeployNoticeDedupeKey(body, autoDeployNoticeHostScope("runner-host"));
+  // Sharing one key drops the second host's outcome as a duplicate, leaving the
+  // Inbox reporting the first host's — a stale failure outlives its repair.
+  assert.notEqual(controlPlane, follower);
+  // The same host reporting the same outcome twice is still one record.
+  assert.equal(controlPlane, autoDeployNoticeDedupeKey(body, autoDeployNoticeHostScope("control-plane-host")));
+  // A finer scope stays distinct within its host, and across hosts sharing it.
+  const attempt = autoDeployNoticeHostScope("control-plane-host", "attempt-one");
+  assert.notEqual(autoDeployNoticeDedupeKey(body, attempt), controlPlane);
+  assert.notEqual(
+    autoDeployNoticeDedupeKey(body, attempt),
+    autoDeployNoticeDedupeKey(body, autoDeployNoticeHostScope("runner-host", "attempt-one")),
+  );
 });
 
 test("an undelivered over-budget alert reports itself undelivered", async () => {
@@ -3622,6 +3643,14 @@ test("wait exceeded sends informational Chinese text rather than a deploy failur
   assert.equal(notices[0].outcome, "info");
   assert.equal(autoDeployNoticeBody(notices[0]), "自动部署等待超时，已开始排空派发");
   assert.match(autoDeployNoticeBody({ outcome: "failure", reason: "build-failed", ...revisions }), /^\[auto-deploy\] failure:/u);
+  // The host is bounded by `;` before the detail, which carries a whole builder
+  // transcript and cannot be parsed past.
+  assert.match(
+    autoDeployNoticeBody({ outcome: "failure", reason: "build-failed", host: "runner-host-1", detail: "exit-1: fatal: x", ...revisions }),
+    /; reason=build-failed; host=runner-host-1; detail=exit-1: fatal: x$/u,
+  );
+  // A caller that names no host writes the shape every record before this one had.
+  assert.doesNotMatch(autoDeployNoticeBody({ outcome: "success", reason: "deployed", ...revisions }), /host=/u);
 });
 
 test("automatic cadence persists successful deployment time across ticks", async (t) => {

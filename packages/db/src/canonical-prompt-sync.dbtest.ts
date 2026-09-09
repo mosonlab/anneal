@@ -1318,6 +1318,15 @@ test(`sync recreates a missing ${specialName} Agent from senior-dev-astra-medium
     await prisma.repo.delete({ where: { id: repo.id } });
   });
 
+  // The canonical Default profiles may stake a tier slot on this role (the
+  // direct `hard` tier binds senior-dev-sol-high). Those rows restrict the
+  // delete, so lift them first and restake them on the recreated Agent below;
+  // sync never touches an existing profile's slots.
+  const stakedTiers = await prisma.staffingProfileTier.findMany({
+    where: { agentId: existingSol.id },
+    select: { profileId: true, tier: true },
+  });
+  await prisma.staffingProfileTier.deleteMany({ where: { agentId: existingSol.id } });
   await prisma.agent.delete({ where: { id: existingSol.id } });
 
   const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
@@ -1327,6 +1336,9 @@ test(`sync recreates a missing ${specialName} Agent from senior-dev-astra-medium
 
   const sol = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: specialName } },
+  });
+  await prisma.staffingProfileTier.createMany({
+    data: stakedTiers.map((row) => ({ ...row, agentId: sol.id })),
   });
   assert.equal(sol.model, specialSource.model);
   assert.equal(sol.runnerPreference, specialSource.runnerPreference);

@@ -31,7 +31,7 @@ export type StaffingProfileTierKey = (typeof STAFFING_PROFILE_TIERS)[number];
 export const CANONICAL_STAFFING_TIER_ROLES: Readonly<Record<StaffingProfileTierKey, string>> = {
   default: "senior-dev-luna-max",
   frontend: "frontend-dev-opus-medium",
-  hard: "senior-dev-astra-low",
+  hard: "senior-dev-sol-high",
   hazard: "senior-dev-astra-medium",
 };
 

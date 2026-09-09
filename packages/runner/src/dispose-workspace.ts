@@ -1,9 +1,14 @@
+import { realpath, rm } from "node:fs/promises";
+import { resolve, sep } from "node:path";
+
+import { workspaceEnvironment } from "./adapters/environment.js";
 import {
   openControlPlane, type ClaimedTask, type CleanupStatus,
   type ControlPlane, type RunSessionClaim,
 } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { salvageWorkspace, type DeliveryResult } from "./delivery.js";
+import { bindCommandRunner } from "./exec.js";
 import { captureWorkspaceResult, cleanupWorkspace, type Workspace } from "./workspace.js";
 
 export type WorkspaceDisposalClaim = RunSessionClaim & {
@@ -38,6 +43,14 @@ export type WorkspaceDisposal = {
   salvage: DeliveryResult | null;
 };
 
+export type WorkspaceDisposalDependencies = {
+  canonicalizeWorkspacePath: (workspacePath: string) => Promise<string>;
+};
+
+const DEFAULT_DISPOSAL_DEPENDENCIES: WorkspaceDisposalDependencies = {
+  canonicalizeWorkspacePath: realpath,
+};
+
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
 const runIdOf = (identity: WorkspaceDisposalIdentity): string =>
@@ -45,6 +58,58 @@ const runIdOf = (identity: WorkspaceDisposalIdentity): string =>
 
 const audit = (event: string, identity: WorkspaceDisposalIdentity, detail: Record<string, unknown>): void => {
   console.warn(JSON.stringify({ audit: "workspace-disposal", event, runId: runIdOf(identity), ...detail }));
+};
+
+const inside = (root: string, candidate: string): boolean => candidate.startsWith(`${root}${sep}`);
+
+export const guardClaudeTranscriptDirectory = (projectsRoot: string, candidate: string): string => {
+  const resolvedProjectsRoot = resolve(projectsRoot);
+  const transcriptDirectory = resolve(candidate);
+  if (!inside(resolvedProjectsRoot, transcriptDirectory) || transcriptDirectory === resolvedProjectsRoot) {
+    throw new Error("Refusing to remove a Claude transcript path outside the configured projects root");
+  }
+  return transcriptDirectory;
+};
+
+const claudeTranscriptLocation = (config: RunnerConfig, workspacePath: string): {
+  projectsRoot: string;
+  transcriptDirectory: string;
+} => {
+  const projectsRoot = resolve(config.home, ".claude", "projects");
+  const mangledWorkspacePath = workspacePath.replace(/[^A-Za-z0-9]/g, "-");
+  const transcriptDirectory = resolve(projectsRoot, mangledWorkspacePath);
+  return { projectsRoot, transcriptDirectory };
+};
+
+export const claudeTranscriptDirectory = (config: RunnerConfig, workspacePath: string): string => {
+  const location = claudeTranscriptLocation(config, workspacePath);
+  return guardClaudeTranscriptDirectory(location.projectsRoot, location.transcriptDirectory);
+};
+
+const removeClaudeTranscript = async (
+  config: RunnerConfig,
+  identity: WorkspaceDisposalIdentity,
+  workspacePath: string,
+): Promise<void> => {
+  const { projectsRoot, transcriptDirectory } = claudeTranscriptLocation(config, workspacePath);
+  try {
+    guardClaudeTranscriptDirectory(projectsRoot, transcriptDirectory);
+    if (config.runAsPrefix.length > 0) {
+      const run = bindCommandRunner(
+        config.runAsPrefix,
+        resolve(config.workspaceRoot),
+        workspaceEnvironment(config),
+      );
+      await run("/bin/rm", ["-rf", "--", transcriptDirectory]);
+    } else {
+      await rm(transcriptDirectory, { recursive: true, force: true });
+    }
+  } catch (error: unknown) {
+    audit("transcript-remove-failed", identity, {
+      path: transcriptDirectory,
+      error: errorMessage(error),
+    });
+  }
 };
 
 const failed = (reason: string, salvage: DeliveryResult | null = null): WorkspaceDisposal => ({
@@ -111,6 +176,7 @@ export const disposeWorkspace = async (
   workspace: DisposableWorkspace,
   policy: WorkspaceDisposalPolicy,
   controlPlane: ControlPlane = openControlPlane(config),
+  dependencies: WorkspaceDisposalDependencies = DEFAULT_DISPOSAL_DEPENDENCIES,
 ): Promise<WorkspaceDisposal> => {
   let salvage: DeliveryResult | null = null;
   if (!policy.alreadyDurable) {
@@ -165,12 +231,20 @@ export const disposeWorkspace = async (
   }
 
   if (policy.retain) return { cleanupStatus: "RETAINED", workspaceRetained: true, salvage };
+  let canonicalWorkspacePath: string;
   try {
+    try {
+      canonicalWorkspacePath = await dependencies.canonicalizeWorkspacePath(workspace.path);
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      canonicalWorkspacePath = resolve(workspace.path);
+    }
     await cleanupWorkspace(config, workspace.path);
-    return { cleanupStatus: "SUCCEEDED", workspaceRetained: false, salvage };
   } catch (error: unknown) {
     const reason = errorMessage(error);
     audit("remove-failed", identity, { error: reason });
     return failed(reason, salvage);
   }
+  await removeClaudeTranscript(config, identity, canonicalWorkspacePath);
+  return { cleanupStatus: "SUCCEEDED", workspaceRetained: false, salvage };
 };

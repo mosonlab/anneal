@@ -1511,7 +1511,7 @@ curl -X DELETE "$BASE_URL/staffing-profiles/$PROFILE_ID" \
   `mergeTailRepairAgentId`; the active direct, PR, and compound canonical
   profiles set `tiers.default` to `senior-dev-luna-max`,
   `tiers.frontend` to `frontend-dev-opus-medium`, `tiers.hard` to
-  `senior-dev-astra-low`, and `tiers.hazard` to `senior-dev-astra-medium`, and
+  `senior-dev-sol-high`, and `tiers.hazard` to `senior-dev-astra-medium`, and
   set the repair slot to `senior-dev-luna-max`.
 - If the canonical repair Agent is missing or archived, reset restores the step
   entries, clears the repair slot, and returns a `merge_tail_repair_agent_unavailable`

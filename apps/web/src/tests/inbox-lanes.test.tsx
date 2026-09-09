@@ -98,6 +98,36 @@ test("a deploy that succeeded reports where production is, without occupying a l
   }
 });
 
+test("a deploy notice names the host that wrote it", async () => {
+  const failed = card({
+    id: "deploy-2", status: "CLOSED", answeredAt: now,
+    body: "[auto-deploy] failure: cd63e56186022274da18288bfd7ef36bd6b318ea -> cb46e4a003c3296fbd2f9ee49d6450ae7b7b3b3b;"
+      + " reason=release-artifact-build-failed; host=runner-host-1; detail=exit-1: fatal: unable to access",
+  });
+  const { container, page } = await renderInbox([failed]);
+  try {
+    const text = container.textContent ?? "";
+    // Without this the operator cannot tell which of the deploying hosts to go
+    // and look at, and the detail after it must not be mistaken for the host.
+    assert.match(text, /runner-host-1/);
+    assert.match(text, /release-artifact-build-failed/);
+    assert.doesNotMatch(text, /exit-1/);
+  } finally {
+    await page.dispose();
+  }
+});
+
+test("a deploy notice written before hosts were named still renders", async () => {
+  const { latestDeploy } = await import("../lib/inbox");
+  assert.deepEqual(latestDeploy([deployed])?.host, null);
+  const { container, page } = await renderInbox([deployed]);
+  try {
+    assert.match(container.textContent ?? "", /cb46e4a/);
+  } finally {
+    await page.dispose();
+  }
+});
+
 test("the sidebar badge counts the reply-owing cards only", async () => {
   const { needsReply } = await import("../lib/inbox");
   assert.deepEqual([gate, notice, deployed].filter(needsReply).map((message) => message.id), ["gate-1"]);
