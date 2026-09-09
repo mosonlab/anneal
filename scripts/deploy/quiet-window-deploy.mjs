@@ -664,15 +664,24 @@ export const openDispatchDrain = ({ insert, extend, remove, onWriteFailure, log:
 export const autoDeployNoticeDedupeKey = (body, dedupeScope = null) =>
   `auto-deploy:${createHash("sha256").update(dedupeScope === null ? body : `${dedupeScope}\n${body}`).digest("hex")}`;
 
-/** `dedupeScope` names what the notice is about when its text alone does not.
- * Deploy outcomes dedupe on their text; a per-attempt alert scopes its key to
- * the attempt, so a later attempt with the same revisions and the same timing
- * still reaches the operator instead of colliding with the earlier record. */
-const notify = async ({ outcome, reason, detail = "", from, to, dedupeScope = null }) => {
+/** The host that wrote a notice is part of what the notice is about. A
+ * control-plane host and the runner-only hosts following it deploy the same
+ * `from -> to`, so their notice bodies are identical: on one shared key the
+ * follower's outcome is dropped as a duplicate, and the Inbox keeps reporting
+ * whichever host wrote first. Scoping by host records each one. */
+export const autoDeployNoticeHostScope = (host, dedupeScope = null) =>
+  dedupeScope === null ? host : `${host}\n${dedupeScope}`;
+
+/** `dedupeScope` names what the notice is about when its text and its host
+ * alone do not. Deploy outcomes dedupe on their text; a per-attempt alert
+ * scopes its key to the attempt, so a later attempt with the same revisions
+ * and the same timing still reaches the operator instead of colliding with the
+ * earlier record. */
+const notify = async ({ outcome, reason, detail = "", from, to, dedupeScope = null, host = hostname() }) => {
   if (outcome === "success") throwIfInterrupted();
   const db = await database();
   const body = autoDeployNoticeBody({ outcome, reason, detail, from, to });
-  const dedupeKey = autoDeployNoticeDedupeKey(body, dedupeScope);
+  const dedupeKey = autoDeployNoticeDedupeKey(body, autoDeployNoticeHostScope(host, dedupeScope));
   try {
     const chatId = process.env.FEISHU_DEFAULT_CHAT_ID;
     if (!chatId) fail("environment-unreadable", "FEISHU_DEFAULT_CHAT_ID-missing");
