@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { performance } from "node:perf_hooks";
 import test from "node:test";
 
-import { runDeployCommand } from "./quiet-window-command.mjs";
+import { deployChildEnvironment, runDeployCommand } from "./quiet-window-command.mjs";
 import { DeployFailure } from "./quiet-window-lib.mjs";
 
 const env = { PATH: process.env.PATH ?? "/usr/bin:/bin" };
@@ -42,6 +42,29 @@ test("deploy command returns captured output before its step deadline", async ()
     timeoutReason: "fixture-timeout",
   });
   assert.deepEqual(result, { code: 0, signal: null, stdout: "ok", stderr: "warning" });
+});
+
+test("deploy command pins its child to the locale the classifiers read", async () => {
+  // The host's own translated locale reaches the child otherwise, and every
+  // downstream reader of `fatal: ` diagnostics stops recognising them.
+  const result = await runDeployCommand("/bin/sh", ["-c", "printf %s \"$LC_ALL\""], {
+    cwd: process.cwd(),
+    env: { ...env, LC_ALL: "zh_CN.UTF-8", LANG: "zh_CN.UTF-8", LANGUAGE: "zh_CN" },
+    capture: true,
+    timeoutMs: 30_000,
+    timeoutReason: "fixture-timeout",
+  });
+  assert.equal(result.stdout, "C");
+});
+
+test("the pinned child environment overrides a translated host and keeps the rest", () => {
+  assert.deepEqual(
+    deployChildEnvironment({ PATH: "/usr/bin", LC_ALL: "zh_CN.UTF-8" }),
+    { PATH: "/usr/bin", LC_ALL: "C" },
+  );
+  // An explicit `C` is what gettext needs to ignore `LANGUAGE` as well, so the
+  // pin is not weakened to `LC_MESSAGES`.
+  assert.equal(deployChildEnvironment({ LANGUAGE: "zh_CN" }).LC_ALL, "C");
 });
 
 test("deploy command requires an explicit step budget and timeout reason", () => {

@@ -5,6 +5,17 @@ import { DeployFailure } from "./quiet-window-lib.mjs";
 
 export const COMMAND_KILL_GRACE_MS = 2_000;
 
+/** Every reader of a deploy subprocess's output parses English: the remote-main
+ * reader's transport and auth patterns, the escalation classifier's `fatal: `
+ * source-transport allowlist, and the builder's own clone retry. A host whose
+ * git is translated — macOS resolves an unset `LANG` through `AppleLanguages`,
+ * so a launchd job on a non-English desktop is translated by default — answers
+ * every one of those with a silent no, and a transient clone failure latches
+ * the pipeline for an operator instead of retrying itself. Pin the child to the
+ * locale those patterns are written against. `C` is deliberate rather than
+ * `LC_MESSAGES=C`: gettext ignores `LANGUAGE` only when `LC_ALL` is `C`. */
+export const deployChildEnvironment = (env = process.env) => ({ ...env, LC_ALL: "C" });
+
 const timeoutFailure = (program, timeoutMs, reason) => new DeployFailure(
   reason,
   `program-${basename(program)}-timeout-${timeoutMs}ms`,
@@ -38,7 +49,7 @@ export const runDeployCommand = (program, args, {
   return new Promise((accept, reject) => {
     const child = spawn(program, args, {
       cwd,
-      env,
+      env: deployChildEnvironment(env),
       shell: false,
       detached: true,
       stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",

@@ -745,7 +745,14 @@ the builder's terminal `DeployFailure: release-artifact-source-unavailable:
 exit-128` header and a matching final `fatal:` diagnostic before that exception
 (allowing Node's throw-site display). This identifies the source clone or
 checkout's promisor fetch; earlier recovered transport errors, terminal
-compile/dependency failures, and ambiguous output do not qualify. The allowlist is explicit
+compile/dependency failures, and ambiguous output do not qualify.
+
+Every deploy subprocess runs with `LC_ALL=C`, because this allowlist and the
+remote-main reader's transport and authentication patterns all match English
+diagnostics. Do not remove the pin to inherit the host's locale: macOS resolves
+an unset `LANG` through `AppleLanguages`, so a launchd job on a non-English
+desktop gets translated `git` output, every pattern here stops matching, and a
+transient clone failure latches for an operator instead of retrying itself. The allowlist is explicit
 and fail-closed: compile, test, missing-dependency, unknown, and every other
 build detail remains commit-scoped when the marker names a full target commit.
 Environment, authentication, malformed remote state, artifact, verification,
