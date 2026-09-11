@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
 import {
+  DependencyProvisioning,
   INTEGRATOR_AGENT_NAME,
   RepoPermission,
   RunnerPreference,
@@ -266,4 +267,49 @@ test("Repo and every grant roll back together, while duplicate and PATCH contrac
   assert.equal(patched.status, 200);
   assert.equal(patched.body.remoteUrl, "https://github.com/owner/repo.git");
   assert.equal(preflightInputs.length, 2, "PATCH must not invoke POST preflight");
+});
+
+test("DELETE repo refuses referenced task with typed counts and preserves the Repo", async () => {
+  const project = await createProject("repo-delete-task-reference");
+  const repo = await db.repo.create({ data: {
+    projectId: project.id,
+    name: "referenced",
+    remoteUrl: "https://github.com/owner/referenced.git",
+    mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
+  } });
+  await db.task.create({ data: {
+    projectId: project.id,
+    repoId: repo.id,
+    name: "referencing task",
+    description: "work",
+  } });
+  const response = await call(createApp(db), "DELETE", `/repos/${repo.id}`);
+  assert.equal(response.status, 409);
+  assert.deepEqual(response.body, {
+    error: "Repo has task, run, or webhook template references; remove them before deleting it",
+    code: "repo_referenced",
+    references: { tasks: 1, runs: 0, templates: 0 },
+  });
+  assert.equal(await db.repo.count({ where: { id: repo.id } }), 1);
+});
+
+test("DELETE repo removes an unreferenced Repo", async () => {
+  const project = await createProject("repo-delete-clean");
+  const repo = await db.repo.create({ data: {
+    projectId: project.id,
+    name: "unreferenced",
+    remoteUrl: "https://github.com/owner/unreferenced.git",
+    mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
+  } });
+  const response = await call(createApp(db), "DELETE", `/repos/${repo.id}`);
+  assert.equal(response.status, 204);
+  assert.equal(await db.repo.count({ where: { id: repo.id } }), 0);
+});
+
+test("DELETE repo returns 404 for an unknown Repo", async () => {
+  const response = await call(createApp(db), "DELETE", "/repos/unknown-repo");
+  assert.equal(response.status, 404);
+  assert.deepEqual(response.body, { error: "Repo not found" });
 });

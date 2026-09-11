@@ -34,9 +34,10 @@ import { isCanonicalRelPath, normalizeRelPath } from "../files/paths.js";
 import { isValidBranchName, parseRepoRemote } from "../onboarding.js";
 import { RepositoryPreflightError } from "../onboarding-preflight.js";
 import { noteArchivedQueuedRuns } from "../reconcile.js";
+import { AGENT_REFERENCED, REPO_REFERENCED, repoAgentDeleteRefusalStatus } from "../repo-agent-delete-errors.js";
 import { AGENT_REFERENCED_BY_STAFFING_PROFILES } from "../staffing-profile-errors.js";
 import { profilesReferencingAgent } from "../staffing-profiles.js";
-import { readCommitted } from "../transaction.js";
+import { readCommitted, serializable } from "../transaction.js";
 import { withoutUndefined } from "../without-undefined.js";
 import {
   id,
@@ -824,7 +825,28 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
     })) satisfies RepoResponse);
   });
   app.delete("/repos/:repoId", async (context) => {
-    await db.repo.delete({ where: { id: id.parse(context.req.param("repoId")) } });
+    const repoId = id.parse(context.req.param("repoId"));
+    const result = await serializable(db, async (tx) => {
+      const repo = await tx.repo.findUnique({ where: { id: repoId }, select: { id: true } });
+      if (!repo) return refusal("not-found", "Repo not found");
+      const [tasks, runs, templates] = await Promise.all([
+        tx.task.count({ where: { repoId } }),
+        tx.run.count({ where: { repoId } }),
+        tx.taskTemplate.count({ where: { webhookRepoId: repoId } }),
+      ]);
+      const references = { tasks, runs, templates };
+      if (tasks > 0 || runs > 0 || templates > 0) return { references };
+      await tx.repo.delete({ where: { id: repoId } });
+      return { deleted: true as const };
+    });
+    if ("message" in result) return refusalJson(context, result);
+    if ("references" in result) {
+      return context.json({
+        error: "Repo has task, run, or webhook template references; remove them before deleting it",
+        code: REPO_REFERENCED,
+        references: result.references,
+      }, repoAgentDeleteRefusalStatus[REPO_REFERENCED]);
+    }
     return context.body(null, 204);
   });
   app.post("/agents/:agentId/repos/:repoId/access", async (context) => {
