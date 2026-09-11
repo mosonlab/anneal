@@ -144,9 +144,10 @@ release-level 验证；Windows 不支持。
 
 Pull-request 工作流请按 [Add a project](docs/runbooks/add-a-project.md) 操作。
 
-**把它指向任何你在乎的东西之前先读这段：** Anneal 以非交互的权限旁路
-方式启动 coding CLI，以你自己的用户账户身份运行，不在沙箱内。请使用可
-丢弃的仓库和一台你愿意让 agent 修改的机器。详见
+**开始之前：** Anneal 运行的是你本机已装好的 coding CLI，以你自己的
+用户账户身份，权限与你自己在终端里跑 Claude Code 或 Codex 完全相同。
+CLI 以非交互方式运行，不会逐个动作停下来向你确认。建议先在一个测试
+仓库上试用。详见
 [`docs/release/security.md`](docs/release/security.md)。
 
 Provider CLI、它们的认证与套餐条款始终在你和 provider 之间；权威支持

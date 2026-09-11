@@ -166,10 +166,11 @@ Windows is unsupported.
 
 For the pull-request workflow, follow [Add a project](docs/runbooks/add-a-project.md).
 
-**Read before pointing this at anything you care about:** Anneal
-launches coding CLIs with non-interactive permission bypass, as your
-own user account, outside a sandbox. Use a disposable repository and a
-machine you are willing to let an agent modify. Details in
+**Before you start:** Anneal runs the coding CLIs you already have,
+as your own user account, with the same access you have when you run
+Claude Code or Codex in a terminal yourself. The CLIs run
+non-interactively, so they do not stop to ask permission for each
+action. Try it on a test repository first. Details in
 [`docs/release/security.md`](docs/release/security.md).
 
 Provider CLIs, their authentication and their plan terms stay between
