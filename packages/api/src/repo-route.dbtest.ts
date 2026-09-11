@@ -287,10 +287,59 @@ test("DELETE repo refuses referenced task with typed counts and preserves the Re
   const response = await call(createApp(db), "DELETE", `/repos/${repo.id}`);
   assert.equal(response.status, 409);
   assert.deepEqual(response.body, {
-    error: "Repo has task, run, or webhook template references; remove them before deleting it",
+    error: "Repo has task, run, or webhook template references and cannot be deleted",
     code: "repo_referenced",
     references: { tasks: 1, runs: 0, templates: 0 },
   });
+  assert.equal(await db.repo.count({ where: { id: repo.id } }), 1);
+});
+
+test("DELETE repo refuses a Run reference", async () => {
+  const project = await createProject("repo-delete-run-reference");
+  const agent = await createAgent(project.id, project.environmentId, "run-agent");
+  const repo = await db.repo.create({ data: {
+    projectId: project.id,
+    name: "run-referenced",
+    remoteUrl: "https://github.com/owner/run-referenced.git",
+    mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
+  } });
+  await db.run.create({ data: {
+    projectId: project.id,
+    agentId: agent.id,
+    repoId: repo.id,
+    runNumber: 1,
+    dedupeKey: `repo-delete-run-${repo.id}`,
+    runner: "CODEX",
+    model: agent.model,
+  } });
+
+  const response = await call(createApp(db), "DELETE", `/repos/${repo.id}`);
+  assert.equal(response.status, 409);
+  assert.deepEqual(response.body.references, { tasks: 0, runs: 1, templates: 0 });
+  assert.equal(await db.repo.count({ where: { id: repo.id } }), 1);
+});
+
+test("DELETE repo refuses a webhook-bound TaskTemplate reference", async () => {
+  const project = await createProject("repo-delete-template-reference");
+  const repo = await db.repo.create({ data: {
+    projectId: project.id,
+    name: "template-referenced",
+    remoteUrl: "https://github.com/owner/template-referenced.git",
+    mountPath: "/repo",
+    dependencyProvisioning: DependencyProvisioning.NONE,
+  } });
+  await db.taskTemplate.create({ data: {
+    projectId: project.id,
+    name: "webhook template",
+    description: "template",
+    variables: [],
+    webhookRepoId: repo.id,
+  } });
+
+  const response = await call(createApp(db), "DELETE", `/repos/${repo.id}`);
+  assert.equal(response.status, 409);
+  assert.deepEqual(response.body.references, { tasks: 0, runs: 0, templates: 1 });
   assert.equal(await db.repo.count({ where: { id: repo.id } }), 1);
 });
 

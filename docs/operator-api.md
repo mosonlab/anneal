@@ -477,8 +477,10 @@ curl -X POST "$BASE_URL/agents/$AGENT_ID/reset-runtime-config" \
 - Required path parameter: `agentId`.
 - Returns `204 No Content` when no Task, Run, Session, or staffing profile
   references the Agent.
-- The delete never cascades through history. When references remain, the route
-  returns `409 Conflict` with this body shape; `staffingProfiles` counts
+- The delete never cascades through Task, Run, Session, or staffing profile
+  history. A successful delete clears optional TaskTemplateStep assignee and
+  InboxMessage Agent links. When protected references remain, the route returns
+  `409 Conflict` with this body shape; `staffingProfiles` counts
   distinct profiles referenced through an entry, tier, or merge-tail repair
   Agent, and every count is returned even when it is zero:
 
@@ -886,8 +888,10 @@ curl -X PATCH "$BASE_URL/repos/$REPO_ID" \
 - Required path parameter: `repoId`.
 - Returns `204 No Content` when no Task, Run, or webhook-bound TaskTemplate
   references the Repo.
-- The delete never cascades through history. When references remain, the route
-  returns `409 Conflict` with this body shape; each count is the number of
+- The delete never cascades through Task, Run, or webhook-bound TaskTemplate
+  history. A successful delete removes the Repo's AgentRepoAccess grants. When
+  protected references remain, the route returns `409 Conflict` with this body
+  shape; each count is the number of
   referencing rows for that kind, including zero:
 
   ```json

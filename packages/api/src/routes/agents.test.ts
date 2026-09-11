@@ -214,13 +214,18 @@ type AgentDeleteReferences = {
 const agentDeleteDatabase = (
   references: AgentDeleteReferences = { tasks: 0, runs: 0, sessions: 0, staffingProfiles: 0 },
   exists = true,
+  deleteError?: unknown,
 ): { database: PrismaClient; deleted: boolean } => {
   let deleted = false;
   const tx = {
     $queryRaw: async () => (exists ? [{ id: "agent-1" }] : []),
     agent: {
       findUnique: async () => (exists ? { id: "agent-1" } : null),
-      delete: async () => { deleted = true; return {}; },
+      delete: async () => {
+        if (deleteError) throw deleteError;
+        deleted = true;
+        return {};
+      },
     },
     task: { count: async () => references.tasks },
     run: { count: async () => references.runs },
@@ -244,7 +249,7 @@ test("deleting an agent with references returns typed counts and preserves the r
     });
     assert.equal(response.status, 409);
     assert.deepEqual(await response.json(), {
-      error: "Agent has task, run, session, or staffing profile references; remove them before deleting it",
+      error: "Agent has task, run, session, or staffing profile references; archive it with POST /agents/:agentId/archive instead",
       code: "agent_referenced",
       references: { tasks: 2, runs: 1, sessions: 1, staffingProfiles: 3 },
     });
@@ -274,6 +279,23 @@ test("deleting a history-free agent still returns 204", async () => {
     });
     assert.equal(response.status, 204);
     assert.equal(fixture.deleted, true);
+  });
+});
+
+test("an uncounted Agent delete constraint remains an internal error", async () => {
+  await withTokens(async () => {
+    const error = new Prisma.PrismaClientKnownRequestError("Foreign key constraint failed", {
+      code: "P2003",
+      clientVersion: "6.19.0",
+    });
+    const fixture = agentDeleteDatabase(undefined, true, error);
+    const response = await createApp(fixture.database).request("/agents/agent-1", {
+      method: "DELETE",
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(response.status, 500);
+    assert.deepEqual(await response.json(), { error: "Internal server error" });
+    assert.equal(fixture.deleted, false);
   });
 });
 

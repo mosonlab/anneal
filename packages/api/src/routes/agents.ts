@@ -35,8 +35,7 @@ import { isValidBranchName, parseRepoRemote } from "../onboarding.js";
 import { RepositoryPreflightError } from "../onboarding-preflight.js";
 import { noteArchivedQueuedRuns } from "../reconcile.js";
 import {
-  AGENT_REFERENCED,
-  REPO_REFERENCED,
+  resourceDeleteRefusalCode,
   resourceDeleteRefusalStatusFor,
 } from "../resource-delete-errors.js";
 import { AGENT_REFERENCED_BY_STAFFING_PROFILES } from "../staffing-profile-errors.js";
@@ -412,10 +411,10 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
     if ("message" in result) return refusalJson(context, result);
     if ("references" in result) {
       return context.json({
-        error: "Agent has task, run, session, or staffing profile references; remove them before deleting it",
-        code: AGENT_REFERENCED,
+        error: "Agent has task, run, session, or staffing profile references; archive it with POST /agents/:agentId/archive instead",
+        code: resourceDeleteRefusalCode.agent_referenced,
         references: result.references,
-      }, resourceDeleteRefusalStatusFor(AGENT_REFERENCED));
+      }, resourceDeleteRefusalStatusFor(resourceDeleteRefusalCode.agent_referenced));
     }
     return context.body(null, 204);
   });
@@ -867,10 +866,10 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
     if ("message" in result) return refusalJson(context, result);
     if ("references" in result) {
       return context.json({
-        error: "Repo has task, run, or webhook template references; remove them before deleting it",
-        code: REPO_REFERENCED,
+        error: "Repo has task, run, or webhook template references and cannot be deleted",
+        code: resourceDeleteRefusalCode.repo_referenced,
         references: result.references,
-      }, resourceDeleteRefusalStatusFor(REPO_REFERENCED));
+      }, resourceDeleteRefusalStatusFor(resourceDeleteRefusalCode.repo_referenced));
     }
     return context.body(null, 204);
   });

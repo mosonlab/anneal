@@ -69,10 +69,61 @@ test("DELETE Agent refuses a Run reference with typed counts and preserves the A
   const response = await call("DELETE", `/agents/${agent.id}`);
   assert.equal(response.status, 409, JSON.stringify(response.body));
   assert.deepEqual(response.body, {
-    error: "Agent has task, run, session, or staffing profile references; remove them before deleting it",
+    error: "Agent has task, run, session, or staffing profile references; archive it with POST /agents/:agentId/archive instead",
     code: "agent_referenced",
     references: { tasks: 0, runs: 1, sessions: 0, staffingProfiles: 0 },
   });
+  assert.equal(await db.agent.count({ where: { id: agent.id } }), 1);
+});
+
+test("DELETE Agent refuses a Task reference", async () => {
+  const { project, agent } = await seedAgent("agent-delete-task");
+  await db.task.create({
+    data: {
+      projectId: project.id,
+      assigneeAgentId: agent.id,
+      name: "referencing task",
+      description: "work",
+    },
+  });
+
+  const response = await call("DELETE", `/agents/${agent.id}`);
+  assert.equal(response.status, 409, JSON.stringify(response.body));
+  assert.deepEqual(response.body.references, { tasks: 1, runs: 0, sessions: 0, staffingProfiles: 0 });
+  assert.equal(await db.agent.count({ where: { id: agent.id } }), 1);
+});
+
+test("DELETE Agent refuses a Session reference without a Run reference", async () => {
+  const { project, environment, agent } = await seedAgent("agent-delete-session");
+  const runAgent = await db.agent.create({
+    data: {
+      projectId: project.id,
+      environmentId: environment.id,
+      name: "run-agent",
+      title: "Run Agent",
+      model: "gpt-5.6-sol:medium",
+      runnerPreference: RunnerPreference.CODEX,
+      foundationalPrompt: "foundation",
+      rolePrompt: "role",
+    },
+  });
+  const run = await db.run.create({
+    data: {
+      projectId: project.id,
+      agentId: runAgent.id,
+      runNumber: 1,
+      dedupeKey: unique("agent-delete-session-dedupe"),
+      runner: RunnerKind.CODEX,
+      model: runAgent.model,
+    },
+  });
+  await db.session.create({
+    data: { runId: run.id, projectId: project.id, agentId: agent.id, runner: RunnerKind.CODEX },
+  });
+
+  const response = await call("DELETE", `/agents/${agent.id}`);
+  assert.equal(response.status, 409, JSON.stringify(response.body));
+  assert.deepEqual(response.body.references, { tasks: 0, runs: 0, sessions: 1, staffingProfiles: 0 });
   assert.equal(await db.agent.count({ where: { id: agent.id } }), 1);
 });
 
@@ -94,6 +145,44 @@ test("DELETE Agent refuses a staffing-profile entry reference with a distinct pr
   const response = await call("DELETE", `/agents/${agent.id}`);
   assert.equal(response.status, 409, JSON.stringify(response.body));
   assert.equal(response.body.code, "agent_referenced");
+  assert.deepEqual(response.body.references, { tasks: 0, runs: 0, sessions: 0, staffingProfiles: 1 });
+  assert.equal(await db.agent.count({ where: { id: agent.id } }), 1);
+});
+
+test("DELETE Agent refuses a staffing-profile tier reference", async () => {
+  const { project, agent } = await seedAgent("agent-delete-profile-tier");
+  const template = await db.taskTemplate.create({
+    data: { projectId: project.id, name: "template", description: "template", variables: [] },
+  });
+  const profile = await db.staffingProfile.create({
+    data: { projectId: project.id, taskTemplateId: template.id, name: "profile" },
+  });
+  await db.staffingProfileTier.create({
+    data: { profileId: profile.id, tier: "medium", agentId: agent.id },
+  });
+
+  const response = await call("DELETE", `/agents/${agent.id}`);
+  assert.equal(response.status, 409, JSON.stringify(response.body));
+  assert.deepEqual(response.body.references, { tasks: 0, runs: 0, sessions: 0, staffingProfiles: 1 });
+  assert.equal(await db.agent.count({ where: { id: agent.id } }), 1);
+});
+
+test("DELETE Agent refuses a merge-tail repair staffing-profile reference", async () => {
+  const { project, agent } = await seedAgent("agent-delete-profile-repair");
+  const template = await db.taskTemplate.create({
+    data: { projectId: project.id, name: "template", description: "template", variables: [] },
+  });
+  await db.staffingProfile.create({
+    data: {
+      projectId: project.id,
+      taskTemplateId: template.id,
+      name: "profile",
+      mergeTailRepairAgentId: agent.id,
+    },
+  });
+
+  const response = await call("DELETE", `/agents/${agent.id}`);
+  assert.equal(response.status, 409, JSON.stringify(response.body));
   assert.deepEqual(response.body.references, { tasks: 0, runs: 0, sessions: 0, staffingProfiles: 1 });
   assert.equal(await db.agent.count({ where: { id: agent.id } }), 1);
 });
