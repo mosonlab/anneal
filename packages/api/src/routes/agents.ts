@@ -34,7 +34,11 @@ import { isCanonicalRelPath, normalizeRelPath } from "../files/paths.js";
 import { isValidBranchName, parseRepoRemote } from "../onboarding.js";
 import { RepositoryPreflightError } from "../onboarding-preflight.js";
 import { noteArchivedQueuedRuns } from "../reconcile.js";
-import { AGENT_REFERENCED, REPO_REFERENCED, repoAgentDeleteRefusalStatus } from "../repo-agent-delete-errors.js";
+import {
+  AGENT_REFERENCED,
+  REPO_REFERENCED,
+  resourceDeleteRefusalStatusFor,
+} from "../resource-delete-errors.js";
 import { AGENT_REFERENCED_BY_STAFFING_PROFILES } from "../staffing-profile-errors.js";
 import { profilesReferencingAgent } from "../staffing-profiles.js";
 import { readCommitted, serializable } from "../transaction.js";
@@ -384,15 +388,36 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
     return context.json(agentResponse(result.agent) satisfies AgentResponse);
   });
   app.delete("/agents/:agentId", async (context) => {
-    try {
-      await db.agent.delete({ where: { id: id.parse(context.req.param("agentId")) } });
-      return context.body(null, 204);
-    } catch (error: unknown) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2003") {
-        return context.json({ error: "Agent has task history; archive it instead" }, 409);
-      }
-      throw error;
+    const agentId = id.parse(context.req.param("agentId"));
+    const result = await serializable(db, async (tx) => {
+      const agent = await tx.agent.findUnique({ where: { id: agentId }, select: { id: true } });
+      if (!agent) return refusal("not-found", "Agent not found");
+      const [tasks, runs, sessions, staffingProfiles] = await Promise.all([
+        tx.task.count({ where: { assigneeAgentId: agentId } }),
+        tx.run.count({ where: { agentId } }),
+        tx.session.count({ where: { agentId } }),
+        tx.staffingProfile.count({ where: {
+          OR: [
+            { mergeTailRepairAgentId: agentId },
+            { entries: { some: { assigneeAgentId: agentId } } },
+            { tiers: { some: { agentId } } },
+          ],
+        } }),
+      ]);
+      const references = { tasks, runs, sessions, staffingProfiles };
+      if (tasks > 0 || runs > 0 || sessions > 0 || staffingProfiles > 0) return { references };
+      await tx.agent.delete({ where: { id: agentId } });
+      return { deleted: true as const };
+    });
+    if ("message" in result) return refusalJson(context, result);
+    if ("references" in result) {
+      return context.json({
+        error: "Agent has task, run, session, or staffing profile references; remove them before deleting it",
+        code: AGENT_REFERENCED,
+        references: result.references,
+      }, resourceDeleteRefusalStatusFor(AGENT_REFERENCED));
     }
+    return context.body(null, 204);
   });
   // Archive is one side of the Agent-row exclusion protocol (see lockAgentRow).
   // It takes the same mutex every assignment and run writer takes, and inside it
@@ -845,7 +870,7 @@ export const registerAgentsRoutes = (app: RouteApp, deps: RouteDeps): void => {
         error: "Repo has task, run, or webhook template references; remove them before deleting it",
         code: REPO_REFERENCED,
         references: result.references,
-      }, repoAgentDeleteRefusalStatus[REPO_REFERENCED]);
+      }, resourceDeleteRefusalStatusFor(REPO_REFERENCED));
     }
     return context.body(null, 204);
   });

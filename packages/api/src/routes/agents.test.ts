@@ -204,39 +204,76 @@ test("archive and unarchive return 404 for a missing agent", async () => {
   });
 });
 
-test("deleting an agent with task history maps Prisma P2003 to a guided 409", async () => {
+type AgentDeleteReferences = {
+  tasks: number;
+  runs: number;
+  sessions: number;
+  staffingProfiles: number;
+};
+
+const agentDeleteDatabase = (
+  references: AgentDeleteReferences = { tasks: 0, runs: 0, sessions: 0, staffingProfiles: 0 },
+  exists = true,
+): { database: PrismaClient; deleted: boolean } => {
+  let deleted = false;
+  const tx = {
+    $queryRaw: async () => (exists ? [{ id: "agent-1" }] : []),
+    agent: {
+      findUnique: async () => (exists ? { id: "agent-1" } : null),
+      delete: async () => { deleted = true; return {}; },
+    },
+    task: { count: async () => references.tasks },
+    run: { count: async () => references.runs },
+    session: { count: async () => references.sessions },
+    staffingProfile: { count: async () => references.staffingProfiles },
+  };
+  return {
+    database: {
+      $transaction: async (operation: (client: typeof tx) => Promise<unknown>) => operation(tx),
+    } as unknown as PrismaClient,
+    get deleted() { return deleted; },
+  };
+};
+
+test("deleting an agent with references returns typed counts and preserves the row", async () => {
   await withTokens(async () => {
-    const database = {
-      agent: {
-        delete: async () => {
-          throw new Prisma.PrismaClientKnownRequestError("Foreign key constraint failed", {
-            code: "P2003",
-            clientVersion: "6.19.0",
-          });
-        },
-      },
-    } as unknown as PrismaClient;
-    const response = await createApp(database).request("/agents/agent-1", {
+    const fixture = agentDeleteDatabase({ tasks: 2, runs: 1, sessions: 1, staffingProfiles: 3 });
+    const response = await createApp(fixture.database).request("/agents/agent-1", {
       method: "DELETE",
       headers: { Authorization: "Bearer operator-unit-token" },
     });
     assert.equal(response.status, 409);
-    assert.deepEqual(await response.json(), { error: "Agent has task history; archive it instead" });
+    assert.deepEqual(await response.json(), {
+      error: "Agent has task, run, session, or staffing profile references; remove them before deleting it",
+      code: "agent_referenced",
+      references: { tasks: 2, runs: 1, sessions: 1, staffingProfiles: 3 },
+    });
+    assert.equal(fixture.deleted, false);
+  });
+});
+
+test("deleting an unknown agent returns 404", async () => {
+  await withTokens(async () => {
+    const fixture = agentDeleteDatabase(undefined, false);
+    const response = await createApp(fixture.database).request("/agents/missing-agent", {
+      method: "DELETE",
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: "Agent not found" });
+    assert.equal(fixture.deleted, false);
   });
 });
 
 test("deleting a history-free agent still returns 204", async () => {
   await withTokens(async () => {
-    let deleted = false;
-    const database = {
-      agent: { delete: async () => { deleted = true; return {}; } },
-    } as unknown as PrismaClient;
-    const response = await createApp(database).request("/agents/agent-1", {
+    const fixture = agentDeleteDatabase();
+    const response = await createApp(fixture.database).request("/agents/agent-1", {
       method: "DELETE",
       headers: { Authorization: "Bearer operator-unit-token" },
     });
     assert.equal(response.status, 204);
-    assert.equal(deleted, true);
+    assert.equal(fixture.deleted, true);
   });
 });
 
