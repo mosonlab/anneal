@@ -232,6 +232,15 @@ curl -X PATCH "$BASE_URL/projects/$PROJECT_ID" \
 ### DELETE `/projects/:projectId`
 
 - Required path parameter: `projectId`.
+- Deletes the Project and every row the Project owns—agents, repos, templates, staffing
+  profiles, tasks, runs, sessions, goals, inbox items, chain controls, and merge
+  leases—in one database transaction. On success, the route returns `204 No
+  Content` with an empty body.
+- If no Project has that id, the route returns `404 Not Found` with exactly:
+
+  ```json
+  { "error": "Project not found" }
+  ```
 
 ```sh
 curl -X DELETE "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
