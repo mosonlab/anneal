@@ -158,7 +158,7 @@ test("DELETE Agent refuses a staffing-profile tier reference", async () => {
     data: { projectId: project.id, taskTemplateId: template.id, name: "profile" },
   });
   await db.staffingProfileTier.create({
-    data: { profileId: profile.id, tier: "medium", agentId: agent.id },
+    data: { profileId: profile.id, tier: "hard", agentId: agent.id },
   });
 
   const response = await call("DELETE", `/agents/${agent.id}`);
