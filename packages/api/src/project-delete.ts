@@ -33,24 +33,50 @@ export const deleteProject = async (db: PrismaClient, projectId: string): Promis
 
   // Inbox rows can be attached through any of the project-owned roots. Delete
   // them before those roots so nullable links do not turn an owned card into a
-  // global one during the transaction.
+  // global one during the transaction. Every populated root must belong to
+  // this Project: a shared external thread must not make another Project's
+  // message (or its cascading decision) part of this delete.
   await tx.inboxMessage.deleteMany({
     where: {
-      OR: [
-        { agent: { projectId } },
-        { session: { projectId } },
-        { task: { projectId } },
-        { goal: { projectId } },
-        { gateTask: { projectId } },
+      AND: [
         {
-          thread: {
-            OR: [
-              { session: { projectId } },
-              { task: { projectId } },
-              { goal: { projectId } },
-            ],
-          },
+          OR: [
+            { agent: { projectId } },
+            { session: { projectId } },
+            { task: { projectId } },
+            { goal: { projectId } },
+            { gateTask: { projectId } },
+            {
+              thread: {
+                OR: [
+                  { session: { projectId } },
+                  { task: { projectId } },
+                  { goal: { projectId } },
+                ],
+              },
+            },
+          ],
         },
+        { OR: [{ agentId: null }, { agent: { projectId } }] },
+        { OR: [{ sessionId: null }, { session: { projectId } }] },
+        { OR: [{ taskId: null }, { task: { projectId } }] },
+        { OR: [{ goalId: null }, { goal: { projectId } }] },
+        { OR: [{ gateTaskId: null }, { gateTask: { projectId } }] },
+        {
+          OR: [
+            { threadId: null },
+            {
+              thread: {
+                OR: [
+                  { session: { projectId } },
+                  { task: { projectId } },
+                  { goal: { projectId } },
+                ],
+              },
+            },
+          ],
+        },
+        { decisions: { every: { run: { projectId } } } },
       ],
     },
   });
@@ -157,6 +183,6 @@ export const deleteProject = async (db: PrismaClient, projectId: string): Promis
   await tx.repo.deleteMany({ where: { projectId } });
   await tx.agent.deleteMany({ where: { projectId } });
   await tx.environment.deleteMany({ where: { projectId } });
-  await tx.project.delete({ where: { id: projectId } });
-  return true;
-});
+  const deleted = await tx.project.deleteMany({ where: { id: projectId } });
+  return deleted.count === 1;
+}, { maxWait: 5_000, timeout: 300_000 });
