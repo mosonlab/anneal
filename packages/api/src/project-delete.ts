@@ -14,15 +14,35 @@ export const deleteProject = async (db: PrismaClient, projectId: string): Promis
 
   // Break nullable Restrict/self references before deleting their targets.
   await tx.task.updateMany({
-    where: { projectId },
+    where: { projectId, goalId: null },
     data: {
       dispatchAfterTaskId: null,
       goalPredecessorTaskId: null,
       goalDecisionRunId: null,
     },
   });
+  // Goal-linked Tasks have database checks that require the lineage and
+  // decision columns to move together. Clear the complete tuple in one update
+  // so the Restrict predecessor and decision-Run references are detached
+  // without creating an invalid intermediate shape.
+  await tx.task.updateMany({
+    where: { projectId, goalId: { not: null } },
+    data: {
+      dispatchAfterTaskId: null,
+      goalId: null,
+      goalGeneration: null,
+      goalIteration: null,
+      goalDispatchKey: null,
+      goalDispatchRequestHash: null,
+      goalDispatchState: null,
+      goalDecisionKey: null,
+      goalDecisionRequestHash: null,
+      goalDecisionRunId: null,
+      goalDecisionAt: null,
+      goalPredecessorTaskId: null,
+    },
+  });
   await tx.run.updateMany({ where: { projectId }, data: { retryOfRunId: null } });
-  await tx.mergeLeaseEvent.updateMany({ where: { projectId }, data: { handedOffRunId: null } });
   await tx.taskTemplate.updateMany({ where: { projectId }, data: { webhookRepoId: null } });
   await tx.staffingProfile.updateMany({ where: { projectId }, data: { mergeTailRepairAgentId: null } });
 
@@ -36,6 +56,10 @@ export const deleteProject = async (db: PrismaClient, projectId: string): Promis
       ],
     },
   });
+  // The row itself is the project-owned handoff record. Removing it before
+  // Runs avoids writing an invalid handedOffRunId/handedOffAt pair while also
+  // satisfying the Restrict edge to Run.
+  await tx.mergeLeaseEvent.deleteMany({ where: { projectId } });
   await tx.inboxDecision.deleteMany({ where: { run: { projectId } } });
   await tx.sessionEvent.deleteMany({ where: { session: { projectId } } });
   await tx.taskStepOutput.deleteMany({ where: { task: { projectId } } });
@@ -83,7 +107,6 @@ export const deleteProject = async (db: PrismaClient, projectId: string): Promis
 
   // Runs reference project Tasks, Goals, Agents, and Repos through Restrict
   // edges. The run-level dependents and nullable retry links are gone now.
-  await tx.mergeLeaseEvent.deleteMany({ where: { projectId } });
   await tx.run.deleteMany({ where: { projectId } });
 
   // Tasks reference one another, Runs, Goals, Agents, and Repos through
