@@ -475,6 +475,34 @@ curl -X POST "$BASE_URL/agents/$AGENT_ID/reset-runtime-config" \
 ### DELETE `/agents/:agentId`
 
 - Required path parameter: `agentId`.
+- Returns `204 No Content` when no Task, Run, Session, or staffing profile
+  references the Agent.
+- The delete never cascades through Task, Run, Session, or staffing profile
+  history. A successful delete clears optional TaskTemplateStep assignee and
+  InboxMessage Agent links. When protected references remain, the route returns
+  `409 Conflict` with this body shape; `staffingProfiles` counts
+  distinct profiles referenced through an entry, tier, or merge-tail repair
+  Agent, and every count is returned even when it is zero:
+
+  ```json
+  {
+    "error": "<message>",
+    "code": "agent_referenced",
+    "references": {
+      "tasks": 0,
+      "runs": 1,
+      "sessions": 0,
+      "staffingProfiles": 0
+    }
+  }
+  ```
+
+  A refusal leaves the Agent and all of its history unchanged. If no Agent has
+  that id, the route returns `404 Not Found` with exactly:
+
+  ```json
+  { "error": "Agent not found" }
+  ```
 
 ```sh
 curl -X DELETE "$BASE_URL/agents/$AGENT_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
@@ -858,6 +886,32 @@ curl -X PATCH "$BASE_URL/repos/$REPO_ID" \
 ### DELETE `/repos/:repoId`
 
 - Required path parameter: `repoId`.
+- Returns `204 No Content` when no Task, Run, or webhook-bound TaskTemplate
+  references the Repo.
+- The delete never cascades through Task, Run, or webhook-bound TaskTemplate
+  history. A successful delete removes the Repo's AgentRepoAccess grants. When
+  protected references remain, the route returns `409 Conflict` with this body
+  shape; each count is the number of
+  referencing rows for that kind, including zero:
+
+  ```json
+  {
+    "error": "<message>",
+    "code": "repo_referenced",
+    "references": {
+      "tasks": 1,
+      "runs": 0,
+      "templates": 0
+    }
+  }
+  ```
+
+  A refusal leaves the Repo and all of its history unchanged. If no Repo has
+  that id, the route returns `404 Not Found` with exactly:
+
+  ```json
+  { "error": "Repo not found" }
+  ```
 
 ```sh
 curl -X DELETE "$BASE_URL/repos/$REPO_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"
