@@ -17,7 +17,7 @@ body:
     attributes:
       label: Release tag or commit
       description: The exact tag you checked out, or the commit SHA.
-      placeholder: v0.8.0
+      placeholder: v0.9.0
     validations:
       required: true
   - type: input

@@ -78,8 +78,8 @@ export const FILES_PRECHECK_COMMAND = ["npm", "run", "db:files-precheck"] as con
  * terminal's recorded position, so that migration's merge must update the pin.
  */
 export const RELEASE_CANDIDATE_MIGRATIONS = {
-  count: 55,
-  terminal: "20260905140000_run_salvage_parent_sha",
+  count: 68,
+  terminal: "20260907140000_staffing_profile_tiers",
 } as const;
 
 /** Stable stop conditions owned by the orchestrator itself. */

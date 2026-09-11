@@ -9,71 +9,57 @@ written.
 
 ## Unreleased
 
-- Retired the temporary `sol-findings` execution alias for Step roles, repair
-  evidence and prior outputs, and PR handoff. Execution uses `review-findings`;
-  ordinary staffing carry reports the retired kind as unknown. Historical
-  Tasks, Runs, outputs, and reports remain readable without rewriting or deleting
-  rows, and template adoption and rollover mappings remain supported. The
-  retirement boundary was established on 2026-09-08: of 280 Chains carrying the
-  old kind, the only three unarchived unfinished Chains (word-factory
-  `3cd7177f`, `21cc2d0b`, `bb60e911`) were archived and re-created from current
-  templates. The 103 archived unfinished Chains are abandoned with no supported
-  retry or resume path; archived completed Chains remain readable.
-- Defense-list merge audits are recorded as one control-plane TaskActivity on
-  the readiness Step per `(readinessTaskId, headSha)`, with the exact range,
-  triggered paths, reasons, and `headSha`, `baseSha`, and `triggers` metadata;
-  they no longer create Inbox messages.
-- Briefs for cards dispatched after a predecessor now state premises as of
-  that predecessor's merge, name its card or branch, and avoid "until it lands"
-  language; dependency qualification checks those premises against its outcome.
-- The readiness `merge-executor-offline` recovery guidance now tells operators
-  that the manual fallback to automatic re-arm is to retry the Regression
-  task, opening a new Regression Run at full rerun cost. It also records
-  that the executor-offline requeue is a separate settlement: it spends
-  neither the lease-loss refund cap nor a Regression repair budget.
-- Merge-tail repair staffing preserves webhook and manual-trigger profile provenance.
-  Repair slots refuse the mechanical merge-integrator; profile edits preserve an
-  omitted archived slot. Reset restores entries with warnings when its canonical
-  repair Agent or Repo context is unavailable, and new Default profiles capture
-  canonical step bindings after synchronization.
+## v0.9.0 — Developer Preview 9
 
-- An auto-deploy whose quiet-window wait outlives its budget now stops the
-  platform from admitting new Runs until that deploy lands: it opens a
-  platform-wide dispatch drain, every claim is refused with `dispatch-draining`
-  without touching any Task or its run budget, and the deploy deletes the drain
-  on every exit path. Running Runs are never interrupted, the refused runners
-  stay online, and `GET /runners` reports the drain as `dispatchDrain`. A drain
-  left behind by a dead deploy process expires by itself 120 minutes after that
-  deploy last reported itself (`DISPATCH_DRAIN_DEADLINE_MINUTES`). One migration adds the drain table.
-- The runner's dispatcher slot count for the primary gate worker follows
-  `RUNNER_GATE_PRIMARY_SLOTS` (1 or 2, default 2) instead of always being two,
-  and sessions receive it as `AGENTOS_GATE_PRIMARY_SLOTS` in the two-host gate
-  topology. Set it to the primary worker's own `~/gate/worker-capacity`, or a
-  dispatch holds a slot while it waits on that worker's execution lock.
-- A base-drift recovery that stopped on a merge gate FAIL the branch did not
-  cause can be re-run from the API:
-  `POST /tasks/:taskId/merge-tail/rerun` on the Regression task opens the next
-  recovery attempt against the same head and queues a fresh Regression Run. It
-  opens no repair task, charges no repair budget, spends none of the two
-  automatic base-drift recovery attempts, and grants the queued Run its own
-  budget, and it is bounded at two re-runs per recovery stop.
-- Merge-tail `review-fix` and `gate-fix` repair cards now use the nullable
-  `mergeTailRepairAgentId` slot on the Chain's staffing profile, falling back
-  to the fixed-implementation Agent only when that slot is empty. A Chain with
-  no recorded profile uses the template default profile; an archived slot
-  Agent falls back with a recorded TaskActivity. The active direct, PR, and
-  compound canonical profiles default this slot to `senior-dev-luna-max`,
-  while `refresh-conflict` retains `MERGE_RESOLVER_ROLE`. Profile create, PUT,
-  and reset operations accept optional `repoId` context for validating the
-  slot's Repo grant; PUT omission preserves the slot and `null` clears it.
-- A gate dispatch queued behind other gates no longer gives up while the queue
-  is moving. `GATE_DISPATCH_TIMEOUT_MINUTES` now bounds a queue that makes no
-  progress: each poll reads which process holds each busy slot, and a slot that
-  changes hands restarts the timeout, up to an absolute ceiling of twice the
-  timeout so a dispatch that keeps losing the race for a slot still gives up.
-  `GATE DISPATCH: NO SLOT` (exit 75) now reports either a queue where nothing
-  finished for the whole timeout or one that moved for the whole ceiling without
-  room for this dispatch, and the stderr line above it says which.
+The ninth preview is about the end of a chain. A merge tail that stops now
+always names a way out: an operator can re-run a merge gate failure the branch
+did not cause, a repair card gets three attempts instead of two, and both
+reentry verbs are API calls rather than a reason to delete the chain and start
+over. Merge readiness can publish several proven chains behind one gate as a
+merge train, the merge gate now distinguishes its own infrastructure failing
+from your commit failing, and a Run that dies inside the platform's own phases
+is retried instead of charged to the agent. The console shows what a Run is
+doing while it does it — phase, time in phase, token split, time to first
+token — and deleting a Project finally deletes it. As with every 0.x minor,
+behaviour changes below are breaking-eligible. There is still no supported
+upgrade path between previews other than a fresh install. This release adds
+thirteen migrations.
+
+### Projects, repos and agents
+
+- **`DELETE /projects/:projectId` removes every row the Project owns, in one
+  transaction.** Reported from outside against a freshly bootstrapped Project
+  ([Issue #624](https://github.com/mosonlab/anneal/issues/624)): the route was a
+  bare delete, so the Project's own Default staffing profile blocked the Agent
+  cascade and the console's "Agents, tasks and runs cascade" confirmation ended
+  in a bare `500` on every Project the console had created. The delete now
+  clears and removes agents, repos, templates, staffing profiles, tasks, runs,
+  sessions, goals, inbox items, chain controls and merge leases in a
+  dependency-safe order inside one transaction, returns `204 No Content` on
+  success, and returns `404` with `{ "error": "Project not found" }` for an
+  unknown id. A shared Inbox thread does not pull another Project's rows into
+  the delete.
+- **`DELETE /repos/:repoId` and `DELETE /agents/:agentId` refuse with a typed
+  `409` naming what still references the row** — a task, run, session or
+  staffing profile — instead of answering a bare `500` when a `Restrict` edge
+  blocks the delete, and answer `404` for an unknown id
+  ([Issue #627](https://github.com/mosonlab/anneal/issues/627)). Unlike a
+  Project delete, a single Repo or Agent delete still does not cascade through
+  history: those `Restrict` edges are deliberate, and the operator archives or
+  removes the referencing rows first.
+
+### Chains, Runs and the runner
+
+- **A failure in one of the runner's own phases is retried by phase.** A Run
+  that dies in `PROVISION`, `DELIVER` or `COMPLETE` — the platform's work, not
+  the agent's — is retried against that phase on a deterministic schedule
+  instead of spending an attempt of the Task's run budget.
+- **A Task's refunded attempts are bounded and re-queued with backoff**,
+  independently of the ceiling they raise, so a repeatedly lost Run cannot spin
+  the queue.
+- **A Task's spend cap is enforced before a new attempt is queued.** A Run
+  birth refused by the cap parks with the cap detail on the refusal, without
+  reshaping every other Run-birth refusal.
 - Editing a chain step's brief after implementation has started no longer parks
   the chain. A review claim now checks the materialized `.chain/<branch>/spec.md`
   against the brief the implementer was actually handed instead of against the
@@ -81,6 +67,11 @@ written.
   amended after materialization. A `spec.md` rewritten on the branch is still
   refused, and the refusal says whether the current brief also differs. Adds one
   migration.
+- A slow specification read under host load defers the review claim on a
+  bounded backoff ladder and leaves durable evidence of each deferral, instead
+  of parking the Task the first time the repository read times out.
+- The implementation base a review step pins is a commit the branch actually
+  carries.
 - Session events are now bounded end to end. A runner holds at most 32 MiB and
   20 000 undelivered events per Run. When it fills, the oldest liveness events —
   streaming deltas, raw provider frames, captured stderr, provider status and
@@ -98,6 +89,101 @@ written.
   request-body cap, answering 413 with the offending event's index so the runner
   drops that one event and resends the rest. Heartbeats now carry
   `eventQueueBytes`.
+- A Claude Run's transcript is removed when its workspace is disposed, rather
+  than outliving the workspace it describes.
+- A Claude Run may not spawn a subagent on an unnamed model: a platform
+  `PreToolUse` guard requires an explicit `opus`, `sonnet` or `haiku` on every
+  Agent and Task spawn and permits fork inheritance only from a verified parent
+  model. A project or local `disableAllHooks: true` cannot switch the guard off.
+- `PATCH /tasks/:taskId` accepts `dispatchAfterTaskId` on the first step of a
+  Chain that has no Run, re-pointing or (with `null`) releasing its Chain
+  binding instead of forcing the Chain to be deleted and instantiated again. A
+  started Chain, a later step, or a standalone task is refused with
+  `chain_binding_immutable_after_start`; an archived, foreign, standalone, or
+  same-chain predecessor with `chain_binding_target_invalid`.
+- One predecessor Task can carry several bound successor Chains, so a single
+  card can fan a wave out rather than forcing one binding per predecessor.
+- The revalidation step judges the implementation tier and the Chain staffs it
+  from that judgement; a Chain whose output protocol has been retired still
+  revalidates against the protocol it was created with.
+- The runner's dependency-cache retention runs only after a publication, not
+  after every Run.
+
+### Merge tail, merge train and the merge executor
+
+- **A base-drift recovery that stopped on a merge gate FAIL the branch did not
+  cause can be re-run from the API.** `POST /tasks/:taskId/merge-tail/rerun` on
+  the Regression task opens the next recovery attempt against the same head and
+  queues a fresh Regression Run. It opens no repair task, charges no repair
+  budget, spends none of the two automatic base-drift recovery attempts, and
+  grants the queued Run its own budget; it is bounded at two re-runs per
+  recovery stop.
+- **A merge tail stopped by base drift always has an exit**, on resume and
+  after a failed integrator run as well as after recovery. Base-drift recovery
+  separates waiting, transport and validation failures, and exhausts on time
+  and on count rather than on a single undifferentiated ceiling.
+- **A review-fix or gate-fix repair gets three automatic attempts** before the
+  tail stops for the operator (`MAX_MERGE_TAIL_REPAIR_ATTEMPTS`), up from two.
+  A refresh-conflict repair stays at one attempt per head.
+- A base-drift recovery whose head is unchanged reuses the semantic verdict
+  pinned to that head and re-runs only the merge gate, instead of paying for a
+  second Regression.
+- A persisted semantic verdict survives a later external failure in the same
+  Run: Regression freezes the candidate and baseline when it prepares, and
+  finalize persists that pair's gate verdict without another target fetch.
+- Base-drift requeues that follow a valid Regression PASS are not charged
+  against the lease-loss refund cap.
+- Merge-tail `review-fix` and `gate-fix` repair cards now use the nullable
+  `mergeTailRepairAgentId` slot on the Chain's staffing profile, falling back
+  to the fixed-implementation Agent only when that slot is empty. A Chain with
+  no recorded profile uses the template default profile; an archived slot
+  Agent falls back with a recorded TaskActivity. The active direct, PR, and
+  compound canonical profiles default this slot to `senior-dev-luna-max`,
+  while `refresh-conflict` retains `MERGE_RESOLVER_ROLE`. Profile create, PUT,
+  and reset operations accept optional `repoId` context for validating the
+  slot's Repo grant; PUT omission preserves the slot and `null` clears it.
+  Webhook and manual-trigger profile provenance is preserved, a repair slot
+  refuses the mechanical merge-integrator, and a reset restores entries with
+  warnings when its canonical repair Agent or Repo context is unavailable.
+- A repair step's identity comes from the persisted template steps rather than
+  from a name an agent typed, and a gate attestation binds the base it was
+  proven against.
+- A repair completion never answers `500`, and a repair bound to a superseded
+  Run is refused when it opens rather than after it has run.
+- A repair Run that fails before producing a result spends the repair Task's
+  remaining session budget before the tail gives up on it.
+- A refresh-conflict repair whose merge is already on the branch is not voided
+  by a malformed result output, and the resolver accepts the structured
+  `tradeOffs` entries its own role prompt asks for. A refusal names the
+  offending key, and a stale-head refusal names the head that failed.
+- An exception thrown while merge readiness evaluates a Chain now requeues the
+  readiness step instead of stopping the merge tail. The retry is bounded by
+  `MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT` (default 3); past the bound the tail
+  stops with `readiness evaluation failed after <n> exception requeues:
+  <message>`. A deliberate refusal, and a missing or mismatched merge-gate
+  operator authorization, still stop the tail on the first occurrence.
+- Merge readiness writes an authorization only while a merge executor is
+  online, and otherwise requeues itself. The executor-offline episode observes
+  liveness on every tick and closes under the readiness claim, and a candidate
+  stopped at its ceiling can still reach the strict re-arm checks while the
+  merge train is enabled.
+- The readiness `merge-executor-offline` recovery guidance now tells operators
+  that the manual fallback to automatic re-arm is to retry the Regression
+  task, opening a new Regression Run at full rerun cost. It also records
+  that the executor-offline requeue is a separate settlement: it spends
+  neither the lease-loss refund cap nor a Regression repair budget.
+- Pre-authorization requeues are counted and shown per chain, so a chain that
+  keeps re-entering readiness is visible rather than silent.
+- **Ready chains can publish through a merge train.** With `MERGE_TRAIN_WIDTH`
+  set (`0` disables it, maximum 3), a runtime tool builds, gates and records
+  cumulative prefixes for an ordered candidate list, and the executor publishes
+  the authorized train prefix as a fast-forward whose candidate pull requests
+  read as merged. A candidate whose head changed mid-train settles under the
+  train's own lease and readiness claim — requeueing or stopping — instead of
+  aborting the train and re-forming it from the same stale evidence; passing
+  peers stay protected by the cumulative-prefix check.
+- A contended merge lease is visible and alerted, and stealing one requires an
+  explicit human flag rather than a timeout.
 - The merge executor verifies its own landed merge from the commit when
   GitHub's pull-request projection cannot. A merge commit whose parents are
   exactly the authorized base and head and which is reachable from the
@@ -106,18 +192,184 @@ written.
   two parent shas. Any missing fact, and any failed or timed-out read, still
   stops `base-drift-post-merge`; the Inbox evidence gains a `directParentCheck`
   field naming what was read.
-- `PATCH /tasks/:taskId` accepts `dispatchAfterTaskId` on the first step of a
-  Chain that has no Run, re-pointing or (with `null`) releasing its Chain
-  binding instead of forcing the Chain to be deleted and instantiated again. A
-  started Chain, a later step, or a standalone task is refused with
-  `chain_binding_immutable_after_start`; an archived, foreign, standalone, or
-  same-chain predecessor with `chain_binding_target_invalid`.
-- An exception thrown while merge readiness evaluates a Chain now requeues the
-  readiness step instead of stopping the merge tail. The retry is bounded by
-  `MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT` (default 3); past the bound the tail
-  stops with `readiness evaluation failed after <n> exception requeues:
-  <message>`. A deliberate refusal, and a missing or mismatched merge-gate
-  operator authorization, still stop the tail on the first occurrence.
+- A ref update whose response is lost is confirmed by read-back and never
+  recorded as a refusal, and the merge-response variants the executor cannot
+  reach are gone while deterministic rejections keep their class.
+- A merge executor that finds a contract-version mismatch parks alive and
+  re-checks on an interval, rather than exiting and leaving every chain tail
+  without an executor.
+- Defense-list merge audits are recorded as one control-plane TaskActivity on
+  the readiness Step per `(readinessTaskId, headSha)`, with the exact range,
+  triggered paths, reasons, and `headSha`, `baseSha`, and `triggers` metadata;
+  they no longer create Inbox messages.
+- Archiving a Chain closes its open merge-tail stop notices, and a queued
+  candidate's settlement and its chain parks are decided in one place.
+
+### Merge gate and gate workers
+
+- **An infrastructure failure inside the merge gate reports `GATE NOT RUN`,
+  never a commit `FAIL`.** A worker that cannot run the gate no longer produces
+  evidence that looks like your branch failing.
+- A gate dispatch queued behind other gates no longer gives up while the queue
+  is moving. `GATE_DISPATCH_TIMEOUT_MINUTES` now bounds a queue that makes no
+  progress: each poll reads which process holds each busy slot, and a slot that
+  changes hands restarts the timeout, up to an absolute ceiling of twice the
+  timeout so a dispatch that keeps losing the race for a slot still gives up.
+  `GATE DISPATCH: NO SLOT` (exit 75) now reports either a queue where nothing
+  finished for the whole timeout or one that moved for the whole ceiling without
+  room for this dispatch, and the stderr line above it says which.
+- **A runner daemon can name a fallback gate worker.** With
+  `RUNNER_GATE_FALLBACK_SERVER` set alongside `RUNNER_GATE_SERVER`, sessions
+  dispatch in two-host mode (`AGENTOS_GATE_PRIMARY_SERVER`,
+  `AGENTOS_GATE_FALLBACK_SERVER`), and the fallback is tried only after the
+  primary has stayed busy for a grace period.
+- The runner's dispatcher slot count for the primary gate worker follows
+  `RUNNER_GATE_PRIMARY_SLOTS` (1 or 2, default 2) instead of always being two,
+  and sessions receive it as `AGENTOS_GATE_PRIMARY_SLOTS` in the two-host gate
+  topology. Set it to the primary worker's own `~/gate/worker-capacity`, or a
+  dispatch holds a slot while it waits on that worker's execution lock.
+- A gate worker reaps orphaned gate databases, ends a slot wait as
+  `GATE NOT RUN` rather than as a verdict, and reads how much of the host one
+  gate sizes itself for from its own `host-share` setting rather than from its
+  capacity.
+- Every `scripts` suite runs in a gate step, and the frozen-record check cites
+  documents that exist.
+- The gate's unit lane runs one workspace at a time and passes its lane budget
+  to Node, instead of letting each workspace take the whole host. Database
+  files start in measured longest-first order and redundant launch layers are
+  gone; on a 14-vCPU shared worker this moved a comparable cache-hit gate from
+  about 353s to about 288s.
+- The suites the merge gate runs no longer fail because the worker was busy: a
+  noisy gate fixture flushes its verdict before exiting, and the timing-bound
+  fixtures no longer depend on an unloaded host.
+
+### Web console and observability
+
+- **Task detail shows per-run diagnostics**: the Run's phases, its token split,
+  tool statistics and effective output rate.
+- **Every model turn records its time to first token**, and Task detail shows
+  it.
+- **Board cards show the Run's current phase, how long it has been in that
+  phase, and anomaly badges**, so a stuck Run is visible without opening it.
+- A merge run refused for a contract-version mismatch says so on the board.
+- The Sessions page searches and filters server-side, so any Run can be found
+  without paging, and each row carries that Run's diagnostics.
+- Task detail and the board carry a per-template-step baseline for cost and
+  duration, so a step that costs twice its usual amount is legible as such.
+- Pre-authorization requeues are shown per chain.
+- The board no longer replaces a populated view with a loading screen on
+  refresh: polling effects are serialized, obsolete requests are cancelled,
+  deferred first reads resume when a tab becomes visible, and the task-creation
+  panel loads its Agent and Repo options only when it opens.
+- The console reads the event envelope and treats `404` the way the rest of the
+  console does, and the pre-route compatibility paths it kept for older API
+  shapes are gone.
+
+### Costs
+
+- **A resumed Claude session's cumulative result is counted once, not once per
+  resume.** Claude keeps its provider session id across process resumes while
+  each new CLI process resets its counters, so grouping stored `FINAL_OUTPUT`
+  events by session id alone discarded the earlier process's usage. Recompute
+  now reads persisted `PROCESS_STARTED` boundaries alongside those events:
+  repeated cumulative notifications count once inside each process, and
+  distinct process totals add. Live ingestion and historical recompute use the
+  same locked path.
+- The historical correction that followed is recorded: of fourteen terminal
+  Claude Sessions checked on 2026-09-08, ten were corrected and four were
+  unchanged, moving aggregate stored cost from $274.2944 to $106.4807. Raw
+  events were preserved, and every Session passed readback and a second
+  recompute.
+
+### Staffing, templates and review outputs
+
+- **Code review reports are named for what they are, not for the model that
+  wrote them.** New canonical Direct, Full Assurance and PR Chains produce
+  `review-findings`, with model-neutral template filenames, prompts and report
+  headings. Existing Chains keep their Step rows, prompts and immutable
+  `sol-findings` outputs; a registered template rollover creates the successor
+  templates and carries staffing-profile choices to the renamed output kind.
+- Retired the temporary `sol-findings` execution alias for Step roles, repair
+  evidence and prior outputs, and PR handoff. Execution uses `review-findings`;
+  ordinary staffing carry reports the retired kind as unknown. Historical
+  Tasks, Runs, outputs, and reports remain readable without rewriting or deleting
+  rows, and template adoption and rollover mappings remain supported. The
+  retirement boundary was established on 2026-09-08: of 280 Chains carrying the
+  old kind, the only three unarchived unfinished Chains (word-factory
+  `3cd7177f`, `21cc2d0b`, `bb60e911`) were archived and re-created from current
+  templates. The 103 archived unfinished Chains are abandoned with no supported
+  retry or resume path; archived completed Chains remain readable.
+- The canonical `hard` staffing tier defaults to `senior-dev-sol-high`, so a
+  profile reset no longer reverts a Chain that was deliberately staffed there.
+  The review-fix step stays bound to `senior-dev-astra-low`.
+- `frontend-dev-opus-high` and `senior-dev-opus-high` are canonical roles, and
+  the brief template lists both Opus high routes.
+
+### Maintainer deployment
+
+- An auto-deploy whose quiet-window wait outlives its budget now stops the
+  platform from admitting new Runs until that deploy lands: it opens a
+  platform-wide dispatch drain, every claim is refused with `dispatch-draining`
+  without touching any Task or its run budget, and the deploy deletes the drain
+  on every exit path. Running Runs are never interrupted, the refused runners
+  stay online, and `GET /runners` reports the drain as `dispatchDrain`. A drain
+  left behind by a dead deploy process expires by itself 120 minutes after that
+  deploy last reported itself (`DISPATCH_DRAIN_DEADLINE_MINUTES`). One migration
+  adds the drain table.
+- Automatic deploys coalesce on a minimum interval, and the dispatch drain does
+  not stop mechanical merge and readiness work already in flight.
+- **An auto-deploy Inbox notice names the host that wrote it** and is deduped
+  per host. Two hosts publishing the same release wrote byte-identical notice
+  bodies, collided on one dedupe key, and left the Inbox deploy strip showing an
+  18-hour-old failure from the other machine after this one had been repaired.
+  The body is now
+  `[auto-deploy] <outcome>: <from> -> <to>; reason=<reason>; host=<name>[; detail=…]`,
+  and a legacy body without the field still parses.
+- Deploy subprocesses run under the C locale. Under launchd the deploy's `git`
+  spoke the operator's language, and all three of the deploy's fault
+  classifiers read English, so an ordinary transient was escalated as something
+  needing a human.
+- A retryable-transient escalation that reaches its retry cap expires after a
+  backoff instead of stopping every later tick, and an escalation latches the
+  commit that failed while a newer `main` commit is still attempted.
+- A control-plane deploy is green only when the API and every local runner are
+  registered and stay healthy; forward activation and rollback now prove the
+  same readiness sample.
+- Every Darwin install renders through the single launchd service wrapper, and
+  a Mac runner definition rendered by that installer finds the provider CLIs.
+- A runner-only host's deploy preflight requires only what that role reads.
+- A release artifact verifies with only the files every previous builder ships,
+  and Prisma runs under auto-deploy with its update banner hidden.
+- The merge executor adopts the control plane's deployed release on its own.
+
+### Documentation
+
+- Routing grammar, the install sequence, security limits, the demo schema and
+  the glossary each have one owning document; every other mention points at it.
+- Refused designs and the decisions behind them are recorded in the repository,
+  in `docs/out-of-scope/` and the ADRs under `docs/adr/`, with their
+  consequences and the condition under which each may be revisited.
+- The README describes the access Anneal needs in terms of the CLI you already
+  run yourself, rather than as a warning not to run it, and suggests a test
+  repository first.
+- Briefs for cards dispatched after a predecessor now state premises as of
+  that predecessor's merge, name its card or branch, and avoid "until it lands"
+  language; dependency qualification checks those premises against its outcome.
+- The auto-deploy runbook presents Linux systemd as the production path.
+
+### Internal structure
+
+- A refactor wave gave single owners to merge-tail settlement facts, merge-tail
+  episode observations, merge-tail marker state, the two operator reentry verbs,
+  Run birth refusal settlement, Run budget and refund accounting, the
+  specification-read deferral episode, the Task archive lifecycle, the transient
+  failure vocabulary the runner and the API share, the deployment service
+  definitions for both platforms, and forward and rollback release readiness.
+  These changes are intended to preserve their existing external behaviour.
+- Five small guards from the 2026-09-06 design audit are closed, the
+  runtime-tool inventory is declared once and derived everywhere else, and the
+  orphaned ordinal constants, aliases and unreferenced names are gone from the
+  merge modules.
 - Retired the `POST /files/mkdir` and `POST /files/move` routes and their
   underlying store operations.
 - Removed `POST /inbox/messages/:messageId/supersede`;
@@ -140,6 +392,40 @@ written.
   `db:verify-goal-execution` aliases are also removed; both commands remain
   available as `npm run db:export-goal-lineage -w @anneal/db -- <output-path>`
   and `npm run db:verify-goal-execution -w @anneal/db`.
+- One-shot migration replay suites retire once their migration has shipped.
+- The new route in this release is `POST /tasks/:taskId/merge-tail/rerun`; the
+  removed routes are `POST /files/mkdir`, `POST /files/move` and
+  `POST /inbox/messages/:messageId/supersede`. The new configuration keys are
+  `MERGE_TRAIN_WIDTH`, `MERGE_READINESS_EXCEPTION_REQUEUE_LIMIT`,
+  `DISPATCH_DRAIN_DEADLINE_MINUTES`, `RUNNER_GATE_FALLBACK_SERVER`,
+  `AGENTOS_GATE_PRIMARY_SERVER`, `AGENTOS_GATE_FALLBACK_SERVER`,
+  `RUNNER_GATE_PRIMARY_SLOTS` and `AGENTOS_GATE_PRIMARY_SLOTS`;
+  `GATE_DISPATCH_TIMEOUT_MINUTES` keeps its name and changes meaning.
+
+### Known limitations
+
+- There is no supported in-place upgrade from v0.8.0. Install v0.9.0 against an
+  empty schema with `npm run db:migrate:release -- --fresh`.
+- The delivery symptom in [Issue #305](https://github.com/mosonlab/anneal/issues/305)
+  is classified accurately, but the provider-side cause is not eliminated: a
+  code-producing provider can still end a successful session without writing or
+  committing its announced work. A manual Task's final prose remains in its
+  Session events and is not promoted to retry handoff output.
+- The pull-request tier stops at an open pull request. Anneal does not review or
+  merge it for you, and onboarding a project does not provision another
+  workflow or create a Secret.
+- macOS on Apple Silicon and Linux (Ubuntu 24.04 LTS, x86_64) are the verified
+  targets. macOS on Intel is expected to work but has not been exercised;
+  Windows is unsupported by design.
+- The merge train is off by default: `MERGE_TRAIN_WIDTH` is `0` unless you set
+  it, and its maximum is 3. Until you set it, every chain publishes on its own.
+- On a phone, the data tables still scroll horizontally rather than becoming
+  card lists; the `Toggle` and `Check` controls keep their existing hit targets
+  because a halo would overlap the rows around them; and iOS Safari zooms on a
+  focused input, because the application's type scale is pinned to a 13px root
+  and `maximum-scale=1` would cost pinch zoom.
+- Anneal still launches coding CLIs with the operator account's authority and
+  is not a sandbox.
 
 ## v0.8.0 — Developer Preview 8
 

@@ -143,7 +143,7 @@ Windows is unsupported.
 ```sh
 git clone https://github.com/mosonlab/anneal.git
 cd anneal
-git checkout v0.8.0
+git checkout v0.9.0
 npm ci
 npm run setup:local
 npm run build
@@ -158,7 +158,7 @@ The full sequence with its preflights is in
 
 ## Status
 
-Developer Preview 8 (v0.8.0): interfaces and stored data shapes may
+Developer Preview 9 (v0.9.0): interfaces and stored data shapes may
 change between previews, and the only upgrade path is a fresh install.
 The verified targets are macOS on Apple Silicon and Linux (Ubuntu 24.04 LTS,
 x86_64). macOS on Intel is expected to work but is not yet release-verified;
@@ -183,7 +183,7 @@ you and the provider; the authoritative support statement is
 [Install](docs/install.md) ·
 [Security](docs/release/security.md) ·
 [Migration and recovery](docs/release/migration-and-recovery.md) ·
-[Release notes](docs/release/v0.8.0-release-notes.md) ·
+[Release notes](docs/release/v0.9.0-release-notes.md) ·
 [Contributing](CONTRIBUTING.md) ·
 [Support](SECURITY.md)
 

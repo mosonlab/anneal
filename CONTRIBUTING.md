@@ -2,7 +2,7 @@
 
 ## The current state of contributions
 
-Anneal v0.8.0 is a Developer Preview. **We are not yet accepting outside pull
+Anneal v0.9.0 is a Developer Preview. **We are not yet accepting outside pull
 requests.** Contributions currently take the form of:
 
 - Bug reports with the release tag or commit, platform, command, and exact

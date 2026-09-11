@@ -68,6 +68,7 @@
     { "glob": "docs/release/v0.6.0-release-notes.md", "purpose": "the release notes for v0.6.0, and the source text for the GitHub Release body of the same tag" },
     { "glob": "docs/release/v0.7.0-release-notes.md", "purpose": "the release notes for v0.7.0, and the source text for the GitHub Release body of the same tag" },
     { "glob": "docs/release/v0.8.0-release-notes.md", "purpose": "the release notes for v0.8.0, and the source text for the GitHub Release body of the same tag" },
+    { "glob": "docs/release/v0.9.0-release-notes.md", "purpose": "the release notes for v0.9.0, and the source text for the GitHub Release body of the same tag" },
     { "glob": "docs/adr/README.md", "purpose": "index of architecture decision records and their statuses" },
     { "glob": "docs/adr/0001-merge-lease-hold-window.md", "purpose": "superseded decision to narrow the merge-lease hold window; its diagnosis is kept in operator records" },
     { "glob": "docs/adr/0002-coordinate-main-delivery-with-merge-trains.md", "purpose": "accepted fixed-width cumulative-prefix design for concurrent host delivery" },

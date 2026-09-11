@@ -55,7 +55,7 @@ installation.
 ```sh
 git clone https://github.com/mosonlab/anneal.git
 cd anneal
-git checkout v0.8.0
+git checkout v0.9.0
 ```
 
 Check out the exact tag or commit the release names. A branch tip is not a
