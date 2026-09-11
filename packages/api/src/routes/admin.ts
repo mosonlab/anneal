@@ -12,6 +12,7 @@ import type { SerializesTo } from "@anneal/db/wire-serialization";
 import { z } from "zod";
 
 import { COSTS_DEFAULT_DAYS, COSTS_RANGE_DAYS, isValidTimeZone, readProjectCosts, type CostsResponse } from "../costs.js";
+import { deleteProject } from "../project-delete.js";
 import { createProjectBootstrap, projectFields, projectInput } from "../project-bootstrap.js";
 import { encryptSecret } from "../secrets.js";
 import { withoutUndefined } from "../without-undefined.js";
@@ -79,8 +80,9 @@ export const registerAdminRoutes = (app: RouteApp, { db, projectBootstrapLoaders
     data: withoutUndefined(await readJson(context.req.raw, projectPatch)) as Prisma.ProjectUpdateInput,
   })) satisfies ProjectResponse));
   app.delete("/projects/:projectId", async (context) => {
-    await db.project.delete({ where: { id: id.parse(context.req.param("projectId")) } });
-    return context.body(null, 204);
+    const projectId = id.parse(context.req.param("projectId"));
+    const deleted = await deleteProject(db, projectId);
+    return deleted ? context.body(null, 204) : context.json({ error: "Project not found" }, 404);
   });
 
   app.get("/projects/:projectId/costs", async (context) => {
