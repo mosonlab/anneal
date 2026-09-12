@@ -4,6 +4,10 @@ Source-of-truth files for canonical agent prompts and initial runtime defaults, 
 
 The chain prompts with an upstream counterpart in [mattpocock/skills](https://github.com/mattpocock/skills) do carry that text verbatim, wrapped in paragraphs written here for this platform's contracts; the notice is in [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
 
+Keep the Spec Writer and Plan guidance aligned with the upstream baseline
+recorded in that notice. Update their imported text through upstream
+synchronization, preserving Anneal's surrounding authority and output contracts.
+
 ## Canonical synchronization and verification
 
 The canonical synchronization, project-scoped installation and verification,

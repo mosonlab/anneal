@@ -7,7 +7,11 @@ this repository. Read "Everyone", then the section for your environment:
 ## Everyone
 
 - Before writing specs, plans, reviews, or documentation, read [the domain glossary](CONTEXT.md) and use its vocabulary.
-- Before proposing, specifying, or reviewing a design change, read [`docs/out-of-scope/`](docs/out-of-scope/) and the ADRs in [`docs/adr/`](docs/adr/); a proposal that contradicts an entry must cite it and argue its revisit condition.
+- Before proposing, specifying, or reviewing a design change, use the
+  [out-of-scope index](docs/out-of-scope/README.md) and
+  [ADR index](docs/adr/README.md) to find and read the relevant decisions,
+  following their current cross-references. A proposal that contradicts an
+  entry must cite it and argue its revisit condition.
 - Use the simplest design that meets current requirements. Add abstractions,
   configuration, or compatibility only for a current criterion or caller.
 - Run affected workspace checks (`npm run <script> -w <workspace>`) and relevant
