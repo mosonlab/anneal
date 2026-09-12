@@ -16,6 +16,6 @@ this index routes to those decisions.
 | Merge queuing, Lease waits, or Run ownership of the Merge Lease | [Merge tail](merge-tail.md) |
 | Merge gate coverage, scheduling, worker capacity, or database test provisioning | [Merge gate](merge-gate.md) |
 | Runner containment, workspace retention or reclaim, scope bypass, or execution abstractions | [Runner isolation](runner-isolation.md) |
-| Database shapes, query limits, event retention, canonical identity, or quotas | [Data model](data-model.md) |
+| Database shapes, query limits, event retention, canonical identity, quotas, or executor claim ranges, cancellation checks, and legacy constants | [Data model](data-model.md) |
 | Deployment safeguards, rollback, or source-build fallback removal | [Deployment](deployment.md) |
 | Supported operating systems or claim-rejection retry behavior | [Platform scope](platform-scope.md) |
