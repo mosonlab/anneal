@@ -85,16 +85,40 @@ test("an unchanged relaxed Run completes SUCCEEDED only with canonical implement
   );
 });
 
-test("a manual own-publication continuation cannot clean-exit without implementation evidence", () => {
+test("a manual own-publication continuation proves itself with this Run's output at the unchanged head", () => {
   const run = continuation({ task: { templateStep: null } });
+  const manualOutput = { runId: "run-2", kind: "result", body: "The audit found nothing left to change.", commitSha: baseSha, metadata: {} };
 
+  assert.equal(completionEvidenceRefusal(run, true, baseSha, manualOutput), null);
   assert.equal(
     completionEvidenceRefusal(run, true, baseSha, null),
-    "missing implementation task output for current Run run-2",
+    "missing task output for current Run run-2",
   );
   assert.equal(
-    completionEvidenceRefusal(run, true, baseSha, implementationOutput({ kind: "result" })),
-    "task output kind result does not match canonical kind implementation",
+    completionEvidenceRefusal(run, true, baseSha, { ...manualOutput, runId: "run-1" }),
+    "missing task output for current Run run-2",
+  );
+  assert.equal(
+    completionEvidenceRefusal(run, true, baseSha, { ...manualOutput, commitSha: "7".repeat(40) }),
+    `task output is bound to ${"7".repeat(40)}, not completion head ${baseSha}`,
+  );
+});
+
+test("an unchanged continuation of a committing non-implementation Step is held to that Step's own kind", () => {
+  const run = continuation({
+    task: { templateStep: { outputKind: "plan", requiresCommit: true, taskTemplate: { name: "compound-engineer-workflow" } } },
+  });
+
+  assert.equal(
+    completionEvidenceRefusal(run, true, baseSha, implementationOutput()),
+    "task output kind implementation does not match canonical kind plan",
+  );
+  assert.equal(
+    completionEvidenceRefusal(run, true, baseSha, implementationOutput({
+      kind: "plan",
+      body: JSON.stringify({ schemaVersion: 1, headSha: baseSha, summary: "The committed plan still holds.", sliceIds: ["slice-1"] }),
+    })),
+    null,
   );
 });
 

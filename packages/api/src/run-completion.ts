@@ -46,7 +46,6 @@ import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 import { z } from "zod";
 
 import {
-  canonicalImplementationOutputRefusal,
   canonicalOutputRefusal,
   isCanonicalAgentStep,
   outputIsImmutableOncePersisted,
@@ -378,9 +377,28 @@ type CompletionEvidenceRun = {
 type CompletionEvidenceOutput = Parameters<typeof canonicalOutputRefusal>[1];
 
 type CompletionEvidenceRequirement =
-  | { kind: "canonical-implementation"; headSha: string }
+  | { kind: "unchanged-continuation"; headSha: string; step: CompletionEvidenceStep | null }
   | { kind: "current-run-output"; outputKind: string }
   | null;
+
+/**
+ * A Task with no canonical Step declares no output kind and no body contract,
+ * so an unchanged continuation proves itself with the only claim such a Task
+ * can make: an output this Run authored, bound to the head it leaves behind.
+ * Holding it to the canonical implementation protocol instead would refuse a
+ * contract the Task never stated, the prompt never named, and the output write
+ * path accepted without complaint — the Run burns and the evidence is lost.
+ */
+const uncontractedContinuationRefusal = (
+  output: CompletionEvidenceOutput,
+  runId: string,
+  headSha: string,
+): string | null => {
+  if (!output || output.runId !== runId) return `missing task output for current Run ${runId}`;
+  return output.commitSha === headSha
+    ? null
+    : `task output is bound to ${output.commitSha ?? "no commit"}, not completion head ${headSha}`;
+};
 
 const completionEvidenceRequirement = (
   run: CompletionEvidenceRun,
@@ -392,14 +410,22 @@ const completionEvidenceRequirement = (
   // the configured contract distinguishes the own-publication relaxation from
   // Steps that were always non-committing, without re-deriving publication
   // ownership after birth.
-  const configuredRequiresCommit = run.task?.templateStep?.requiresCommit ?? run.opensPullRequest;
+  const step = run.task?.templateStep ?? null;
+  const configuredRequiresCommit = step?.requiresCommit ?? run.opensPullRequest;
   if (
     configuredRequiresCommit
     && !run.requiresCommit
     && run.baseSha !== null
     && completionHeadSha === run.baseSha
   ) {
-    return { kind: "canonical-implementation", headSha: run.baseSha };
+    // The Step's own contract, not the implementation Step's. A canonical Step
+    // is refused the same deliverable at persistence and at completion; any
+    // other Task is held to what it actually declared.
+    return {
+      kind: "unchanged-continuation",
+      headSha: run.baseSha,
+      step: isCanonicalAgentStep(step) ? step : null,
+    };
   }
   const requiredKind = requiredOutputKind(run.task?.templateStep);
   return requiredKind && run.runNumber < run.maxRunsPerTask
@@ -415,12 +441,10 @@ export const completionEvidenceRefusal = (
 ): string | null => {
   const requirement = completionEvidenceRequirement(run, reportedSuccess, completionHeadSha);
   if (!requirement) return null;
-  if (requirement.kind === "canonical-implementation") {
-    return canonicalImplementationOutputRefusal(
-      persistedOutput,
-      run.id,
-      requirement.headSha,
-    );
+  if (requirement.kind === "unchanged-continuation") {
+    return requirement.step
+      ? canonicalOutputRefusal(requirement.step, persistedOutput, run.id, requirement.headSha)
+      : uncontractedContinuationRefusal(persistedOutput, run.id, requirement.headSha);
   }
   // The same decision the session status route hands the runner, read here so
   // completion and the Run that asked cannot disagree about whether the

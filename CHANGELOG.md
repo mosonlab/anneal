@@ -9,6 +9,21 @@ written.
 
 ## Unreleased
 
+### Chains, Runs and the runner
+
+- **A Run that continues its own published branch without changing it is now
+  held to its own Task's output contract.** Reported from outside
+  ([Issue #630](https://github.com/mosonlab/anneal/issues/630)): a manual Task's
+  ninth Run audited the branch an earlier Run had published, found nothing left
+  to change, persisted its report — and failed with `task output kind result
+  does not match canonical kind implementation`, a contract no prompt had named
+  and the output write path had just accepted. Such a Run now proves itself with
+  the deliverable its Task actually declares: a canonical Step's own output
+  kind and body schema, or, for a Task with no canonical Step, an output this
+  Run authored at the unchanged head, whatever its kind. This also releases a
+  committing non-implementation Step, such as the compound chain's plan Step,
+  from a completion demand its own output write path refused.
+
 ## v0.9.0 — Developer Preview 9
 
 The ninth preview is about the end of a chain. A merge tail that stops now

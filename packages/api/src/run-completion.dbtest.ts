@@ -243,19 +243,22 @@ test("a no-change salvage continuation succeeds only with canonical implementati
   }
 });
 
-test("a manual no-change continuation rejects missing or non-implementation evidence", async () => {
-  for (const wrongKind of [false, true]) {
+test("a manual no-change continuation is proved by this Run's own output, whatever its kind", async () => {
+  for (const withOutput of [true, false]) {
     const { task, run, baseSha } = await seedCanonicalImplementationContinuation();
     await db.task.update({ where: { id: task.id }, data: {
       templateId: null,
       templateStepId: null,
+      chainId: null,
+      chainIndex: null,
+      chainLayer: null,
     } });
-    if (wrongKind) {
+    if (withOutput) {
       await db.taskStepOutput.create({ data: {
         taskId: task.id,
         runId: run.id,
         kind: "result",
-        body: "finished",
+        body: "The audit found nothing left to change.",
         commitSha: baseSha,
         metadata: {},
       } });
@@ -273,11 +276,11 @@ test("a manual no-change continuation rejects missing or non-implementation evid
     });
     const stored = await db.run.findUniqueOrThrow({ where: { id: run.id } });
 
-    assert.equal("succeeded" in result && result.succeeded, false);
-    assert.equal(stored.status, RunStatus.FAILED);
-    assert.equal(stored.failureReason, wrongKind
-      ? "task output kind result does not match canonical kind implementation"
-      : `missing implementation task output for current Run ${run.id}`);
+    assert.equal("succeeded" in result && result.succeeded, withOutput);
+    assert.equal(stored.status, withOutput ? RunStatus.SUCCEEDED : RunStatus.FAILED);
+    assert.equal(stored.failureReason, withOutput
+      ? null
+      : `missing task output for current Run ${run.id}`);
   }
 });
 

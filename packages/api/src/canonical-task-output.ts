@@ -412,23 +412,6 @@ export const canonicalOutputRefusal = (
 };
 
 /**
- * A no-change continuation proves the salvaged tree with the implementation
- * protocol even when the current Task has no canonical Step (or has a
- * different one). Keep that exceptional expectation on the same canonical
- * kind, ownership, commit, and body validator as every ordinary Step.
- */
-export const canonicalImplementationOutputRefusal = (
-  output: Pick<TaskStepOutput, "runId" | "kind" | "body" | "commitSha" | "metadata"> | null,
-  runId: string,
-  completionHeadSha: string | null,
-): string | null => canonicalOutputRefusal(
-  { outputKind: "implementation" },
-  output,
-  runId,
-  completionHeadSha,
-);
-
-/**
  * A findings artifact is the review it records; a later run may not replace it,
  * which `persistSessionTaskOutput` enforces. A run that finds one already
  * persisted therefore has nothing left to author, whoever wrote it.
