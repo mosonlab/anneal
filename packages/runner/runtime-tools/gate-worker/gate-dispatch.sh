@@ -11,9 +11,13 @@
 #
 # The slot model rations measured host capacity, not arbitrary processes. An
 # explicitly configured primary worker contributes AGENTOS_GATE_PRIMARY_SLOTS
-# slots (1 or 2, two when unset), which must be the same number as that worker's
-# own ~/gate/worker-capacity, and an explicitly configured fallback worker
-# contributes one. The explicit --server form remains one slot. With no remote
+# slots (1 or 2, two when unset), and an explicitly configured fallback worker
+# contributes one. A primary slot count one greater than that worker's own
+# ~/gate/worker-capacity is the queue place a worker sharing its host with
+# runners is configured for: the surplus dispatch waits on the worker's
+# execution lock instead of leaving for the slower fallback, bounded by
+# run-gate.sh's SLOT_WAIT_MINUTES. Fewer slots than the worker's capacity is
+# the misconfiguration, and the one this dispatcher remarks on. The explicit --server form remains one slot. With no remote
 # configured, --allow-local selects a local-only dispatch. The local machine
 # contributes the configured number of slots only when --allow-local (or
 # AGENTOS_GATE_ALLOW_LOCAL=1) says this invocation may spend its resources, and
@@ -182,11 +186,12 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# The primary worker's capacity is stated twice — here and in its own
-# ~/gate/worker-capacity — and a dispatcher counting more slots than the worker
-# will run only produces an ssh session waiting on the worker's execution lock.
-# So the count is configuration, not a constant, and a value the worker could
-# never match is refused instead of being read as the default two.
+# How many dispatches this dispatcher will send the primary before calling it
+# full, which is the worker's own ~/gate/worker-capacity plus at most one queued
+# place. The queued dispatch waits on the worker's execution lock rather than
+# taking the same commit to a slower fallback, which is what a worker sharing
+# its host with runners is for. So the count is configuration, not a constant,
+# and a value no worker could back is refused instead of read as the default.
 case "$PRIMARY_SLOT_COUNT" in
   1|2) ;;
   *) die "AGENTOS_GATE_PRIMARY_SLOTS must be 1 or 2, got: $PRIMARY_SLOT_COUNT" ;;
@@ -404,19 +409,20 @@ run_remote() {
   REMOTE_OUTPUT="$(AGENTOS_GATE_SERVER='' bash "${SCRIPT_DIR}/remote-gate.sh" "$server" "$OID" --master "$MASTER_OID")"
   REMOTE_STATUS=$?
 
-  # The dispatcher's primary slot count and the worker's own worker-capacity are
-  # two copies of one number kept in two places, and drift between them has no
-  # symptom of its own: the extra dispatch simply waits on the worker's execution
-  # lock until somebody wonders why an ssh session is doing nothing. The worker
-  # states its capacity in the output already transported here, so say it once
-  # where both numbers are known. Nothing acts on it; a worker that says nothing
-  # is an older worker or an attempt that never arrived, and is not news.
+  # A worker that runs more gates at once than this dispatcher will ever send it
+  # is capacity nobody can reach, and it has no symptom of its own: dispatches
+  # queue here while the worker sits idle. The opposite direction is not drift —
+  # one slot more than the capacity is the queue place, and run-gate.sh bounds
+  # its wait. The worker states its capacity in the output already transported
+  # here, so say it once where both numbers are known. Nothing acts on it; a
+  # worker that says nothing is an older worker or an attempt that never
+  # arrived, and is not news.
   if [ "$label" = primary ] && [ "$PRIMARY_CAPACITY_WARNED" -eq 0 ]; then
     worker_capacity="$(printf '%s\n' "$REMOTE_OUTPUT" \
       | sed -n 's/.*run-gate: worker capacity \([0-9][0-9]*\).*/\1/p' | head -n 1)"
-    if [ -n "$worker_capacity" ] && [ "$worker_capacity" -ne "${#PRIMARY_SLOTS[@]}" ] 2>/dev/null; then
+    if [ -n "$worker_capacity" ] && [ "$worker_capacity" -gt "${#PRIMARY_SLOTS[@]}" ] 2>/dev/null; then
       PRIMARY_CAPACITY_WARNED=1
-      printf 'gate-dispatch: warning — the primary worker reports worker-capacity %s but this dispatcher configures %s primary slot(s); one of the two is wrong\n' \
+      printf 'gate-dispatch: warning — the primary worker runs %s gates at once but this dispatcher sends it at most %s; the surplus worker capacity is unreachable\n' \
         "$worker_capacity" "${#PRIMARY_SLOTS[@]}" >&2
     fi
   fi

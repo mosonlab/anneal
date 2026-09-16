@@ -100,15 +100,14 @@ case "$STALE_WORKTREE_MINUTES" in
                  "$STALE_WORKTREE_MINUTES" >&2; exit 2 ;;
 esac
 
-# How long this run waits for a worker execution slot before giving up. An
-# unbounded wait is what a configuration drift turns into a hang: the dispatcher
-# counts two slots on a worker whose worker-capacity file says one, hands this
-# script the extra dispatch, and the caller's ssh session then sits in the slot
-# loop for as long as the queue stays full — gate-dispatch.sh's own
-# --timeout-minutes cannot interrupt an attempt that has already reached the
-# worker. Twenty minutes is comfortably longer than a full gate on any
-# configured worker, and giving up as "nothing ran" is what lets the dispatcher
-# take the same commit to its fallback worker instead.
+# How long this run waits for a worker execution slot before giving up. A
+# dispatcher may count one slot more than this worker's capacity — the queued
+# dispatch waits here rather than leaving for a slower fallback — so the wait is
+# ordinary, and an unbounded one is what would turn it into a hang:
+# gate-dispatch.sh's own --timeout-minutes cannot interrupt an attempt that has
+# already reached the worker. Twenty minutes is comfortably longer than a full
+# gate on any configured worker, and giving up as "nothing ran" is what lets the
+# dispatcher take the same commit to its fallback worker instead.
 SLOT_WAIT_MINUTES="${SLOT_WAIT_MINUTES:-20}"
 case "$SLOT_WAIT_MINUTES" in
   ''|*[!0-9]*) printf 'run-gate: SLOT_WAIT_MINUTES must be a whole number of minutes, got: %s\n' \

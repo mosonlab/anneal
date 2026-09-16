@@ -118,10 +118,12 @@ A full gate can consume a host. The dispatcher cannot know the
 candidate-selected profile before running it, so it rations fixed, measured
 host capacity rather than trying to resize from live CPU or memory readings.
 An explicitly configured primary worker contributes
-`AGENTOS_GATE_PRIMARY_SLOTS` slots (1 or 2, two when the variable is unset, and
-always the same number as that worker's own `~/gate/worker-capacity`; any other
-value is a usage error at dispatch start) and an explicitly configured fallback
-contributes one. The explicit `--server` form contributes one dispatcher slot.
+`AGENTOS_GATE_PRIMARY_SLOTS` slots (1 or 2, two when the variable is unset; any
+other value is a usage error at dispatch start) and an explicitly configured
+fallback contributes one. That count is the worker's own
+`~/gate/worker-capacity` plus at most one queued place: a worker sharing its
+host with runners runs one gate at a time and still wants the second dispatch
+waiting on its execution lock rather than leaving for a slower fallback. The explicit `--server` form contributes one dispatcher slot.
 The local machine contributes no automatic capacity; it adds
 `AGENTOS_GATE_LOCAL_SLOTS` slots only for an invocation that passes
 `--allow-local` or sets `AGENTOS_GATE_ALLOW_LOCAL=1`. The count defaults to one
@@ -215,14 +217,15 @@ That wait is bounded. `run-gate.sh` gives up after `SLOT_WAIT_MINUTES` (default
 20) with `GATE NOT RUN: worker slot wait exceeded <n> minutes` and exit `76`, so
 the dispatcher takes the same commit to its fallback worker. The bound exists
 because the dispatcher's own `--timeout-minutes` cannot interrupt an attempt
-that has already reached the worker: a dispatcher counting two slots on a worker
-whose `worker-capacity` says one produced an ssh session that simply never
-returned. The dispatcher also reads the capacity the worker states in its own
-output and logs `gate-dispatch: warning — the primary worker reports
-worker-capacity N but this dispatcher configures M primary slot(s)` when they
-disagree. That warning changes nothing on its own; it names the drift, which
-the operator resolves by setting `RUNNER_GATE_PRIMARY_SLOTS` (below) to the
-worker's capacity or by changing the worker's `worker-capacity`.
+that has already reached the worker: without it, the queued dispatch is an ssh
+session that simply never returns. The dispatcher also reads the capacity the
+worker states in its own output and logs `gate-dispatch: warning — the primary
+worker runs N gates at once but this dispatcher sends it at most M; the surplus
+worker capacity is unreachable` when the worker can run more than it is sent.
+That warning changes nothing on its own; it names capacity nobody can reach,
+which the operator resolves by raising `RUNNER_GATE_PRIMARY_SLOTS` (below) or
+lowering the worker's `worker-capacity`. One slot more than the capacity is the
+queue place and is not remarked on.
 
 Local slots are accounted per runner account: the account that owns
 `AGENTOS_RUNNER_HOME` owns the shared slot directory at
@@ -405,10 +408,12 @@ be a different destination; the runner exposes the pair as
 set `AGENTOS_GATE_SERVER`. It also passes the primary slot count as
 `AGENTOS_GATE_PRIMARY_SLOTS`, taken from `RUNNER_GATE_PRIMARY_SLOTS` (1 or 2,
 default 2; any other value stops the runner at startup naming the variable).
-That number must equal the primary worker's `~/gate/worker-capacity`: a
-dispatcher configuring more slots than the worker will run only produces an
-ssh session holding a dispatcher slot while it waits for the worker's execution
-lock. With the default this gives the primary two remote slots (`remote-1`,
+That number is the primary worker's `~/gate/worker-capacity` plus at most one
+queued place: the surplus dispatch holds a dispatcher slot while it waits for
+the worker's execution lock, which is the intended shape for a worker that
+shares its host with runners and the reason `gate-self` is configured with two
+slots against `worker-capacity=1`. Configuring fewer slots than the worker's
+capacity leaves gates the worker could run unreachable. With the default this gives the primary two remote slots (`remote-1`,
 `remote-1-2`) and the fallback one (`remote-2`), tried in that order before
 polling; with `RUNNER_GATE_PRIMARY_SLOTS=1` the primary has `remote-1` alone.
 To contribute local capacity, also set
@@ -561,9 +566,16 @@ runs took 241, 240 and 240 seconds (median 240). Five two-gate batches took
 passed. The median batch was 43.8 percent faster than two median single gates
 run serially. Peak CPU reached 100 percent, peak used memory was 5.50 GiB, at
 least 13.37 GiB remained available, and there was no OOM, sustained memory
-pressure, leaked container, database, worktree or held slot. The retained
-desktop setting is therefore `worker-capacity=2`; the four-vCPU fallback stays
-at its default capacity of one.
+pressure, leaked container, database, worktree or held slot. The four-vCPU
+fallback stays at its default capacity of one.
+
+That acceptance was for a dedicated gate VM. The same host later became the
+runner host as well, and two overlapping gates beside sixteen runners took 8-9
+minutes each against 4-5 minutes for a single gate, at host load 33-44, with
+two of them failing on a service start-up timeout the load caused. Capacity
+there is therefore one again, with `host-share=2` and two dispatcher slots, the
+second of which is the queue place. An acceptance is a statement about the host
+as it was measured, not about the host once it is also carrying something else.
 
 ## Routine use
 

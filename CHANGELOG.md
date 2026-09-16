@@ -9,6 +9,17 @@ written.
 
 ## Unreleased
 
+### Merge gate and gate workers
+
+- **A dispatcher slot count one greater than the worker's `worker-capacity` is
+  the queue place, not a misconfiguration.** A worker that shares its host with
+  runners runs one gate at a time, and the second dispatch should wait on its
+  execution lock — bounded by `run-gate.sh`'s `SLOT_WAIT_MINUTES`, then falling
+  back — rather than leaving immediately for a slower fallback worker. The
+  dispatcher no longer warns about that shape; it now warns about the direction
+  that has no defence, a worker that runs more gates at once than this
+  dispatcher will ever send it.
+
 ### Chains, Runs and the runner
 
 - **A Run that continues its own published branch without changing it is now
