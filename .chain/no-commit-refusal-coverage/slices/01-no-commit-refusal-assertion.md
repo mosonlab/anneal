@@ -42,7 +42,10 @@ the production fallback expression must not be reproduced in the expectation.
 - [ ] Restoring the production string returns `npm run test -w @anneal/api` to
       green, and both runs of this mutation check are reported in this Step's
       output summary.
-- [ ] `npm run lint` is green.
+- [ ] `npm run lint -w @anneal/api` is green — biome and eslint over the only
+      touched workspace. The repository-wide lint aggregate is chain-level
+      Regression and Merge Gate evidence, not a criterion of this slice, and is
+      refused inside a Run.
 - [ ] `git diff` against the frozen base touches exactly one file — the
       run-completion unit test module — with at most 6 net added lines, no
       production edit left behind, and no existing assertion, test name, fixture,

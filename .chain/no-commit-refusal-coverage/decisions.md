@@ -45,14 +45,19 @@ final diff touches one test file. Nothing persists and nothing leaves the Run.
 ## Verification named at the workspace seam
 
 **Choice.** Each acceptance criterion names the API workspace test script, the
-repository lint script, or a `git diff` inspection as its verification.
+API workspace lint script, or a `git diff` inspection as its verification.
 
-**Rejected.** Naming the repository merge gate or a database suite as a slice
-criterion.
+**Rejected.** (a) Naming the repository merge gate or a database suite as a
+slice criterion. (b) Naming the repository-wide `npm run lint` aggregate, as an
+earlier revision of this plan did.
 
 **Reason.** Repository instructions reserve whole-repo aggregates and database
-suites for the merge gate and forbid running them inside a Run. Chain-level
-evidence stays outside the slice set.
+suites for the merge gate and forbid running them inside a Run. The root `lint`
+script is such an aggregate: its first step is the Run scope guard, which
+refuses with a non-zero exit whenever `AGENTOS_RUN_ID` is set, so an
+implementation Step could never turn that criterion green. The executable
+equivalent at the only touched workspace is `npm run lint -w @anneal/api`;
+repository-wide lint remains chain-level evidence outside the slice set.
 
 ## Mutation check is a slice criterion, not a report-only note
 
