@@ -102,6 +102,10 @@ test("a manual own-publication continuation proves itself with this Run's output
     completionEvidenceRefusal(run, true, baseSha, { ...manualOutput, commitSha: "7".repeat(40) }),
     `task output is bound to ${"7".repeat(40)}, not completion head ${baseSha}`,
   );
+  assert.equal(
+    completionEvidenceRefusal(run, true, baseSha, { ...manualOutput, commitSha: null }),
+    `task output is bound to no commit, not completion head ${baseSha}`,
+  );
 });
 
 test("an unchanged continuation of a committing non-implementation Step is held to that Step's own kind", () => {
