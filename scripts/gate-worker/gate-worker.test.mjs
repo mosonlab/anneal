@@ -111,12 +111,12 @@ test("gate-worker entrypoints authenticate Run callers in the materialized tool 
     }
     for (const result of refused) assert.equal(result.status, 76, `${name}: ${result.stderr}`);
     const accepted = [
-      invoke("bash", [script, "--help"], { AGENTOS_RUN_ID: "" }),
-      invoke("bash", [regression, script, "--help"], { AGENTOS_RUN_SCOPE_BYPASS: "regression-verification" }),
-      invoke(process.execPath, [train, script, "--help"], { AGENTOS_RUN_SCOPE_BYPASS: "merge-train" }),
+      ["host", invoke("bash", [script, "--help"], { AGENTOS_RUN_ID: "" })],
+      ["Regression", invoke("bash", [regression, script, "--help"], { AGENTOS_RUN_SCOPE_BYPASS: "regression-verification" })],
+      ["Merge train", invoke(process.execPath, [train, script, "--help"], { AGENTOS_RUN_SCOPE_BYPASS: "merge-train" })],
     ];
-    for (const result of accepted) {
-      assert.equal(result.status, 0, `${name}: ${result.stderr}`);
+    for (const [callerName, result] of accepted) {
+      assert.equal(result.status, 0, `${name} via ${callerName}: ${result.stderr}`);
       assert.doesNotMatch(stripAnsi(result.stdout), /^GATE NOT RUN: refused/m);
     }
   }

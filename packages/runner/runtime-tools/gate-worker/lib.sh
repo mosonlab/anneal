@@ -374,7 +374,10 @@ agentos_run_tool_is_ancestor() {
       AGENTOS_RUN_SCOPE_CALLER_COMMAND="$command_line"
     fi
 
-    if [[ -n "${AGENTOS_TOOLS:-}" && "$process_name" == "$expected_process" ]]; then
+    # Linux Node 26 on the worker reports node-MainThread to ps ucomm;
+    # macOS reports node. Both still require the exact runner-owned module.
+    if [[ -n "${AGENTOS_TOOLS:-}" ]] && { [[ "$process_name" == "$expected_process" ]] \
+      || [[ "$expected_process" == "node" && "$process_name" == "node-MainThread" ]]; }; then
       read -r -a command_words <<< "$command_line"
       # The merge-train wrapper execs Node directly with its pinned module.
       # Do not accept node -e/-p or a module path appearing only as an argument.
