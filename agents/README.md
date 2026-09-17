@@ -19,11 +19,14 @@ Follow its Tier 1 checklist when onboarding another Project.
 
 For an already-seeded canonical project, `senior-dev-opus-high` and
 `frontend-dev-opus-high` rely on adoption of pre-existing active project Agent
-rows by name when their `canonicalRole` is null. Neither role is in
-`SPECIAL_CANONICAL_AGENTS` in `packages/db/prisma/sync-canonical-prompts.ts`, so
-ordinary canonical sync does not recreate a missing or archived row for these
-roles and refuses an incomplete canonical inventory. Fresh seeds install both
-roles from the source inventory.
+rows by name when their `canonicalRole` is null. The frontend implementation
+tier defaults to `frontend-dev-opus-medium`; `frontend-dev-opus-high` is used
+only when the user explicitly names that route for the current dispatch.
+Neither role is in `SPECIAL_CANONICAL_AGENTS` in
+`packages/db/prisma/sync-canonical-prompts.ts`, so ordinary canonical sync does
+not recreate a missing or archived row for these roles and refuses an
+incomplete canonical inventory. Fresh seeds install both roles from the source
+inventory.
 
 ## Changing a canonical prompt
 

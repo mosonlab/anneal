@@ -34,6 +34,7 @@ import {
   type PersistedTemplateStepStructure,
   templateStepStructureDifferences,
 } from "../src/template-sources.js";
+import { CANONICAL_STAFFING_TIER_ROLES } from "../src/staffing-profile-canonical.js";
 
 const rolesRoot = fileURLToPath(new URL("../../../agents/roles/", import.meta.url));
 const prismaRoot = fileURLToPath(new URL("./", import.meta.url));
@@ -196,6 +197,16 @@ test("named canonical roles use their model catalog runner and retired role name
   }
   assert.equal(canonical.has("senior-dev-high"), false);
   assert.equal(canonical.has("review-adjudicator-opus"), false);
+});
+
+test("frontend implementation routing defaults to Opus medium", async () => {
+  assert.equal(CANONICAL_STAFFING_TIER_ROLES.frontend, "frontend-dev-opus-medium");
+
+  const revalidation = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))
+    .find((step) => step.outputKind === "revalidation");
+  assert.ok(revalidation);
+  assert.match(revalidation.prompt, /The current\s+Agent is `frontend-dev-opus-medium`/u);
+  assert.doesNotMatch(revalidation.prompt, /The current\s+Agent is `frontend-dev-opus-high`/u);
 });
 
 /** Opus effort variants must preserve every line except name and model. */
