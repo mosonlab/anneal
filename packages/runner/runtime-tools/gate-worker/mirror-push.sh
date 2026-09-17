@@ -60,6 +60,9 @@ DRY_RUN=0
 CANDIDATE_OID=""
 BASELINE_OID=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=packages/runner/runtime-tools/gate-worker/lib.sh
+. "${SCRIPT_DIR}/lib.sh" || exit 76
+gate_require_run_authority
 
 usage() {
   sed -n '2,58p' "$0" \
@@ -133,9 +136,6 @@ git -C "$REPO_ROOT" cat-file -e "${CANDIDATE_OID}^{commit}" 2>/dev/null \
   || die "candidate ${CANDIDATE_OID} is not in ${REPO_ROOT}"
 git -C "$REPO_ROOT" cat-file -e "${BASELINE_OID}^{commit}" 2>/dev/null \
   || die "baseline ${BASELINE_OID} is not in ${REPO_ROOT}; refresh it before pushing"
-
-# shellcheck source=packages/runner/runtime-tools/gate-worker/lib.sh
-. "${SCRIPT_DIR}/lib.sh"
 
 # Checked before anything is sent: each of these is interpolated into a command
 # string the remote login shell parses. lib.sh says what each one accepts.

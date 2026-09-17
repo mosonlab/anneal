@@ -56,7 +56,8 @@ state.
 
 ### What exists instead
 
-The parent-process check in `scripts/run-scope-guard.sh`.
+The parent-process check shared by `scripts/run-scope-guard.sh` and the
+gate-worker entrypoints in `packages/runner/runtime-tools/gate-worker/lib.sh`.
 
 ### Revisit when
 

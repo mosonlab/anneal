@@ -112,6 +112,17 @@ first `mirror-push.sh`. A repository qualifies by shipping its own
 `scripts/merge-gate.sh` — the gate that judges a commit is the gate that commit
 ships.
 
+## Run callers
+
+Inside an Anneal Run, call the runner-provided Regression or Merge train tool.
+`gate-dispatch.sh`, `mirror-push.sh`, `remote-gate.sh`, and `run-gate.sh` refuse
+direct Run calls with `GATE NOT RUN` and exit 76, before transport, slot
+acquisition, or worker cleanup. The shared library checks the actual ancestor
+process against the tool pinned under `AGENTOS_TOOLS`; a bypass environment
+value alone grants nothing. The detached Merge train uses its Node module
+ancestor because its shell wrapper replaces itself with Node. Host calls are
+unchanged. This is a cooperative execution boundary, not a hostile-code sandbox.
+
 ## The slot model
 
 A full gate can consume a host. The dispatcher cannot know the

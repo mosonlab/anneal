@@ -71,6 +71,9 @@ MASTER_OID=""
 VERBOSE=0
 FETCH_LOG=0
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=packages/runner/runtime-tools/gate-worker/lib.sh
+. "${SCRIPT_DIR}/lib.sh" || exit 76
+gate_require_run_authority
 
 # 2, not sysexits' 64: this script's exit codes are the gate's table, and the
 # table has one row for a usage error. Two numbers for one meaning is how a
@@ -143,9 +146,6 @@ if [ -n "$SSH_PORT" ]; then
     ''|*[!0-9]*) die "--port needs a number, got: $SSH_PORT" "$EXIT_USAGE" ;;
   esac
 fi
-
-# shellcheck source=packages/runner/runtime-tools/gate-worker/lib.sh
-. "${SCRIPT_DIR}/lib.sh"
 
 if [ -z "${AGENTOS_WORKSPACE_PATH:-}" ]; then
   no_verdict "AGENTOS_WORKSPACE_PATH is required"

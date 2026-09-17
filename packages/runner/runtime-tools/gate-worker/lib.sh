@@ -2,11 +2,8 @@
 # (mirror-push.sh, remote-gate.sh, gate-dispatch.sh). Not executable on its own;
 # source it.
 #
-# Three things live here: the values that travel into a remote shell command
-# string, the slot locks that ration how many gates run at once, and the gate's
-# verdict — the exit codes, the four lines and the reader that recovers one from
-# a log. All three are places where being approximately right is the same as
-# being wrong.
+# Shared boundaries live here: remote command values, capacity locks, verdict
+# formats, and Run caller admission. Every caller uses the same definitions.
 #
 # run-gate.sh runs on the worker, where this file sits beside it because
 # mirror-push.sh installs the pair. Nothing here may assume a repository
@@ -330,4 +327,106 @@ gate_verdict_is_judgement() {
     "$GATE_EXIT_PASS" | "$GATE_EXIT_FAIL" | "$GATE_EXIT_NOT_AUTHORITATIVE") return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# --- Run ownership ----------------------------------------------------------
+
+# Match an actual runner-tool ancestor, not an environment assertion or a
+# tool path mentioned in a command string. This is the existing cooperative
+# Run boundary, not containment against hostile code running as the same user.
+agentos_run_tool_is_ancestor() {
+  AGENTOS_RUN_SCOPE_CALLER_COMMAND="unreadable process $$"
+
+  local expected_process="$1"
+  local expected_script="${AGENTOS_TOOLS:-}"
+  expected_script="${expected_script%/}/$2"
+  local ps_command
+  local current_pid="$$"
+  local process_record
+  local parent_pid
+  local process_name
+  local command_line
+  local command_word
+  local -a command_words
+  local depth=0
+
+  if [[ -x /bin/ps ]]; then
+    ps_command=/bin/ps
+  elif [[ -x /usr/bin/ps ]]; then
+    ps_command=/usr/bin/ps
+  else
+    return 1
+  fi
+
+  # Find the immediate parent first; authentication considers parents only.
+  process_record="$("$ps_command" -ww -p "$current_pid" -o ppid= -o ucomm= -o command= 2>/dev/null)" || return 1
+  [[ -n "$process_record" ]] || return 1
+  read -r parent_pid process_name command_line <<< "$process_record"
+  [[ "$parent_pid" =~ ^[0-9]+$ && -n "$process_name" && -n "$command_line" ]] || return 1
+  current_pid="$parent_pid"
+
+  while [[ "$current_pid" =~ ^[0-9]+$ ]] && (( current_pid > 1 && depth < 128 )); do
+    process_record="$("$ps_command" -ww -p "$current_pid" -o ppid= -o ucomm= -o command= 2>/dev/null)" || return 1
+    [[ -n "$process_record" ]] || return 1
+    read -r parent_pid process_name command_line <<< "$process_record"
+    [[ "$parent_pid" =~ ^[0-9]+$ && -n "$process_name" && -n "$command_line" ]] || return 1
+    if (( depth == 0 )); then
+      AGENTOS_RUN_SCOPE_CALLER_COMMAND="$command_line"
+    fi
+
+    if [[ -n "${AGENTOS_TOOLS:-}" && "$process_name" == "$expected_process" ]]; then
+      read -r -a command_words <<< "$command_line"
+      # The merge-train wrapper execs Node directly with its pinned module.
+      # Do not accept node -e/-p or a module path appearing only as an argument.
+      if [[ "$expected_process" == "node" ]]; then
+        [[ "${command_words[1]:-}" == "$expected_script" ]] && return 0
+      else
+        for command_word in "${command_words[@]:1}"; do
+          # The script path must be Bash's first non-option argument. This rejects
+          # command strings, stdin programs and argv[0] spoofing without narrowing
+          # legitimate `bash -x /runner/tools/regression-verification.sh` calls.
+          case "$command_word" in
+            -c|--command|-s|-) break ;;
+          esac
+          if [[ "$command_word" != -* ]]; then
+            [[ "$command_word" == "$expected_script" ]] && return 0
+            break
+          fi
+        done
+      fi
+    fi
+
+    [[ "$parent_pid" != "$current_pid" ]] || return 1
+    current_pid="$parent_pid"
+    depth=$((depth + 1))
+  done
+
+  return 1
+}
+
+agentos_regression_bypass_audit_refusal() {
+  printf 'run-scope-bypass: refused forged Regression bypass from caller: %s\n' \
+    "${AGENTOS_RUN_SCOPE_CALLER_COMMAND:-unreadable process $$}" >&2
+}
+
+agentos_regression_bypass_is_authenticated() {
+  [[ "${AGENTOS_RUN_SCOPE_BYPASS:-}" == "regression-verification" ]] || return 1
+  agentos_run_tool_is_ancestor bash regression-verification.sh
+}
+
+# Both Regression and the detached Merge train own gate work. Only their
+# runner-pinned processes may cross this boundary; the Merge train exception
+# does not grant access to repository-wide npm aggregates.
+gate_require_run_authority() {
+  [[ -n "${AGENTOS_RUN_ID:-}" ]] || return 0
+  if agentos_regression_bypass_is_authenticated \
+    || { [[ "${AGENTOS_RUN_SCOPE_BYPASS:-}" == "merge-train" ]] \
+      && agentos_run_tool_is_ancestor node merge-train.mjs; }; then
+    return 0
+  fi
+  if [[ "${AGENTOS_RUN_SCOPE_BYPASS:-}" == "regression-verification" ]]; then
+    agentos_regression_bypass_audit_refusal
+  fi
+  gate_verdict_not_run "refused inside Anneal run ${AGENTOS_RUN_ID}: use the runner-provided Regression or Merge train tool"
+  exit "$GATE_EXIT_NO_VERDICT"
 }

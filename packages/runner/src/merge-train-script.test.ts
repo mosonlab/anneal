@@ -102,6 +102,10 @@ try {
   index = Number(cp.execFileSync("git", ["rev-list", "--first-parent", "--count", process.env.MERGE_TRAIN_FIXTURE_BASE + ".." + oid], { encoding: "utf8" }).trim());
 } catch {}
 const behavior = process.env.MERGE_TRAIN_FIXTURE_GATE_BEHAVIOR || "pass";
+if (behavior === "require-admission") {
+  const admission = cp.spawnSync("bash", ["-c", '. "$1"; gate_require_run_authority', "gate-fixture", ${JSON.stringify(join(dirname(script), "gate-worker", "lib.sh"))}], { stdio: "inherit" });
+  if (admission.status !== 0) process.exit(admission.status ?? 99);
+}
 if (behavior === "require-ref") {
   const ref = "refs/anneal/train/" + oid;
   const found = cp.execFileSync("git", ["ls-remote", "origin", "refs/anneal/train/*"], { encoding: "utf8" }).trim().split("\\n");
@@ -189,6 +193,7 @@ if (behavior === "delayed-pass") {
     AGENTOS_FENCING_TOKEN: undefined,
     MERGE_TRAIN_GATE_DISPATCH: gateScript,
     AGENTOS_RUN_ID: "run-merge-train-fixture",
+    AGENTOS_TOOLS: dirname(script),
     AGENTOS_WORKSPACE_PATH: workspace,
     RUNNER_WORKSPACE_ROOT: join(root, "runner-workspaces"),
     MERGE_TRAIN_FIXTURE_GATE_LOG: gateLog,
@@ -269,7 +274,7 @@ test("runtime merge train builds and gates three cumulative prefixes", async () 
       fixture.candidate("task-2", "chain-2", { "b.txt": "b\n" }),
       fixture.candidate("task-3", "chain-3", { "c.txt": "c\n" }),
     ];
-    const result = await runTool(fixture, trainInput(fixture, candidates));
+    const result = await runTool(fixture, trainInput(fixture, candidates), { MERGE_TRAIN_FIXTURE_GATE_BEHAVIOR: "require-admission" });
     assert.equal(result.status, 0, result.stderr);
     const record = recordOf(result);
     assert.equal(parseMergeTrainRecord(JSON.stringify(record)).status, "ok");

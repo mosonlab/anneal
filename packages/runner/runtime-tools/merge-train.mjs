@@ -384,7 +384,7 @@ const gateOne = async (prefix, gateCheckout, environment, gateDispatch) => {
   for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS; attempt += 1) {
     const result = await runProcess(gateDispatch, [prefix.prefixOid, "--master", prefix.predecessorOid], {
       cwd: gateCheckout,
-      env: { ...environment, AGENTOS_WORKSPACE_PATH: gateCheckout },
+      env: { ...environment, AGENTOS_WORKSPACE_PATH: gateCheckout, AGENTOS_RUN_SCOPE_BYPASS: "merge-train" },
     });
     last = gateVerdict(result, prefix);
     if (last.verdict !== "no-verdict") return last;

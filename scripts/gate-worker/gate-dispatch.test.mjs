@@ -604,11 +604,18 @@ test("an unconfigured dispatcher runs local-only after explicit opt-in", (t) => 
     mergeGate:
       'test "$AGENTOS_RUN_ID" = local-regression-run && test "$AGENTOS_RUN_SCOPE_BYPASS" = regression-verification && printf "MERGE GATE: PASS local-only\\n"',
   });
-  const result = dispatch(t, repo, [repo.head, "--allow-local"], {
+  const tools = scratch(t);
+  const regression = join(tools, "regression-verification.sh");
+  writeFileSync(regression, '#!/usr/bin/env bash\nbash "$@" &\nchild=$!\nwait "$child"\n');
+  const invocation = dispatchInvocation(repo, scratch(t), [repo.head, "--allow-local"], {
     AGENTOS_GATE_PRIMARY_SERVER: "",
     AGENTOS_GATE_FALLBACK_SERVER: "",
     AGENTOS_RUN_ID: "local-regression-run",
     AGENTOS_RUN_SCOPE_BYPASS: "regression-verification",
+    AGENTOS_TOOLS: tools,
+  });
+  const result = spawnSync("bash", [regression, ...invocation.args], {
+    ...invocation.options, timeout: DISPATCH_KILL_MS,
   });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /MERGE GATE: PASS local-only/u);

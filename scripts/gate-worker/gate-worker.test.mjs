@@ -77,6 +77,51 @@ const scratch = (t) => {
 const git = (cwd, ...args) =>
   execFileSync("git", args, { cwd, encoding: "utf8", env: FIXTURE_ENV }).trim();
 
+// Copy only the shipped tools: Run authorization must not depend on files in
+// the candidate checkout. Help keeps both accepted and rejected calls offline.
+test("gate-worker entrypoints authenticate Run callers in the materialized tool tree", (t) => {
+  const root = scratch(t);
+  const tools = join(root, "tools");
+  cpSync(runtimeGateWorker, join(tools, "gate-worker"), { recursive: true });
+  const regression = join(tools, "regression-verification.sh");
+  const forgedRegression = join(root, "regression-verification.sh");
+  const caller = '#!/usr/bin/env bash\nbash "$@" &\nchild=$!\nwait "$child"\n';
+  writeFileSync(regression, caller);
+  writeFileSync(forgedRegression, caller);
+  const train = join(tools, "merge-train.mjs");
+  writeFileSync(train, 'import { spawnSync } from "node:child_process"; const result = spawnSync("bash", process.argv.slice(2), { stdio: "inherit" }); process.exit(result.status ?? 99);\n');
+  const env = { ...FIXTURE_ENV, AGENTOS_RUN_ID: "guard-fixture", AGENTOS_TOOLS: tools };
+  const invoke = (command, args, overrides = {}) => spawnSync(command, args, {
+    cwd: root, encoding: "utf8", timeout: 30_000, env: { ...env, ...overrides },
+  });
+  for (const name of ["gate-dispatch.sh", "mirror-push.sh", "remote-gate.sh", "run-gate.sh"]) {
+    const script = join(tools, "gate-worker", name);
+    const refused = [
+      invoke("bash", [script, "--help"]),
+      invoke("bash", [script, "--help"], { AGENTOS_RUN_SCOPE_BYPASS: "regression-verification" }),
+      invoke("bash", [script, "--help"], { AGENTOS_RUN_SCOPE_BYPASS: "merge-train" }),
+      invoke("bash", [forgedRegression, script, "--help"], { AGENTOS_RUN_SCOPE_BYPASS: "regression-verification" }),
+      invoke("bash", [regression, script, "--help"], { AGENTOS_TOOLS: "", AGENTOS_RUN_SCOPE_BYPASS: "regression-verification" }),
+      invoke("bash", ["-c", 'bash "$1" --help & child=$!; wait "$child"', regression, script], { AGENTOS_RUN_SCOPE_BYPASS: "regression-verification" }),
+      invoke(process.execPath, ["-e", 'const r = require("node:child_process").spawnSync("bash", [process.argv[2], "--help"], {stdio:"inherit"}); process.exit(r.status ?? 99);', train, script], { AGENTOS_RUN_SCOPE_BYPASS: "merge-train" }),
+    ];
+    for (const result of refused) {
+      assert.match(stripAnsi(result.stdout), /^GATE NOT RUN: refused inside Anneal run guard-fixture/m, `${name}: ${result.stderr}`);
+      assert.doesNotMatch(result.stdout, /MERGE GATE: (PASS|FAIL)/u);
+    }
+    for (const result of refused) assert.equal(result.status, 76, `${name}: ${result.stderr}`);
+    const accepted = [
+      invoke("bash", [script, "--help"], { AGENTOS_RUN_ID: "" }),
+      invoke("bash", [regression, script, "--help"], { AGENTOS_RUN_SCOPE_BYPASS: "regression-verification" }),
+      invoke(process.execPath, [train, script, "--help"], { AGENTOS_RUN_SCOPE_BYPASS: "merge-train" }),
+    ];
+    for (const result of accepted) {
+      assert.equal(result.status, 0, `${name}: ${result.stderr}`);
+      assert.doesNotMatch(stripAnsi(result.stdout), /^GATE NOT RUN: refused/m);
+    }
+  }
+});
+
 // --- worker provisioning contract -------------------------------------------
 
 test("provisioning includes the native Node build/runtime dependencies and Git identity", () => {
@@ -642,7 +687,6 @@ const mergeGateScopeFixture = (t) => {
   mkdirSync(join(repo, "packages", "runner", "runtime-tools", "gate-worker"), { recursive: true });
   writeFileSync(join(repo, "package.json"), '{"name": "anneal"}\n');
   cpSync(mergeGatePath, join(repo, "scripts", "merge-gate.sh"));
-  cpSync(join(here, "..", "run-scope-bypass.sh"), join(repo, "scripts", "run-scope-bypass.sh"));
   for (const name of ["host-sizing.sh", "step-engine.sh", "verdict.sh"]) {
     cpSync(join(here, name), join(repo, "scripts", "gate-worker", name));
   }
@@ -740,7 +784,7 @@ const mergeGateHostFixture = (t) => {
   // failure here rather than on the next branch.
   cpSync(join(here, "..", "..", ".gitignore"), join(repo, ".gitignore"));
   cpSync(mergeGatePath, join(repo, "scripts", "merge-gate.sh"));
-  for (const name of ["check-frozen-docs.sh", "merge-gate-profile.mjs", "run-scope-bypass.sh"]) {
+  for (const name of ["check-frozen-docs.sh", "merge-gate-profile.mjs"]) {
     cpSync(join(here, "..", name), join(repo, "scripts", name));
   }
   writeFileSync(
@@ -1753,7 +1797,7 @@ test("every script that names the gate's exit codes takes them from lib.sh", () 
   // file that defines it, and none of them redeclares it.
   for (const name of ["run-gate.sh", "remote-gate.sh", "gate-dispatch.sh", "mirror-push.sh"]) {
     const source = readFileSync(toolPath(name), "utf8");
-    assert.match(source, /^\. "\$\{(SCRIPT_DIR|HARNESS_DIR)\}\/lib\.sh"$/m, `${name} does not source lib.sh`);
+    assert.match(source, /^\. "\$\{(SCRIPT_DIR|HARNESS_DIR)\}\/lib\.sh" \|\| exit 76$/m, `${name} does not source lib.sh`);
     assert.doesNotMatch(source, /^EXIT_NO_VERDICT=/m, `${name} declares the no-verdict code again`);
   }
   const gate = readFileSync(join(here, "..", "merge-gate.sh"), "utf8");

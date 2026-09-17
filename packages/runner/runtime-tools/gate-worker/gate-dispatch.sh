@@ -116,6 +116,9 @@ OID=""
 MASTER_OID=""
 DEFAULT_REF=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=packages/runner/runtime-tools/gate-worker/lib.sh
+. "${SCRIPT_DIR}/lib.sh" || exit 76
+gate_require_run_authority
 
 usage() {
   awk 'NR > 1 && /^#/ { sub(/^#+ ?/, ""); print; next } NR > 1 { exit }' "${BASH_SOURCE[0]}" \
@@ -237,13 +240,8 @@ if [ "$ALLOW_LOCAL" -eq 1 ]; then
   done
 fi
 
-# Sourced before the first check that reports a code: the slot locks, the values
-# that reach a remote shell and the verdict's codes all live here, and this
-# script transports verdicts rather than forming them, so every failure of its
-# own is GATE_EXIT_NO_VERDICT.
-# shellcheck source=packages/runner/runtime-tools/gate-worker/lib.sh
-. "${SCRIPT_DIR}/lib.sh"
-
+# This script transports verdicts rather than forming them, so every failure
+# of its own is GATE_EXIT_NO_VERDICT.
 if [ -z "${AGENTOS_WORKSPACE_PATH:-}" ]; then
   die "AGENTOS_WORKSPACE_PATH is required" "$GATE_EXIT_NO_VERDICT"
 fi

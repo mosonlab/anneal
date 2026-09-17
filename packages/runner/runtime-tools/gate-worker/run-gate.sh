@@ -75,7 +75,8 @@ set -uo pipefail
 # point elsewhere.
 HARNESS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=packages/runner/runtime-tools/gate-worker/lib.sh
-. "${HARNESS_DIR}/lib.sh"
+. "${HARNESS_DIR}/lib.sh" || exit 76
+gate_require_run_authority
 
 # 2 is this script's own argument parsing, not the gate's, so it stays here.
 EXIT_USAGE=2

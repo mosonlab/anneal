@@ -36,10 +36,11 @@ Work in your exclusive checkout on its chain branch. Any additional worktree
 stays inside your run workspace. Commit; the platform owns push, PR creation,
 Regression, and merge.
 
-Never run `scripts/merge-gate.sh`, scripts under `scripts/gate-worker/` or
-`packages/runner/runtime-tools/gate-worker/`, or repository-wide verification
-aggregates inside a Run. Gate-worker scripts have no Run refusal; this rule is
-the guardrail. Regression runs the gate on its worker. Never operate on a
+Never run host scripts under `scripts/gate-worker/` inside a Run. Use the
+runner-provided Regression or Merge train tool for gate work. Runtime
+gate-worker entrypoints refuse direct Run calls; they authenticate those tools
+through process ancestry. Repository-wide verification aggregates and direct
+`scripts/merge-gate.sh` calls remain forbidden inside a Run. Never operate on a
 production or appliance checkout.
 
 ## In a host window

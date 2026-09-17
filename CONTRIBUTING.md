@@ -43,6 +43,10 @@ repository-wide proof. Root `build`, `lint`, `typecheck`, `test`, `test:db`, and
 `GATE NOT RUN:` and **76**. Runs have no scratch PostgreSQL. Database tests are
 merge gate evidence: never attempt them inside a Run, including named files,
 or report their absence as a gap. `test:db -w @anneal/api` also exits **78**.
+The gate-worker entrypoints also refuse direct Run calls with **76**, before
+transport or slot acquisition. They accept only the runner-provided Regression
+or Merge train process ancestry; setting a bypass environment value alone
+does not authorize a call. Host calls retain their existing behavior.
 A replay dbtest for a one-shot data migration is retired in the first release
 after the migration shipped.
 

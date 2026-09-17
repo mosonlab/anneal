@@ -177,8 +177,6 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 if [[ -n "${AGENTOS_RUN_ID:-}" ]]; then
   regression_bypass_authenticated=0
   if [[ "${AGENTOS_RUN_SCOPE_BYPASS:-}" == "regression-verification" ]]; then
-    # shellcheck source=scripts/run-scope-bypass.sh
-    . "${SCRIPT_DIR}/run-scope-bypass.sh"
     if agentos_regression_bypass_is_authenticated; then
       regression_bypass_authenticated=1
     else
