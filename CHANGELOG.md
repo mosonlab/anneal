@@ -9,6 +9,17 @@ written.
 
 ## Unreleased
 
+### Staffing and model routes
+
+- **Canonical staffing no longer uses Astra as a default.** Plan review uses
+  `review-coordinator-sol-high`, compound implementation uses
+  `plan-executor-sol-high`, Apply review fixes uses `senior-dev-sol-high`, and
+  the judged `hazard` tier plus canonical Default profile slot use
+  `senior-dev-sol-high`. Astra roles remain canonical for history and explicit
+  staffing only: a user must name the Astra escalation for that dispatch after
+  a Sol high attempt actually fails; the optional `review-astra-medium`
+  staffing profile remains available.
+
 ### Merge gate and gate workers
 
 - **A dispatcher slot count one greater than the worker's `worker-capacity` is

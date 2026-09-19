@@ -186,7 +186,7 @@ curl "$BASE_URL/projects" -H "Authorization: Bearer $OPERATOR_TOKEN"
 - A successful request creates the Project and, in the same transaction, one
   `local` Environment with `networking` `OPEN` and `allowedHosts` `[]`, four
   Agents (`senior-dev-luna-max`, `code-reviewer-sol-high`,
-  `code-reviewer-opus-medium`, and `senior-dev-astra-low`) bound to that Environment, and
+  `code-reviewer-opus-medium`, and `senior-dev-sol-high`) bound to that Environment, and
   the canonical `pr-engineer-workflow` TaskTemplate with its four steps.
   The returned Project read shape includes `specGateDefault` and
   `mergeGateDefault`, both `false` for a newly created project.
@@ -1574,7 +1574,7 @@ curl -X DELETE "$BASE_URL/staffing-profiles/$PROFILE_ID" \
   `mergeTailRepairAgentId`; the active direct, PR, and compound canonical
   profiles set `tiers.default` to `senior-dev-luna-max`,
   `tiers.frontend` to `frontend-dev-opus-medium`, `tiers.hard` to
-  `senior-dev-sol-high`, and `tiers.hazard` to `senior-dev-astra-medium`, and
+  `senior-dev-sol-high`, and `tiers.hazard` to `senior-dev-sol-high`, and
   set the repair slot to `senior-dev-luna-max`.
 - If the canonical repair Agent is missing or archived, reset restores the step
   entries, clears the repair slot, and returns a `merge_tail_repair_agent_unavailable`

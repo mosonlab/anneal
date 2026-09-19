@@ -109,7 +109,7 @@ for that tier. The tier criteria and their not-a-reason lists are:
   migrations; or the change alters what the merge gate, merge automation, a
   migration, or authorization does. Merely touching those files without
   changing their behavior is not a reason to choose it. Its canonical Agent
-  today is `senior-dev-astra-medium`.
+  today is `senior-dev-sol-high`.
 
 These tier criteria and not-a-reason lists are the text of record.
 

@@ -65,7 +65,8 @@ reason and check the listed not-a-reason cases before choosing a tier other than
   migrations; or the change alters what the merge gate, merge automation, a
   migration, or authorization does. It is not a reason merely to touch those
   files without changing their behavior. The current Agent is
-  `senior-dev-astra-medium`.
+  `senior-dev-sol-high`. An Astra role is used only when the user names it for
+  this dispatch after a Sol high attempt actually fails; it is never a default.
 
 Record the selected tier and the specific criterion that applies, or explain
 why none applies when selecting `default`, in `route.reason`. The route is an

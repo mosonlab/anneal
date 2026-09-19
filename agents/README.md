@@ -26,7 +26,10 @@ Neither role is in `SPECIAL_CANONICAL_AGENTS` in
 `packages/db/prisma/sync-canonical-prompts.ts`, so ordinary canonical sync does
 not recreate a missing or archived row for these roles and refuses an
 incomplete canonical inventory. Fresh seeds install both roles from the source
-inventory.
+inventory. The current Sol high review coordinator, plan executor, and senior
+developer roles are in that special-agent list so canonical sync can recreate
+their rows in an already-seeded project; their Astra counterparts remain
+available as explicit user-named escalation roles.
 
 ## Changing a canonical prompt
 
@@ -94,7 +97,7 @@ the model or the effort.
 ```yaml
 stepIndex: 5
 layer: 5
-agent: plan-executor-astra-low # Agent.name, or null for a human step
+agent: plan-executor-sol-high # Agent.name, or null for a human step
 approvalGate: false
 optional: false
 outputKind: implementation
@@ -148,30 +151,34 @@ The seed installs three templates over these roles: the twelve-step Full
 Assurance chain, the eight-step bound-capable direct chain
 (`direct-engineer-workflow`) — revalidation for bound briefs, implementation by
 `senior-dev-luna-max` from the task brief, parallel code review and blind code
-review siblings whose findings the fix step (`senior-dev-astra-low`, the senior
-developer prompt at Astra low) adjudicates itself, exact-head regression,
-server-side readiness, and mechanical merge — and the four-step pull-request
-chain (`pr-engineer-workflow`), which runs implementation, code review and blind
-code review, and review-fix application before ending at an open pull request with
-no regression or merge step. Unbound direct instantiation omits the
-revalidation row and retains the historical seven-step prompts. All three step
-contracts live in their Markdown directories under `templates/`.
+review siblings whose findings the fix step (`senior-dev-sol-high`) adjudicates
+itself, exact-head regression, server-side readiness, and mechanical merge —
+and the four-step pull-request chain (`pr-engineer-workflow`), which runs
+implementation, code review and blind code review, and review-fix application
+before ending at an open pull request with no regression or merge step. The
+Full Assurance plan review and compound implementation use
+`review-coordinator-sol-high` and `plan-executor-sol-high`. Unbound direct
+instantiation omits the revalidation row and retains the historical seven-step
+prompts. All three step contracts live in their Markdown directories under
+`templates/`.
 
 Provider-specific or temporary roles are not canonical defaults unless the
 cross-provider review contract explicitly requires separate identities.
-`senior-dev-sol-high`, `senior-dev-opus-medium` and `senior-dev-opus-high` are
-canonical rather than experiments
-because they are the explicit implementation tiers named by the
-implementation-assignee routing rules in `docs/governance/task-routing-v1.md`:
-the Sol fallback when the Astra model is unavailable, and the Claude
-Opus 5 medium and high routes an operator names to spend Claude capacity.
-`senior-dev-astra-low` is canonical because every template binds it to the
-review-fix step and the `hard` implementation tier. Keep
-experiments out of `roles/`; create them as local overlays and archive them
-when no longer needed so a seed cannot silently turn an experiment into a
-release default. Implementation-assignee escalation follows the
+`review-coordinator-sol-high`, `plan-executor-sol-high`, and
+`senior-dev-sol-high` are canonical because the current templates and the
 implementation-assignee routing rules in
-`docs/governance/task-routing-v1.md`.
+`docs/governance/task-routing-v1.md` use them as the Sol high defaults.
+`senior-dev-opus-medium` and `senior-dev-opus-high` remain explicit Claude
+routes an operator names to spend Claude capacity. The Astra roles — including
+`review-coordinator-astra-medium`, `plan-executor-astra-low`,
+`senior-dev-astra-medium`, and `senior-dev-astra-low` — stay in the canonical
+roster for history and explicit staffing, but are used only when the user names
+one for that dispatch after a Sol high attempt actually fails; the optional
+`review-astra-medium` staffing profile remains available for that escalation.
+Keep experiments out of `roles/`; create them as local overlays and archive
+them when no longer needed so a seed cannot silently turn an experiment into a
+release default. Implementation-assignee escalation follows the
+implementation-assignee routing rules in `docs/governance/task-routing-v1.md`.
 
 Each review and regression role states its own duty in its role file; read
 `roles/` rather than a summary here. Superseded roles and template rows —

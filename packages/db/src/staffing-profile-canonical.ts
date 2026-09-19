@@ -32,7 +32,7 @@ export const CANONICAL_STAFFING_TIER_ROLES: Readonly<Record<StaffingProfileTierK
   default: "senior-dev-luna-max",
   frontend: "frontend-dev-opus-medium",
   hard: "senior-dev-sol-high",
-  hazard: "senior-dev-astra-medium",
+  hazard: "senior-dev-sol-high",
 };
 
 /** Resolve every tier from the same active canonical roster for reset and install. */

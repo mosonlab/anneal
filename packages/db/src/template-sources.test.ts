@@ -277,7 +277,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
         name: "Apply review fixes",
         stepIndex: 4,
         layer: 3,
-        agent: "senior-dev-astra-low",
+        agent: "senior-dev-sol-high",
         approvalGate: false,
         optional: false,
         outputKind: "fixed-implementation",
@@ -744,7 +744,7 @@ test("bare revalidation only selects v1 for complete historical Direct identitie
 test("registered Direct generations retain their historical revalidation protocol", () => {
   for (const generation of LEGACY_TEMPLATE_GENERATIONS[DIRECT_TEMPLATE_NAME]) {
     if (!generation.shape.some(({ outputKind }) => outputKind === "revalidation")) continue;
-    const expected = ["pre-frozen-regression-baseline", "pre-sol-high-hard-tier"].includes(generation.marker) ? "v2" : "v1";
+    const expected = ["pre-frozen-regression-baseline", "pre-sol-high-hard-tier", "pre-sol-high-hazard-tier"].includes(generation.marker) ? "v2" : "v1";
     const taskTemplateName = templateRolloverName(DIRECT_TEMPLATE_NAME, generation.marker, "row");
     assert.equal(canonicalOutputGeneration({ outputKind: "revalidation", taskTemplateName }), expected);
     assert.equal(canonicalOutputGeneration({ outputKind: "revalidation", taskTemplate: { name: taskTemplateName } }), expected);

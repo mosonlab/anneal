@@ -70,7 +70,7 @@ test("setup converges on the canonical twelve-step topology and grants every age
     assigneeAgentId: `agent-${offset + 1}`,
     assigneeAgent: {
       id: `agent-${offset + 1}`,
-      name: offset === 10 ? "review-coordinator-astra-medium" : offset === 11 ? "merge-integrator" : `agent-${offset + 1}`,
+      name: offset === 10 ? "review-coordinator-sol-high" : offset === 11 ? "merge-integrator" : `agent-${offset + 1}`,
       archivedAt: null,
     },
     outputKind: offset === 10 ? "merge-authorization" : offset === 11 ? "merge-result" : `kind-${offset + 1}`,
@@ -102,7 +102,7 @@ test("setup converges on the canonical twelve-step topology and grants every age
       () => ({ argv: ["npm", "run", "db:verify-agent-template"], exitCode: 0, stdoutSha256: "a".repeat(64), stderrSha256: "b".repeat(64) }),
     );
     assert.equal(result.steps.length, 12);
-    assert.equal(result.steps[10].agentName, "review-coordinator-astra-medium");
+    assert.equal(result.steps[10].agentName, "review-coordinator-sol-high");
     assert.equal(result.steps[11].agentName, "merge-integrator");
     assert.equal(result.steps[11].opensPullRequest, false);
     assert.equal(calls.filter((call) => call.path.endsWith("/access")).length, 12);
@@ -119,7 +119,7 @@ const completeEvidence = (mode = "rehearsal") => {
     chainIndex: step.stepIndex,
     status: "DONE",
     assigneeType: "AGENT",
-    agentName: offset === 10 ? "review-coordinator-astra-medium" : offset === 11 ? "merge-integrator" : `agent-${offset + 1}`,
+    agentName: offset === 10 ? "review-coordinator-sol-high" : offset === 11 ? "merge-integrator" : `agent-${offset + 1}`,
     templateStep: { outputKind: step.outputKind, opensPullRequest: offset !== 11 },
     output: { kind: step.outputKind, bytes: 1, sha256: "a".repeat(64) },
     activity: { count: 1, digest: "b".repeat(64) },

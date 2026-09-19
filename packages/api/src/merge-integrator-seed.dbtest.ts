@@ -299,7 +299,7 @@ test("a fresh seed writes the twelve-step, eight-step, and four-step canonical t
     "Implementation", "Code review", "Blind code review", "Apply review fixes",
   ]);
   assert.deepEqual(pullRequest.steps.map(({ assigneeAgent }) => assigneeAgent?.name), [
-    "senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-medium", "senior-dev-astra-low",
+    "senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-medium", "senior-dev-sol-high",
   ]);
   assert.deepEqual(pullRequest.steps.map(({ opensPullRequest }) => opensPullRequest), [true, false, false, false]);
   assert.deepEqual(pullRequest.steps.map(({ requiresCommit }) => requiresCommit), [true, false, false, false]);
@@ -1111,11 +1111,11 @@ test("re-seeding a historical nine-step template preserves its in-flight task se
   const historicalContract = [
     [1, "Write a spec", "spec-opus-high", AssigneeType.AGENT, "spec", true],
     [2, "Plan", "plan-fable-medium", AssigneeType.AGENT, "plan", false],
-    [3, "Plan review", "review-coordinator-astra-medium", AssigneeType.AGENT, "plan-review", false],
+    [3, "Plan review", "review-coordinator-sol-high", AssigneeType.AGENT, "plan-review", false],
     [4, "Revise plan", "plan-reviser-opus-medium", AssigneeType.AGENT, "revised-plan", true],
-    [5, "Implementation", "plan-executor-astra-low", AssigneeType.AGENT, "implementation", false],
-    [6, "Code review", "review-coordinator-astra-medium", AssigneeType.AGENT, "code-review", false],
-    [7, "Apply review fixes", "senior-dev-astra-medium", AssigneeType.AGENT, "fixed-implementation", false],
+    [5, "Implementation", "plan-executor-sol-high", AssigneeType.AGENT, "implementation", false],
+    [6, "Code review", "review-coordinator-sol-high", AssigneeType.AGENT, "code-review", false],
+    [7, "Apply review fixes", "senior-dev-sol-high", AssigneeType.AGENT, "fixed-implementation", false],
     [8, "Librarian", "librarian-luna-xhigh", AssigneeType.AGENT, "documentation", false],
     [9, "Human PR review", null, AssigneeType.HUMAN, "approval", true],
   ] as const;

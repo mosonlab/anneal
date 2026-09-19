@@ -100,7 +100,7 @@ test("a matching no-history pull-request row is current, never a rollover", () =
       stepIndex: 4,
       name: "Apply review fixes",
       layer: 3,
-      agentName: "senior-dev-astra-low",
+      agentName: "senior-dev-sol-high",
       approvalGate: false,
       optional: false,
       outputKind: "fixed-implementation",

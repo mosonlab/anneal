@@ -1,6 +1,6 @@
 # Task Routing Contract v1
 
-Version: 1.11 (2026-09-07)
+Version: 1.12 (2026-09-19)
 
 Status: Active
 
@@ -97,9 +97,17 @@ operator configuration; an empty slot never falls through to another tier.
 | `default` | Everything else. Acceptance that existing tests or grep can check stays here whatever it touches. | Crossing packages, touching web files, touching many files, landing in a sensitive directory, or an audit report once suggesting a stronger model. | `senior-dev-luna-max` |
 | `frontend` | The deliverable is a new page, a page redesign, or a new interaction or visual scheme. | Adding a field, wiring data, or changing copy on an existing component. | `frontend-dev-opus-medium` |
 | `hard` | A behavior that neither the brief nor an existing test pins down has to be defined by the implementer, and getting it wrong would not show in review or regression; for example, keeping an untested semantic intact across several providers' event handling. | The change is large, spans modules, or needs a lot of reading. | `senior-dev-sol-high` |
-| `hazard` | The failure the acceptance suite cannot witness: concurrency, transaction boundaries, lock or lease windows, or cross-module contract migrations; or the change alters what the merge gate, merge automation, a migration, or authorization does. | Merely touching those files without changing their behavior. | `senior-dev-astra-medium` |
+| `hazard` | The failure the acceptance suite cannot witness: concurrency, transaction boundaries, lock or lease windows, or cross-module contract migrations; or the change alters what the merge gate, merge automation, a migration, or authorization does. | Merely touching those files without changing their behavior. | `senior-dev-sol-high` |
 
 These tier criteria and not-a-reason lists are the text of record.
+
+The Astra implementation roles remain canonical for history and explicit
+staffing, but are not defaults. A user may name an Astra role for the current
+dispatch only after a `senior-dev-sol-high` attempt actually fails; a missing
+or failed Sol attempt is never inferred from paths, file count, or model
+availability. The canonical plan-review, compound-implementation, and review-
+fix bindings likewise use Sol high roles; an optional Astra staffing profile is
+an operator escalation, not a default.
 
 The tier is judged from the brief and tree, never from the path or file count.
 The implementation step is restaffed from the selected profile's slot only
@@ -220,7 +228,7 @@ Agent does not rewrite it.
 Record this block when creating or materially rerouting a chain:
 
 ```text
-Routing Contract: v1.10
+Routing Contract: v1.12
 Tier: Direct
 Implementation Agent: <project-agent-name>
 Critical: no

@@ -208,7 +208,7 @@ test("sync creates the pull-request template when the pre-existing canonical ins
   });
   assert.deepEqual(created.variables, ["branchName"]);
   assert.deepEqual(created.steps.map(({ assigneeAgent }) => assigneeAgent?.name), [
-    "senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-medium", "senior-dev-astra-low",
+    "senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-medium", "senior-dev-sol-high",
   ]);
   assert.equal(JSON.stringify(await prisma.taskTemplate.findMany({
     where: {
@@ -1282,15 +1282,21 @@ test("sync recreates a missing spec revalidator with read-only repository covera
   }), [{ mountPath: repo.mountPath, permissions: RepoPermission.GIT_READ }]);
 });
 
-// senior-dev-astra-low is also created through the special-agent table, but
-// every template binds it, so deleting it here would leave a bound step with
-// no assignee; its creation is exercised by the canonical seed instead.
-for (const specialName of ["senior-dev-sol-high", "senior-dev-opus-medium"] as const) {
-test(`sync recreates a missing ${specialName} Agent from senior-dev-astra-medium`, async (t) => {
+// These roles are created through the special-agent table because an existing
+// canonical project predates their source files. Some now bind current template
+// steps, so the fixture temporarily clears restrictive references before deleting
+// the row and restores them after sync recreates it.
+for (const { name: specialName, source: sourceName } of [
+  { name: "senior-dev-sol-high", source: "senior-dev-astra-medium" },
+  { name: "senior-dev-opus-medium", source: "senior-dev-astra-medium" },
+  { name: "review-coordinator-sol-high", source: "review-coordinator-astra-medium" },
+  { name: "plan-executor-sol-high", source: "plan-executor-astra-low" },
+] as const) {
+test(`sync recreates a missing ${specialName} Agent from ${sourceName}`, async (t) => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const specialSource = canonicalRuntime(specialName);
   const source = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: project.id, name: "senior-dev-astra-medium" } },
+    where: { projectId_name: { projectId: project.id, name: sourceName } },
   });
   const existingSol = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: specialName } },
@@ -1318,6 +1324,47 @@ test(`sync recreates a missing ${specialName} Agent from senior-dev-astra-medium
     await prisma.repo.delete({ where: { id: repo.id } });
   });
 
+  const boundSteps = await prisma.taskTemplateStep.findMany({
+    where: { assigneeAgentId: existingSol.id },
+    select: { id: true },
+  });
+  if (boundSteps.length > 0) {
+    await prisma.taskTemplateStep.updateMany({
+      where: { id: { in: boundSteps.map(({ id }) => id) } },
+      data: { assigneeAgentId: null },
+    });
+  }
+  const assignedTasks = await prisma.task.findMany({
+    where: { assigneeAgentId: existingSol.id },
+    select: { id: true },
+  });
+  if (assignedTasks.length > 0) {
+    await prisma.task.updateMany({
+      where: { id: { in: assignedTasks.map(({ id }) => id) } },
+      data: { assigneeAgentId: null },
+    });
+  }
+  const stakedEntries = await prisma.staffingProfileEntry.findMany({
+    where: { assigneeAgentId: existingSol.id },
+    select: { profileId: true, outputKind: true },
+  });
+  if (stakedEntries.length > 0) {
+    await prisma.staffingProfileEntry.updateMany({
+      where: { assigneeAgentId: existingSol.id },
+      data: { assigneeAgentId: null },
+    });
+  }
+  const stakedRepairProfiles = await prisma.staffingProfile.findMany({
+    where: { mergeTailRepairAgentId: existingSol.id },
+    select: { id: true },
+  });
+  if (stakedRepairProfiles.length > 0) {
+    await prisma.staffingProfile.updateMany({
+      where: { mergeTailRepairAgentId: existingSol.id },
+      data: { mergeTailRepairAgentId: null },
+    });
+  }
+
   // The canonical Default profiles may stake a tier slot on this role (the
   // direct `hard` tier binds senior-dev-sol-high). Those rows restrict the
   // delete, so lift them first and restake them on the recreated Agent below;
@@ -1340,6 +1387,24 @@ test(`sync recreates a missing ${specialName} Agent from senior-dev-astra-medium
   await prisma.staffingProfileTier.createMany({
     data: stakedTiers.map((row) => ({ ...row, agentId: sol.id })),
   });
+  for (const entry of stakedEntries) {
+    await prisma.staffingProfileEntry.update({
+      where: { profileId_outputKind: entry },
+      data: { assigneeAgentId: sol.id },
+    });
+  }
+  if (stakedRepairProfiles.length > 0) {
+    await prisma.staffingProfile.updateMany({
+      where: { id: { in: stakedRepairProfiles.map(({ id }) => id) } },
+      data: { mergeTailRepairAgentId: sol.id },
+    });
+  }
+  if (assignedTasks.length > 0) {
+    await prisma.task.updateMany({
+      where: { id: { in: assignedTasks.map(({ id }) => id) } },
+      data: { assigneeAgentId: sol.id },
+    });
+  }
   assert.equal(sol.model, specialSource.model);
   assert.equal(sol.runnerPreference, specialSource.runnerPreference);
   assert.equal(sol.inboxAccess, true);

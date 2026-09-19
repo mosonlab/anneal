@@ -75,9 +75,12 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
 const bodyOf = (source: string): string => source.split("---\n").slice(2).join("---\n");
 
 test("canonical OpenAI roles pin their Codex model and runner", async () => {
-  const [reviewCoordinator, reviewCoordinatorSol, librarian, specRevalidator, seniorDev, reviewFix] = await Promise.all([
+  const [reviewCoordinator, reviewCoordinatorSol, codeReviewerSol, planExecutor, planExecutorSol, librarian, specRevalidator, seniorDev, reviewFix] = await Promise.all([
     roleSource("review-coordinator-astra-medium"),
+    roleSource("review-coordinator-sol-high"),
     roleSource("code-reviewer-sol-high"),
+    roleSource("plan-executor-astra-low"),
+    roleSource("plan-executor-sol-high"),
     roleSource("librarian-luna-xhigh"),
     roleSource("spec-revalidator-luna-xhigh"),
     roleSource("senior-dev-astra-medium"),
@@ -88,6 +91,14 @@ test("canonical OpenAI roles pin their Codex model and runner", async () => {
   assert.equal(frontmatterValue(reviewCoordinator, "runner"), "codex");
   assert.equal(frontmatterValue(reviewCoordinatorSol, "model"), "gpt-5.6-sol:high");
   assert.equal(frontmatterValue(reviewCoordinatorSol, "runner"), "codex");
+  assert.equal(frontmatterValue(codeReviewerSol, "model"), "gpt-5.6-sol:high");
+  assert.equal(frontmatterValue(codeReviewerSol, "runner"), "codex");
+  assert.equal(frontmatterValue(planExecutor, "model"), "gpt-6-astra:low");
+  assert.equal(frontmatterValue(planExecutor, "runner"), "codex");
+  assert.equal(frontmatterValue(planExecutorSol, "model"), "gpt-5.6-sol:high");
+  assert.equal(frontmatterValue(planExecutorSol, "runner"), "codex");
+  assert.equal(bodyOf(reviewCoordinatorSol), bodyOf(reviewCoordinator));
+  assert.equal(bodyOf(planExecutorSol), bodyOf(planExecutor));
   assert.equal(frontmatterValue(librarian, "model"), "gpt-5.6-luna:xhigh");
   assert.equal(frontmatterValue(librarian, "runner"), "codex");
   assert.equal(frontmatterValue(specRevalidator, "model"), "gpt-5.6-luna:xhigh");
@@ -180,6 +191,7 @@ test("named canonical roles use their model catalog runner and retired role name
     "frontend-dev-opus-medium",
     "frontend-dev-opus-high",
     "review-coordinator-astra-medium",
+    "review-coordinator-sol-high",
     "code-reviewer-sol-high",
     "regression-verifier-luna-max",
     "librarian-luna-xhigh",
@@ -190,6 +202,7 @@ test("named canonical roles use their model catalog runner and retired role name
     "senior-dev-astra-low",
     "spec-revalidator-luna-xhigh",
     "plan-executor-astra-low",
+    "plan-executor-sol-high",
   ]) {
     const role = canonical.get(name);
     assert.ok(role, `role source must contain ${name}`);
@@ -207,6 +220,30 @@ test("frontend implementation routing defaults to Opus medium", async () => {
   assert.ok(revalidation);
   assert.match(revalidation.prompt, /The current\s+Agent is `frontend-dev-opus-medium`/u);
   assert.doesNotMatch(revalidation.prompt, /The current\s+Agent is `frontend-dev-opus-high`/u);
+});
+
+test("Sol high owns the hazard tier and every current template default", async () => {
+  assert.equal(CANONICAL_STAFFING_TIER_ROLES.hazard, "senior-dev-sol-high");
+
+  const templates = await loadAllTemplateStepSources();
+  const currentAssignments = [...templates.values()].flatMap((steps) => steps.map((step) => step.agentName));
+  assert.equal(currentAssignments.some((agentName) => agentName?.includes("astra")), false);
+
+  assert.deepEqual(
+    templates.get("compound-engineer-workflow")!.filter((step) => ["plan-review", "implementation", "fixed-implementation", "merge-authorization"].includes(step.outputKind)).map((step) => step.agentName),
+    ["review-coordinator-sol-high", "plan-executor-sol-high", "senior-dev-sol-high", "review-coordinator-sol-high"],
+  );
+  assert.deepEqual(
+    templates.get(DIRECT_TEMPLATE_NAME)!.filter((step) => ["fixed-implementation", "merge-authorization"].includes(step.outputKind)).map((step) => step.agentName),
+    ["senior-dev-sol-high", "review-coordinator-sol-high"],
+  );
+  assert.equal(templates.get(PR_TEMPLATE_NAME)!.find((step) => step.outputKind === "fixed-implementation")?.agentName, "senior-dev-sol-high");
+
+  const revalidation = templates.get(DIRECT_TEMPLATE_NAME)!.find((step) => step.outputKind === "revalidation");
+  assert.ok(revalidation);
+  assert.match(revalidation.prompt, /hazard[\s\S]*current Agent is\s+`senior-dev-sol-high`/u);
+  assert.match(revalidation.prompt, /Astra role is used only when the user names it[\s\S]*after a Sol high attempt actually fails/u);
+  assert.doesNotMatch(revalidation.prompt, /hazard[\s\S]*`senior-dev-astra-medium`/u);
 });
 
 /** Opus effort variants must preserve every line except name and model. */
@@ -232,7 +269,7 @@ for (const role of ["frontend-dev", "senior-dev"] as const) {
 
 test("the split review prompts enforce persisted-range, blindness, and regression contracts", async () => {
   const [planReview, firstReview, blindReview, regressionVerification] = await Promise.all([
-    roleSource("review-coordinator-astra-medium"),
+    roleSource("review-coordinator-sol-high"),
     roleSource("code-reviewer-sol-high"),
     roleSource("code-reviewer-opus-medium"),
     roleSource("regression-verifier-luna-max"),
@@ -241,6 +278,7 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
   assert.match(planReview, /never review implementation\s+diffs/u);
   assert.match(planReview, /acceptance criterion fail at the frozen base commit/u);
   assert.match(planReview, /mislabelled risk\s+flags/u);
+  assert.equal(bodyOf(planReview), bodyOf(await roleSource("review-coordinator-astra-medium")));
 
   // Both reviewer roles share one prompt body: the Sol two-pass discipline, but
   // taking the reviewed range from the platform-pinned claim metadata so the
@@ -297,8 +335,8 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
 });
 
 test("the executioner delegates only through platform-pinned native Luna children", async () => {
-  const executioner = await roleSource("plan-executor-astra-low");
-  assert.equal(frontmatterValue(executioner, "model"), "gpt-6-astra:low");
+  const executioner = await roleSource("plan-executor-sol-high");
+  assert.equal(frontmatterValue(executioner, "model"), "gpt-5.6-sol:high");
   assert.match(executioner, /pins every native child to Luna max/u);
   assert.match(executioner, /eight concurrent child threads/u);
   assert.match(executioner, /Delegation is not one slice per child/u);
@@ -315,15 +353,15 @@ test("the canonical twelve-step layered template sources split review and preser
     [
       { stepIndex: 1, layer: 1, agentName: "spec-opus-high", outputKind: "spec" },
       { stepIndex: 2, layer: 2, agentName: "plan-fable-medium", outputKind: "plan" },
-      { stepIndex: 3, layer: 3, agentName: "review-coordinator-astra-medium", outputKind: "plan-review" },
+      { stepIndex: 3, layer: 3, agentName: "review-coordinator-sol-high", outputKind: "plan-review" },
       { stepIndex: 4, layer: 4, agentName: "plan-reviser-opus-medium", outputKind: "revised-plan" },
-      { stepIndex: 5, layer: 5, agentName: "plan-executor-astra-low", outputKind: "implementation" },
+      { stepIndex: 5, layer: 5, agentName: "plan-executor-sol-high", outputKind: "implementation" },
       { stepIndex: 6, layer: 6, agentName: "code-reviewer-sol-high", outputKind: "review-findings" },
       { stepIndex: 7, layer: 6, agentName: "code-reviewer-opus-medium", outputKind: "blind-findings" },
-      { stepIndex: 8, layer: 7, agentName: "senior-dev-astra-low", outputKind: "fixed-implementation" },
+      { stepIndex: 8, layer: 7, agentName: "senior-dev-sol-high", outputKind: "fixed-implementation" },
       { stepIndex: 9, layer: 8, agentName: "librarian-luna-xhigh", outputKind: "documentation" },
       { stepIndex: 10, layer: 9, agentName: "regression-verifier-luna-max", outputKind: "regression-verification-v2" },
-      { stepIndex: 11, layer: 10, agentName: "review-coordinator-astra-medium", outputKind: "merge-authorization" },
+      { stepIndex: 11, layer: 10, agentName: "review-coordinator-sol-high", outputKind: "merge-authorization" },
       { stepIndex: 12, layer: 11, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
   );
@@ -411,9 +449,9 @@ test("the direct template sources expose the layered review spine and mechanical
       { stepIndex: 2, layer: 2, agentName: "senior-dev-luna-max", outputKind: "implementation" },
       { stepIndex: 3, layer: 3, agentName: "code-reviewer-sol-high", outputKind: "review-findings" },
       { stepIndex: 4, layer: 3, agentName: "code-reviewer-opus-medium", outputKind: "blind-findings" },
-      { stepIndex: 5, layer: 4, agentName: "senior-dev-astra-low", outputKind: "fixed-implementation" },
+      { stepIndex: 5, layer: 4, agentName: "senior-dev-sol-high", outputKind: "fixed-implementation" },
       { stepIndex: 6, layer: 5, agentName: "regression-verifier-luna-max", outputKind: "regression-verification-v2" },
-      { stepIndex: 7, layer: 6, agentName: "review-coordinator-astra-medium", outputKind: "merge-authorization" },
+      { stepIndex: 7, layer: 6, agentName: "review-coordinator-sol-high", outputKind: "merge-authorization" },
       { stepIndex: 8, layer: 7, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
   );

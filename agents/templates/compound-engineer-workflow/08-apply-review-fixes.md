@@ -1,7 +1,7 @@
 ---
 stepIndex: 8
 layer: 7
-agent: senior-dev-astra-low
+agent: senior-dev-sol-high
 approvalGate: false
 optional: false
 outputKind: fixed-implementation

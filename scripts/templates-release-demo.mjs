@@ -259,7 +259,7 @@ const canonicalSteps = (steps) => {
   }
   const readiness = steps[10];
   const integrator = steps[11];
-  if (readiness.assigneeType !== "AGENT" || readiness.assigneeAgent?.name !== "review-coordinator-astra-medium"
+  if (readiness.assigneeType !== "AGENT" || readiness.assigneeAgent?.name !== "review-coordinator-sol-high"
     || readiness.approvalGate !== false || readiness.outputKind !== "merge-authorization") {
     throw new Error("canonical step 11 must be server-side mechanical readiness");
   }
@@ -419,7 +419,7 @@ export function verifyEvidence(config, setup, instantiated, capture) {
   }
   const readiness = capture.tasks[10];
   const integrator = capture.tasks[11];
-  if (readiness.assigneeType !== "AGENT" || readiness.agentName !== "review-coordinator-astra-medium"
+  if (readiness.assigneeType !== "AGENT" || readiness.agentName !== "review-coordinator-sol-high"
     || readiness.output?.kind !== "merge-authorization") throw new Error("step 11 is not mechanical readiness");
   if (integrator.agentName !== "merge-integrator" || integrator.templateStep?.opensPullRequest !== false) throw new Error("step 12 is not mechanical merge execution");
   const delivered = capture.tasks.flatMap((task) => task.runs).filter((run) => run.pullRequestUrl);

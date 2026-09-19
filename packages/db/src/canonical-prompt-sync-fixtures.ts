@@ -1,10 +1,22 @@
 /**
+ * Restore the `hazard` tier Agent name the revalidation prompt carried before
+ * the tier's canonical role moved to `senior-dev-sol-high` (2026-09-19). Every
+ * registered generation predates that rollover, so the older fixtures apply
+ * it before reconstructing their earlier prompt bytes.
+ */
+export const restorePreSolHighHazardTierPrompt = (prompt: string): string => prompt
+  .replace(
+    "The current Agent is\n  `senior-dev-sol-high`. An Astra role is used only when the user names it for\n  this dispatch after a Sol high attempt actually fails; it is never a default.",
+    "The current Agent is\n  `senior-dev-astra-medium`.",
+  );
+
+/**
  * Restore the `hard` tier Agent name the revalidation prompt carried before the
  * tier's canonical role moved to `senior-dev-sol-high` (2026-09-09). Every
  * registered generation predates that rollover, so the older fixtures apply
  * it first.
  */
-export const restorePreSolHighHardTierPrompt = (prompt: string): string => prompt
+export const restorePreSolHighHardTierPrompt = (prompt: string): string => restorePreSolHighHazardTierPrompt(prompt)
   .replace("The current Agent is\n  `senior-dev-sol-high`.", "The current Agent is\n  `senior-dev-astra-low`.");
 
 /**

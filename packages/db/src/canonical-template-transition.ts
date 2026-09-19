@@ -59,6 +59,10 @@ import type { PersistedTemplateStepStructure } from "./template-sources.js";
  * named `senior-dev-astra-low` as the `hard` tier's Agent, before the tier's
  * canonical role moved to `senior-dev-sol-high` (2026-09-09 ruling).
  * Prompt-only in the direct template.
+ * `pre-sol-high-hazard-tier`: the direct graph whose revalidation prompt still
+ * named `senior-dev-astra-medium` as the `hazard` tier's Agent, before the tier's
+ * canonical role moved to `senior-dev-sol-high` (2026-09-19 ruling).
+ * Prompt-only in the direct template.
  */
 export type LegacyTemplateGeneration = Readonly<{
   marker: string;
@@ -353,6 +357,23 @@ const legacyTemplateGenerations = {
       // senior-dev-sol-high. The graph is unchanged.
       marker: "pre-sol-high-hard-tier",
       promptDigest: "667f0aadce31cc62aa7043d6c46a1ee89d08ce4f8690bd5a5fe50a5fd5662abd",
+      shape: [
+        { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Code review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "review-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null, provisionDependencies: false },
+        { name: "Blind code review", assigneeType: AssigneeType.AGENT, approvalGate: false, optional: true, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null, provisionDependencies: false },
+        { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Regression verification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Merge authorization", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 6, spawnPolicy: null },
+        { name: "Merge execution", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
+      ],
+    },
+    {
+      // Prompt-only rollover: the revalidation prompt names the hazard tier's
+      // canonical Agent, which moved from senior-dev-astra-medium to
+      // senior-dev-sol-high. The graph is unchanged.
+      marker: "pre-sol-high-hazard-tier",
+      promptDigest: "cea709c7937fb307648ca7a5be2ed6de14aef3747ee96cff53e4d34270b03536",
       shape: [
         { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -736,7 +757,7 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<
  * `agents/templates/` and fails on a mismatch.
  */
 export const CANONICAL_SOURCE_PROMPT_GENERATIONS = {
-  [DIRECT_TEMPLATE_NAME]: "cea709c7937fb307648ca7a5be2ed6de14aef3747ee96cff53e4d34270b03536",
+  [DIRECT_TEMPLATE_NAME]: "57c1f304441e38bf4a0dd63bb7a9f031dbcbc55acf52ac0ff16d416a885d5ceb",
   "compound-engineer-workflow": "2a3634bc7c7f74a066ab8fce78c4e0f02f2f9ac65acdcf37e07c993c445bed2c",
   [PR_TEMPLATE_NAME]: "93a909a5d88b6aa158f9f86155853d7aed7762b61bd56dc9a1b17b6e7051281f",
 } as const satisfies Readonly<Record<CanonicalTemplateRegistryName, string>>;

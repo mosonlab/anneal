@@ -49,6 +49,10 @@ const SENIOR_DEV_SOL_ROLE = "senior-dev-sol-high";
 const SENIOR_DEV_OPUS_ROLE = "senior-dev-opus-medium";
 const SENIOR_DEV_ASTRA_LOW_ROLE = "senior-dev-astra-low";
 const SENIOR_DEV_ROLE = "senior-dev-astra-medium";
+const REVIEW_COORDINATOR_SOL_ROLE = "review-coordinator-sol-high";
+const REVIEW_COORDINATOR_ROLE = "review-coordinator-astra-medium";
+const PLAN_EXECUTOR_SOL_ROLE = "plan-executor-sol-high";
+const PLAN_EXECUTOR_ROLE = "plan-executor-astra-low";
 const CODE_REVIEWER_SOL_ROLE = "code-reviewer-sol-high";
 
 // Canonical roles added after the canonical project was seeded, so ordinary
@@ -66,6 +70,8 @@ const SPECIAL_CANONICAL_AGENTS: readonly {
   { canonicalRole: SENIOR_DEV_SOL_ROLE, source: SENIOR_DEV_ROLE, permissions: null },
   { canonicalRole: SENIOR_DEV_OPUS_ROLE, source: SENIOR_DEV_ROLE, permissions: null },
   { canonicalRole: SENIOR_DEV_ASTRA_LOW_ROLE, source: SENIOR_DEV_ROLE, permissions: null },
+  { canonicalRole: REVIEW_COORDINATOR_SOL_ROLE, source: REVIEW_COORDINATOR_ROLE, permissions: null },
+  { canonicalRole: PLAN_EXECUTOR_SOL_ROLE, source: PLAN_EXECUTOR_ROLE, permissions: null },
 ];
 
 /** Agent columns canonical sync writes unless the operator edited them (R9). */
