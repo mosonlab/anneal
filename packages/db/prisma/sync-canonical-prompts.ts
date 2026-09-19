@@ -184,24 +184,34 @@ const createSpecialCanonicalAgent = async (
   sourceRole: string,
   permissions: RepoPermission | null,
 ): Promise<{ created: boolean; grants: number }> => {
-  const existing = await tx.agent.findFirst({
-    where: { projectId: project.id, canonicalRole: role.canonicalRole },
-    select: { id: true, archivedAt: true },
+  // Foreign Projects seeded before `canonicalRole` was introduced may still
+  // carry this canonical Agent under its legacy name. Resolve both identities
+  // before attempting creation, otherwise sync would try to duplicate that row
+  // (or fail on its missing source Agent) before `synchronizeAgents` can claim it.
+  const existing = await findCanonicalAgent(tx, {
+    projectId: project.id,
+    canonicalRole: role.canonicalRole,
+    activeOnly: false,
   });
   if (existing?.archivedAt) {
     throw projectError(project, `Agent ${role.canonicalRole} (${existing.id}) is archived; sync will not resurrect it`);
   }
   if (existing) return { created: false, grants: 0 };
 
-  const source = await tx.agent.findFirst({
-    where: { projectId: project.id, canonicalRole: sourceRole },
-    select: {
-      id: true,
-      environmentId: true,
-      disabledTools: true,
-      archivedAt: true,
-      repoAccess: { select: { projectId: true, repoId: true, mountPath: true, permissions: true } },
-    },
+  const sourceSelect = {
+    id: true,
+    environmentId: true,
+    disabledTools: true,
+    archivedAt: true,
+    repoAccess: { select: { projectId: true, repoId: true, mountPath: true, permissions: true } },
+  } as const;
+  const sourceByRole = await tx.agent.findUnique({
+    where: { projectId_canonicalRole: { projectId: project.id, canonicalRole: sourceRole } },
+    select: sourceSelect,
+  });
+  const source = sourceByRole ?? await tx.agent.findFirst({
+    where: { projectId: project.id, canonicalRole: null, name: sourceRole },
+    select: sourceSelect,
   });
   if (!source || source.archivedAt) {
     throw projectError(project, `Cannot create ${role.canonicalRole}: active source Agent ${sourceRole} was not found`);
@@ -235,17 +245,19 @@ const createSpecialCanonicalAgent = async (
 
 const migrateSpecialCanonicalAgents = async (
   tx: Prisma.TransactionClient,
-  canonicalProject: ProjectRow,
+  project: ProjectRow,
   sources: AgentSources,
   rolesByRole: ReadonlyMap<string, RoleSource>,
   counters: CanonicalSyncCounters,
+  requiredCanonicalRoles: ReadonlySet<string>,
 ): Promise<void> => {
   for (const special of SPECIAL_CANONICAL_AGENTS) {
+    if (!requiredCanonicalRoles.has(special.canonicalRole)) continue;
     const role = rolesByRole.get(special.canonicalRole);
-    if (!role) throw projectError(canonicalProject, `Canonical role ${special.canonicalRole} was not found`);
+    if (!role) throw projectError(project, `Canonical role ${special.canonicalRole} was not found`);
     const outcome = await createSpecialCanonicalAgent(
       tx,
-      canonicalProject,
+      project,
       sources,
       role,
       special.source,
@@ -254,6 +266,30 @@ const migrateSpecialCanonicalAgents = async (
     if (outcome.created) counters.createdAgents += 1;
     if (outcome.grants > 0) counters.createdAgentRepoGrants += outcome.grants;
   }
+};
+
+const specialCanonicalRolesUsedByProjectTemplates = (
+  project: ProjectRow,
+  canonicalProject: ProjectRow,
+  installationRows: readonly CanonicalInstallationRow[],
+  templateSources: ReadonlyMap<CanonicalTemplateName, readonly TemplateStepSource[]>,
+): ReadonlySet<string> => {
+  // The canonical Project retains the historical migration contract: all
+  // special rows are restored even when no current step binds one. Foreign
+  // Projects keep their partial inventory; only a special role named by a
+  // template that is actually present is materialized before binding.
+  if (project.id === canonicalProject.id) return new Set(SPECIAL_CANONICAL_AGENTS.map(({ canonicalRole }) => canonicalRole));
+  const presentTemplates = new Set(
+    installationRows.filter((row) => row.projectId === project.id).map((row) => row.name),
+  );
+  const sourceRoles = new Set(
+    [...templateSources]
+      .filter(([templateName]) => presentTemplates.has(templateName))
+      .flatMap(([, steps]) => steps.flatMap(({ agentName }) => agentName === null ? [] : [agentName])),
+  );
+  return new Set(SPECIAL_CANONICAL_AGENTS
+    .map(({ canonicalRole }) => canonicalRole)
+    .filter((canonicalRole) => sourceRoles.has(canonicalRole)));
 };
 
 const installMissingAgents = async (
@@ -701,9 +737,14 @@ export const main = async (
           }
 
           await adoptRenamedCanonicalRoles(tx, project.id, (message) => projectError(project, message));
-          if (project.id === canonicalProject.id) {
-            await migrateSpecialCanonicalAgents(tx, canonicalProject, sources, rolesByRole, projectCounters);
-          }
+          await migrateSpecialCanonicalAgents(
+            tx,
+            project,
+            sources,
+            rolesByRole,
+            projectCounters,
+            specialCanonicalRolesUsedByProjectTemplates(project, canonicalProject, installationRows, templateSources),
+          );
           await synchronizeAgents(
             tx,
             project,

@@ -27,9 +27,13 @@ Neither role is in `SPECIAL_CANONICAL_AGENTS` in
 not recreate a missing or archived row for these roles and refuses an
 incomplete canonical inventory. Fresh seeds install both roles from the source
 inventory. The current Sol high review coordinator, plan executor, and senior
-developer roles are in that special-agent list so canonical sync can recreate
-their rows in an already-seeded project; their Astra counterparts remain
-available as explicit user-named escalation roles.
+developer roles are in that special-agent list. When an already-seeded Project
+already has a canonical template that uses one of those roles, ordinary sync
+recreates a missing active row before it adopts the template's binding,
+copying the designated source Agent's environment, tools, and repository
+grants. Projects without such a template keep their partial inventory, and a
+missing or archived source Agent still refuses that Project. Their Astra
+counterparts remain available as explicit user-named escalation roles.
 
 ## Changing a canonical prompt
 

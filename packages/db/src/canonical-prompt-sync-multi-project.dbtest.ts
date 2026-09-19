@@ -18,6 +18,7 @@ import {
   CodexServiceTier,
   Prisma,
   PrismaClient,
+  RepoPermission,
   RunnerPreference,
   TaskStatus,
 } from "@prisma/client";
@@ -186,6 +187,7 @@ const copyTemplate = async (
   project: FixtureProject,
   name: CanonicalTemplateName,
   agentIds?: Map<string, string>,
+  assigneeOverrides: ReadonlyMap<string, string> = new Map(),
 ) => {
   const source = await canonicalTemplate(name);
   const target = await prisma.taskTemplate.create({
@@ -203,7 +205,9 @@ const copyTemplate = async (
         stepIndex: step.stepIndex,
         layer: step.layer,
         name: step.name,
-        assigneeAgentId: step.assigneeAgent ? agentIds?.get(step.assigneeAgent.name) ?? null : null,
+        assigneeAgentId: step.assigneeAgent
+          ? agentIds?.get(assigneeOverrides.get(step.assigneeAgent.name) ?? step.assigneeAgent.name) ?? null
+          : null,
         assigneeType: step.assigneeType,
         runner: step.runner,
         approvalGate: step.approvalGate,
@@ -409,6 +413,137 @@ test("ordinary sync covers active canonical Agents in every Project and preserve
   assert.equal(summary.projects[project.slug]!.runtimeDriftNotices, 1);
   assert.equal(summary.projects[project.slug]!.updatedRoles["senior-dev-astra-medium"], 1);
   assert.equal(summary.projects[canonicalProject.slug]!.updatedRoles.default, 1);
+});
+
+test("sync recreates missing special Agents before adopting historical bindings", async (t) => {
+  const project = await createProject(`a2-special-bindings-${randomBytes(4).toString("hex")}`);
+  const refusedProject = await createProject(`a2-special-bindings-refused-${randomBytes(4).toString("hex")}`);
+  const healthyProject = await createProject(`a2-special-bindings-healthy-${randomBytes(4).toString("hex")}`);
+  const overrides = new Map([
+    ["review-coordinator-sol-high", "review-coordinator-astra-medium"],
+    ["plan-executor-sol-high", "plan-executor-astra-low"],
+    ["senior-dev-sol-high", "senior-dev-astra-low"],
+  ]);
+  const missingSpecialRoles = new Set([
+    "regression-verifier-luna-max",
+    "spec-revalidator-luna-xhigh",
+    "review-coordinator-sol-high",
+    "plan-executor-sol-high",
+  ]);
+  const names = new Set([
+    ...(await templateAssigneeNames("direct-engineer-workflow")),
+    ...(await templateAssigneeNames("compound-engineer-workflow")),
+    "senior-dev-sol-high",
+    "senior-dev-astra-medium",
+  ]);
+  for (const missing of missingSpecialRoles) names.delete(missing);
+  for (const replacement of overrides.values()) names.add(replacement);
+  const agents = await createAgents(project, [...names]);
+  const repo = await prisma.repo.create({
+    data: {
+      projectId: project.id,
+      name: `canonical-sync-special-bindings-${randomBytes(4).toString("hex")}`,
+      remoteUrl: "file:///tmp/agentos-canonical-sync-special-bindings.git",
+      mountPath: "/workspace/canonical-sync-special-bindings",
+      dependencyProvisioning: "NONE",
+    },
+  });
+  t.after(async () => {
+    await deleteProject(project.id);
+    await deleteProject(refusedProject.id);
+    await deleteProject(healthyProject.id);
+  });
+  for (const sourceName of [
+    "code-reviewer-sol-high",
+    "review-coordinator-astra-medium",
+    "plan-executor-astra-low",
+    "senior-dev-astra-medium",
+  ]) {
+    await prisma.agentRepoAccess.create({
+      data: {
+        agentId: agents.get(sourceName)!,
+        repoId: repo.id,
+        projectId: project.id,
+        mountPath: repo.mountPath,
+        permissions: RepoPermission.GIT_WRITE,
+      },
+    });
+  }
+  const direct = await copyTemplate(project, "direct-engineer-workflow", agents, overrides);
+  const compound = await copyTemplate(project, "compound-engineer-workflow", agents, overrides);
+  // This Project models a seed from before canonicalRole was recorded; sync
+  // must resolve both the special targets and their copy sources by legacy name.
+  await prisma.agent.updateMany({
+    where: {
+      projectId: project.id,
+      name: { in: ["code-reviewer-sol-high", "review-coordinator-astra-medium", "plan-executor-astra-low", "senior-dev-astra-medium"] },
+    },
+    data: { canonicalRole: null },
+  });
+  const refusedNames = (await templateAssigneeNames("direct-engineer-workflow"))
+    .filter((name) => name !== "code-reviewer-opus-medium");
+  const refusedAgents = await createAgents(refusedProject, refusedNames);
+  await copyTemplate(refusedProject, "direct-engineer-workflow", refusedAgents);
+  await createAgents(healthyProject, ["default"]);
+  const healthyAgent = await prisma.agent.findUniqueOrThrow({
+    where: { projectId_name: { projectId: healthyProject.id, name: "default" } },
+  });
+  await prisma.agent.update({
+    where: { id: healthyAgent.id },
+    data: { foundationalPrompt: "healthy Project prompt drift", rolePrompt: "healthy Project role drift" },
+  });
+  const before = await prisma.taskTemplateStep.findMany({
+    where: { taskTemplateId: { in: [direct.id, compound.id] } },
+    select: { taskTemplateId: true, stepIndex: true, assigneeAgent: { select: { name: true } } },
+    orderBy: [{ taskTemplateId: "asc" }, { stepIndex: "asc" }],
+  });
+  assert.ok(before.some(({ assigneeAgent }) => assigneeAgent?.name === "review-coordinator-astra-medium"));
+  assert.ok(before.some(({ assigneeAgent }) => assigneeAgent?.name === "plan-executor-astra-low"));
+
+  const synced = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
+  assert.equal(synced.status, 0, synced.output);
+  assert.doesNotMatch(synced.output, new RegExp(`^REFUSED ${project.slug}:`, "mu"));
+  assert.match(synced.output, new RegExp(`^REFUSED ${refusedProject.slug}: .*cannot adopt code-reviewer-opus-medium: active target Agent was not found`, "mu"));
+  const summary = parseCanonicalSyncSummary(synced.output);
+  assert.equal(summary.projects[project.slug]!.createdAgents, missingSpecialRoles.size);
+  assert.equal(summary.projects[project.slug]!.createdAgentRepoGrants, missingSpecialRoles.size);
+  assert.equal(summary.projects[healthyProject.slug]!.templates, 0);
+  assert.equal(Object.hasOwn(summary.projects, refusedProject.slug), false);
+  assert.equal(await prisma.agent.count({ where: { projectId: project.id, canonicalRole: { in: [...missingSpecialRoles] } } }), missingSpecialRoles.size);
+  const grants = await prisma.agentRepoAccess.findMany({
+    where: { projectId: project.id, agent: { canonicalRole: { in: [...missingSpecialRoles] } } },
+    select: { permissions: true, agent: { select: { canonicalRole: true } } },
+    orderBy: { agent: { canonicalRole: "asc" } },
+  });
+  assert.deepEqual(grants.map(({ agent, permissions }) => [agent.canonicalRole, permissions]), [
+    ["plan-executor-sol-high", RepoPermission.GIT_WRITE],
+    ["regression-verifier-luna-max", RepoPermission.GIT_WRITE],
+    ["review-coordinator-sol-high", RepoPermission.GIT_WRITE],
+    ["spec-revalidator-luna-xhigh", RepoPermission.GIT_READ],
+  ]);
+  const assigneeName = async (templateId: string, stepIndex: number): Promise<string | null> => (
+    (await prisma.taskTemplateStep.findUniqueOrThrow({
+      where: { taskTemplateId_stepIndex: { taskTemplateId: templateId, stepIndex } },
+      select: { assigneeAgent: { select: { name: true } } },
+    })).assigneeAgent?.name ?? null
+  );
+  assert.equal(await assigneeName(direct.id, 3), "code-reviewer-sol-high");
+  assert.equal(await assigneeName(direct.id, 5), "senior-dev-sol-high");
+  assert.equal(await assigneeName(direct.id, 7), "review-coordinator-sol-high");
+  assert.equal(await assigneeName(compound.id, 3), "review-coordinator-sol-high");
+  assert.equal(await assigneeName(compound.id, 5), "plan-executor-sol-high");
+  assert.equal(await assigneeName(compound.id, 6), "code-reviewer-sol-high");
+  assert.equal(await assigneeName(compound.id, 8), "senior-dev-sol-high");
+  assert.equal(await assigneeName(compound.id, 11), "review-coordinator-sol-high");
+  assert.ok(before.some(({ assigneeAgent }) => assigneeAgent?.name === "review-coordinator-astra-medium"));
+  assert.ok(before.some(({ assigneeAgent }) => assigneeAgent?.name === "plan-executor-astra-low"));
+  assert.deepEqual(
+    await prisma.agent.findUniqueOrThrow({
+      where: { id: healthyAgent.id },
+      select: { foundationalPrompt: true, rolePrompt: true },
+    }),
+    { foundationalPrompt: sources.foundationalPrompt, rolePrompt: role("default").rolePrompt },
+  );
 });
 
 test("sync adopts renamed canonical roles in place without duplicating Agents", async (t) => {

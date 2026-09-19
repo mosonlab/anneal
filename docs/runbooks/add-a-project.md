@@ -223,7 +223,12 @@ npm run db:sync-canonical-prompts
 An ordinary sync visits every Project. It restores prompts and validates
 canonical-named Agents and template rows that a Project already holds. A
 partial inventory is valid outside `agentos-example`; absent canonical Agents
-and templates are left absent. `agentos-example` remains the canonical Project
+and templates are left absent. If a present canonical template needs a missing
+role listed in `SPECIAL_CANONICAL_AGENTS`, sync recreates that special Agent
+from its designated active source (including the source's environment, tools,
+and repository grants) before adopting the step binding. No other absent Agent
+is created: a missing non-special target, or a missing/archived special source,
+still refuses that Project. `agentos-example` remains the canonical Project
 and its complete template inventory is restored when a canonical row is
 missing.
 

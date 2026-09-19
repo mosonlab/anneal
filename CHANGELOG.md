@@ -20,6 +20,14 @@ written.
   a Sol high attempt actually fails; the optional `review-astra-medium`
   staffing profile remains available.
 
+### Canonical synchronization
+
+- **A seeded Project no longer loses prompt updates when a current canonical
+  template still points at a newly introduced Sol high role.** Ordinary sync
+  recreates only the missing special Agent required by that template before
+  adopting its binding, copying the designated source's repository grants;
+  missing non-special roles continue to refuse that Project.
+
 ### Merge gate and gate workers
 
 - **A dispatcher slot count one greater than the worker's `worker-capacity` is
