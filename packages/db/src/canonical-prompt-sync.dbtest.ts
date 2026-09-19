@@ -1407,7 +1407,7 @@ test(`sync recreates a missing ${specialName} Agent from ${sourceName}`, async (
   }
   assert.equal(sol.model, specialSource.model);
   assert.equal(sol.runnerPreference, specialSource.runnerPreference);
-  assert.equal(sol.inboxAccess, true);
+  assert.equal(sol.inboxAccess, source.inboxAccess);
   assert.equal(sol.environmentId, source.environmentId);
   assert.deepEqual(sol.customizedFields, []);
   // The role binds no template step, so the source Agent's write grant is the
@@ -1822,12 +1822,13 @@ test("seed and sync preserve every seed-era legacy template identity", async () 
   const agentId = async (name: string): Promise<string> => (
     await prisma.agent.findUniqueOrThrow({ where: { projectId_name: { projectId: project.id, name } } })
   ).id;
-  const [coordinatorId, integratorId, librarianId, regressionVerifierId, seniorDevId] = await Promise.all([
+  const [coordinatorId, integratorId, librarianId, regressionVerifierId, seniorDevId, planExecutorId] = await Promise.all([
     agentId("review-coordinator-astra-medium"),
     agentId("merge-integrator"),
     agentId("librarian-luna-xhigh"),
     agentId("regression-verifier-luna-max"),
     agentId("senior-dev-astra-medium"),
+    agentId("plan-executor-astra-low"),
   ]);
 
   const legacyRows: Array<{
@@ -1930,6 +1931,14 @@ test("seed and sync preserve every seed-era legacy template identity", async () 
       await prisma.taskTemplateStep.update({
         where: { id: stepAt(template, 4).id },
         data: { approvalGate: true },
+      });
+      await prisma.taskTemplateStep.update({
+        where: { id: stepAt(template, 5).id },
+        data: {
+          assigneeAgentId: planExecutorId,
+          assigneeType: AssigneeType.AGENT,
+          outputKind: "implementation",
+        },
       });
       await prisma.taskTemplateStep.update({
         where: { id: stepAt(template, 6).id },

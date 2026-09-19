@@ -65,7 +65,7 @@ const seed = async (templateName = "custom-workflow") => {
         ...(archived ? { archivedAt: new Date() } : {}),
       },
     });
-  const implementer = await agent("senior-dev-astra-medium", "gpt-5.6-astra:medium", RunnerPreference.CODEX);
+  const implementer = await agent("senior-dev-sol-high", "gpt-5.6-sol:high", RunnerPreference.CODEX);
   const reviewer = await agent("code-reviewer-sol-high", "gpt-5.6-sol:high", RunnerPreference.CODEX);
   const claudeAgent = await agent("frontend-dev-opus-medium", "claude-opus-5:medium", RunnerPreference.CLAUDE);
   const integrator = await agent(INTEGRATOR_AGENT_NAME, "mechanical/merge-integrator", RunnerPreference.INHERIT);

@@ -107,7 +107,7 @@ test("reset without a Repo in a multi-Repo project restores the canonical slot w
     default: "repair",
     frontend: "agent-frontend",
     hard: "agent-hard",
-    hazard: "agent-hazard",
+    hazard: "agent-hard",
   });
   assert.equal(observed.entriesWritten(), true);
   assert.equal(result.warnings[0]?.code, "merge_tail_repair_repo_unresolved");
