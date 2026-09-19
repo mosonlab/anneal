@@ -242,7 +242,7 @@ test("profiles are created, listed, replaced, reset and deleted", async () => {
   assert.deepEqual(reset.body.profile.tiers, {
     default: fixture.repairAgent.id,
     frontend: fixture.claudeAgent.id,
-    hard: null,
+    hard: fixture.implementer.id,
     hazard: fixture.implementer.id,
   });
 

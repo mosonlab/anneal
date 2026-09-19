@@ -1933,6 +1933,14 @@ test("seed and sync preserve every seed-era legacy template identity", async () 
         data: { approvalGate: true },
       });
       await prisma.taskTemplateStep.update({
+        where: { id: stepAt(template, 3).id },
+        data: {
+          assigneeAgentId: coordinatorId,
+          assigneeType: AssigneeType.AGENT,
+          outputKind: "plan-review",
+        },
+      });
+      await prisma.taskTemplateStep.update({
         where: { id: stepAt(template, 5).id },
         data: {
           assigneeAgentId: planExecutorId,
