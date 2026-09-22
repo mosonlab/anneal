@@ -486,7 +486,7 @@ test("the Astra-low review-fix generation is kept on record and retired from mat
     assert.equal(generation.retiredByBinding, true, templateName);
     assert.equal(generation.promptDigest, undefined, templateName);
     const fixIndex = current.findIndex((step) => step.outputKind === "fixed-implementation");
-    assert.equal(current[fixIndex]!.agentName, "senior-dev-sol-high", templateName);
+    assert.equal(current[fixIndex]!.agentName, "senior-dev-opus-medium", templateName);
 
     // Apart from the later review rename, the rebinding left no structural
     // trace, which is the reason for the flag.

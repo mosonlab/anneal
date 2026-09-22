@@ -208,7 +208,7 @@ test("sync creates the pull-request template when the pre-existing canonical ins
   });
   assert.deepEqual(created.variables, ["branchName"]);
   assert.deepEqual(created.steps.map(({ assigneeAgent }) => assigneeAgent?.name), [
-    "senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-medium", "senior-dev-sol-high",
+    "senior-dev-luna-max", "code-reviewer-sol-high", "code-reviewer-opus-medium", "senior-dev-opus-medium",
   ]);
   assert.equal(JSON.stringify(await prisma.taskTemplate.findMany({
     where: {

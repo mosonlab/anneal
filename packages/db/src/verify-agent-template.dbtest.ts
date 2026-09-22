@@ -75,7 +75,7 @@ const partialRoleNames = [
   "senior-dev-luna-max",
   "code-reviewer-sol-high",
   "code-reviewer-opus-medium",
-  "senior-dev-sol-high",
+  "senior-dev-opus-medium",
 ] as const;
 
 type ProjectFixture = {
@@ -269,7 +269,7 @@ test("--project rejects every canonical Agent field drift with project and Agent
       name: "collaborators",
       apply: async (fixture) => {
         const agent = fixture.agents.get("senior-dev-luna-max")!;
-        const allowed = fixture.agents.get("senior-dev-sol-high")!;
+        const allowed = fixture.agents.get("senior-dev-opus-medium")!;
         await prisma.agentCollaboration.create({
           data: { agentId: agent.id, allowedAgentId: allowed.id, projectId: fixture.id },
         });
@@ -431,7 +431,7 @@ test("--project rejects every canonical template step field with template/step i
     { name: "agent", apply: async (fixture, step) => {
       await prisma.taskTemplateStep.update({
         where: { id: step.id },
-        data: { assigneeAgentId: fixture.agents.get("senior-dev-sol-high")!.id },
+        data: { assigneeAgentId: fixture.agents.get("senior-dev-opus-medium")!.id },
       });
     } },
     { name: "assigneeType", apply: async (_fixture, step) => {

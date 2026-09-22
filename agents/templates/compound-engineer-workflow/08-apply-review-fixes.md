@@ -1,7 +1,7 @@
 ---
 stepIndex: 8
 layer: 7
-agent: senior-dev-sol-high
+agent: senior-dev-opus-medium
 approvalGate: false
 optional: false
 outputKind: fixed-implementation

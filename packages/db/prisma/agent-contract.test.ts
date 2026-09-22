@@ -222,7 +222,7 @@ test("frontend implementation routing defaults to Opus medium", async () => {
   assert.doesNotMatch(revalidation.prompt, /The current\s+Agent is `frontend-dev-opus-high`/u);
 });
 
-test("Sol high owns the hazard tier and every current template default", async () => {
+test("Sol high owns the hazard tier and current template defaults", async () => {
   assert.equal(CANONICAL_STAFFING_TIER_ROLES.hazard, "senior-dev-sol-high");
 
   const templates = await loadAllTemplateStepSources();
@@ -231,13 +231,13 @@ test("Sol high owns the hazard tier and every current template default", async (
 
   assert.deepEqual(
     templates.get("compound-engineer-workflow")!.filter((step) => ["plan-review", "implementation", "fixed-implementation", "merge-authorization"].includes(step.outputKind)).map((step) => step.agentName),
-    ["review-coordinator-sol-high", "plan-executor-sol-high", "senior-dev-sol-high", "review-coordinator-sol-high"],
+    ["review-coordinator-sol-high", "plan-executor-sol-high", "senior-dev-opus-medium", "review-coordinator-sol-high"],
   );
   assert.deepEqual(
     templates.get(DIRECT_TEMPLATE_NAME)!.filter((step) => ["fixed-implementation", "merge-authorization"].includes(step.outputKind)).map((step) => step.agentName),
-    ["senior-dev-sol-high", "review-coordinator-sol-high"],
+    ["senior-dev-opus-medium", "review-coordinator-sol-high"],
   );
-  assert.equal(templates.get(PR_TEMPLATE_NAME)!.find((step) => step.outputKind === "fixed-implementation")?.agentName, "senior-dev-sol-high");
+  assert.equal(templates.get(PR_TEMPLATE_NAME)!.find((step) => step.outputKind === "fixed-implementation")?.agentName, "senior-dev-opus-medium");
 
   const revalidation = templates.get(DIRECT_TEMPLATE_NAME)!.find((step) => step.outputKind === "revalidation");
   assert.ok(revalidation);
@@ -358,7 +358,7 @@ test("the canonical twelve-step layered template sources split review and preser
       { stepIndex: 5, layer: 5, agentName: "plan-executor-sol-high", outputKind: "implementation" },
       { stepIndex: 6, layer: 6, agentName: "code-reviewer-sol-high", outputKind: "review-findings" },
       { stepIndex: 7, layer: 6, agentName: "code-reviewer-opus-medium", outputKind: "blind-findings" },
-      { stepIndex: 8, layer: 7, agentName: "senior-dev-sol-high", outputKind: "fixed-implementation" },
+      { stepIndex: 8, layer: 7, agentName: "senior-dev-opus-medium", outputKind: "fixed-implementation" },
       { stepIndex: 9, layer: 8, agentName: "librarian-luna-xhigh", outputKind: "documentation" },
       { stepIndex: 10, layer: 9, agentName: "regression-verifier-luna-max", outputKind: "regression-verification-v2" },
       { stepIndex: 11, layer: 10, agentName: "review-coordinator-sol-high", outputKind: "merge-authorization" },
@@ -449,7 +449,7 @@ test("the direct template sources expose the layered review spine and mechanical
       { stepIndex: 2, layer: 2, agentName: "senior-dev-luna-max", outputKind: "implementation" },
       { stepIndex: 3, layer: 3, agentName: "code-reviewer-sol-high", outputKind: "review-findings" },
       { stepIndex: 4, layer: 3, agentName: "code-reviewer-opus-medium", outputKind: "blind-findings" },
-      { stepIndex: 5, layer: 4, agentName: "senior-dev-sol-high", outputKind: "fixed-implementation" },
+      { stepIndex: 5, layer: 4, agentName: "senior-dev-opus-medium", outputKind: "fixed-implementation" },
       { stepIndex: 6, layer: 5, agentName: "regression-verifier-luna-max", outputKind: "regression-verification-v2" },
       { stepIndex: 7, layer: 6, agentName: "review-coordinator-sol-high", outputKind: "merge-authorization" },
       { stepIndex: 8, layer: 7, agentName: "merge-integrator", outputKind: "merge-result" },

@@ -239,7 +239,7 @@ test("role and template source failures happen before any Project row is written
       loaders: {
         loadAgentSources: async () => ({
           ...actualRoles,
-          roles: actualRoles.roles.filter(({ name }) => name !== "senior-dev-sol-high"),
+          roles: actualRoles.roles.filter(({ name }) => name !== "senior-dev-opus-medium"),
         }),
       },
     },

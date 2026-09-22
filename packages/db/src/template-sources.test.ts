@@ -277,7 +277,7 @@ test("the pull-request workflow source exposes its exact four-step graph and pro
         name: "Apply review fixes",
         stepIndex: 4,
         layer: 3,
-        agent: "senior-dev-sol-high",
+        agent: "senior-dev-opus-medium",
         approvalGate: false,
         optional: false,
         outputKind: "fixed-implementation",

@@ -155,7 +155,7 @@ The seed installs three templates over these roles: the twelve-step Full
 Assurance chain, the eight-step bound-capable direct chain
 (`direct-engineer-workflow`) — revalidation for bound briefs, implementation by
 `senior-dev-luna-max` from the task brief, parallel code review and blind code
-review siblings whose findings the fix step (`senior-dev-sol-high`) adjudicates
+review siblings whose findings the fix step (`senior-dev-opus-medium`) adjudicates
 itself, exact-head regression, server-side readiness, and mechanical merge —
 and the four-step pull-request chain (`pr-engineer-workflow`), which runs
 implementation, code review and blind code review, and review-fix application
@@ -168,12 +168,12 @@ prompts. All three step contracts live in their Markdown directories under
 
 Provider-specific or temporary roles are not canonical defaults unless the
 cross-provider review contract explicitly requires separate identities.
-`review-coordinator-sol-high`, `plan-executor-sol-high`, and
-`senior-dev-sol-high` are canonical because the current templates and the
-implementation-assignee routing rules in
-`docs/governance/task-routing-v1.md` use them as the Sol high defaults.
-`senior-dev-opus-medium` and `senior-dev-opus-high` remain explicit Claude
-routes an operator names to spend Claude capacity. The Astra roles — including
+`review-coordinator-sol-high` and `plan-executor-sol-high` are canonical because
+the compound template uses them as Sol high defaults; `senior-dev-sol-high` is
+canonical for the `hard` and `hazard` implementation tiers; `senior-dev-opus-medium`
+is canonical because every template binds it to the review-fix step.
+`senior-dev-opus-high` remains an explicit Claude route an operator names to spend
+Claude capacity. The Astra roles — including
 `review-coordinator-astra-medium`, `plan-executor-astra-low`,
 `senior-dev-astra-medium`, and `senior-dev-astra-low` — stay in the canonical
 roster for history and explicit staffing, but are used only when the user names

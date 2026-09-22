@@ -99,7 +99,7 @@ different models stay distinguishable at a glance.
 | 5 | Implementation | `plan-executor-sol-high` | Executes the slice set from the live dependency frontier and opens the pull request | Codex | GPT-5.6 Sol · high, with GPT-5.6 Luna · max subagents |
 | 6 | Code review | `code-reviewer-sol-high` | Reviews the integrated diff at the pinned base and head | Codex | GPT-5.6 Sol · high |
 | 7 | Blind code review | `code-reviewer-opus-medium` | Reviews the same diff again, blind to step 6's findings | Claude | Claude Opus 5 · medium |
-| 8 | Apply review fixes | `senior-dev-sol-high` | Dispositions every finding from both reviews and applies the adopted ones | Codex | GPT-5.6 Sol · high |
+| 8 | Apply review fixes | `senior-dev-opus-medium` | Dispositions every finding from both reviews and applies the adopted ones | Claude | Claude Opus 5 · medium |
 | 9 | Documentation | `librarian-luna-xhigh` | Updates internal documentation to match the delivered code | Codex | GPT-5.6 Luna · xhigh |
 | 10 | Regression verification | `regression-verifier-luna-max` | Refreshes onto the target branch and reruns the regressions | Codex | GPT-5.6 Luna · max |
 | 11 | Merge readiness | — | Recomputes the head, requires head-bound regression PASS evidence and a server-side ancestry check, emits an exact-head authorization | — | mechanical, no model run |

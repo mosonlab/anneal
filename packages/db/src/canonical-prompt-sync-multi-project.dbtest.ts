@@ -528,12 +528,12 @@ test("sync recreates missing special Agents before adopting historical bindings"
     })).assigneeAgent?.name ?? null
   );
   assert.equal(await assigneeName(direct.id, 3), "code-reviewer-sol-high");
-  assert.equal(await assigneeName(direct.id, 5), "senior-dev-sol-high");
+  assert.equal(await assigneeName(direct.id, 5), "senior-dev-opus-medium");
   assert.equal(await assigneeName(direct.id, 7), "review-coordinator-sol-high");
   assert.equal(await assigneeName(compound.id, 3), "review-coordinator-sol-high");
   assert.equal(await assigneeName(compound.id, 5), "plan-executor-sol-high");
   assert.equal(await assigneeName(compound.id, 6), "code-reviewer-sol-high");
-  assert.equal(await assigneeName(compound.id, 8), "senior-dev-sol-high");
+  assert.equal(await assigneeName(compound.id, 8), "senior-dev-opus-medium");
   assert.equal(await assigneeName(compound.id, 11), "review-coordinator-sol-high");
   assert.ok(before.some(({ assigneeAgent }) => assigneeAgent?.name === "review-coordinator-astra-medium"));
   assert.ok(before.some(({ assigneeAgent }) => assigneeAgent?.name === "plan-executor-astra-low"));

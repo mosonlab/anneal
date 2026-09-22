@@ -11,6 +11,11 @@ written.
 
 ### Staffing and model routes
 
+- **Apply review fixes defaults to Claude Opus medium across all templates.**
+  The review-fix step in `direct-engineer-workflow`, `compound-engineer-workflow`,
+  and `pr-engineer-workflow` binds to `senior-dev-opus-medium` by canonical
+  default, giving fix adjudication and resolution to Claude Opus 5 at medium
+  reasoning effort.
 - **Canonical staffing no longer uses Astra as a default.** Plan review uses
   `review-coordinator-sol-high`, compound implementation uses
   `plan-executor-sol-high`, Apply review fixes uses `senior-dev-sol-high`, and

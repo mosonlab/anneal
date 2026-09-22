@@ -60,7 +60,7 @@ export CHAIN_NAME="Demo: open the first pull request"
 Call `POST /projects` with a name and lowercase hyphenated slug. A1 creates
 the Project in one bootstrap operation with its `local` Environment, the four
 workflow Agents `senior-dev-luna-max`, `code-reviewer-sol-high`,
-`code-reviewer-opus-medium`, and `senior-dev-sol-high`, and the canonical
+`code-reviewer-opus-medium`, and `senior-dev-opus-medium`, and the canonical
 `pr-engineer-workflow` TaskTemplate.
 
 ```sh

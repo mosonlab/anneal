@@ -35,7 +35,7 @@ export const PROJECT_BOOTSTRAP_ROLE_NAMES = [
   "senior-dev-luna-max",
   "code-reviewer-sol-high",
   "code-reviewer-opus-medium",
-  "senior-dev-sol-high",
+  "senior-dev-opus-medium",
 ] as const;
 
 export type ProjectBootstrapRoleLoader = () => Promise<AgentSources>;
