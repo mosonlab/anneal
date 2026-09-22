@@ -11,10 +11,10 @@ written.
 
 ### Staffing and model routes
 
-- **Code review defaults to PI runner for Sol high.** The canonical
-  `code-reviewer-sol-high` role now runs under the PI CLI runner using
-  `openai-codex/gpt-5.6-sol:high`, reducing startup latency and context overhead
-  for read-only diff reviews.
+- **Code review and plan review default to PI runner for Sol high.** The
+  canonical `code-reviewer-sol-high` and `review-coordinator-sol-high` roles now
+  run under the PI CLI runner using `openai-codex/gpt-5.6-sol:high`, reducing
+  startup latency and context overhead for read-only reviews.
 - **Apply review fixes defaults to Claude Opus medium across all templates.**
   The review-fix step in `direct-engineer-workflow`, `compound-engineer-workflow`,
   and `pr-engineer-workflow` binds to `senior-dev-opus-medium` by canonical

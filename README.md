@@ -94,7 +94,7 @@ different models stay distinguishable at a glance.
 | --- | --- | --- | --- | --- | --- |
 | 1 | Write a spec | `spec-opus-high` | Turns the task into the specification of record | Claude | Claude Opus 5 · high |
 | 2 | Plan | `plan-fable-medium` | Cuts the spec into parallel vertical tracer-bullet slices | Claude | Claude Fable 5 · medium |
-| 3 | Plan review | `review-coordinator-sol-high` | Reviews every slice against the spec and the frozen base | Codex | GPT-5.6 Sol · high |
+| 3 | Plan review | `review-coordinator-sol-high` | Reviews every slice against the spec and the frozen base | PI | GPT-5.6 Sol · high |
 | 4 | Revise plan | `plan-reviser-opus-medium` | Edits the slice set against the findings, in a fresh session | Claude | Claude Opus 5 · medium |
 | 5 | Implementation | `plan-executor-sol-high` | Executes the slice set from the live dependency frontier and opens the pull request | Codex | GPT-5.6 Sol · high, with GPT-5.6 Luna · max subagents |
 | 6 | Code review | `code-reviewer-sol-high` | Reviews the integrated diff at the pinned base and head | PI | GPT-5.6 Sol · high |
