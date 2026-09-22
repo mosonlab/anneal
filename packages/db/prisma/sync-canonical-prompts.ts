@@ -357,7 +357,7 @@ const installMissingAgents = async (
   }
 };
 
-const synchronizeAgents = async (
+export const synchronizeAgents = async (
   tx: Prisma.TransactionClient,
   project: ProjectRow,
   requireCompleteInventory: boolean,
@@ -444,9 +444,19 @@ const synchronizeAgents = async (
     const differences = roleSourceStructureDifferences(agent, role);
     const adoptable = (field: string): boolean => (ADOPTABLE_AGENT_FIELDS as readonly string[]).includes(field);
     const structuralDifferences = differences.filter((difference) => !adoptable(difference));
-    const adoptedDifferences = differences.filter((difference) => adoptable(difference) && !customized.has(difference));
+    let adoptedDifferences = differences.filter((difference) => adoptable(difference) && !customized.has(difference));
+    if (adoptedDifferences.includes("runnerPreference") && !adoptedDifferences.includes("model")) {
+      if (runtimeConfigRefusal({ model: agent.model, runnerPreference: role.runnerPreference })) {
+        adoptedDifferences = adoptedDifferences.filter((difference) => difference !== "runnerPreference");
+      }
+    } else if (adoptedDifferences.includes("model") && !adoptedDifferences.includes("runnerPreference")) {
+      if (runtimeConfigRefusal({ model: role.model, runnerPreference: agent.runnerPreference })) {
+        adoptedDifferences = adoptedDifferences.filter((difference) => difference !== "model");
+      }
+    }
     const runtimeDrift = differences.some((difference) => (
-      (RUNTIME_AGENT_FIELDS as readonly string[]).includes(difference) && customized.has(difference)
+      (RUNTIME_AGENT_FIELDS as readonly string[]).includes(difference)
+      && (customized.has(difference) || !adoptedDifferences.includes(difference))
     ));
     const runtimeRefusal = runtimeConfigRefusal(agent);
     if (structuralDifferences.length > 0) {
@@ -476,7 +486,7 @@ const synchronizeAgents = async (
           ...(adoptedDifferences.includes("title") ? { title: role.title } : {}),
           ...(adoptedDifferences.includes("model") ? { model: role.model } : {}),
           ...(adoptedDifferences.includes("runnerPreference") ? { runnerPreference: role.runnerPreference } : {}),
-          ...(adoptsRuntime ? { runtimeConfigDriftNoticeFingerprint: null } : {}),
+          ...(adoptsRuntime && !runtimeDrift ? { runtimeConfigDriftNoticeFingerprint: null } : {}),
         },
       });
       if (adopted.count !== 1) {
@@ -485,14 +495,30 @@ const synchronizeAgents = async (
       if (adoptedDifferences.includes("name")) {
         namesInProject.delete(agent.name);
         namesInProject.set(role.name, agent.id);
+        agent.name = role.name;
+      }
+      if (adoptedDifferences.includes("title")) {
+        agent.title = role.title;
       }
       if (adoptsRuntime) {
         counters.adoptedAgentDefaults += 1;
         runtimeConfigAdoptions.push({
           name: agent.name,
           from: { model: agent.model, runnerPreference: agent.runnerPreference },
-          to: { model: role.model, runnerPreference: role.runnerPreference },
+          to: {
+            model: adoptedDifferences.includes("model") ? role.model : agent.model,
+            runnerPreference: adoptedDifferences.includes("runnerPreference") ? role.runnerPreference : agent.runnerPreference,
+          },
         });
+        if (adoptedDifferences.includes("model")) {
+          agent.model = role.model;
+        }
+        if (adoptedDifferences.includes("runnerPreference")) {
+          agent.runnerPreference = role.runnerPreference;
+        }
+        if (!runtimeDrift) {
+          agent.runtimeConfigDriftNoticeFingerprint = null;
+        }
       }
       if (adoptedDifferences.some((difference) => difference === "name" || difference === "title")) {
         counters.adoptedAgentIdentity += 1;
@@ -516,6 +542,7 @@ const synchronizeAgents = async (
         if (claimed.count !== 1) {
           throw projectError(project, `Agent ${agent.name} (${agent.id}) changed while canonical runtime drift was being recorded`);
         }
+        agent.runtimeConfigDriftNoticeFingerprint = fingerprint;
         const chatId = process.env["FEISHU_DEFAULT_CHAT_ID"];
         const thread = chatId ? (
           await tx.inboxThread.findFirst({ where: { channel: "FEISHU", externalChatId: chatId, sessionId: null } })
@@ -546,6 +573,7 @@ const synchronizeAgents = async (
         },
         data: { runtimeConfigDriftNoticeFingerprint: null },
       });
+      agent.runtimeConfigDriftNoticeFingerprint = null;
     }
 
     const promptUpdate = await tx.agent.updateMany({

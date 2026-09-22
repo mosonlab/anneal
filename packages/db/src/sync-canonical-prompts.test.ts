@@ -6,12 +6,22 @@ import type { PrismaClient } from "@prisma/client";
 type SyncModule = {
   main: (database?: PrismaClient, installFullProjectId?: string | null) => Promise<void>;
   parseInstallFullProjectId: (args?: readonly string[]) => string | null;
+  synchronizeAgents: (
+    tx: unknown,
+    project: unknown,
+    requireCompleteInventory: boolean,
+    sources: unknown,
+    rolesByRole: ReadonlyMap<string, unknown>,
+    roles: readonly string[],
+    counters: Record<string, unknown>,
+    runtimeConfigAdoptions: unknown[],
+  ) => Promise<void>;
 };
 
 // Keep the acceptance test under src/ without pulling the prisma CLI entrypoint
 // under src/'s TypeScript rootDir during the library typecheck.
 const syncModulePath: string = "../prisma/sync-canonical-prompts.js";
-const { main, parseInstallFullProjectId } = await import(syncModulePath) as SyncModule;
+const { main, parseInstallFullProjectId, synchronizeAgents } = await import(syncModulePath) as SyncModule;
 
 const asPrisma = (value: unknown): PrismaClient => value as PrismaClient;
 
@@ -138,4 +148,200 @@ test("full installation refuses an archived canonical Agent before observing a m
 
   await assert.rejects(main(database, "project-1"), /Project agentos-example: Agent senior-dev-astra-medium \(archived-agent-1\) is archived/u);
   assert.deepEqual(events, ["project-read", "archived-agent-read"]);
+});
+
+test("synchronizeAgents refuses incompatible runner adoption for customized model and records runtime drift cleanly", async () => {
+  const project = { id: "project-1", slug: "agentos-example" };
+  const role = {
+    canonicalRole: "code-reviewer-sol-high",
+    name: "code-reviewer-sol-high",
+    title: "Code Reviewer",
+    model: "openai-codex/gpt-5.6-sol:high",
+    runnerPreference: "PI",
+    inboxAccess: false,
+    collaborators: [],
+    rolePrompt: "canonical role prompt",
+  };
+  const sources = {
+    foundationalPrompt: "canonical foundational prompt",
+    roles: [role],
+  };
+  const agentRow = {
+    id: "agent-1",
+    projectId: project.id,
+    canonicalRole: "code-reviewer-sol-high",
+    name: "code-reviewer-astra-medium",
+    archivedAt: null,
+    title: "Code Reviewer",
+    model: "gpt-6-astra:medium",
+    customizedFields: ["model", "name"],
+    runtimeConfigDriftNoticeFingerprint: "old-fingerprint",
+    runnerPreference: "CODEX",
+    inboxAccess: false,
+    collaborators: [],
+    foundationalPrompt: "canonical foundational prompt",
+    rolePrompt: "canonical role prompt",
+  };
+
+  const updatedRecords: Array<{ where: unknown; data: unknown }> = [];
+  const createdMessages: unknown[] = [];
+
+  const tx = {
+    agent: {
+      findMany: async (args?: { select?: { id: boolean; name: boolean } }) => {
+        if (args?.select?.id && args?.select?.name && Object.keys(args.select).length === 2) {
+          return [{ id: agentRow.id, name: agentRow.name }];
+        }
+        return [agentRow];
+      },
+      updateMany: async (query: { where: unknown; data: unknown }) => {
+        updatedRecords.push(query);
+        const where = query.where as Record<string, unknown>;
+        if (where.OR) return { count: 0 };
+        return { count: 1 };
+      },
+    },
+    inboxThread: {
+      findFirst: async () => ({ id: "thread-1" }),
+    },
+    inboxMessage: {
+      create: async (query: unknown) => {
+        createdMessages.push(query);
+        return { id: "msg-1" };
+      },
+    },
+  };
+
+  const counters: Record<string, unknown> = {
+    assignedCanonicalRoles: 0,
+    adoptedAgentDefaults: 0,
+    adoptedAgentIdentity: 0,
+    runtimeDriftNotices: 0,
+    updatedRoles: { [role.canonicalRole]: 0 },
+    updatedSteps: {},
+  };
+  const adoptions: unknown[] = [];
+
+  const rolesByRole = new Map([[role.canonicalRole, role]]);
+  await synchronizeAgents(
+    tx,
+    project,
+    true,
+    sources,
+    rolesByRole,
+    [role.canonicalRole],
+    counters,
+    adoptions,
+  );
+
+  assert.equal(adoptions.length, 0);
+  assert.equal(counters.adoptedAgentDefaults, 0);
+  assert.equal(counters.runtimeDriftNotices, 1);
+  const runtimeAdoptionAttempt = updatedRecords.find((record) => {
+    const data = record.data as Record<string, unknown>;
+    return data.runnerPreference !== undefined || data.model !== undefined;
+  });
+  assert.equal(runtimeAdoptionAttempt, undefined, "Incompatible runnerPreference must not be adopted onto a customized model");
+
+  const expectedFingerprint = JSON.stringify({
+    canonical: { model: role.model, runnerPreference: role.runnerPreference },
+    production: { model: agentRow.model, runnerPreference: agentRow.runnerPreference },
+  });
+  const driftUpdate = updatedRecords.find((record) => {
+    const data = record.data as Record<string, unknown>;
+    return data.runtimeConfigDriftNoticeFingerprint === expectedFingerprint;
+  });
+  assert.ok(driftUpdate, "Runtime drift notice fingerprint must be recorded");
+
+  assert.equal(createdMessages.length, 1);
+  const msg = createdMessages[0] as { data: { body: string } };
+  assert.match(msg.data.body, /Canonical runtime drift detected/u);
+  assert.match(msg.data.body, /Canonical: model=openai-codex\/gpt-5\.6-sol:high, runner=PI/u);
+  assert.match(msg.data.body, /Production: model=gpt-6-astra:medium, runner=CODEX/u);
+});
+
+test("synchronizeAgents adopts compatible uncustomized runtime fields and syncs in-memory state", async () => {
+  const project = { id: "project-1", slug: "agentos-example" };
+  const role = {
+    canonicalRole: "code-reviewer-sol-high",
+    name: "code-reviewer-sol-high",
+    title: "Code Reviewer",
+    model: "openai-codex/gpt-5.6-sol:high",
+    runnerPreference: "PI",
+    inboxAccess: false,
+    collaborators: [],
+    rolePrompt: "canonical role prompt",
+  };
+  const sources = {
+    foundationalPrompt: "canonical foundational prompt",
+    roles: [role],
+  };
+  const agentRow = {
+    id: "agent-1",
+    projectId: project.id,
+    canonicalRole: "code-reviewer-sol-high",
+    name: "code-reviewer-sol-high",
+    archivedAt: null,
+    title: "Code Reviewer",
+    model: "gpt-5.6-sol:high",
+    customizedFields: [],
+    runtimeConfigDriftNoticeFingerprint: "stale-drift",
+    runnerPreference: "CODEX",
+    inboxAccess: false,
+    collaborators: [],
+    foundationalPrompt: "canonical foundational prompt",
+    rolePrompt: "canonical role prompt",
+  };
+
+  const updatedRecords: Array<{ where: unknown; data: unknown }> = [];
+  const tx = {
+    agent: {
+      findMany: async (args?: { select?: { id: boolean; name: boolean } }) => {
+        if (args?.select?.id && args?.select?.name && Object.keys(args.select).length === 2) {
+          return [{ id: agentRow.id, name: agentRow.name }];
+        }
+        return [agentRow];
+      },
+      updateMany: async (query: { where: unknown; data: unknown }) => {
+        updatedRecords.push(query);
+        const where = query.where as Record<string, unknown>;
+        if (where.OR) return { count: 0 };
+        return { count: 1 };
+      },
+    },
+  };
+
+  const counters: Record<string, unknown> = {
+    assignedCanonicalRoles: 0,
+    adoptedAgentDefaults: 0,
+    adoptedAgentIdentity: 0,
+    runtimeDriftNotices: 0,
+    updatedRoles: { [role.canonicalRole]: 0 },
+    updatedSteps: {},
+  };
+  const adoptions: unknown[] = [];
+
+  const rolesByRole = new Map([[role.canonicalRole, role]]);
+  await synchronizeAgents(
+    tx,
+    project,
+    true,
+    sources,
+    rolesByRole,
+    [role.canonicalRole],
+    counters,
+    adoptions,
+  );
+
+  assert.equal(adoptions.length, 1);
+  assert.equal(counters.adoptedAgentDefaults, 1);
+  assert.equal(counters.runtimeDriftNotices, 0);
+
+  const adoptionRecord = updatedRecords.find((record) => {
+    const data = record.data as Record<string, unknown>;
+    return data.runnerPreference === "PI" && data.model === "openai-codex/gpt-5.6-sol:high";
+  });
+  assert.ok(adoptionRecord, "Both compatible runtime fields must be adopted together");
+  const data = adoptionRecord.data as Record<string, unknown>;
+  assert.equal(data.runtimeConfigDriftNoticeFingerprint, null, "Fingerprint must be cleared when adopting defaults");
 });
