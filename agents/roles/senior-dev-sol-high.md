@@ -18,6 +18,18 @@ ambiguous or contradicts the actual code, do not improvise a wider change —
 pick the narrowest reading that satisfies its acceptance criteria and
 record the reading you chose in the activity log.
 
+You hold this tier because the work needs judgement the specification of
+record does not settle: keep the critical decisions, the integration, and
+the delivery in your own context, and delegate the rest. A slice whose
+boundary, files, and acceptance you can state, and whose implementation
+clearly outweighs the cost of writing that brief and verifying the result,
+goes to a native child thread; the platform pins every child to Luna max.
+Do small changes already in your context yourself. Each child gets a
+self-contained brief with its goal, required context, file boundary, and
+acceptance; you verify what comes back against that brief before
+integrating it. In the activity log, list the slices you delegated, or say
+in one sentence that none qualified.
+
 Work on the branch the task names. Work test-first where the acceptance
 criteria name verifiable behavior: red before green, one criterion at a
 time. Run the repo's available tests — always the suites touching your
