@@ -65,6 +65,11 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
   }));
 
   for (const { name, model, runnerPreference } of roles) {
+    if (name === "code-reviewer-sol-high") {
+      assert.equal(model, "openai-codex/gpt-5.6-sol:high");
+      assert.equal(runnerPreference, RunnerPreference.PI);
+      continue;
+    }
     assert.equal(model.startsWith("openai-codex/"), false, name);
     assert.notEqual(runnerPreference, RunnerPreference.PI, name);
   }
@@ -91,8 +96,8 @@ test("canonical OpenAI roles pin their Codex model and runner", async () => {
   assert.equal(frontmatterValue(reviewCoordinator, "runner"), "codex");
   assert.equal(frontmatterValue(reviewCoordinatorSol, "model"), "gpt-5.6-sol:high");
   assert.equal(frontmatterValue(reviewCoordinatorSol, "runner"), "codex");
-  assert.equal(frontmatterValue(codeReviewerSol, "model"), "gpt-5.6-sol:high");
-  assert.equal(frontmatterValue(codeReviewerSol, "runner"), "codex");
+  assert.equal(frontmatterValue(codeReviewerSol, "model"), "openai-codex/gpt-5.6-sol:high");
+  assert.equal(frontmatterValue(codeReviewerSol, "runner"), "pi");
   assert.equal(frontmatterValue(planExecutor, "model"), "gpt-6-astra:low");
   assert.equal(frontmatterValue(planExecutor, "runner"), "codex");
   assert.equal(frontmatterValue(planExecutorSol, "model"), "gpt-5.6-sol:high");

@@ -83,6 +83,9 @@ test("the loader exposes the two independent review roles exactly once", async (
   ]);
   // The adjudication role is archived: the fix step dispositions both reports itself.
   assert.equal(sources.roles.some(({ canonicalRole }) => canonicalRole === "review-adjudicator-opus"), false);
+  const first = reviewRoles.find(({ canonicalRole }) => canonicalRole === "code-reviewer-sol-high");
+  assert.ok(first);
+  assert.equal(first.runnerPreference, RunnerPreference.PI);
   const blind = reviewRoles.find(({ canonicalRole }) => canonicalRole === "code-reviewer-opus-medium");
   assert.ok(blind);
   assert.equal(blind.runnerPreference, RunnerPreference.CLAUDE);

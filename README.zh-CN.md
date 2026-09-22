@@ -81,7 +81,7 @@ Agent 的 title 只写角色本身——Planner、Code Reviewer、Senior Dev；s
 | 3 | 计划评审 | `review-coordinator-sol-high` | 对照规格与冻结基线评审每个切片 | Codex | GPT-5.6 Sol · high |
 | 4 | 修订计划 | `plan-reviser-opus-medium` | 在全新会话中按评审发现修订切片集 | Claude | Claude Opus 5 · medium |
 | 5 | 实现 | `plan-executor-sol-high` | 按依赖前沿执行切片集并开出 pull request | Codex | GPT-5.6 Sol · high，子代理 GPT-5.6 Luna · max |
-| 6 | 代码评审 | `code-reviewer-sol-high` | 在钉住的 base 与 head 上评审集成后的 diff | Codex | GPT-5.6 Sol · high |
+| 6 | 代码评审 | `code-reviewer-sol-high` | 在钉住的 base 与 head 上评审集成后的 diff | PI | GPT-5.6 Sol · high |
 | 7 | 盲评 | `code-reviewer-opus-medium` | 对同一 diff 再评一次，看不到第 6 步的发现 | Claude | Claude Opus 5 · medium |
 | 8 | 落地评审修复 | `senior-dev-opus-medium` | 裁决两轮评审的全部发现并落地采纳项 | Claude | Claude Opus 5 · medium |
 | 9 | 文档 | `librarian-luna-xhigh` | 让内部文档与交付代码保持一致 | Codex | GPT-5.6 Luna · xhigh |

@@ -97,7 +97,7 @@ different models stay distinguishable at a glance.
 | 3 | Plan review | `review-coordinator-sol-high` | Reviews every slice against the spec and the frozen base | Codex | GPT-5.6 Sol · high |
 | 4 | Revise plan | `plan-reviser-opus-medium` | Edits the slice set against the findings, in a fresh session | Claude | Claude Opus 5 · medium |
 | 5 | Implementation | `plan-executor-sol-high` | Executes the slice set from the live dependency frontier and opens the pull request | Codex | GPT-5.6 Sol · high, with GPT-5.6 Luna · max subagents |
-| 6 | Code review | `code-reviewer-sol-high` | Reviews the integrated diff at the pinned base and head | Codex | GPT-5.6 Sol · high |
+| 6 | Code review | `code-reviewer-sol-high` | Reviews the integrated diff at the pinned base and head | PI | GPT-5.6 Sol · high |
 | 7 | Blind code review | `code-reviewer-opus-medium` | Reviews the same diff again, blind to step 6's findings | Claude | Claude Opus 5 · medium |
 | 8 | Apply review fixes | `senior-dev-opus-medium` | Dispositions every finding from both reviews and applies the adopted ones | Claude | Claude Opus 5 · medium |
 | 9 | Documentation | `librarian-luna-xhigh` | Updates internal documentation to match the delivered code | Codex | GPT-5.6 Luna · xhigh |

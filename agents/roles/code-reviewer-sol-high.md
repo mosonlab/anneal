@@ -1,8 +1,8 @@
 ---
 name: code-reviewer-sol-high
 title: Code Reviewer
-model: gpt-5.6-sol:high
-runner: codex
+model: openai-codex/gpt-5.6-sol:high
+runner: pi
 inboxAccess: false
 collaborators: []
 ---
