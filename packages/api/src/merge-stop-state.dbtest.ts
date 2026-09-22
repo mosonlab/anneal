@@ -1221,6 +1221,23 @@ test("a rejected confirmation card is recoverable: the redo earns the next gener
   );
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: integratorTaskId } })).status, "REVIEW");
 
+  // The park also posts the run-birth refusal notice. It is informational by
+  // construction — no Session, no choices, `dismissible` in the Inbox read
+  // model — so answering it is refused as what it is rather than as a card
+  // that cannot be found.
+  const notice = await db.inboxMessage.findUniqueOrThrow({
+    where: { dedupeKey: `run-birth-refusal:${integratorTaskId}:integrator-stopped` },
+  });
+  assert.equal(notice.kind, "TEXT");
+  assert.equal(notice.sessionId, null);
+  assert.equal(notice.gateTaskId, null);
+  await assert.rejects(
+    () => db.$transaction((tx) => applyInboxDecisionTx(tx, {
+      inboxMessageId: notice.id, externalEventId: "evt-recovery-notice", decision: "approve",
+    })),
+    /notice, not a question/u,
+  );
+
   // A replay of the same activation is idempotent: one live card per generation.
   await db.$transaction((tx) => activateChainSuccessor(tx, readiness, {}, new Date()));
   assert.deepEqual(await confirmationCardIds(readinessTaskId), [first.id, second.id]);

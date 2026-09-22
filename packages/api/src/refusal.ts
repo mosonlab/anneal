@@ -34,6 +34,7 @@ const workflowRefusalStatus = {
   "invalid-request": 400,
   conflict: 409,
   "inbox-question-not-found": 409,
+  "inbox-notice-not-answerable": 409,
   "approval-gate-decision-invalid": 409,
   "inbox-choice-mismatch": 409,
   "inbox-run-not-waiting": 409,

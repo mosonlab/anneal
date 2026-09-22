@@ -92,6 +92,22 @@ export const applyInboxDecisionTx = async (
       thread: true,
     },
   });
+  // A sessionless AGENT card carries no question: it is one of the notices the
+  // control plane posts about a Task — a refused Run birth, a stopped merge
+  // tail, an operator alert. `GET /inbox/messages` marks exactly this shape
+  // `dismissible`, and the Inbox renders it with nothing but Close. Say so,
+  // rather than telling an operator that the card in front of them is missing.
+  if (question
+    && !question.sessionId
+    && question.from === InboxSender.AGENT
+    && question.kind === InboxKind.TEXT
+    && question.gateTaskId === null
+    && question.replyToMessageId === null) {
+    throw new WorkflowRefusalError(
+      "inbox-notice-not-answerable",
+      "This Inbox card is a notice, not a question; close it instead of answering",
+    );
+  }
   if (!question?.session?.run) {
     throw new WorkflowRefusalError("inbox-question-not-found", "No matching Inbox question");
   }

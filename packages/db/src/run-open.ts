@@ -46,6 +46,7 @@ export type WorkflowRefusalReason =
   | "invalid-request"
   | "conflict"
   | "inbox-question-not-found"
+  | "inbox-notice-not-answerable"
   | "approval-gate-decision-invalid"
   | "inbox-choice-mismatch"
   | "inbox-run-not-waiting"
