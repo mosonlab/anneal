@@ -934,8 +934,54 @@ export const requestConfirmationCard = async (
   return ensureConfirmationCard(tx, integratorTask, stopId, now);
 };
 
-const confirmationKey = (integratorTaskId: string, stopId: string): string =>
-  `confirmation:${integratorTaskId}:${stopId}`;
+const CONFIRMATION_CARD_PREFIX = "confirmation";
+
+/**
+ * A stop asks for confirmation evidence once per generation. Rejecting a
+ * confirmation card sends the chain back through its executable predecessor,
+ * and what that redo produces is a different head carrying a different gate
+ * signature — so the evidence the operator judges next is a different card,
+ * and it needs a key of its own. Generation zero keeps the historical key
+ * exactly, the same shape `stopQuestionKey` uses for a re-validated stop.
+ * Task and stop ids are cuids and never contain a colon.
+ */
+export const confirmationCardKey = (
+  integratorTaskId: string,
+  stopId: string,
+  generation = 0,
+): string => (
+  generation > 0
+    ? `${CONFIRMATION_CARD_PREFIX}:${integratorTaskId}:${stopId}:r${String(generation)}`
+    : `${CONFIRMATION_CARD_PREFIX}:${integratorTaskId}:${stopId}`
+);
+
+/**
+ * The generation this stop's confirmation evidence currently lives in, and the
+ * card already issued for it if there is one.
+ *
+ * A card the operator rejected is spent: the rejection queued a redo, and the
+ * head that redo produces is what the *next* generation is read against, so the
+ * walk continues past it. Every other state — open, approved, or closed by a
+ * sibling gate decision — is the live generation and is returned as it stands.
+ * Only the live generation is ever written to, and its key is unique, so one
+ * (task, stop, generation) can never hold two live cards.
+ */
+const liveConfirmationGeneration = async (
+  tx: Tx,
+  integratorTaskId: string,
+  stopId: string,
+): Promise<{ generation: number; dedupeKey: string; card: { id: string } | null }> => {
+  for (let generation = 0; ; generation += 1) {
+    const dedupeKey = confirmationCardKey(integratorTaskId, stopId, generation);
+    const card = await tx.inboxMessage.findUnique({
+      where: { dedupeKey },
+      select: { id: true, status: true, selectedChoiceId: true },
+    });
+    if (!card) return { generation, dedupeKey, card: null };
+    const rejected = card.status === InboxStatus.ANSWERED && card.selectedChoiceId === "reject";
+    if (!rejected) return { generation, dedupeKey, card: { id: card.id } };
+  }
+};
 
 /**
  * The integrator Task mutex serializes the initial request and every replay or
@@ -954,8 +1000,7 @@ const ensureConfirmationCard = async (
       `Merge integrator task ${integratorTask.id} has no chain identity for confirmation evidence`,
     );
   }
-  const dedupeKey = confirmationKey(integratorTask.id, stopId);
-  const existing = await tx.inboxMessage.findUnique({ where: { dedupeKey }, select: { id: true } });
+  const { dedupeKey, card: existing } = await liveConfirmationGeneration(tx, integratorTask.id, stopId);
   if (existing) return existing.id;
 
   const target = await resolveChainTarget(tx, integratorTask);
@@ -1011,12 +1056,18 @@ const ensureConfirmationCard = async (
 };
 
 /**
- * Repairs the historical state in which the append-only stop answer says
- * refresh-requested but its Phase-A confirmation request is absent. This is
- * deliberately a no-op for every other stop disposition and for a request
- * that already exists.
+ * Makes the live confirmation generation of a `refresh-requested` stop hold a
+ * card, and answers with its id.
+ *
+ * It serves two callers with one rule. A replayed stop answer repairs the
+ * historical state in which the append-only answer says refresh-requested but
+ * its Phase-A request is absent. A Run birth refused by this same stop reports
+ * that the chain has come back to the integrator — which is what finishing the
+ * redo of a *rejected* confirmation looks like — so the next generation is
+ * issued there. Both are a no-op for every other disposition and for a
+ * generation whose card already stands.
  */
-export const recoverRefreshRequestedConfirmationCard = async (
+export const ensureRefreshRequestedConfirmationCard = async (
   tx: Tx,
   integratorTaskId: string,
   now = new Date(),

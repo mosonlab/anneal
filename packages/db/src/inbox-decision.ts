@@ -16,7 +16,7 @@ import { lockChainRows, lockTaskRow } from "./locks.js";
 import { produceMergeAuthorization, recordMergeEvidenceRefusal } from "./merge-authorization.js";
 import { MERGE_INTEGRATOR_KIND } from "./merge-integrator.js";
 import type { MergeExecutorLivenessReader } from "./merge-integrator-db.js";
-import { applyStopAnswer, parseStopQuestionKey, recoverRefreshRequestedConfirmationCard } from "./merge-integrator-db.js";
+import { applyStopAnswer, ensureRefreshRequestedConfirmationCard, parseStopQuestionKey } from "./merge-integrator-db.js";
 import {
   isGatedMergeReadinessTask,
   rejectMergeReadinessGate,
@@ -147,7 +147,7 @@ export const applyInboxDecisionTx = async (
       // confirmation card. Re-read the append-only disposition under the
       // integrator Task mutex; every other duplicate remains a no-op.
       if (question.status === InboxStatus.ANSWERED && question.selectedChoiceId === input.decision && question.taskId) {
-        await recoverRefreshRequestedConfirmationCard(tx, question.taskId, now);
+        await ensureRefreshRequestedConfirmationCard(tx, question.taskId, now);
       }
       return { duplicate: true, resumed: false };
     }
