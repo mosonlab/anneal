@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { execute, idempotencyKeyFor, matchingProtectionRule, synchronousExecution } from "./decision-table.js";
+import { execute, idempotencyKeyFor, matchingProtectionRule, synchronousExecution, verifyRequiredChecks } from "./decision-table.js";
 import type { DirectCommitRead, RepositorySnapshot } from "./github.js";
 import {
   AUTHORIZED_BASE,
@@ -509,6 +509,148 @@ test("N24 — across every stop leg, the only mutating call ever observed is the
     await execute(leg.deps);
     assertNoPublication(leg.calls());
   }
+});
+
+/**
+ * A Free-plan private repository answers the protection and ruleset routes with
+ * 403, so `branchProtectionRules` arrives empty even while CI is running. These
+ * tests pin the rollup-derived pending set that keeps a still-running build on
+ * the bounded poll instead of raising a human question, and pin the stops that
+ * the leg is explicitly not allowed to soften.
+ */
+const unprotected = (checks: RepositorySnapshot["pullRequest"]["checks"]): RepositorySnapshot =>
+  cleanSnapshot({ repository: { branchProtectionRules: [] }, pullRequest: { checks } });
+
+test("with no protection rule, a CheckRun that has not completed is pending, not a stop", () => {
+  for (const status of ["IN_PROGRESS", "QUEUED", "WAITING", null]) {
+    const snapshot = unprotected([
+      { kind: "CheckRun", name: "ci", conclusion: null, status },
+      { kind: "CheckRun", name: "lint", conclusion: "SUCCESS", status: "COMPLETED" },
+    ]);
+    assert.deepEqual(
+      verifyRequiredChecks(snapshot, AUTHORIZED_HEAD, "master"),
+      { status: "pending", pending: ["ci"] },
+      `status ${String(status)} should be pending`,
+    );
+  }
+});
+
+test("with no protection rule, a PENDING or EXPECTED status context is pending, not a stop", () => {
+  for (const state of ["PENDING", "EXPECTED"]) {
+    const snapshot = unprotected([
+      { kind: "StatusContext", context: "buildkite/deploy", state },
+      { kind: "StatusContext", context: "codecov", state: "SUCCESS" },
+    ]);
+    assert.deepEqual(
+      verifyRequiredChecks(snapshot, AUTHORIZED_HEAD, "master"),
+      { status: "pending", pending: ["buildkite/deploy"] },
+      `state ${state} should be pending`,
+    );
+  }
+});
+
+test("with no protection rule, a fully completed rollup is ok with no observed required checks", () => {
+  const snapshot = unprotected([
+    { kind: "CheckRun", name: "ci", conclusion: "SUCCESS", status: "COMPLETED" },
+    { kind: "StatusContext", context: "codecov", state: "SUCCESS" },
+  ]);
+  assert.deepEqual(verifyRequiredChecks(snapshot, AUTHORIZED_HEAD, "master"), { status: "ok", observed: [] });
+});
+
+test("with no protection rule, a completed FAILURE is still ok here and is stopped by the mergeStateStatus leg", async () => {
+  // Documented deliberately: this function reports only what it can name as
+  // required, and with no rule there is nothing required. The red rollup is not
+  // forgiven — GitHub holds such a head at UNSTABLE, and the non-clean
+  // mergeability stop below is what refuses it.
+  const checks: RepositorySnapshot["pullRequest"]["checks"] = [
+    { kind: "CheckRun", name: "ci", conclusion: "FAILURE", status: "COMPLETED" },
+    { kind: "StatusContext", context: "codecov", state: "ERROR" },
+  ];
+  assert.deepEqual(verifyRequiredChecks(unprotected(checks), AUTHORIZED_HEAD, "master"), { status: "ok", observed: [] });
+
+  const fake = makeFake({
+    reads: [{
+      status: "ok",
+      snapshot: cleanSnapshot({
+        repository: { branchProtectionRules: [] },
+        pullRequest: { checks, mergeStateStatus: "UNSTABLE" },
+      }),
+    }],
+  });
+  const outcome = stopped(await execute(fake.deps));
+  assert.equal(outcome.condition, "non-clean-mergeability");
+  assert.match(outcome.evidence, /UNSTABLE/u);
+  assertNoPublication(fake.calls());
+});
+
+test("with no protection rule, the rollup-commit guard still runs first", () => {
+  const snapshot = cleanSnapshot({
+    repository: { branchProtectionRules: [] },
+    pullRequest: { rollupCommitOid: "9".repeat(40), checks: [{ kind: "CheckRun", name: "ci", conclusion: null, status: "IN_PROGRESS" }] },
+  });
+  const verdict = verifyRequiredChecks(snapshot, AUTHORIZED_HEAD, "master");
+  assert.equal(verdict.status, "stop");
+});
+
+test("a protection rule that does exist keeps its own required-check verdicts", () => {
+  const required = cleanSnapshot();
+  assert.deepEqual(
+    verifyRequiredChecks(required, AUTHORIZED_HEAD, "master"),
+    { status: "ok", observed: [{ name: "ci", conclusion: "SUCCESS" }] },
+  );
+  // An unrelated check still running does not make a satisfied rule pending.
+  assert.deepEqual(
+    verifyRequiredChecks(
+      cleanSnapshot({ pullRequest: { checks: [
+        { kind: "CheckRun", name: "ci", conclusion: "SUCCESS", status: "COMPLETED" },
+        { kind: "CheckRun", name: "docs", conclusion: null, status: "IN_PROGRESS" },
+      ] } }),
+      AUTHORIZED_HEAD,
+      "master",
+    ),
+    { status: "ok", observed: [{ name: "ci", conclusion: "SUCCESS" }] },
+  );
+  // A required check absent from the rollup is still a stop.
+  assert.equal(verifyRequiredChecks(cleanSnapshot({ pullRequest: { checks: [] } }), AUTHORIZED_HEAD, "master").status, "stop");
+  // A required check that completed badly is still a stop.
+  assert.equal(
+    verifyRequiredChecks(
+      cleanSnapshot({ pullRequest: { checks: [{ kind: "CheckRun", name: "ci", conclusion: "FAILURE", status: "COMPLETED" }] } }),
+      AUTHORIZED_HEAD,
+      "master",
+    ).status,
+    "stop",
+  );
+  // A required check still running is pending, exactly as before.
+  assert.deepEqual(
+    verifyRequiredChecks(
+      cleanSnapshot({ pullRequest: { checks: [{ kind: "CheckRun", name: "ci", conclusion: null, status: "IN_PROGRESS" }] } }),
+      AUTHORIZED_HEAD,
+      "master",
+    ),
+    { status: "pending", pending: ["ci"] },
+  );
+});
+
+test("an unprotected repository whose checks finish mid-poll merges without asking a human", async () => {
+  const running = cleanSnapshot({
+    repository: { branchProtectionRules: [] },
+    pullRequest: {
+      mergeStateStatus: "UNSTABLE",
+      checks: [{ kind: "CheckRun", name: "ci", conclusion: null, status: "IN_PROGRESS" }],
+    },
+  });
+  const green = cleanSnapshot({ repository: { branchProtectionRules: [] } });
+  const fake = makeFake({
+    reads: [
+      { status: "ok", snapshot: running },
+      { status: "ok", snapshot: green },
+      { status: "ok", snapshot: green },
+      { status: "ok", snapshot: mergedSnapshot() },
+    ],
+  });
+  assert.deepEqual(await execute(fake.deps), { outcome: "merged", mergeCommitSha: MERGE_COMMIT });
+  assert.ok(fake.calls().includes("sleep"), "the poll branch should have been taken");
 });
 
 test("the idempotency key binds PR, authorized head and authorization record together", () => {

@@ -157,7 +157,30 @@ export const verifyRequiredChecks = (
     return { status: "stop", reason: `check rollup belongs to commit ${describe(snapshot.pullRequest.rollupCommitOid)}, not to the authorized head ${authorizedHead}` };
   }
   const rule = matchingProtectionRule(snapshot.branchProtectionRules, baseRef);
-  const requiredNames = rule?.requiredStatusCheckContexts ?? [];
+  if (rule === null) {
+    // No rule to read means no list of names to wait for, but it does not mean
+    // there is nothing running: a Free-plan private repository answers both the
+    // protection and the ruleset routes with 403, so `branchProtectionRules` is
+    // empty on a repository whose CI is very much in flight. Without this leg
+    // an UNSTABLE head — checks started, none finished — fell through to the
+    // `non-clean-mergeability` stop and asked a human what to do about a build
+    // that was merely still running. The rollup for the authorized head is the
+    // evidence we do have, so an unfinished entry in it is reported as pending
+    // and handled by the same bounded poll as an UNKNOWN mergeability.
+    //
+    // This leg only distinguishes "not finished yet" from "finished". It never
+    // turns a finished-badly check into a pass: once everything has completed
+    // the verdict is the same `ok` with no observed required checks as before,
+    // and a red rollup is still stopped downstream by `mergeStateStatus`, which
+    // an unsuccessful check holds at UNSTABLE rather than CLEAN.
+    const unfinished = snapshot.pullRequest.checks
+      .filter((check) => check.kind === "CheckRun"
+        ? check.status !== "COMPLETED"
+        : check.state === "PENDING" || check.state === "EXPECTED")
+      .map((check) => check.kind === "CheckRun" ? check.name : check.context);
+    return unfinished.length > 0 ? { status: "pending", pending: unfinished } : { status: "ok", observed: [] };
+  }
+  const requiredNames = rule.requiredStatusCheckContexts;
   const observed: RequiredCheck[] = [];
   const pending: string[] = [];
   for (const name of requiredNames) {
