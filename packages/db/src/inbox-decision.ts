@@ -16,7 +16,7 @@ import { lockChainRows, lockTaskRow } from "./locks.js";
 import { produceMergeAuthorization, recordMergeEvidenceRefusal } from "./merge-authorization.js";
 import { MERGE_INTEGRATOR_KIND } from "./merge-integrator.js";
 import type { MergeExecutorLivenessReader } from "./merge-integrator-db.js";
-import { applyStopAnswer, parseStopQuestionKey, recoverRefreshRequestedConfirmationCard } from "./merge-integrator-db.js";
+import { applyStopAnswer, ensureRefreshRequestedConfirmationCard, parseStopQuestionKey } from "./merge-integrator-db.js";
 import {
   isGatedMergeReadinessTask,
   rejectMergeReadinessGate,
@@ -92,6 +92,22 @@ export const applyInboxDecisionTx = async (
       thread: true,
     },
   });
+  // A sessionless AGENT card carries no question: it is one of the notices the
+  // control plane posts about a Task — a refused Run birth, a stopped merge
+  // tail, an operator alert. `GET /inbox/messages` marks exactly this shape
+  // `dismissible`, and the Inbox renders it with nothing but Close. Say so,
+  // rather than telling an operator that the card in front of them is missing.
+  if (question
+    && !question.sessionId
+    && question.from === InboxSender.AGENT
+    && question.kind === InboxKind.TEXT
+    && question.gateTaskId === null
+    && question.replyToMessageId === null) {
+    throw new WorkflowRefusalError(
+      "inbox-notice-not-answerable",
+      "This Inbox card is a notice, not a question; close it instead of answering",
+    );
+  }
   if (!question?.session?.run) {
     throw new WorkflowRefusalError("inbox-question-not-found", "No matching Inbox question");
   }
@@ -147,7 +163,7 @@ export const applyInboxDecisionTx = async (
       // confirmation card. Re-read the append-only disposition under the
       // integrator Task mutex; every other duplicate remains a no-op.
       if (question.status === InboxStatus.ANSWERED && question.selectedChoiceId === input.decision && question.taskId) {
-        await recoverRefreshRequestedConfirmationCard(tx, question.taskId, now);
+        await ensureRefreshRequestedConfirmationCard(tx, question.taskId, now);
       }
       return { duplicate: true, resumed: false };
     }

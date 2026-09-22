@@ -20,6 +20,7 @@ import { layerOf } from "./chain-order.js";
 import { lockAgentRow } from "./locks.js";
 import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
 import {
+  ensureRefreshRequestedConfirmationCard,
   gateFeedsIntegratorStep,
   IntegratorBindingError,
   integratorBindingRefusalFor,
@@ -45,6 +46,7 @@ export type WorkflowRefusalReason =
   | "invalid-request"
   | "conflict"
   | "inbox-question-not-found"
+  | "inbox-notice-not-answerable"
   | "approval-gate-decision-invalid"
   | "inbox-choice-mismatch"
   | "inbox-run-not-waiting"
@@ -1442,17 +1444,26 @@ export const settleRunBirthRefusal = async (
   if (decision.action === "raise") return { kind: "raise", error: decision.error };
   let failureReason = refusal.message;
   let activity = decision.activity;
-  if (origin.kind === "chain-activation" && dispositionByCode[refusal.code] === "stopped") {
+  if (dispositionByCode[refusal.code] === "stopped") {
     // The stop is re-read after birth rollback: its authority must still exist
     // before preserving predecessor success and parking the stopped successor.
     const stopped = await stopStateFor(tx, taskId);
-    if (!stopped) return { kind: "raise", error: errorForOpenRunRefusal(refusal) };
-    failureReason = `Merge integrator stopped on ${stopped.stop.condition}; predecessor success preserved and successor not activated`;
-    activity = {
-      actorType: "control-plane",
-      body: `Predecessor ${origin.predecessorName} completed successfully and was preserved; successor not activated because merge integrator stopped on ${stopped.stop.condition}`,
-      metadata: { ...activity.metadata, condition: stopped.stop.condition, sourceRunId: origin.sourceRunId, sourceStopId: stopped.stop.stopId },
-    };
+    if (origin.kind === "chain-activation") {
+      if (!stopped) return { kind: "raise", error: errorForOpenRunRefusal(refusal) };
+      failureReason = `Merge integrator stopped on ${stopped.stop.condition}; predecessor success preserved and successor not activated`;
+      activity = {
+        actorType: "control-plane",
+        body: `Predecessor ${origin.predecessorName} completed successfully and was preserved; successor not activated because merge integrator stopped on ${stopped.stop.condition}`,
+        metadata: { ...activity.metadata, condition: stopped.stop.condition, sourceRunId: origin.sourceRunId, sourceStopId: stopped.stop.stopId },
+      };
+    }
+    // The chain arriving back at a stopped integrator is the event a rejected
+    // confirmation was waiting for: the predecessor it sent the chain back
+    // through has finished, so the head the renewal would name is the one the
+    // gate has just signed. Asking for the next generation's evidence here is
+    // what keeps a rejection recoverable; it opens a card and authorizes
+    // nothing, and the operator still reads it and decides.
+    if (stopped) await ensureRefreshRequestedConfirmationCard(tx, taskId, now);
   }
   const written = await writeTask(tx, taskId, async () => ({
     update: { status: decision.taskStatus, failureReason, ...(origin.kind === "at-schedule" ? { runAt: null } : {}) },

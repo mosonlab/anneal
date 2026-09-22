@@ -11,6 +11,8 @@ import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
 import {
+  activateChainSuccessor,
+  advanceTemplateTask,
   applyInboxDecisionTx,
   EVIDENCE_PLACEHOLDER_BODY,
   enqueueTaskRun,
@@ -138,6 +140,14 @@ const persistOutcome = async (taskId: string, runId: string, body: string) => {
 
 const stopQuestionFor = async (taskId: string) =>
   db.inboxMessage.findFirst({ where: { taskId, status: "OPEN", kind: "MULTIPLE_CHOICE" }, orderBy: { createdAt: "desc" } });
+
+/** Every confirmation card this readiness step has asked for, oldest first. */
+const confirmationCardIds = async (readinessTaskId: string): Promise<string[]> => (
+  await db.taskActivity.findMany({
+    where: { taskId: readinessTaskId }, orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  })
+).filter((row) => (row.metadata as any)?.purpose === "confirmation")
+  .map((row) => (row.metadata as any).cardId as string);
 
 const stoppedChain = async (
   label: string,
@@ -1116,6 +1126,152 @@ test("fresh confirmation rejection reruns regression, never gated readiness, for
       `${shape}: rejection records the regression recovery`,
     );
   }
+});
+
+/**
+ * The end state the test above stops short of, and the defect that hid there.
+ *
+ * A rejected confirmation card used to be terminal: its dedupe key matched
+ * forever, so every later request answered with the spent card and opened
+ * nothing, while the run-birth guard refused the Run a new stop id would have
+ * needed. The generation suffix is what lets the redo the rejection queued earn
+ * the next card, and nothing else about the contract moves: the spent card
+ * stays answered, and the merge still waits for a human to read fresh evidence.
+ */
+test("a rejected confirmation card is recoverable: the redo earns the next generation, and approving it merges", async () => {
+  const { chain } = await stoppedChain("reject-recovery", "head-drift", "twelve-step-readiness", 1, 5, true);
+  assert.ok(chain.readinessTask);
+  const readinessTaskId = chain.readinessTask.id;
+  const integratorTaskId = chain.integratorTask!.id;
+
+  const stop = await stopQuestionFor(integratorTaskId);
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: stop!.id, externalEventId: "evt-recovery-reauthorize", decision: "re-authorize",
+  }));
+  const firstRequest = await confirmationCardIds(readinessTaskId);
+  assert.equal(firstRequest.length, 1, "re-authorize asks for confirmation evidence once");
+  assert.deepEqual(
+    await evidenceTick(db, { readPullRequest: async () => freshSnapshot() }, new Date()),
+    { claimed: 1, filled: 1, unavailable: 0 },
+  );
+  const first = await db.inboxMessage.findUniqueOrThrow({ where: { id: firstRequest[0]! } });
+  assert.notEqual(first.body, EVIDENCE_PLACEHOLDER_BODY);
+
+  const rejected = await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: first.id, externalEventId: "evt-recovery-reject", decision: "reject",
+  }));
+  assert.equal(rejected.gateAction, "rejected");
+  assert.deepEqual(
+    await confirmationCardIds(readinessTaskId),
+    [first.id],
+    "the rejection itself opens nothing: the redo has not produced the head a renewal would name",
+  );
+
+  // The redo the rejection queued, completing: the regression Run succeeds and
+  // the chain walks forward again.
+  const redo = await db.run.findFirstOrThrow({
+    where: { taskId: chain.gateTask.id }, orderBy: { runNumber: "desc" },
+  });
+  assert.equal(redo.status, "QUEUED");
+  await db.session.create({ data: {
+    runId: redo.id, projectId: chain.project.id, agentId: redo.agentId, taskId: chain.gateTask.id,
+    runner: "CLAUDE", executionStatus: "SUCCEEDED",
+  } });
+  await db.run.update({ where: { id: redo.id }, data: { status: "SUCCEEDED" } });
+  await db.task.update({ where: { id: chain.gateTask.id }, data: { status: "DONE" } });
+  await db.$transaction((tx) => advanceTemplateTask(tx, chain.gateTask.id, redo.id, null, new Date()));
+
+  // The readiness gate the redo re-opens is the ordinary one, and approving it
+  // releases the server-owned worker exactly as it does on a first pass.
+  const gateCard = await db.inboxMessage.findFirstOrThrow({
+    where: { gateTaskId: readinessTaskId, status: "OPEN" }, orderBy: { createdAt: "desc" },
+  });
+  assert.notEqual(gateCard.id, first.id);
+  assert.deepEqual(
+    await evidenceTick(db, { readPullRequest: async () => freshSnapshot() }, new Date()),
+    { claimed: 1, filled: 1, unavailable: 0 },
+  );
+  const releasedGate = await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: gateCard.id, externalEventId: "evt-recovery-gate-approve", decision: "approve",
+  }));
+  assert.equal(releasedGate.gateAction, "approved");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: readinessTaskId } })).status, "TODO");
+  assert.equal(
+    await db.run.count({ where: { taskId: integratorTaskId } }), 1,
+    "the stop still refuses a mechanical Run; approving the gate is not approving the merge",
+  );
+
+  // What the readiness worker does once it has authorized the tail: it settles
+  // its own step and activates the successor. The stop still stands, so that
+  // Run birth is still refused — and the refusal is where the next confirmation
+  // generation is issued.
+  await db.task.update({ where: { id: readinessTaskId }, data: { status: "DONE" } });
+  const readiness = await db.task.findUniqueOrThrow({ where: { id: readinessTaskId } });
+  await db.$transaction((tx) => activateChainSuccessor(tx, readiness, {}, new Date()));
+
+  const generations = await confirmationCardIds(readinessTaskId);
+  assert.equal(generations.length, 2, "the completed redo earns the next confirmation generation");
+  const second = await db.inboxMessage.findUniqueOrThrow({ where: { id: generations[1]! } });
+  assert.notEqual(second.id, first.id);
+  assert.equal(second.status, "OPEN");
+  assert.equal(second.dedupeKey, `${first.dedupeKey!}:r1`);
+  assert.equal(
+    (await db.inboxMessage.findUniqueOrThrow({ where: { id: first.id } })).status, "ANSWERED",
+    "the spent card is not reopened; the generation it owns holds exactly one card",
+  );
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: integratorTaskId } })).status, "REVIEW");
+
+  // The park also posts the run-birth refusal notice. It is informational by
+  // construction — no Session, no choices, `dismissible` in the Inbox read
+  // model — so answering it is refused as what it is rather than as a card
+  // that cannot be found.
+  const notice = await db.inboxMessage.findUniqueOrThrow({
+    where: { dedupeKey: `run-birth-refusal:${integratorTaskId}:integrator-stopped` },
+  });
+  assert.equal(notice.kind, "TEXT");
+  assert.equal(notice.sessionId, null);
+  assert.equal(notice.gateTaskId, null);
+  await assert.rejects(
+    () => db.$transaction((tx) => applyInboxDecisionTx(tx, {
+      inboxMessageId: notice.id, externalEventId: "evt-recovery-notice", decision: "approve",
+    })),
+    /notice, not a question/u,
+  );
+
+  // A replay of the same activation is idempotent: one live card per generation.
+  await db.$transaction((tx) => activateChainSuccessor(tx, readiness, {}, new Date()));
+  assert.deepEqual(await confirmationCardIds(readinessTaskId), [first.id, second.id]);
+
+  assert.deepEqual(
+    await evidenceTick(db, { readPullRequest: async () => freshSnapshot() }, new Date()),
+    { claimed: 1, filled: 1, unavailable: 0 },
+  );
+  const approved = await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: second.id, externalEventId: "evt-recovery-approve", decision: "approve",
+  }));
+  assert.equal(approved.gateAction, "approved");
+  const runs = await db.run.findMany({ where: { taskId: integratorTaskId }, orderBy: { runNumber: "asc" } });
+  assert.equal(runs.length, 2, "the renewed authorization queues the mechanical merge Run");
+  assert.equal(runs[1]!.status, "QUEUED");
+
+  const claimed = await call("POST", "/runner/tasks/claim", {
+    runnerId: "merge-executor-1", contractVersion: RUN_COMPLETION_CONTRACT_VERSION,
+  }, EXECUTOR);
+  assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
+  assert.equal(claimed.body.run.taskId, integratorTaskId);
+  const output = await call("PUT", `/session/runs/${claimed.body.run.id}/output`, {
+    fencingToken: claimed.body.fencingToken,
+    kind: "merge-result",
+    body: JSON.stringify({ outcome: "merged", mergeCommitSha: "e".repeat(40) }),
+  }, claimed.body.sessionToken);
+  assert.equal(output.status, 200, JSON.stringify(output.body));
+  const completed = await completeRun({
+    id: claimed.body.run.id as string, fencingToken: claimed.body.fencingToken as string,
+  });
+  assert.equal(completed.status, 200, JSON.stringify(completed.body));
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: integratorTaskId } })).status, "DONE");
+  const merged = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: integratorTaskId } });
+  assert.deepEqual(JSON.parse(merged.body), { outcome: "merged", mergeCommitSha: "e".repeat(40) });
 });
 
 test("N20 an external failure at the ceiling buys an integrator step no extra run", async () => {

@@ -4,9 +4,11 @@ import { test } from "node:test";
 import { Prisma } from "@prisma/client";
 
 import {
+  confirmationCardKey,
   landIntegratorStop,
   latestRecordedStop,
   recordIntegratorStop,
+  stopQuestionKey,
   type IntegratorStopLandingInput,
 } from "./merge-integrator-db.js";
 
@@ -346,4 +348,18 @@ test("malformed result metadata never becomes a guard-visible recorded stop", as
     });
     assert.equal(await latestRecordedStop(tx, "integrator-task"), null, id);
   }
+});
+
+/**
+ * The renewal keys, side by side. A confirmation card is issued once per
+ * generation for the same reason a re-validated stop asks its question once per
+ * generation, so it carries the same suffix rather than a second mechanism.
+ */
+test("a confirmation card key keeps generation zero historical and suffixes every renewal", () => {
+  assert.equal(confirmationCardKey("task-1", "stop-1"), "confirmation:task-1:stop-1");
+  assert.equal(confirmationCardKey("task-1", "stop-1", 0), "confirmation:task-1:stop-1");
+  assert.equal(confirmationCardKey("task-1", "stop-1", 1), "confirmation:task-1:stop-1:r1");
+  assert.equal(confirmationCardKey("task-1", "stop-1", 2), "confirmation:task-1:stop-1:r2");
+  assert.equal(stopQuestionKey("stop-1"), "merge-stop:stop-1");
+  assert.equal(stopQuestionKey("stop-1", 1), "merge-stop:stop-1:r1");
 });
