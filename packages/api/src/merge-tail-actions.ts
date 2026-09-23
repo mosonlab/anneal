@@ -12,6 +12,7 @@ import {
   githubRepositoryFromRemote,
   isIntegratorStep,
   latestMarker,
+  mergeTailNoticeRecommendation,
   MAX_MERGE_TAIL_REPAIR_ATTEMPTS,
   MERGE_TAIL_KIND,
   MERGE_TAIL_SCHEMA_VERSION,
@@ -203,6 +204,7 @@ export const openMergeTailStopNotice = async (
   tx: DbTx,
   input: { taskId: string; agentId: string; sessionId?: string; reason: string },
 ): Promise<void> => {
+  const body = `${mergeTailNoticeRecommendation(input.reason)}\n\nAutonomous merge tail stopped: ${input.reason}`;
   const dedupeKey = `merge-tail-stop:${input.taskId}:${createHash("sha256").update(input.reason).digest("hex")}`;
   const thread = await requireDefaultFeishuThread(tx);
   const existing = await tx.inboxMessage.findUnique({ where: { dedupeKey }, select: { status: true } });
@@ -212,6 +214,7 @@ export const openMergeTailStopNotice = async (
       data: {
         status: InboxStatus.OPEN,
         answeredAt: null,
+        body,
         threadId: thread.id,
         deliveryStatus: InboxDeliveryStatus.PENDING,
         deliveredAt: null,
@@ -227,7 +230,7 @@ export const openMergeTailStopNotice = async (
     taskId: input.taskId,
     threadId: thread.id,
     kind: "TEXT",
-    body: `Autonomous merge tail stopped: ${input.reason}`,
+    body,
     dedupeKey,
   }, update: { threadId: thread.id } });
 };
@@ -658,11 +661,12 @@ export async function stopMergeTail(
 ): Promise<StopMergeTailResult | void> {
   if (input.phase === "regression" || input.phase === "readiness") {
     const recovery = input.recovery;
-    const body = recovery
+    const summary = recovery
       ? `Automatic base-drift recovery ${recovery.attempt} stopped at ${input.phase}: ${input.reason}`
       : input.phase === "readiness"
         ? `Autonomous merge readiness stopped: ${input.reason}`
         : `Autonomous merge tail stopped: ${input.reason}`;
+    const body = `${mergeTailNoticeRecommendation(input.reason)}\n\n${summary}`;
     if (recovery) {
       await blockDownstream(tx, { recovery, phase: input.phase, reason: input.reason, at: input.at });
     } else if (input.phase === "readiness") {

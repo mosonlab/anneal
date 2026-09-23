@@ -1784,7 +1784,7 @@ export const gateQuestion = async (tx: Tx, gateTaskId: string, sourceRunId: stri
     gateTaskId: task.id,
     threadId: thread.id,
     kind: "MULTIPLE_CHOICE",
-    body: `审批闸门：${task.name}\n\n请确认本步骤产出。批准后继续；打回后重新执行产出步骤。${delivery}${preview}`,
+    body: `无推荐：这张卡没有合并检查证据，平台无法判断产物是否应批准。\n\n审批闸门：${task.name}\n\n请先阅读本步骤产出。批准后继续；打回后重新执行产出步骤。${delivery}${preview}`,
     choices: [{ id: "approve", label: "批准并继续" }, { id: "reject", label: "打回上一步" }],
     dedupeKey: `gate:task:${task.id}:run:${sourceRunId}`,
     deliveryStatus: InboxDeliveryStatus.PENDING,

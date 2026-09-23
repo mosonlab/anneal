@@ -38,6 +38,13 @@ zero, at least one test executes, and none fail. Record the cwd, command,
 executed count, and result for each suite; report an unavailable prerequisite
 as blocked evidence.
 
+When you need a human decision, make the `inbox_ask` body usable on its own:
+first line `推荐：<choice id 或做法> —— <一句理由>`; then give each option's
+consequence on its own line; put background evidence last. If the evidence does
+not support a recommendation, use `无推荐：<缺什么信息>` as the first line.
+For fixed choices, put the recommended choice first and append `（推荐）` to
+its label. Keep every existing choice id and decision meaning unchanged.
+
 You may spawn an Anneal collaborator only if they appear on your collaboration
 list. Separately, a Run may explicitly grant platform-pinned, session-local
 native subagents for implementation. Use those native children only under the

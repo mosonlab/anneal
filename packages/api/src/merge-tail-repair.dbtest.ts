@@ -565,7 +565,7 @@ test("a repair Run that fails retryably opens a second Run instead of stopping t
   // The tail is still open: a stopped tail files this notice and moves its
   // regression task out of the repair loop.
   assert.equal(await db.inboxMessage.count({
-    where: { taskId: seeded.regression.id, body: { startsWith: "Autonomous merge tail stopped:" } },
+    where: { taskId: seeded.regression.id, body: { contains: "Autonomous merge tail stopped:" } },
   }), 0);
   assert.equal(await repairCount(seeded), 1);
 
@@ -638,7 +638,7 @@ test("a repair whose whole budget fails retryably still stops the tail", async (
 
   assert.equal(await db.run.count({ where: { taskId: repair.id } }), 2);
   assert.equal(await db.inboxMessage.count({
-    where: { taskId: seeded.regression.id, body: { startsWith: "Autonomous merge tail stopped:" } },
+    where: { taskId: seeded.regression.id, body: { contains: "Autonomous merge tail stopped:" } },
   }), 1);
 });
 
@@ -744,7 +744,7 @@ test("a renamed canonical resolver still receives the refresh-conflict repair", 
   assert.equal(assignee.name, "conflict-resolver");
   assert.equal(assignee.canonicalRole, "merge-resolver-luna-max");
   assert.equal(await db.inboxMessage.count({
-    where: { taskId: seeded.regression.id, body: { startsWith: "Autonomous merge tail stopped:" } },
+    where: { taskId: seeded.regression.id, body: { contains: "Autonomous merge tail stopped:" } },
   }), 0);
 });
 
@@ -1882,7 +1882,7 @@ test("a repair is refused at open when the chain's recovery names another Run", 
   // A refused open consumes no attempt: the head keeps no repairAttempt marker.
   assert.equal(latestMarker(await readMarkerHistory(db, seeded.regression.id), "repairAttempt"), null);
   assert.equal(await db.inboxMessage.count({
-    where: { taskId: seeded.regression.id, body: { startsWith: "Autonomous merge tail stopped:" } },
+    where: { taskId: seeded.regression.id, body: { contains: "Autonomous merge tail stopped:" } },
   }), 1);
 });
 
@@ -2021,7 +2021,7 @@ test("a rejected repair leaves a recovery that is still running alone", async ()
     metadata: { path: ["kind"], equals: MERGE_TAIL_REPAIR_BINDING_MISMATCH_KIND },
   } }), 1);
   assert.equal(await db.inboxMessage.count({
-    where: { taskId: seeded.regression.id, body: { startsWith: "Autonomous merge tail stopped:" } },
+    where: { taskId: seeded.regression.id, body: { contains: "Autonomous merge tail stopped:" } },
   }), 1);
 });
 

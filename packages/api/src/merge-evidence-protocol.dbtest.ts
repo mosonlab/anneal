@@ -91,8 +91,25 @@ test("an ordinary gate without a mechanical successor is untouched by the protoc
 });
 
 test("Phase B fills the card by compare-and-swap, makes it deliverable, and refuses to fill it twice", async () => {
-  const chain = await seedIntegratorChain(db, { label: "phase-b" });
-  const card = await openGate(chain);
+  const chain = await seedIntegratorChain(db, {
+    label: "phase-b",
+    shape: "canonical-compound-readiness",
+    gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask);
+  await db.taskStepOutput.create({ data: {
+    taskId: chain.gateTask.id,
+    runId: chain.gateRun.id,
+    kind: "regression-verification",
+    body: JSON.stringify({
+      schemaVersion: 1,
+      outcome: "pass",
+      headSha: "a".repeat(40),
+      baseHeadSha: "b".repeat(40),
+      gateVerdict: "PASS",
+    }),
+  } });
+  const card = await db.$transaction((tx) => gateQuestion(tx, chain.readinessTask!.id, chain.gateRun.id, null));
   const first = await evidenceTick(db, readerReturning(snapshot()), new Date());
   assert.deepEqual(first, { claimed: 1, filled: 1, unavailable: 0 });
   const filled = await db.inboxMessage.findUniqueOrThrow({ where: { id: card.id } });
@@ -103,6 +120,11 @@ test("Phase B fills the card by compare-and-swap, makes it deliverable, and refu
   assert.equal(parsed.evidence.baseSha, "b".repeat(40));
   assert.equal(parsed.evidence.baseRef, "master");
   assert.deepEqual(parsed.evidence.requiredChecks, [{ name: "ci/build", conclusion: "SUCCESS" }]);
+  assert.match(filled.body, /^推荐：批准并合并/u);
+  assert.deepEqual(filled.choices, [
+    { id: "approve", label: "批准并合并（推荐）" },
+    { id: "reject", label: "打回上一步" },
+  ]);
   assert.ok((filled.nextDeliveryAt?.getTime() ?? Infinity) <= Date.now(), "a filled card is deliverable");
   // The body CAS is what makes a fill single-shot: a second tick finds no
   // placeholder to claim, so a stale worker cannot overwrite a judged snapshot.
