@@ -29,6 +29,7 @@ import {
   RunStatus,
   RunnerKind,
   SessionExecutionStatus,
+  sharedChainBranch,
   taskIsIntegratorStep,
   TaskStatus,
 } from "@anneal/db";
@@ -588,6 +589,7 @@ export const claimRun = async (
             runId: candidate.id,
             previousRunId: regressionRepairHandoff.previousRunId,
             reason: regressionRepairHandoff.reason,
+            ...regressionRepairHandoff.metadata,
           },
         }, now);
       }
@@ -860,11 +862,17 @@ export const claimRun = async (
           repoId: candidate.repo.id,
           pushedBranch: run.targetBranch,
           task: candidate.task.chainId && candidate.task.chainIndex !== null
-            ? {
-              projectId: candidate.task.projectId,
-              chainId: candidate.task.chainId,
-              chainIndex: { not: null },
-            }
+            ? run.targetBranch === sharedChainBranch({
+              projectId: candidate.task.projectId, chainId: candidate.task.chainId,
+            })
+              // The shared ref is unique to this project and Chain. A
+              // chain-detached merge-tail repair can be its latest publisher.
+              ? { projectId: candidate.task.projectId }
+              : {
+                projectId: candidate.task.projectId,
+                chainId: candidate.task.chainId,
+                chainIndex: { not: null },
+              }
             : { id: candidate.task.id },
         },
         select: { id: true },

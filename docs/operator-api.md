@@ -2517,6 +2517,16 @@ repair ...` reason and writes the stop notice. The operator's
 `maxSessionsPerTask` through `PATCH /tasks/:taskId` is required first when the
 retry would otherwise be refused for an exhausted Run budget.
 
+After a successful repair, a Regression retry starts from the latest published
+head of its Chain's shared branch, including a push by a chain-detached repair
+Task. A per-Run salvage ref wins only when its Run was created after that
+publication. If a queued Regression Run targets one of its own per-Run refs but
+the recorded head matches neither the repaired head nor the retry continuation,
+claim stops it as non-retryable `handoff-invalid` before an agent Session starts.
+The `TaskActivity` and stop notice name the ref, observed head, and expected
+head; the operator can inspect the mismatched publication before an agent
+spends time on an impossible exact-head request.
+
 When a regression verdict fails after the automatic repair budget is exhausted,
 the Regression verification task remains parked in `REVIEW`, and a stop notice
 is written to the Inbox. Its `failureReason` is exactly one of these shapes:

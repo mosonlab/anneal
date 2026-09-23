@@ -218,7 +218,14 @@ test("gate decision route trims feedback without changing the rejection", async 
       agent: { findUnique: async () => lockedAgent(executable.assigneeAgent) },
       run: {
         findFirst: async ({ where }: { where: { pushedBranch?: unknown } }) =>
-          where.pushedBranch === "feature/gate-note" ? { id: "run-1", pushedBranch: "feature/gate-note" } : null,
+          where.pushedBranch === "feature/gate-note" ? {
+            id: "run-1", taskId: executable.id, branch: "feature/gate-note",
+            pushedBranch: "feature/gate-note", headSha: null,
+            task: {
+              id: executable.id, projectId: executable.projectId, repoId: executable.repoId,
+              chainId: null, chainIndex: null, targetBranch: executable.targetBranch,
+            },
+          } : null,
         create: async ({ data }: { data: Record<string, unknown> }) => ({ id: "run-2", ...data }),
       },
     };

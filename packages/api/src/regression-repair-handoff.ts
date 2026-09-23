@@ -8,6 +8,7 @@ import {
   Prisma,
   PushStatus,
   type RegressionRepairHandoff,
+  runOwnedHead,
   RunStatus,
   TaskStatus,
 } from "@anneal/db";
@@ -17,7 +18,7 @@ type RegressionRepairKind = RegressionRepairHandoff["repair"]["kind"];
 
 export type RegressionRepairHandoffSelection =
   | { status: "none" }
-  | { status: "invalid"; reason: string; previousRunId: string }
+  | { status: "invalid"; reason: string; previousRunId: string; metadata?: Record<string, unknown> }
   | { status: "ok"; handoff: RegressionRepairHandoff };
 
 const EXACT_SHA = /^[0-9a-f]{40}$/u;
@@ -55,10 +56,11 @@ export const regressionRepairHandoffForClaim = async (
   if (!priorOutput?.runId || priorOutput.runId === input.runId) return { status: "none" };
   const parsed = parseRegressionVerdict(priorOutput.body, input.outputKind);
   if (parsed.status === "invalid") return { status: "none" };
-  const invalid = (reason: string): RegressionRepairHandoffSelection => ({
+  const invalid = (reason: string, metadata?: Record<string, unknown>): RegressionRepairHandoffSelection => ({
     status: "invalid",
     previousRunId: priorOutput.runId!,
     reason: `regression repair handoff is invalid: ${reason}`,
+    ...(metadata ? { metadata } : {}),
   });
 
   // A PASS opens no repair task, so a fresh Session has nothing to inherit.
@@ -184,6 +186,29 @@ export const regressionRepairHandoffForClaim = async (
     select: { id: true, headSha: true },
     orderBy: { runNumber: "desc" },
   });
+  // A per-Run ref is immutable recovery evidence. If the selected ref does
+  // not carry either the repaired head or the recorded retry continuation,
+  // the runner cannot satisfy the exact-head handoff. Stop before claiming an
+  // agent Session, with the observed and required heads in the audit record.
+  if (input.targetBranch?.startsWith(`agentos/${input.taskId}/run-`)) {
+    const producer = await tx.run.findFirst({
+      where: { taskId: input.taskId, pushedBranch: input.targetBranch },
+      select: { runNumber: true, headSha: true },
+      orderBy: { runNumber: "desc" },
+    });
+    const observedHeadSha = producer?.headSha ?? null;
+    const expectedHeads = [...new Set([
+      ...(retryRun?.headSha ? [retryRun.headSha] : []),
+      resolvedHeadSha,
+    ])];
+    if (!producer || runOwnedHead(input.taskId, producer.runNumber) !== input.targetBranch
+      || !observedHeadSha || !expectedHeads.includes(observedHeadSha)) {
+      return invalid(
+        `per-Run ref ${input.targetBranch} has observed head ${observedHeadSha ?? "missing"}; expected ${expectedHeads.join(" or ")}`,
+        { targetBranch: input.targetBranch, observedHeadSha, expectedHeadShas: expectedHeads },
+      );
+    }
+  }
   return {
     status: "ok",
     handoff: {
