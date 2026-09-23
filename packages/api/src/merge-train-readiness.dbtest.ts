@@ -495,12 +495,14 @@ const finishTrainRun = async (
   seed: Seed,
   body: string | null,
   status: RunStatus = RunStatus.SUCCEEDED,
+  failureEnvelope?: ReturnType<typeof toolFailureEnvelope>,
 ) => {
   const train = await trainTaskFor(seed);
   const run = await db.run.findFirstOrThrow({ where: { taskId: train.id }, orderBy: { runNumber: "desc" } });
   await db.run.update({
     where: { id: run.id },
-    data: { status, endedAt: TEST_NOW, failureReason: status === RunStatus.LOST ? "merge train Run was lost" : null },
+    data: { status, endedAt: TEST_NOW, failureReason: status === RunStatus.LOST ? "merge train Run was lost" : null,
+      ...(failureEnvelope ? { failureEnvelope } : {}) },
   });
   await db.task.update({ where: { id: train.id }, data: { status: status === RunStatus.LOST ? TaskStatus.REVIEW : TaskStatus.DONE } });
   if (body !== null) {
@@ -516,6 +518,16 @@ const finishTrainRun = async (
   }
   return { train, run };
 };
+
+const toolFailureEnvelope = (stderrSummary: string) => ({
+  version: 1,
+  phase: "EXECUTE",
+  agentExited: true,
+  exitCode: 2,
+  signal: null,
+  providerError: null,
+  stderrSummary,
+});
 
 const recordFor = async (
   seed: Seed,
@@ -918,6 +930,82 @@ test("a failed train Run cannot authorize a valid PASS record", async () => {
   const first = await db.task.findUniqueOrThrow({ where: { id: seed.candidates[0]!.readiness.id } });
   assert.equal(first.status, TaskStatus.REVIEW);
   assert.match(first.failureReason ?? "", /ended FAILED/u);
+});
+
+test("a failed train without a record on a moved live base requeues all candidates without a stop card", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
+  const { train } = await finishTrainRun(seed, null, RunStatus.FAILED);
+  const movedBase = "9".repeat(40);
+
+  const settled = await readinessTick(db, readerFor(seed, { baseSha: movedBase }),
+    new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
+  assert.equal(settled.authorized, 0);
+  const marker = (await trainTaskMarkerFor(train.id)).metadata as Record<string, unknown>;
+  assert.equal(marker.state, "aborted");
+  assert.match(String(marker.reason), /base moved after Run failure/u);
+  for (const candidate of seed.candidates) {
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.readiness.id } })).status, TaskStatus.TODO);
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.regression.id } })).status, TaskStatus.DONE);
+  }
+  assert.equal(await db.inboxMessage.count({ where: {
+    taskId: { in: seed.candidates.flatMap((candidate) => [candidate.regression.id, candidate.readiness.id]) },
+  } }), 0, "base movement creates no candidate Inbox card");
+
+  await readinessTick(db, readerFor(seed, { baseSha: movedBase }),
+    new Date(TEST_NOW.getTime() + 2_000), 5, releaseChainLease, runWithMergeLease, () => []);
+  assert.equal(await db.task.count({ where: {
+    projectId: seed.project.id,
+    chainId: null,
+    description: { contains: "merge-train.sh" },
+  } }), 2, "the next tick forms a new train against the moved base");
+});
+
+test("candidate-tip-mismatch stops the second candidate named by the tool stderr", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "3";
+  const seed = await seedTrainCandidates(3);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
+  const second = seed.candidates[1]!;
+  const stderr = `merge-train: candidate-tip-mismatch: ${second.readiness.id} supplied ${second.headSha}, origin/${second.branch} is ${HEADS[3]}`;
+  await finishTrainRun(seed, null, RunStatus.FAILED, toolFailureEnvelope(stderr));
+
+  await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5,
+    releaseChainLease, runWithMergeLease, () => []);
+  for (const [index, candidate] of seed.candidates.entries()) {
+    const stopped = index === 1;
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.readiness.id } })).status,
+      stopped ? TaskStatus.REVIEW : TaskStatus.TODO);
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.regression.id } })).status,
+      stopped ? TaskStatus.REVIEW : TaskStatus.DONE);
+    const notices = await db.inboxMessage.findMany({ where: {
+      taskId: candidate.regression.id,
+      dedupeKey: { startsWith: "merge-tail-stop:" },
+    } });
+    assert.equal(notices.length, stopped ? 1 : 0);
+    if (stopped) assert.match(notices[0]!.body, new RegExp(second.readiness.id, "u"));
+  }
+});
+
+test("an unbound mismatch signal falls back to stopping the first candidate", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
+  const unknownId = randomUUID();
+  const { run } = await finishTrainRun(seed, null, RunStatus.FAILED,
+    toolFailureEnvelope(`merge-train: candidate-tip-mismatch: ${unknownId} branch does not exist on origin`));
+  await db.run.update({ where: { id: run.id }, data: {
+    output: `merge-train: candidate-tip-mismatch: ${seed.candidates[1]!.readiness.id} branch does not exist on origin`,
+  } });
+
+  await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5,
+    releaseChainLease, runWithMergeLease, () => []);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seed.candidates[0]!.readiness.id } })).status, TaskStatus.REVIEW);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seed.candidates[1]!.readiness.id } })).status, TaskStatus.TODO);
+  assert.equal(await db.inboxMessage.count({ where: {
+    taskId: seed.candidates[0]!.regression.id,
+    dedupeKey: { startsWith: "merge-tail-stop:" },
+  } }), 1);
 });
 
 test("width zero keeps candidates on the existing single-candidate path", async () => {

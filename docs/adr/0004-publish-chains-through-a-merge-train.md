@@ -39,9 +39,9 @@ Every candidate readiness Task receives a `mergeTail.train` marker naming the
 train Task and its one-based position. The detached Task is shown on the board
 with its candidate list; after settlement its description also shows the
 recorded verdict for each position. Each candidate readiness Task receives one
-activity entry naming the train Task, position, and settlement. A failed,
-blocked, or aborted train writes the existing stop notice once per affected
-candidate, so a failure is visible on both the board and Inbox.
+activity entry naming the train Task, position, and settlement. A stopped
+candidate receives the existing Inbox stop notice; an abort caused by a moved
+live base remains visible on the board and lets its candidates retry.
 
 ## Lease window
 
@@ -71,10 +71,13 @@ executor's publication of the authorized prefix happens after that handoff and
 is outside this Lease.
 
 If the train Run ends without a stored `merge-train-v1` record, or the Run is
-lost, the control plane releases the Lease and writes a `mergeTail.train` marker
-with `state: "aborted"` and the named reason on every candidate. The first
-candidate stops in `REVIEW` with an Inbox notice; the others return to `ready`.
-The detached Task is not retried.
+lost, the control plane checks the live default-branch base before settling,
+writes a `mergeTail.train` marker with `state: "aborted"` and the named reason
+on every candidate, and releases the Lease. A moved base returns every
+candidate to `ready`, since the failed command ran against an obsolete base.
+Otherwise a structured candidate-tip mismatch stops the named candidate in
+`REVIEW` with an Inbox notice; other failures stop the first candidate. The
+others return to `ready`. The detached Task is not retried.
 Terminal settlement records one deferred-release obligation in the same
 transaction as the terminal train marker. A confirmed external release settles
 that obligation; if the process exits first, restart reconciliation consumes it
@@ -140,7 +143,7 @@ settlement. Only the longest contiguous PASS prefix is authorized.
 | Every `skipped` candidate | Return the candidate to `ready` unchanged for a later train. |
 | `blocked` candidate | Enter the existing refresh-conflict recovery stop with the recorded reason. |
 | `pass` prefix whose candidate has an unsatisfied Approval gate | Stop that candidate on its gate refusal, authorize only the positions before it against the truncated prefix, and return the positions after it to `ready`. |
-| Missing record or lost train Run | Abort the train, release the Lease, mark every candidate `aborted`, stop the first candidate, and return the others to `ready`. |
+| Missing record or lost train Run | Abort the train and release the Lease. If the live base moved, return every candidate to `ready`; otherwise mark every candidate `aborted`, stop the named candidate for a structured tip mismatch or the first candidate for other failures, and return the others to `ready`. |
 
 None of these train settlements invokes `requeueRegressionSettlement` for
 base drift. In particular, the existing shared Regression completion and
@@ -184,9 +187,13 @@ A production train Run ended before its model-started gate command finished.
 The Run had no `merge-train-v1` record, so readiness repeatedly formed the same
 train from unchanged Regression evidence. This meets the revisit condition for
 the original return-to-ready abort rule: it caused repeated Runs and notices
-without changing the fault. A missing record, lost Run, invalid output, or
-other infrastructure abort now stops the first candidate's Merge readiness
-Step and opens its existing stop notice in the default Inbox thread. The
+without changing the fault. On a missing record, lost Run, invalid output, or
+other infrastructure abort, readiness first checks the live default-branch
+base. If it moved, the candidates can retry against that new base. Otherwise a
+structured `candidate-tip-mismatch: <taskId>` from the failed command stops
+that candidate; without a bound candidate identity, readiness stops the first
+candidate and opens its existing stop notice in the default Inbox thread.
+Stopping the first candidate is a loop guard, not attribution of fault. The
 remaining candidates may proceed independently; if they encounter the same
 fault, each further abort stops another Chain, bounded by the train width.
 
@@ -196,8 +203,11 @@ The Runner invokes the fixed tool with the claim's candidate metadata and
 waits for process exit. A successful process exit without a valid current-Run
 handoff fails the Run. The Task description is board context, not executable
 authority. This reuses the existing gate and handoff paths without asking a
-model to supervise a long command. Exact-head validation, Merge gate
-attestation, second reads, and cumulative prefix lineage remain required.
+model to supervise a long command. While a gate child runs, the tool emits a
+bounded periodic progress line so a quiet gate is not mistaken for an inactive
+tool; the gate's own timeout and the Run walltime still bound a hung gate.
+Exact-head validation, Merge gate attestation, second reads, and cumulative
+prefix lineage remain required.
 
 ## Related authority
 

@@ -902,20 +902,18 @@ export const claimRun = async (
         ? await tx.taskActivity.findFirst({ where: {
           taskId: candidate.task.id,
           actorType: "control-plane",
-          metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.train },
+          OR: [
+            { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.train } },
+            // The marker's self-reference still identifies this detached Task
+            // when its kind field is damaged; no Task name is trusted here.
+            { metadata: { path: ["trainTaskId"], equals: candidate.task.id } },
+          ],
         }, select: { metadata: true }, orderBy: [{ createdAt: "desc" }, { id: "desc" }] })
         : null;
       // The execution kind is independent of marker validity. A malformed or
       // settled train marker must never turn this detached Run into model work.
       const trainMarker = markerFromMetadata(trainMarkerRow?.metadata);
-      // The card name is a second fail-closed signal if the marker's kind key
-      // is damaged. It never supplies execution input; without a valid marker
-      // the fixed executor fails before starting any process.
-      const isMergeTrain = trainMarkerRow !== null || (
-        candidate.task.chainId === null
-        && candidate.task.templateStep === null
-        && candidate.task.name?.startsWith("Merge train: ") === true
-      );
+      const isMergeTrain = trainMarkerRow !== null;
       const mergeTrain = trainMarker?.kind === "train" ? mergeTrainClaimMetadata(trainMarker) : null;
       const regressionRecoveryContext = isRegressionVerificationOutputKind(candidate.task.templateStep?.outputKind)
         ? await regressionRecoveryContextForClaim(tx, { taskId: candidate.task.id, runId: run.id })

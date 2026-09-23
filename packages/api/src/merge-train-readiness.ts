@@ -38,6 +38,27 @@ import { lockTaskMutationRows } from "./task-write.js";
 type TrainCandidateBinding = { taskId: string; chainId: string; headSha: string; branch: string };
 type TrainBinding = { baseSha: string; width: number; candidates: TrainCandidateBinding[] };
 
+/** The fixed runtime tool writes this line to stderr for an origin tip check.
+ * Run.output is stdout and may contain arbitrary work text, so it cannot name
+ * the candidate to stop. Only a failed tool exit's channel-separated envelope
+ * and a task id from the durable train binding may do that. */
+const mismatchedCandidate = (
+  run: { status: RunStatus; failureEnvelope: Prisma.JsonValue | null } | undefined,
+  train: TrainBinding,
+): TrainCandidateBinding | null => {
+  if (run?.status !== RunStatus.FAILED || !run.failureEnvelope
+    || typeof run.failureEnvelope !== "object" || Array.isArray(run.failureEnvelope)) return null;
+  const envelope = run.failureEnvelope;
+  if (envelope.version !== 1 || envelope.phase !== "EXECUTE" || envelope.agentExited !== true
+    || envelope.exitCode !== 2 || envelope.signal !== null || envelope.providerError !== null
+    || typeof envelope.stderrSummary !== "string") return null;
+  const matches = [...envelope.stderrSummary.matchAll(
+    /^merge-train: candidate-tip-mismatch: (\S+) (?:supplied [0-9a-f]{40}, origin\/\S+ is [0-9a-f]{40}|branch does not exist on origin)$/gmu,
+  )];
+  if (matches.length !== 1) return null;
+  return train.candidates.find((candidate) => candidate.taskId === matches[0]![1]) ?? null;
+};
+
 /** A valid train record can become stale while the control plane is reading GitHub. */
 class StaleTrainBaseError extends Error {}
 
@@ -283,19 +304,18 @@ const candidateSettlementMarker = async (
 };
 
 const abortTrain = async (
-  db: PrismaClient, train: PendingTrain, reason: string, now: Date, stopFirst: boolean,
+  db: PrismaClient, train: PendingTrain, reason: string, now: Date,
+  stopCandidateTaskId: string | null, noticeReturned = false,
 ): Promise<boolean> => db.$transaction(async (tx) => {
   await lockCandidates(tx, train.candidates);
   const current = await readLatestMarker(tx, train.taskId, "train");
   if (current?.state !== "queued" && current?.state !== "acquiring") return false;
   for (const [index, candidate] of train.candidates.entries()) {
-    const isFirstCandidate = index === 0;
     const stopReason = `Merge train ${train.taskId} aborted: ${reason}`;
     let returnedToReady = false;
-    // Park the first candidate so the same evidence cannot recreate the failed
-    // train on the next tick. Other members remain eligible and can progress
-    // through a later train or the existing single-candidate path.
-    if (isFirstCandidate && stopFirst) {
+    // Park only the implicated candidate so the same evidence cannot recreate
+    // its failed train. Other members may progress independently.
+    if (candidate.taskId === stopCandidateTaskId) {
       const readiness = await tx.task.findUniqueOrThrow({ where: { id: candidate.taskId },
         select: { projectId: true, chainId: true, status: true, archivedAt: true } });
       const regression = await tx.task.findFirstOrThrow({ where: {
@@ -343,7 +363,7 @@ const abortTrain = async (
       } });
       returnedToReady = returned.count === 1;
     }
-    if (!stopFirst && returnedToReady) {
+    if (noticeReturned && returnedToReady) {
       await noticeMergeTrainAbort(tx, { readinessTaskId: candidate.taskId, trainTaskId: train.taskId, reason, now });
     }
     await candidateSettlementMarker(tx, train, index + 1, "aborted", reason);
@@ -388,6 +408,7 @@ const readEligibleCandidate = async (
   const ready = read as ReadyRead;
   if (ready.input.regression.headSha !== candidate.headSha
     || ready.regression.runs[0]?.branch !== candidate.branch) {
+    await releaseClaim(db, ready);
     return refused("binding changed");
   }
   return { kind: "ready", read: ready };
@@ -436,7 +457,7 @@ const enqueueReservedTrain = async (
     const reason = error instanceof Error ? error.message : String(error);
     for (const read of reads) await releaseClaim(db, read);
     reads.length = 0;
-    await abortTrain(db, train, reason, now, stopFirst);
+    await abortTrain(db, train, reason, now, stopFirst ? train.candidates[0]!.taskId : null, !stopFirst);
     return "finished";
   } finally {
     for (const read of reads) await releaseClaim(db, read);
@@ -502,7 +523,21 @@ const settleTrain = async (
   const parsed = parseMergeTrainRecord(output?.body);
   if (!failure && parsed.status === "invalid") failure = parsed.reason;
   if (failure || parsed.status !== "ok") {
-    await abortTrain(db, train, failure ?? "Invalid merge train output", now, true);
+    const first = await readEligibleCandidate(db, train, train.candidates[0]!, now, hooks, "failure settlement");
+    if (first.kind === "claim-lost") return "waiting";
+    let baseMoved = false;
+    if (first.kind === "ready") {
+      try {
+        baseMoved = await liveBase(reader, first.read) !== train.baseSha;
+      } finally {
+        await releaseClaim(db, first.read);
+      }
+    }
+    const mismatch = baseMoved ? null : mismatchedCandidate(run, train);
+    const reason = baseMoved ? "Merge train base moved after Run failure"
+      : mismatch ? `Candidate ${mismatch.taskId} tip differs from its queued head: ${failure}`
+        : failure ?? "Invalid merge train output";
+    await abortTrain(db, train, reason, now, baseMoved ? null : mismatch?.taskId ?? train.candidates[0]!.taskId);
     return "finished";
   }
 
@@ -702,7 +737,7 @@ const settleTrain = async (
     // `stopMergeTail` parked it in REVIEW.
     for (const read of reads) await releaseClaim(db, read);
     reads.length = 0;
-    await abortTrain(db, train, reason, now, stopFirst);
+    await abortTrain(db, train, reason, now, stopFirst ? train.candidates[0]!.taskId : null, !stopFirst);
     return "finished";
   } finally {
     for (const read of reads) await releaseClaim(db, read);
@@ -737,7 +772,7 @@ export const mergeTrainReadinessTick = async (
         && event.owningTask.id === train.regressionTaskId);
       let outcome: "waiting" | "finished";
       if (releaseWasDeferred) {
-        await abortTrain(db, train, "Previous merge train lease release was deferred", now, true);
+        await abortTrain(db, train, "Previous merge train lease release was deferred", now, train.candidates[0]!.taskId);
         outcome = "finished";
       } else outcome = train.state === "acquiring"
         ? await enqueueReservedTrain(db, reader, train, now, hooks)

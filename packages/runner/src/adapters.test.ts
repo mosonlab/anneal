@@ -1399,11 +1399,16 @@ test("child environment is an explicit allowlist and excludes host variables", (
 test("the runner pins its configured gate destination over task secrets", () => {
   const env = buildChildEnvironment(
     { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], workspaceRoot: productionRoot, hostProofSlots: 3, gateServer: "agentos-gate" },
-    { ...claim, secrets: { ...claim.secrets, AGENTOS_GATE_SERVER: "ci-desktop-worker" } },
+    { ...claim, secrets: {
+      ...claim.secrets,
+      AGENTOS_GATE_SERVER: "ci-desktop-worker",
+      MERGE_TRAIN_GATE_DISPATCH: "/untrusted/skip-gate.sh",
+    } },
     scratch,
     "/work",
   );
   assert.equal(env.AGENTOS_GATE_SERVER, "agentos-gate");
+  assert.equal(env.MERGE_TRAIN_GATE_DISPATCH, undefined);
 });
 
 test("RUNNER_GATE_FALLBACK_SERVER selects a runner-owned two-host environment", async () => {
