@@ -171,6 +171,7 @@ const inboxProjectPredicate = (projectId: string): Prisma.InboxMessageWhereInput
 });
 
 type InboxCard = InboxMessageContract<Date>;
+const inboxProjectSelect = { id: true, name: true, slug: true } as const;
 
 export const registerInboxRoutes = (app: RouteApp, { db, runners }: RouteDeps): void => {
   // The production app passes the same registry that receives runner
@@ -214,11 +215,25 @@ export const registerInboxRoutes = (app: RouteApp, { db, runners }: RouteDeps): 
         decisions: true,
         replies: { orderBy: { createdAt: "asc" } },
         replyTo: true,
-        session: { select: { taskId: true } },
+        agent: { select: { project: { select: inboxProjectSelect } } },
+        task: { select: { project: { select: inboxProjectSelect } } },
+        goal: { select: { project: { select: inboxProjectSelect } } },
+        gateTask: { select: { project: { select: inboxProjectSelect } } },
+        session: { select: { taskId: true, agent: { select: { project: { select: inboxProjectSelect } } } } },
       },
     });
     if (!message) return context.json({ error: "Inbox message not found" }, 404);
-    return context.json(withInboxReadModel(message, await blockedMessageIds(db, [message.id])) satisfies InboxCard);
+    const project = message.agent?.project
+      ?? message.task?.project
+      ?? message.goal?.project
+      ?? message.session?.agent.project
+      ?? message.gateTask?.project
+      ?? null;
+    const { agent, task, goal, gateTask, ...readModel } = message;
+    return context.json({
+      ...withInboxReadModel(readModel, await blockedMessageIds(db, [message.id])),
+      project,
+    } satisfies InboxCard);
   });
   app.post("/inbox/messages/:messageId/decision", async (context) => {
     const input = await readJson(context.req.raw, inboxDecisionInput);

@@ -3310,6 +3310,12 @@ curl "$BASE_URL/inbox/messages/summary" -H "Authorization: Bearer $OPERATOR_TOKE
 ### GET `/inbox/messages/:messageId`
 
 - Required path parameter: `messageId`.
+- The id lookup is unfiltered by Project. It returns the message's ordered
+  `replies` and `decisions` with the same fields as the list route. It also
+  returns `project` as `{ id, name, slug }` when an associated Agent, Task,
+  Goal, Session, or gate Task identifies a Project;
+  global messages return `project: null`.
+- Returns `404 Not Found` when the message id does not exist.
 
 ```sh
 curl "$BASE_URL/inbox/messages/$MESSAGE_ID" -H "Authorization: Bearer $OPERATOR_TOKEN"

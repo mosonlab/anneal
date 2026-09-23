@@ -32,7 +32,7 @@ test("an approval gate shows the producing step's full artifact, not just the ca
   const page = await mountPage(<ProjectProvider><InboxThreadPage messageId="gate-1" /></ProjectProvider>, { "*": ({ input }) => {
     const url = String(input).replace(/^.*\/api/, "");
     requested.push(url);
-    if (url === "/inbox/messages") return new Response(JSON.stringify([gateCard()]), { status: 200 });
+    if (url === "/inbox/messages/gate-1") return new Response(JSON.stringify(gateCard()), { status: 200 });
     if (url === "/tasks/producing-task/output") return new Response(JSON.stringify(artifact), { status: 200 });
     return new Response("[]", { status: 200 });
   } }, "http://127.0.0.1:5173/inbox/gate-1");
@@ -57,7 +57,7 @@ test("a card that is not an approval gate polls no artifact at all", async () =>
   const page = await mountPage(<ProjectProvider><InboxThreadPage messageId="plain-1" /></ProjectProvider>, { "*": ({ input }) => {
     const url = String(input).replace(/^.*\/api/, "");
     requested.push(url);
-    if (url === "/inbox/messages") return new Response(JSON.stringify([plain]), { status: 200 });
+    if (url === "/inbox/messages/plain-1") return new Response(JSON.stringify(plain), { status: 200 });
     return new Response("[]", { status: 200 });
   } }, "http://127.0.0.1:5173/inbox/plain-1");
   try {

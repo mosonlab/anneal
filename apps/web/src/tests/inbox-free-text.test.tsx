@@ -30,7 +30,7 @@ const renderThread = async (message: InboxMessage, posts: Post[] = []) => {
         posts.push({ path, body: JSON.parse(String(init.body ?? "{}")) as Record<string, unknown> });
         return new Response("{}", { status: 200 });
       }
-      if (path === "/inbox/messages") return new Response(JSON.stringify([message]), { status: 200 });
+      if (path === `/inbox/messages/${message.id}`) return new Response(JSON.stringify(message), { status: 200 });
       return new Response("[]", { status: 200 });
     } },
     `http://127.0.0.1:5173/inbox/${message.id}`,

@@ -91,10 +91,23 @@ test("Inbox read models expose the server-owned free-text capability", async () 
         gateTaskId: null, replyToMessageId: null, dedupeKey: "notification:1", session: null,
       },
     ];
+    const project = { id: "project-1", name: "Project One", slug: "project-one" };
+    const singleMessage = {
+      ...messages[0],
+      agent: { project }, task: null, goal: null, gateTask: null,
+      decisions: [{ id: "decision-1", decision: "continue", actorOpenId: "operator", createdAt: new Date("2026-09-01T00:00:00Z") }],
+      replies: [{ id: "reply-1", body: "More context", createdAt: new Date("2026-09-01T00:01:00Z") }],
+    };
+    const globalNotice = {
+      id: "global-notice", status: "OPEN", from: "AGENT", kind: "TEXT", choices: null,
+      gateTaskId: null, dedupeKey: "notification:global", replyToMessageId: null,
+      agent: null, task: null, goal: null, gateTask: null, session: null,
+      decisions: [], replies: [],
+    };
     const database = {
       inboxMessage: {
         findMany: async () => messages,
-        findUnique: async () => messages[0],
+        findUnique: async ({ where }: { where: { id: string } }) => where.id === "global-notice" ? globalNotice : singleMessage,
       },
       session: { findMany: async () => [
         { waitingOnMessageId: "waiting-choice" },
@@ -123,7 +136,22 @@ test("Inbox read models expose the server-owned free-text capability", async () 
       headers: { Authorization: "Bearer operator-unit-token" },
     });
     assert.equal(single.status, 200);
-    assert.equal((await single.json() as { acceptsFreeText: boolean }).acceptsFreeText, true);
+    const singleCard = await single.json() as {
+      acceptsFreeText: boolean;
+      project: unknown;
+      decisions: Array<{ decision: string }>;
+      replies: Array<{ body: string }>;
+    };
+    assert.equal(singleCard.acceptsFreeText, true);
+    assert.deepEqual(singleCard.project, project);
+    assert.deepEqual(singleCard.decisions.map(({ decision }) => decision), ["continue"]);
+    assert.deepEqual(singleCard.replies.map(({ body }) => body), ["More context"]);
+
+    const global = await createApp(database).request("/inbox/messages/global-notice", {
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(global.status, 200);
+    assert.equal((await global.json() as { project: unknown }).project, null);
   });
 });
 
