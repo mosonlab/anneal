@@ -1560,6 +1560,11 @@ test("Run native subagent snapshots reject incomplete or noncanonical capability
     ...base, runNumber: 3, dedupeKey: `task:${context.task.id}:run:3`, runner: "CLAUDE",
     subagentModel: "gpt-6-luna:max", subagentMaxConcurrent: 8,
   } }));
+  // The constraint checks shape only: a Run opened under an earlier pin is valid.
+  await db.run.create({ data: {
+    ...base, runNumber: 4, dedupeKey: `task:${context.task.id}:run:4`,
+    subagentModel: "gpt-5.6-luna:max", subagentMaxConcurrent: 8,
+  } });
 });
 
 test("an archive committing under the lock is seen by task creation and by instantiation", { timeout: 30_000 }, async () => {

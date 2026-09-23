@@ -7,6 +7,7 @@ ALTER TABLE "Run"
     OR (
       "runner" = 'codex'
       AND "subagentModel" IS NOT NULL
+      AND "subagentMaxConcurrent" IS NOT NULL
       AND "subagentMaxConcurrent" = 8
     )
   );
