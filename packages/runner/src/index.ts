@@ -14,13 +14,14 @@ loadEnvironment({ path: new URL("../../../.env", import.meta.url), quiet: true }
 // one of them being stale while the other was current (issue #140).
 console.log(`Anneal runner build: ${formatBuildLine(readBuildInfo(import.meta.url))}`);
 
-const [{ loadRunnerConfig }, { nodeBinaryPath, runtimeDescriptor }, { pollForTask, runStartupPreflight, startCliAvailabilityMonitor, startupPreflightLog }, { reclaimWorkspaces }, { prepareHostProofSlots }, { runPollingLoop }] = await Promise.all([
+const [{ loadRunnerConfig }, { nodeBinaryPath, runtimeDescriptor }, { pollForTask, runStartupPreflight, startCliAvailabilityMonitor, startupPreflightLog }, { reclaimWorkspaces }, { prepareHostProofSlots }, { runPollingLoop }, { reportPresence }] = await Promise.all([
   import("./config.js"),
   import("./adapters.js"),
   import("./runner.js"),
   import("./reclaim.js"),
   import("./host-proof-slots.js"),
   import("./polling-loop.js"),
+  import("./api.js"),
 ]);
 
 const config = loadRunnerConfig();
@@ -98,6 +99,7 @@ const reclaim = async (): Promise<void> => {
 
 await runPollingLoop(config, {
   reclaim,
+  reportPresence: () => reportPresence(config),
   claim: () => pollForTask(config),
   shouldStop: () => stopping,
 });

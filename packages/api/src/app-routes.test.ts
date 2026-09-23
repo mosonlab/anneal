@@ -135,6 +135,7 @@ const expectedRoutes = [
   "POST /inbox/messages/:messageId/close",
   "POST /runner/availability",
   "POST /runner/preflight",
+  "POST /runner/presence",
   "POST /runner/workspaces/reclaimable",
   "POST /runner/workspaces/reclaimed",
   "POST /runner/workspaces/salvaged",

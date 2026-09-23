@@ -10,13 +10,14 @@ const config: PollingLoopConfig = {
   claimMaxLoadAverage: 10,
 };
 
-test("overload skips claims, waits, reclaims on schedule, and recovers once", async () => {
+test("overload reports presence without claiming, then recovers once", async () => {
   const loads = [11, 11, 11, 10, 10];
   let clock = 0;
   let stopping = false;
   let loadReads = 0;
   let reclaimCalls = 0;
   let claimCalls = 0;
+  let presenceCalls = 0;
   let firstClaimFinished = false;
   let finishFirstClaim: (() => void) | undefined;
   const waits: number[] = [];
@@ -40,6 +41,10 @@ test("overload skips claims, waits, reclaims on schedule, and recovers once", as
       events.push("reclaim");
       reclaimCalls += 1;
     },
+    reportPresence: async () => {
+      events.push("presence");
+      presenceCalls += 1;
+    },
     claim: async () => {
       events.push("claim");
       claimCalls += 1;
@@ -58,13 +63,14 @@ test("overload skips claims, waits, reclaims on schedule, and recovers once", as
   while (claimCalls === 0) await scheduleImmediate();
   assert.equal(loadReads, 4, "the first claim is reached only after three overload reads");
   assert.equal(reclaimCalls, 2, "reclaim runs on both due iterations while overloaded");
+  assert.equal(presenceCalls, 3, "each overloaded poll reports presence once");
   assert.deepEqual(waits, [100, 100, 100]);
   assert.deepEqual(events, [
-    "reclaim", "load:11", "wait",
-    "load:11", "wait",
-    "reclaim", "load:11", "wait",
+    "reclaim", "load:11", "presence", "wait",
+    "load:11", "presence", "wait",
+    "reclaim", "load:11", "presence", "wait",
     "load:10", "claim",
-  ], "each due reclaim finishes before that iteration's admission decision");
+  ], "each due reclaim finishes before the presence-only overloaded poll");
   assert.deepEqual(logs, ["Runner claim overloaded: load=11 threshold=10", "Runner claim recovered: load=10 threshold=10"]);
   assert.equal(firstClaimFinished, false, "the claim's execution remains awaited");
 
@@ -73,6 +79,7 @@ test("overload skips claims, waits, reclaims on schedule, and recovers once", as
 
   assert.equal(firstClaimFinished, true);
   assert.equal(claimCalls, 2, "an admitted iteration follows immediately after a successful claim");
+  assert.equal(presenceCalls, 3, "recovered polls return to claim without a separate presence request");
   assert.equal(loadReads, 5, "execution does not perform another load read before it completes");
   assert.equal(reclaimCalls, 2);
   assert.deepEqual(waits, [100, 100, 100, 100]);
@@ -87,6 +94,7 @@ test("zero load admits a claim without transition logs", async () => {
   await runPollingLoop({ ...config, workspaceReclaimIntervalMs: 60_000 }, {
     readLoadAverage: () => 0,
     reclaim: async () => undefined,
+    reportPresence: async () => undefined,
     claim: async () => {
       claimCalls += 1;
       return "idle";
@@ -119,6 +127,7 @@ test("a reclaim failure is reported without stopping later polls", async () => {
       reclaimCalls += 1;
       if (reclaimCalls === 1) throw failure;
     },
+    reportPresence: async () => undefined,
     claim: async () => {
       claimCalls += 1;
       return "idle";
@@ -148,6 +157,7 @@ test("a claim failure is reported without stopping later polls", async () => {
   await runPollingLoop({ ...config, workspaceReclaimIntervalMs: 60_000 }, {
     readLoadAverage: () => 0,
     reclaim: async () => undefined,
+    reportPresence: async () => undefined,
     claim: async () => {
       claimCalls += 1;
       if (claimCalls === 1) throw failure;
@@ -166,6 +176,39 @@ test("a claim failure is reported without stopping later polls", async () => {
   assert.deepEqual(errors, [["Runner poll failed", failure]]);
 });
 
+test("a presence failure is reported while overload continues without claiming", async () => {
+  let stopping = false;
+  let presenceCalls = 0;
+  let claimCalls = 0;
+  const errors: Array<[string, unknown]> = [];
+  const failure = new Error("presence unavailable");
+
+  await runPollingLoop({ ...config, workspaceReclaimIntervalMs: 60_000 }, {
+    readLoadAverage: () => 11,
+    reclaim: async () => undefined,
+    reportPresence: async () => {
+      presenceCalls += 1;
+      throw failure;
+    },
+    claim: async () => {
+      claimCalls += 1;
+      return "idle";
+    },
+    shouldStop: () => stopping,
+    wait: async () => {
+      if (presenceCalls === 2) stopping = true;
+    },
+    error: (line, error) => errors.push([line, error]),
+  });
+
+  assert.equal(presenceCalls, 2);
+  assert.equal(claimCalls, 0);
+  assert.deepEqual(errors, [
+    ["Runner presence report failed", failure],
+    ["Runner presence report failed", failure],
+  ]);
+});
+
 test("a dispatch drain logs one line on entry and one on exit while polling continues", async () => {
   const outcomes: ClaimOutcome[] = ["draining", "draining", "idle", "draining", "idle"];
   let stopping = false;
@@ -176,6 +219,7 @@ test("a dispatch drain logs one line on entry and one on exit while polling cont
   await runPollingLoop({ ...config, workspaceReclaimIntervalMs: 60_000 }, {
     readLoadAverage: () => 0,
     reclaim: async () => undefined,
+    reportPresence: async () => undefined,
     claim: async () => {
       const outcome = outcomes[claimCalls]!;
       claimCalls += 1;

@@ -31,6 +31,53 @@ test("runner observations replace omitted telemetry", () => {
   });
 });
 
+test("POST /runner/presence authenticates runners and updates daemon presence without database claims", async () => {
+  await withTokens(async () => {
+    let databaseAccesses = 0;
+    const database = new Proxy({}, {
+      get(_target, property) {
+        databaseAccesses += 1;
+        throw new Error(`presence must not access the database: ${String(property)}`);
+      },
+    }) as PrismaClient;
+    const registry = createRunnerRegistry();
+    const app = createApp(database, { runnerRegistry: registry });
+    const body = {
+      runnerId: "presence-runner",
+      daemonVersion: BUILD_COMMIT,
+      diskFreeBytes: 8_192,
+      pollIntervalMs: 5_000,
+      workspaceRoot: "/isolated/presence-runner",
+    };
+    const request = (authorization?: string) => app.request("/runner/presence", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(authorization === undefined ? {} : { Authorization: authorization }),
+      },
+      body: JSON.stringify(body),
+    });
+
+    assert.equal((await request()).status, 401);
+    assert.equal((await request("Bearer runners-test-operator")).status, 403);
+    assert.deepEqual(registry.snapshot(new Date()), []);
+
+    const sentAt = Date.now();
+    const response = await request("Bearer runners-test-runner");
+    const checkedAt = Date.now();
+    assert.equal(response.status, 204);
+    const daemon = registry.snapshot(new Date(checkedAt)).find(({ runnerId }) => runnerId === body.runnerId);
+    assert.ok(daemon);
+    assert.equal(daemon.online, true);
+    assert.equal(daemon.daemonVersion, BUILD_COMMIT);
+    assert.equal(daemon.diskFreeBytes, body.diskFreeBytes);
+    assert.equal(daemon.pollIntervalMs, body.pollIntervalMs);
+    assert.equal(daemon.workspaceRoot, body.workspaceRoot);
+    assert.ok(daemon.lastSeenAt.getTime() >= sentAt && daemon.lastSeenAt.getTime() <= checkedAt);
+    assert.equal(databaseAccesses, 0, "presence does not run claim reconciliation or create a Run");
+  });
+});
+
 test("the registry keeps every runner inside the forget window and retires stale entries", () => {
   const registry = createRunnerRegistry();
   const start = new Date("2026-08-17T00:00:00.000Z");
