@@ -1702,8 +1702,9 @@ the ordinary single-candidate authorization path.
 The control plane represents a train with one detached platform Task of kind
 `merge-train`. This Task has `assigneeType: AGENT`,
 `maxSessionsPerTask: 1`, and the Agent bound to the first candidate Chain's
-Regression verification Step. Its description instructs the session only to
-run `"${AGENTOS_TOOLS}/merge-train.sh"` and finish. The task claim metadata
+Regression verification Step. The Runner executes
+`"${AGENTOS_TOOLS}/merge-train.sh"` directly and waits for it to exit. Its
+description displays the command for operators. The task claim metadata
 contains the tool's input, including the live `baseSha`, configured `width`,
 and ordered `candidates` with each candidate's `taskId`, `chainId`, `headSha`,
 and `branch`:
@@ -1739,7 +1740,8 @@ train formation. The Lease is released after the last
 authorization or on every failure path. Merge executor publication occurs
 after the handoff and is outside this Lease. A train Run that is lost or ends
 without a stored `merge-train-v1` record releases the Lease, marks the train
-aborted, and returns its candidates to `ready`; the detached Task is not
+aborted, stops the first candidate's Merge readiness Step with a default-thread
+Inbox notice, and returns the others to `ready`; the detached Task is not
 retried.
 
 Before authorizing, readiness parses `merge-train-v1`, requires its `baseSha`
@@ -3090,8 +3092,9 @@ train Task is enqueued and keeps it through the train's record validation,
 second-read checks, and authorization settlement. The Lease is released after
 the last authorization or on every failure and abort path; merge executor's
 publication is outside this window. A lost train Run or a Run without a stored
-`merge-train-v1` record aborts the train, releases the Lease, and returns its
-candidates to `ready` for a later tick.
+`merge-train-v1` record aborts the train, releases the Lease, stops the first
+candidate's Merge readiness Step with a default-thread Inbox notice, and
+returns the others to `ready`.
 
 Response fields:
 

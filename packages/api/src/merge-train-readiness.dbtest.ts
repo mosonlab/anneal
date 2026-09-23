@@ -799,7 +799,7 @@ test("a skipped train candidate returns to ready with no Regression rerun", asyn
   assert.equal(await db.run.count({ where: { taskId: skipped.regression.id } }), 1);
 });
 
-test("an aborted train releases its lease, records every candidate, and returns them to ready without Regression re-runs", async () => {
+test("a lost train Run stops its first candidate and returns later candidates to ready without Regression re-runs", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
   await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
@@ -810,8 +810,10 @@ test("an aborted train releases its lease, records every candidate, and returns 
   assert.equal(settled.requeued, 0);
   assert.equal(settled.stopped, 0);
   for (const [position, candidate] of seed.candidates.entries()) {
-    assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.readiness.id } })).status, TaskStatus.TODO);
-    assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.regression.id } })).status, TaskStatus.DONE);
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.readiness.id } })).status,
+      position === 0 ? TaskStatus.REVIEW : TaskStatus.TODO);
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.regression.id } })).status,
+      position === 0 ? TaskStatus.REVIEW : TaskStatus.DONE);
     assert.equal(await db.run.count({ where: { taskId: candidate.regression.id } }), 1);
     const marker = (await trainMarkersFor(candidate.readiness.id)).at(-1)!.metadata as Record<string, unknown>;
     assert.equal(marker.state, "aborted");
@@ -820,6 +822,124 @@ test("an aborted train releases its lease, records every candidate, and returns 
   }
   assert.deepEqual(releasedTargets, []);
   assert.deepEqual(releasedChainIds, [seed.candidates[0]!.chainId]);
+});
+
+test("train abort preserves readiness status and archive changes made during the train", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "3";
+  const seed = await seedTrainCandidates(3);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
+  await finishTrainRun(seed, null, RunStatus.LOST);
+
+  await db.task.update({ where: { id: seed.candidates[0]!.readiness.id }, data: {
+    status: TaskStatus.REVIEW,
+    failureReason: "operator review is active",
+  } });
+  await db.task.update({ where: { id: seed.candidates[1]!.readiness.id }, data: {
+    status: TaskStatus.DONE,
+    failureReason: "operator completed readiness",
+  } });
+  await db.task.update({ where: { id: seed.candidates[2]!.readiness.id }, data: {
+    archivedAt: new Date(TEST_NOW.getTime() + 500),
+    failureReason: "operator archived readiness",
+  } });
+
+  await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
+
+  const [reviewed, completed, archived] = seed.candidates.map((candidate) => candidate.readiness);
+  const reviewedAfter = await db.task.findUniqueOrThrow({ where: { id: reviewed!.id } });
+  const completedAfter = await db.task.findUniqueOrThrow({ where: { id: completed!.id } });
+  const archivedAfter = await db.task.findUniqueOrThrow({ where: { id: archived!.id } });
+  assert.equal(reviewedAfter.status, TaskStatus.REVIEW);
+  assert.equal(reviewedAfter.failureReason, "operator review is active");
+  assert.equal(completedAfter.status, TaskStatus.DONE);
+  assert.equal(completedAfter.failureReason, "operator completed readiness");
+  assert.ok(archivedAfter.archivedAt);
+  assert.equal(archivedAfter.failureReason, "operator archived readiness");
+  for (const candidate of seed.candidates) {
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.regression.id } })).status, TaskStatus.DONE);
+    assert.equal(await db.inboxMessage.count({ where: {
+      taskId: candidate.regression.id,
+      dedupeKey: { startsWith: `merge-readiness-stop:${candidate.readiness.id}:` },
+    } }), 0, "an existing operator disposition is not replaced by a train-abort stop");
+  }
+});
+
+test("a missing train record parks the first candidate and the next tick does not reform the failed group", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
+  const { train } = await finishTrainRun(seed, null);
+
+  await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
+
+  const first = seed.candidates[0]!;
+  const parked = await db.task.findUniqueOrThrow({ where: { id: first.readiness.id } });
+  assert.equal(parked.status, TaskStatus.REVIEW);
+  assert.match(parked.failureReason ?? "", /without a merge-train-v1 record/u);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seed.candidates[1]!.readiness.id } })).status, TaskStatus.TODO);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: first.regression.id } })).status, TaskStatus.REVIEW);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: train.id } })).status, TaskStatus.REVIEW);
+  const readinessMarker = await readLatestMarker(db, first.regression.id, "readiness");
+  assert.equal(readinessMarker?.state, "stopped");
+
+  const notice = await db.inboxMessage.findFirstOrThrow({ where: {
+    taskId: first.regression.id,
+    dedupeKey: { startsWith: `merge-readiness-stop:${first.readiness.id}:` },
+  }, include: { thread: true } });
+  assert.match(notice.body, /Autonomous merge readiness stopped: Merge train .* aborted.*without a merge-train-v1 record/u);
+  assert.equal(notice.status, "OPEN");
+  assert.equal(notice.thread?.externalChatId, process.env.FEISHU_DEFAULT_CHAT_ID);
+
+  const nextTick = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 2_000), 5, releaseChainLease, runWithMergeLease, () => []);
+  assert.equal(nextTick.authorized, 1, "the remaining candidate proceeds through the single-candidate path");
+  assert.equal(await db.task.count({ where: {
+    projectId: seed.project.id,
+    chainId: null,
+    description: { contains: "merge-train.sh" },
+  } }), 1, "the failed candidate group is not formed as another train");
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: first.readiness.id } })).status, TaskStatus.REVIEW);
+  assert.equal(await db.inboxMessage.count({ where: {
+    taskId: first.regression.id,
+    dedupeKey: { startsWith: `merge-readiness-stop:${first.readiness.id}:` },
+  } }), 1);
+});
+
+test("a failed train Run cannot authorize a valid PASS record", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
+  await finishTrainRun(seed, await recordFor(seed, ["pass", "pass"], 2), RunStatus.FAILED);
+
+  const settled = await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5,
+    releaseChainLease, runWithMergeLease, () => []);
+
+  assert.equal(settled.authorized, 0);
+  assert.equal(await db.taskStepOutput.count({ where: { taskId: seed.candidates[0]!.readiness.id } }), 0);
+  const first = await db.task.findUniqueOrThrow({ where: { id: seed.candidates[0]!.readiness.id } });
+  assert.equal(first.status, TaskStatus.REVIEW);
+  assert.match(first.failureReason ?? "", /ended FAILED/u);
+});
+
+test("width zero keeps candidates on the existing single-candidate path", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "0";
+  const seed = await seedTrainCandidates(2);
+
+  const result = await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
+
+  assert.equal(result.authorized, 2);
+  assert.equal(await db.task.count({ where: {
+    projectId: seed.project.id,
+    chainId: null,
+    description: { contains: "merge-train.sh" },
+  } }), 0);
+  for (const candidate of seed.candidates) {
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.readiness.id } })).status, TaskStatus.DONE);
+    const authorization = await db.taskActivity.findFirstOrThrow({ where: {
+      taskId: candidate.readiness.id,
+      metadata: { path: ["kind"], equals: "mergeIntegrator.authorization" },
+    } });
+    assert.equal((authorization.metadata as Record<string, unknown>).train, undefined);
+  }
 });
 
 test("terminal train settlement leaves one release obligation that restart reconciliation can consume", async () => {
@@ -862,7 +982,30 @@ test("terminal train settlement leaves one release obligation that restart recon
   }
 });
 
-test("a stale train base authorizes nothing and releases the held lease", async () => {
+test("a record with the wrong base stops its first candidate when the live base has not moved", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
+  const valid = JSON.parse(await recordFor(seed, ["pass", "pass"], 2)) as Record<string, unknown>;
+  valid.baseSha = "9".repeat(40);
+  await finishTrainRun(seed, JSON.stringify(valid));
+
+  await readinessTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5, releaseChainLease, runWithMergeLease, () => []);
+
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seed.candidates[0]!.readiness.id } })).status, TaskStatus.REVIEW);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seed.candidates[0]!.regression.id } })).status, TaskStatus.REVIEW);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seed.candidates[1]!.readiness.id } })).status, TaskStatus.TODO);
+  assert.equal(await db.inboxMessage.count({ where: {
+    taskId: seed.candidates[0]!.regression.id,
+    dedupeKey: { startsWith: `merge-readiness-stop:${seed.candidates[0]!.readiness.id}:` },
+  } }), 1, "a record mismatch is treated as invalid output, not a retryable live-base race");
+  assert.equal(await db.inboxMessage.count({ where: {
+    taskId: seed.candidates[1]!.regression.id,
+    dedupeKey: { startsWith: "merge-tail-stop:" },
+  } }), 0);
+});
+
+test("a stale train base requeues the candidates, authorizes nothing, and releases the held lease", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(2);
   await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
@@ -890,7 +1033,53 @@ test("a stale train base authorizes nothing and releases the held lease", async 
     assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.readiness.id } })).status, TaskStatus.TODO);
     assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.regression.id } })).status, TaskStatus.DONE);
     assert.equal(await db.run.count({ where: { taskId: candidate.regression.id } }), 1);
+    assert.equal(await db.inboxMessage.count({ where: {
+      taskId: candidate.regression.id,
+      dedupeKey: { startsWith: "merge-tail-stop:" },
+    } }), 1, "stale base retains the existing train-abort notice");
+    assert.equal(await readLatestMarker(db, candidate.regression.id, "readiness"), null,
+      "base movement remains a retryable train abort, not a readiness stop");
   }
+  const retried = await readinessTick(db, readerFor(seed, { baseSha: staleBase }),
+    new Date(TEST_NOW.getTime() + 2_000), 5, releaseChainLease, runWithMergeLease, () => []);
+  assert.equal(retried.authorized, 0);
+  assert.equal(await db.task.count({ where: {
+    projectId: seed.project.id,
+    chainId: null,
+    description: { contains: "merge-train.sh" },
+  } }), 2, "the next tick can form a new train against the moved base");
+});
+
+test("a live base move before train enqueue keeps candidates ready for a new train", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  const reader = readerFor(seed);
+  const movedBase = "9".repeat(40);
+  let baseReads = 0;
+  reader.readPullRequest = async (_repository, prNumber) => {
+    const candidate = seed.candidates.find((entry) => entry.prNumber === prNumber)!;
+    baseReads += 1;
+    return snapshot(candidate, baseReads === 1 ? BASE : movedBase);
+  };
+
+  await readinessTick(db, reader, TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
+
+  assert.equal(baseReads, 2, "formation and reservation enqueue each observe the target base");
+  const train = await trainTaskFor(seed);
+  assert.equal(train.status, TaskStatus.REVIEW);
+  const trainMarker = (await trainTaskMarkerFor(train.id)).metadata as Record<string, unknown>;
+  assert.equal(trainMarker.state, "aborted");
+  assert.match(String(trainMarker.reason), /base moved before enqueue/u);
+  for (const candidate of seed.candidates) {
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.readiness.id } })).status, TaskStatus.TODO);
+    assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.regression.id } })).status, TaskStatus.DONE);
+    assert.equal(await db.inboxMessage.count({ where: {
+      taskId: candidate.regression.id,
+      dedupeKey: { startsWith: "merge-tail-stop:" },
+    } }), 1);
+    assert.equal(await readLatestMarker(db, candidate.regression.id, "readiness"), null);
+  }
+  assert.deepEqual(releasedChainIds, [seed.candidates[0]!.chainId]);
 });
 
 test("an active train keeps the repository busy across a later readiness tick", async () => {
@@ -1215,6 +1404,7 @@ test("the queued merge-train Run is claimed with the ordered candidate list", as
   });
   assert.ok(claimed && "run" in claimed, JSON.stringify(claimed));
   assert.equal(claimed.run.taskId, train.id);
+  assert.equal(claimed.task.isMergeTrain, true);
   // The runtime input the merge-train session actually receives, read at the
   // Run claim rather than from the marker the control plane wrote.
   assert.deepEqual(claimed.task.mergeTrain, {
@@ -1228,6 +1418,50 @@ test("the queued merge-train Run is claimed with the ordered candidate list", as
       branch: candidate.branch,
     })),
   });
+});
+
+test("a malformed train marker still claims the fixed executor without model input", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
+  const train = await trainTaskFor(seed);
+  const marker = await trainTaskMarkerFor(train.id);
+  await db.taskActivity.update({ where: { id: marker.id }, data: {
+    metadata: { ...(marker.metadata as Record<string, unknown>), baseSha: "malformed" },
+  } });
+
+  const claimed = await claimRun(db, {
+    body: { runnerId: "merge-train-runner", leaseSeconds: 60, contractVersion: RUN_COMPLETION_CONTRACT_VERSION },
+    claimantClass: "runner",
+    now: new Date(TEST_NOW.getTime() + 500),
+    specificationReader: null,
+  });
+  assert.ok(claimed && "run" in claimed, JSON.stringify(claimed));
+  assert.equal(claimed.run.taskId, train.id);
+  assert.equal(claimed.task.isMergeTrain, true);
+  assert.equal(claimed.task.mergeTrain ?? null, null);
+});
+
+test("a damaged train marker kind still cannot claim a model session", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  await readinessTick(db, readerFor(seed), TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []);
+  const train = await trainTaskFor(seed);
+  const marker = await trainTaskMarkerFor(train.id);
+  await db.taskActivity.update({ where: { id: marker.id }, data: {
+    metadata: { ...(marker.metadata as Record<string, unknown>), kind: "damaged" },
+  } });
+
+  const claimed = await claimRun(db, {
+    body: { runnerId: "merge-train-runner", leaseSeconds: 60, contractVersion: RUN_COMPLETION_CONTRACT_VERSION },
+    claimantClass: "runner",
+    now: new Date(TEST_NOW.getTime() + 500),
+    specificationReader: null,
+  });
+  assert.ok(claimed && "run" in claimed, JSON.stringify(claimed));
+  assert.equal(claimed.run.taskId, train.id);
+  assert.equal(claimed.task.isMergeTrain, true);
+  assert.equal(claimed.task.mergeTrain ?? null, null);
 });
 
 test("a train settled while its Run is still active stays closed when that Run completes", async (t) => {

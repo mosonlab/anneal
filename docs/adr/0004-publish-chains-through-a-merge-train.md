@@ -28,11 +28,12 @@ continues through the existing single-candidate path.
 The train is represented by one detached platform Task with kind
 `merge-train`. It is an `AGENT` Task, has `maxSessionsPerTask: 1`, and is
 staffed by the Agent bound to the first candidate Chain's Regression
-verification Step. Its description gives the session one action: run
-`"${AGENTOS_TOOLS}/merge-train.sh"` with the candidate list in the claim
-metadata, then finish. The claim records `baseSha`, `width`, and the ordered
-`candidates` entries (`taskId`, `chainId`, `headSha`, and `branch`). The task
-does no implementation or semantic work.
+verification Step. The Runner executes `"${AGENTOS_TOOLS}/merge-train.sh"`
+directly from the claim metadata and waits for it to exit before persisting
+the handoff. The description displays the command on the Task card. The claim
+records `baseSha`, `width`, and the ordered `candidates` entries (`taskId`,
+`chainId`, `headSha`, and `branch`). The task does no implementation or
+semantic work.
 
 Every candidate readiness Task receives a `mergeTail.train` marker naming the
 train Task and its one-based position. The detached Task is shown on the board
@@ -70,9 +71,10 @@ executor's publication of the authorized prefix happens after that handoff and
 is outside this Lease.
 
 If the train Run ends without a stored `merge-train-v1` record, or the Run is
-lost, the control plane releases the Lease, writes a `mergeTail.train` marker
-with `state: "aborted"` and the named reason on every candidate, and returns
-the candidates to `ready` for a later tick. The detached Task is not retried.
+lost, the control plane releases the Lease and writes a `mergeTail.train` marker
+with `state: "aborted"` and the named reason on every candidate. The first
+candidate stops in `REVIEW` with an Inbox notice; the others return to `ready`.
+The detached Task is not retried.
 Terminal settlement records one deferred-release obligation in the same
 transaction as the terminal train marker. A confirmed external release settles
 that obligation; if the process exits first, restart reconciliation consumes it
@@ -138,7 +140,7 @@ settlement. Only the longest contiguous PASS prefix is authorized.
 | Every `skipped` candidate | Return the candidate to `ready` unchanged for a later train. |
 | `blocked` candidate | Enter the existing refresh-conflict recovery stop with the recorded reason. |
 | `pass` prefix whose candidate has an unsatisfied Approval gate | Stop that candidate on its gate refusal, authorize only the positions before it against the truncated prefix, and return the positions after it to `ready`. |
-| Missing record or lost train Run | Abort the train, release the Lease, mark every candidate `aborted`, and return the candidates to `ready`. |
+| Missing record or lost train Run | Abort the train, release the Lease, mark every candidate `aborted`, stop the first candidate, and return the others to `ready`. |
 
 None of these train settlements invokes `requeueRegressionSettlement` for
 base drift. In particular, the existing shared Regression completion and
@@ -163,9 +165,9 @@ need the existing per-Chain drift recovery can set `MERGE_TRAIN_WIDTH=0`.
   Merge gate work, while publication remains serialized by merge execution.
 - A settled train closes its own detached card; only an aborted train stays in
   `REVIEW` with its named reason, so a completed automation card is never
-  presented as review work. The train session publishes its record before it
-  finishes, so settlement commonly commits while the train Run is still active:
-  once the card's control-plane marker reads `settled` or `aborted`, Run
+  presented as review work. The Runner publishes the process handoff before
+  the Run finishes, so settlement commonly commits while the train Run is still
+  active: once the card's control-plane marker reads `settled` or `aborted`, Run
   completion records the Run and writes no Task status, leaving that terminal
   state to readiness in either ordering.
 - A failure at one prefix prevents later prefixes from crossing it. Later
@@ -175,6 +177,27 @@ need the existing per-Chain drift recovery can set `MERGE_TRAIN_WIDTH=0`.
 - The train Task is detached from every Chain, but each readiness marker and
   activity retains the Chain and position identity needed for board and Inbox
   recovery.
+
+## 2026-09-23 execution and abort amendment
+
+A production train Run ended before its model-started gate command finished.
+The Run had no `merge-train-v1` record, so readiness repeatedly formed the same
+train from unchanged Regression evidence. This meets the revisit condition for
+the original return-to-ready abort rule: it caused repeated Runs and notices
+without changing the fault. A missing record, lost Run, invalid output, or
+other infrastructure abort now stops the first candidate's Merge readiness
+Step and opens its existing stop notice in the default Inbox thread. The
+remaining candidates may proceed independently; if they encounter the same
+fault, each further abort stops another Chain, bounded by the train width.
+
+The detached Task remains an `AGENT` claim so the ordinary Runner owns its
+workspace, Run Lease heartbeat, cancellation, and fenced output transport.
+The Runner invokes the fixed tool with the claim's candidate metadata and
+waits for process exit. A successful process exit without a valid current-Run
+handoff fails the Run. The Task description is board context, not executable
+authority. This reuses the existing gate and handoff paths without asking a
+model to supervise a long command. Exact-head validation, Merge gate
+attestation, second reads, and cumulative prefix lineage remain required.
 
 ## Related authority
 

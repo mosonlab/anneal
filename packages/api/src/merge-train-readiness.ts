@@ -12,6 +12,7 @@ import {
   isMergeReadinessStep,
   parseMergeTrainRecord,
   parseRegressionVerdict,
+  recoveryContext,
   recordLeaseDeferral,
   isGatedMergeReadinessTask,
   requireMergeGateAuthorization,
@@ -36,6 +37,9 @@ import { lockTaskMutationRows } from "./task-write.js";
 
 type TrainCandidateBinding = { taskId: string; chainId: string; headSha: string; branch: string };
 type TrainBinding = { baseSha: string; width: number; candidates: TrainCandidateBinding[] };
+
+/** A valid train record can become stale while the control plane is reading GitHub. */
+class StaleTrainBaseError extends Error {}
 
 /** The record parser proves internal consistency; this binds it to our queued work. */
 export const trainRecordBindingFailure = (
@@ -279,15 +283,69 @@ const candidateSettlementMarker = async (
 };
 
 const abortTrain = async (
-  db: PrismaClient, train: PendingTrain, reason: string, now: Date,
+  db: PrismaClient, train: PendingTrain, reason: string, now: Date, stopFirst: boolean,
 ): Promise<boolean> => db.$transaction(async (tx) => {
   await lockCandidates(tx, train.candidates);
   const current = await readLatestMarker(tx, train.taskId, "train");
   if (current?.state !== "queued" && current?.state !== "acquiring") return false;
   for (const [index, candidate] of train.candidates.entries()) {
-    await tx.task.updateMany({ where: { id: candidate.taskId, status: { in: [TaskStatus.TODO, TaskStatus.DOING] } },
-      data: { status: TaskStatus.TODO, readinessClaimToken: null, readinessClaimExpiresAt: null, failureReason: null } });
-    await noticeMergeTrainAbort(tx, { readinessTaskId: candidate.taskId, trainTaskId: train.taskId, reason, now });
+    const isFirstCandidate = index === 0;
+    const stopReason = `Merge train ${train.taskId} aborted: ${reason}`;
+    let returnedToReady = false;
+    // Park the first candidate so the same evidence cannot recreate the failed
+    // train on the next tick. Other members remain eligible and can progress
+    // through a later train or the existing single-candidate path.
+    if (isFirstCandidate && stopFirst) {
+      const readiness = await tx.task.findUniqueOrThrow({ where: { id: candidate.taskId },
+        select: { projectId: true, chainId: true, status: true, archivedAt: true } });
+      const regression = await tx.task.findFirstOrThrow({ where: {
+        projectId: readiness.projectId,
+        chainId: readiness.chainId,
+        templateStep: { outputKind: { in: ["regression-verification-v2", "regression-verification"] } },
+      }, select: { id: true, status: true, archivedAt: true }, orderBy: [{ chainIndex: "asc" }, { id: "asc" }] });
+      const readinessIsLive = readiness.archivedAt === null
+        && (readiness.status === TaskStatus.TODO || readiness.status === TaskStatus.DOING);
+      // A READY train normally binds a completed Regression and a queued
+      // readiness Step. Preserve any operator change made while the train ran.
+      if (readinessIsLive && regression.status === TaskStatus.DONE
+        && regression.archivedAt === null) {
+        const recoveryAttempt = await tx.mergeRecoveryAttempt.findFirst({ where: {
+          readinessTaskId: candidate.taskId,
+          status: { in: [MergeRecoveryStatus.REPAIRING, MergeRecoveryStatus.AWAITING_AUTHORIZATION] },
+        }, orderBy: [{ attempt: "desc" }, { id: "desc" }] });
+        const recovery = recoveryContext(recoveryAttempt);
+        if (recoveryAttempt && !recovery) {
+          throw new Error(`Merge train ${train.taskId} cannot stop malformed recovery ${recoveryAttempt.id}`);
+        }
+        await stopMergeTail(tx, {
+          phase: "readiness",
+          readinessTaskId: candidate.taskId,
+          regressionTaskId: regression.id,
+          reason: stopReason,
+          recovery,
+          at: now,
+        });
+        await tx.task.update({ where: { id: candidate.taskId }, data: {
+          readinessClaimToken: null,
+          readinessClaimExpiresAt: null,
+        } });
+      }
+    } else {
+      const returned = await tx.task.updateMany({ where: {
+        id: candidate.taskId,
+        archivedAt: null,
+        status: { in: [TaskStatus.TODO, TaskStatus.DOING] },
+      }, data: {
+        status: TaskStatus.TODO,
+        readinessClaimToken: null,
+        readinessClaimExpiresAt: null,
+        failureReason: null,
+      } });
+      returnedToReady = returned.count === 1;
+    }
+    if (!stopFirst && returnedToReady) {
+      await noticeMergeTrainAbort(tx, { readinessTaskId: candidate.taskId, trainTaskId: train.taskId, reason, now });
+    }
     await candidateSettlementMarker(tx, train, index + 1, "aborted", reason);
   }
   await finishTrainMarker(tx, train, "aborted", reason, now);
@@ -350,7 +408,7 @@ const enqueueReservedTrain = async (
     // and every candidate chain lock across a 20-second GitHub call would block
     // unrelated writers for no added guarantee, since the live base can move
     // the instant after it is read either way.
-    if (await liveBase(reader, reads[0]!) !== train.baseSha) throw new Error("Merge train base moved before enqueue");
+    if (await liveBase(reader, reads[0]!) !== train.baseSha) throw new StaleTrainBaseError("Merge train base moved before enqueue");
     await db.$transaction(async (tx) => {
       await lockCandidates(tx, train.candidates);
       await tx.$queryRaw`SELECT "id" FROM "Repo" WHERE "id" = ${train.repoId} FOR UPDATE`;
@@ -374,7 +432,11 @@ const enqueueReservedTrain = async (
     }, serializable);
     return "waiting";
   } catch (error: unknown) {
-    await abortTrain(db, train, error instanceof Error ? error.message : String(error), now);
+    const stopFirst = !(error instanceof StaleTrainBaseError);
+    const reason = error instanceof Error ? error.message : String(error);
+    for (const read of reads) await releaseClaim(db, read);
+    reads.length = 0;
+    await abortTrain(db, train, reason, now, stopFirst);
     return "finished";
   } finally {
     for (const read of reads) await releaseClaim(db, read);
@@ -424,8 +486,12 @@ const settleTrain = async (
   const run = task?.runs[0];
   const output = task?.stepOutput;
   let failure: string | null = null;
-  if (run?.status === RunStatus.LOST || run?.status === RunStatus.CANCELLED || task?.archivedAt) {
-    failure = task?.archivedAt ? "Merge train task was archived" : `Merge train Run ${run!.id} ended ${run!.status}`;
+  if (task?.archivedAt) {
+    failure = "Merge train task was archived";
+  } else if (run && !ACTIVE_RUN_STATUSES.includes(run.status) && run.status !== RunStatus.SUCCEEDED) {
+    // A process that failed after writing a handoff cannot supply an
+    // authorization, even if the record itself is well formed.
+    failure = `Merge train Run ${run.id} ended ${run.status}`;
   } else if (!output) {
     if (run && ACTIVE_RUN_STATUSES.includes(run.status) && task?.status !== TaskStatus.REVIEW) return "waiting";
     failure = run ? `Merge train Run ${run.id} ended ${run.status} without a merge-train-v1 record`
@@ -436,7 +502,7 @@ const settleTrain = async (
   const parsed = parseMergeTrainRecord(output?.body);
   if (!failure && parsed.status === "invalid") failure = parsed.reason;
   if (failure || parsed.status !== "ok") {
-    await abortTrain(db, train, failure ?? "Invalid merge train output", now);
+    await abortTrain(db, train, failure ?? "Invalid merge train output", now, true);
     return "finished";
   }
 
@@ -450,7 +516,9 @@ const settleTrain = async (
       reads.push(eligible.read);
     }
     const record = parsed.record;
-    const bindingFailure = trainRecordBindingFailure(record, train, await liveBase(reader, reads[0]!));
+    const currentBase = await liveBase(reader, reads[0]!);
+    if (currentBase !== train.baseSha) throw new StaleTrainBaseError("merge train record has a stale live base");
+    const bindingFailure = trainRecordBindingFailure(record, train, currentBase);
     if (bindingFailure) throw new Error(bindingFailure);
     const decisions: ReadinessDecision[] = [];
     for (const read of reads) {
@@ -462,7 +530,7 @@ const settleTrain = async (
       // Regression. Candidate-local refusals must settle below so an old PASS
       // cannot form the same failing train again on the next tick.
       if (decision.kind === "requeue-regression" && decision.condition === "train-base-stale") {
-        throw new Error(`Merge train second read refused ${read.readiness.id}: ${decision.kind}: ${decision.reason}`);
+        throw new StaleTrainBaseError(`Merge train second read refused ${read.readiness.id}: ${decision.kind}: ${decision.reason}`);
       }
       decisions.push(decision);
     }
@@ -628,7 +696,13 @@ const settleTrain = async (
     return "finished";
   } catch (error: unknown) {
     const reason = error instanceof Error ? error.message : String(error);
-    await abortTrain(db, train, reason, now);
+    const stopFirst = !(error instanceof StaleTrainBaseError);
+    // Return the claimed candidates to the tail before aborting. Otherwise the
+    // finally release below would requeue the first candidate after
+    // `stopMergeTail` parked it in REVIEW.
+    for (const read of reads) await releaseClaim(db, read);
+    reads.length = 0;
+    await abortTrain(db, train, reason, now, stopFirst);
     return "finished";
   } finally {
     for (const read of reads) await releaseClaim(db, read);
@@ -663,7 +737,7 @@ export const mergeTrainReadinessTick = async (
         && event.owningTask.id === train.regressionTaskId);
       let outcome: "waiting" | "finished";
       if (releaseWasDeferred) {
-        await abortTrain(db, train, "Previous merge train lease release was deferred", now);
+        await abortTrain(db, train, "Previous merge train lease release was deferred", now, true);
         outcome = "finished";
       } else outcome = train.state === "acquiring"
         ? await enqueueReservedTrain(db, reader, train, now, hooks)

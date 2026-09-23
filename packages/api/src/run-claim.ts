@@ -18,13 +18,13 @@ import {
   MERGE_TAIL_KIND,
   MERGE_TAIL_SCHEMA_VERSION,
   type MarkerState,
+  markerFromMetadata,
   mergeTrainClaimMetadata,
   MAX_APPROVAL_GATE_NOTE_CHARS,
   mergeExecutorRunnerIds,
   PinnedBaseCommitError,
   pinnedImplementationRange,
   Prisma,
-  readLatestMarker,
   type PrismaClient,
   RunStatus,
   RunnerKind,
@@ -898,9 +898,25 @@ export const claimRun = async (
       // step. Its queued marker is the durable source for the bounded runtime
       // input; settled and aborted markers intentionally disappear from the
       // claim so a stale card can never run the tool again.
-      const mergeTrain = candidate.task.chainId === null && candidate.task.templateStep === null
-        ? mergeTrainClaimMetadata(await readLatestMarker(tx, candidate.task.id, "train"))
+      const trainMarkerRow = candidate.task.chainId === null && candidate.task.templateStep === null
+        ? await tx.taskActivity.findFirst({ where: {
+          taskId: candidate.task.id,
+          actorType: "control-plane",
+          metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.train },
+        }, select: { metadata: true }, orderBy: [{ createdAt: "desc" }, { id: "desc" }] })
         : null;
+      // The execution kind is independent of marker validity. A malformed or
+      // settled train marker must never turn this detached Run into model work.
+      const trainMarker = markerFromMetadata(trainMarkerRow?.metadata);
+      // The card name is a second fail-closed signal if the marker's kind key
+      // is damaged. It never supplies execution input; without a valid marker
+      // the fixed executor fails before starting any process.
+      const isMergeTrain = trainMarkerRow !== null || (
+        candidate.task.chainId === null
+        && candidate.task.templateStep === null
+        && candidate.task.name?.startsWith("Merge train: ") === true
+      );
+      const mergeTrain = trainMarker?.kind === "train" ? mergeTrainClaimMetadata(trainMarker) : null;
       const regressionRecoveryContext = isRegressionVerificationOutputKind(candidate.task.templateStep?.outputKind)
         ? await regressionRecoveryContextForClaim(tx, { taskId: candidate.task.id, runId: run.id })
         : null;
@@ -924,6 +940,7 @@ export const claimRun = async (
             maxDurationMin: candidate.task.maxDurationMin,
             stallTimeoutMin: candidate.task.stallTimeoutMin,
             maxSessionsPerTask: candidate.task.maxSessionsPerTask,
+            ...(isMergeTrain ? { isMergeTrain: true } : {}),
             templateStep: candidate.task.templateStep === null ? null : {
               name: candidate.task.templateStep.name,
               provisionDependencies: candidate.task.templateStep.provisionDependencies,

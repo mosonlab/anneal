@@ -11,7 +11,7 @@ import { agentExitVerdict, isCodexReconnectStatus } from "@anneal/db";
 
 import {
   adapters, argsForRunner, buildChildEnvironment, buildPrompt, createAdapterState, failureReasonFromEvidence,
-  claudePlatformSettingsPath, inputForRunner, launchArgv, mcpConfig, mcpServerPath, nodeBinaryPath, piExtensionPath,
+  claudePlatformSettingsPath, inputForRunner, launchAdapterArgv, launchArgv, mcpConfig, mcpServerPath, nodeBinaryPath, piExtensionPath,
   PREFLIGHT_REASONS, RUNNER_DEFINITIONS, RUNNER_KINDS, runtimeDescriptor, type AdapterState, type ExitEvidence,
 } from "./adapters.js";
 import { parseClaudeTranscript } from "./adapters/claude.js";
@@ -1488,6 +1488,34 @@ test("a run-as launcher cannot strip the operator-selected gate destination", ()
     env,
   );
   assert.equal(launch.args.includes("AGENTOS_GATE_SERVER=agentos-gate"), true);
+});
+
+test("a fixed runtime tool uses the run-as allowlist without inheriting provider launcher secrets", () => {
+  const launch = launchAdapterArgv(
+    { binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" }, runAsPrefix: ["sudo", "-u", "runner", "-E", "--"] },
+    { runner: "CLAUDE", launcherEnvironmentVariables: [] },
+    [],
+    {
+      AGENTOS_RUN_ID: "run-1",
+      AGENTOS_TOOLS: "/run/tools",
+      AGENTOS_WORKSPACE_PATH: "/run/workspace",
+      AGENTOS_GATE_SERVER: "gate-worker",
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "credential.helper",
+      GIT_CONFIG_VALUE_0: "/run/tools/git-credential-runner.sh",
+      HTTP_PROXY: "http://proxy.invalid:8080",
+      CLAUDE_CODE_OAUTH_TOKEN: "must-not-be-forwarded",
+    },
+    "/run/tools/merge-train.sh",
+    ["AGENTOS_WORKSPACE_PATH", "HTTP_PROXY"],
+  );
+  assert.equal(launch.executable, "sudo");
+  assert.deepEqual(launch.args.slice(0, 4), ["-u", "runner", "-E", "--"]);
+  assert.equal(launch.args.includes("/run/tools/merge-train.sh"), true);
+  assert.equal(launch.args.includes("AGENTOS_WORKSPACE_PATH=/run/workspace"), true);
+  assert.equal(launch.args.includes("HTTP_PROXY=http://proxy.invalid:8080"), true);
+  assert.equal(launch.args.includes("AGENTOS_GATE_SERVER=gate-worker"), true);
+  assert.equal(launch.args.some((value) => value.startsWith("CLAUDE_CODE_OAUTH_TOKEN=")), false);
 });
 
 test("configured local gate capacity is runner-owned and survives a run-as launcher", () => {
