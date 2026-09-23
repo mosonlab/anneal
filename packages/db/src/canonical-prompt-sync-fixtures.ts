@@ -1,18 +1,23 @@
 /**
  * Restore the prompt bytes retired by the defect-class sweep rollover
- * (2026-09-23): the Regression review-fail sweep, the input trace and
- * shared-contract consumer sentences in Implementation and review, the
- * review-fix `inbox_ask` rule, and the revalidation and plan-review input checks. Every registered generation
+ * (2026-09-23): the Regression sweep, the input traces in Spec, Plan,
+ * Revalidate, Implementation and plan review, the shared-contract sentences in
+ * Implementation and review, and the review-fix `inbox_ask` and rejection
+ * rules. Every registered generation
  * predates it, so the older fixtures apply it before reconstructing their
  * earlier prompt bytes.
  */
 export const restorePreDefectClassSweepPrompt = (prompt: string): string => prompt
   .replace(
-    "If an adopted finding remains open, a rejection is unsupported, or a new defect exists, sweep the changed code and\nthe sites governed by changed contracts for every instance of each defect class. Report every blocking instance in\none call, one line each: finding ID or `new`, `file:line` (command and cwd for an execution failure), and\nconsequence; record proven pre-existing instances outside that scope in the activity log:",
+    "Sweep changed code and sites governed by changed contracts for each defect class identified in the prior findings or\nrefreshed fix. Record proven pre-existing out-of-scope instances and non-blocking P2 observations separately in the\nactivity log. If an adopted finding remains open, a rejection is unsupported, or a new blocking defect exists, report\nevery blocking instance in one call, one line per finding ID, location (`file:line`, or command and cwd for an\nexecution failure), and consequence:",
     "If an adopted finding remains open, a rejection is unsupported, or a new\ndefect exists, run",
   )
   .replace(
-    " Before implementing, trace every input the work consumes to a source available at HEAD or to a specified change that creates it before use; for an input you cannot trace, ask one blocking `inbox_ask` question with the tree evidence.",
+    "The script persists the one allowed v2 outcome; never call `task_output` for this step or write a report file.",
+    "The script persists the one allowed v2 outcome; never call `task_output` for\nthis step or write a report file.",
+  )
+  .replace(
+    " Before implementing, trace each input the specification of record requires as pre-existing to a source at HEAD or a specified change, including the same Changes item, that creates it before use. Distinguish an implementation-created detail within scope from an unavailable input premise; ask one blocking `inbox_ask` question with the governing quote and tree evidence only for the latter, and finish independent work meanwhile.",
     "",
   )
   .replace(
@@ -29,6 +34,18 @@ export const restorePreDefectClassSweepPrompt = (prompt: string): string => prom
   )
   .replace(
     " When closing a finding requires changing specified behavior, scope, or an unavailable input premise, ask one blocking `inbox_ask` question quoting the governing text with the tree evidence; finish the independent fixes meanwhile, and resume the dependent work only after the decision is recorded in the specification of record.",
+    "",
+  )
+  .replace(
+    " Reject a P0 or P1 finding only with evidence that it is unreachable, covered by another adopted finding, or proven pre-existing and outside the specification of record; for the last case, list every location and the governing scope constraint in `residualRisks`, and leave its code unchanged.",
+    " Reject a P0 or P1 finding only with a reason that names why the defect is unreachable or already covered by another adopted finding.",
+  )
+  .replace(
+    " Before persisting, trace every input the specification consumes to an artefact at the frozen base or an explicit specified change that creates it before use; treat an unresolved required input as premise collapse and ask a blocking Inbox question with the governing request and tree evidence.",
+    "",
+  )
+  .replace(
+    "Before committing slices, verify that every consumed input exists at the frozen base or is created before use by the same slice or a prerequisite slice; resolve missing creation within the specification of record, and escalate a premise that requires changing it. ",
     "",
   )
   .replace(

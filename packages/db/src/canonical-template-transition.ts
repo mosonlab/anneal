@@ -388,10 +388,12 @@ const legacyTemplateGenerations = {
     {
       // Prompt-only rollover: Regression verification sweeps changed code and
       // governed sites for every instance of a found defect class and reports
-      // them in one review-fail; Implementation and review enumerate every site
-      // governed by a changed shared contract; review fixes ask before changing
-      // specified behavior, scope, or an input premise; and the premise checks
-      // trace every consumed input. The graph is unchanged.
+      // blocking ones in one review-fail; Implementation and review enumerate
+      // every site governed by a changed shared contract; review fixes ask
+      // before changing specified behavior, scope, or an input premise and may
+      // reject proven pre-existing out-of-scope findings; and the Spec, Plan,
+      // Revalidate, Implementation, and plan-review steps trace consumed
+      // inputs. The graph is unchanged.
       marker: "pre-defect-class-sweep",
       promptDigest: "57c1f304441e38bf4a0dd63bb7a9f031dbcbc55acf52ac0ff16d416a885d5ceb",
       shape: [
@@ -671,10 +673,12 @@ const legacyTemplateGenerations = {
     {
       // Prompt-only rollover: Regression verification sweeps changed code and
       // governed sites for every instance of a found defect class and reports
-      // them in one review-fail; Implementation and review enumerate every site
-      // governed by a changed shared contract; review fixes ask before changing
-      // specified behavior, scope, or an input premise; and the premise checks
-      // trace every consumed input. The graph is unchanged.
+      // blocking ones in one review-fail; Implementation and review enumerate
+      // every site governed by a changed shared contract; review fixes ask
+      // before changing specified behavior, scope, or an input premise and may
+      // reject proven pre-existing out-of-scope findings; and the Spec, Plan,
+      // Revalidate, Implementation, and plan-review steps trace consumed
+      // inputs. The graph is unchanged.
       marker: "pre-defect-class-sweep",
       promptDigest: "2a3634bc7c7f74a066ab8fce78c4e0f02f2f9ac65acdcf37e07c993c445bed2c",
       shape: [
@@ -771,8 +775,8 @@ const legacyTemplateGenerations = {
       // Prompt-only rollover: Implementation traces consumed inputs and, with
       // both review prompts (shared with the Direct workflow), enumerates every
       // site governed by a changed shared contract; review fixes ask before
-      // changing specified behavior, scope, or an input premise. The graph is
-      // unchanged.
+      // changing specified behavior, scope, or an input premise and may reject
+      // proven pre-existing out-of-scope findings. The graph is unchanged.
       marker: "pre-defect-class-sweep",
       promptDigest: "93a909a5d88b6aa158f9f86155853d7aed7762b61bd56dc9a1b17b6e7051281f",
       shape: [
@@ -816,9 +820,9 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<
  * `agents/templates/` and fails on a mismatch.
  */
 export const CANONICAL_SOURCE_PROMPT_GENERATIONS = {
-  [DIRECT_TEMPLATE_NAME]: "d4cc03a3e5540cc9f2dfc9edd45e30ab58a2363f5f179513f507983818e2f697",
-  "compound-engineer-workflow": "8c6dd343f109018ab82c08983662d53fbcfcd24cef92fc8095d26bc438b39e87",
-  [PR_TEMPLATE_NAME]: "0c6bf95dc828c692353ebfb1c4cbeb972c462c969165523dbc589dae288064f5",
+  [DIRECT_TEMPLATE_NAME]: "1f0e2e51164d32a69ba9911b845ba310e0651791c67b1f5f11bb40d6463cc458",
+  "compound-engineer-workflow": "b55e6923ea92e04f0def820e45a916b3c98407bdb0b8f0780fce1cfb94af5d53",
+  [PR_TEMPLATE_NAME]: "d749e399aa98598d802cb4b6704330a1f8a7031e54ab3bdff87f8c43be0c2130",
 } as const satisfies Readonly<Record<CanonicalTemplateRegistryName, string>>;
 
 export type CanonicalTemplateIdentity = Readonly<{

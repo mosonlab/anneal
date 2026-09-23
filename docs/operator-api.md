@@ -2353,9 +2353,10 @@ Each repair round spends one automatic attempt of its kind: `review-fix` and
 `gate-fix` get three attempts each. Both halves of the loop therefore work on
 a whole defect class rather than one instance. A canonical Regression step
 that finds a defect sweeps the changed code and the sites governed by changed
-contracts for every instance of that defect class. It reports every blocking
-instance in one `review-fail` summary and records proven pre-existing
-instances outside that scope in its activity log. The `review-fix` and
+contracts for each defect class in the prior findings or refreshed fix. It
+reports every blocking instance in one `review-fail` summary and records
+proven pre-existing out-of-scope instances and non-blocking P2 observations in
+its activity log. The `review-fix` and
 `gate-fix` repair prompt closes every listed in-scope instance and sweeps
 changed code and governed consumers for the same class. It lists other
 instances in its summary without changing them, escalates a specification

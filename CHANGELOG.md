@@ -89,10 +89,12 @@ written.
   attempt per instance. `review-fix` and `gate-fix` repairs each get three
   automatic attempts, so such a defect could exhaust the budget. The canonical
   Regression step now sweeps the changed code and the sites governed by
-  changed contracts for every instance of each defect class. It reports every
-  blocking instance in one `review-fail`, one line per finding ID, location,
-  and consequence, and records proven pre-existing instances outside that
-  scope in the activity log. The `review-fix` and `gate-fix` repair prompt
+  changed contracts for each defect class in the prior findings or refreshed
+  fix. It reports every blocking instance in one `review-fail`, one line per
+  finding ID, location, and consequence. It records proven pre-existing
+  out-of-scope instances and non-blocking P2 observations in the activity
+  log, because the tail loops only on blocking findings
+  ([ADR 0007](docs/adr/0007-one-check-instead-of-a-mechanism.md)). The `review-fix` and `gate-fix` repair prompt
   closes every listed in-scope instance and sweeps changed code and governed
   consumers for the same class. It lists other instances without changing
   them, escalates specification contradictions through the Inbox, and reports
@@ -107,13 +109,20 @@ written.
 - **Review fixes ask before changing the specification.** When closing a
   finding requires changing specified behavior, scope, or an unavailable input
   premise, the review-fix step of every workflow asks one blocking `inbox_ask`
-  question and finishes the independent fixes meanwhile.
+  question and finishes the independent fixes meanwhile. A P0 or P1 finding
+  that is proven pre-existing and outside the specification of record may be
+  rejected. Its locations and governing scope constraint go into
+  `residualRisks`, and its code stays unchanged.
 - **Premise checks trace consumed inputs.** Direct revalidation traces every
   table, column, field, fixture, or export a Changes or Acceptance item
   consumes to HEAD or to a Changes item that creates it before use; an
-  untraceable input is a premise collapse. Direct and PR Implementation run the
-  same trace, because an unbound Direct chain has no Revalidate step. Full plan
-  review accepts an input created before use by the same slice or a
+  untraceable input is a premise collapse. Direct and PR Implementation trace
+  each input the specification requires as pre-existing, because an unbound
+  Direct chain has no Revalidate step. They ask only when the input premise is
+  unavailable, not for an implementation-created detail within scope. In Full
+  Assurance, the Spec step traces its inputs before persisting. The Plan step's
+  Anneal-owned closing paragraph and plan review check that each slice's
+  inputs exist at the frozen base or are created before use by the same or a
   prerequisite slice.
 - **Role contracts.** Senior developer, plan executor, and frontend developer
   roles include required consumer updates within the specification's

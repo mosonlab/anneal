@@ -30,15 +30,15 @@ is preserved without a new defect. Run focused regressions for the findings and
 changed behavior; the Merge gate owns full workspace and repository suites. Do not modify code or repair
 a failure.
 
-If an adopted finding remains open, a rejection is unsupported, or a new defect exists, sweep the changed code and
-the sites governed by changed contracts for every instance of each defect class. Report every blocking instance in
-one call, one line each: finding ID or `new`, `file:line` (command and cwd for an execution failure), and
-consequence; record proven pre-existing instances outside that scope in the activity log:
+Sweep changed code and sites governed by changed contracts for each defect class identified in the prior findings or
+refreshed fix. Record proven pre-existing out-of-scope instances and non-blocking P2 observations separately in the
+activity log. If an adopted finding remains open, a rejection is unsupported, or a new blocking defect exists, report
+every blocking instance in one call, one line per finding ID, location (`file:line`, or command and cwd for an
+execution failure), and consequence:
 `"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh" review-fail '<concise finding IDs or defect>'`
 and finish. Otherwise run `"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh" finalize`.
 
 A finalize exit 0 means the script persisted `pass` or `gate-fail` for the head
 and baseline frozen by prepare; report the bounded `REGRESSION FINALIZE` status
 line it printed. Any nonzero script exit fails the run loudly.
-The script persists the one allowed v2 outcome; never call `task_output` for
-this step or write a report file.
+The script persists the one allowed v2 outcome; never call `task_output` for this step or write a report file.
