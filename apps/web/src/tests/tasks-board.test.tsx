@@ -687,14 +687,14 @@ test("the assignee is one line with a keyboard-reachable way to see the rest", (
 test("the model line is the run's snapshot, not the agent's current tier", () => {
   // A re-tiered agent used to relabel a finished run: the card read the
   // assignee's current model directly under the run line, so a run claimed with
-  // claude-opus-5:medium showed as gpt-6-sol:high.
+  // claude-opus-5-5:medium showed as gpt-6-sol:high.
   const markup = card({
     assigneeAgent: { id: "a1", title: "merge-resolver-opus-medium", model: "gpt-6-sol:high" },
     latestRun: boardRun(),
   });
-  assert.match(markup, /claude-opus-5:medium/);
+  assert.match(markup, /claude-opus-5-5:medium/);
   assert.doesNotMatch(markup, /gpt-6-sol:high/);
-  assert.match(markup, /aria-label="Model claude-opus-5:medium"/);
+  assert.match(markup, /aria-label="Model claude-opus-5-5:medium"/);
 });
 
 test("a FAST run adds a fast marker to the single-task model line, but DEFAULT does not", () => {
@@ -874,8 +874,8 @@ test("an unassigned task with a run still shows the run's model snapshot", () =>
     assigneeAgent: null,
     latestRun: boardRun(),
   });
-  assert.match(markup, /claude-opus-5:medium/);
-  assert.match(markup, /aria-label="Model claude-opus-5:medium"/);
+  assert.match(markup, /claude-opus-5-5:medium/);
+  assert.match(markup, /aria-label="Model claude-opus-5-5:medium"/);
 });
 
 test("a card with neither a run nor an assignee has no model line", () => {

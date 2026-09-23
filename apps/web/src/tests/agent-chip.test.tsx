@@ -19,8 +19,8 @@ test("a Custom model keeps its exact id, and a bare model keeps its effort silen
     renderToStaticMarkup(<AgentChip agent={{ title: "Nightly", model: "private/model:turbo" }} />),
     /private\/model · turbo/u,
   );
-  const bare = renderToStaticMarkup(<AgentChip agent={{ title: "Nightly", model: "claude-opus-5" }} />);
-  assert.match(bare, /Claude Opus 5/u);
+  const bare = renderToStaticMarkup(<AgentChip agent={{ title: "Nightly", model: "claude-opus-5-5" }} />);
+  assert.match(bare, /Claude Opus 5.5/u);
   assert.doesNotMatch(bare, /·/u);
 });
 

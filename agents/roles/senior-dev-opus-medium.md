@@ -1,7 +1,7 @@
 ---
 name: senior-dev-opus-medium
 title: Senior Dev
-model: claude-opus-5:medium
+model: claude-opus-5-5:medium
 runner: claude
 inboxAccess: true
 collaborators: []

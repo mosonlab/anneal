@@ -11,6 +11,10 @@ written.
 
 ### Staffing and model routes
 
+- **Opus roles move to Claude Opus 5.5.** Every canonical Opus role now runs
+  `claude-opus-5-5:medium`; the model picker offers Claude Opus 5.5 in place of
+  Claude Opus 5, and cost estimates price it. Slugs are unchanged, so sync
+  updates existing rows in place unless an operator customized their model.
 - **Sol and Luna move to GPT-6.** Every canonical Sol role now runs
   `gpt-6-sol` and every Luna role `gpt-6-luna`; the model picker offers GPT-6
   Sol and Luna in place of GPT-5.6, and cost estimates price both. Native

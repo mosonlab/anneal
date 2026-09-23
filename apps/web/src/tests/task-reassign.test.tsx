@@ -24,7 +24,7 @@ const agent = (overrides: Partial<Agent> = {}): Agent => ({
 
 const roster: Agent[] = [
   agent(),
-  agent({ id: "agent-2", name: "senior-dev-opus-medium", title: "Senior Developer Opus", model: "claude-opus-5:medium" }),
+  agent({ id: "agent-2", name: "senior-dev-opus-medium", title: "Senior Developer Opus", model: "claude-opus-5-5:medium" }),
   agent({ id: "agent-3", name: "retired-reviewer", title: "Retired Reviewer", archivedAt: now }),
   agent({ id: "agent-4", name: "merge-integrator", title: "Merge Integrator", model: "mechanical", assignable: false }),
 ];
@@ -61,7 +61,7 @@ test("a chain step names each assignable role as title · model effort", () => {
   const markup = renderChain([step()]);
   const select = selectMarkup(markup, "task-1");
   assert.match(select, /Senior Developer · GPT-6 Astra \(codex\) medium/u);
-  assert.match(select, /Senior Developer Opus · Claude Opus 5 medium/u);
+  assert.match(select, /Senior Developer Opus · Claude Opus 5.5 medium/u);
   // Archived roles and the mechanical merge sentinel are not staffing choices.
   assert.doesNotMatch(select, /Retired Reviewer/u);
   assert.doesNotMatch(select, /Merge Integrator/u);

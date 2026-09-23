@@ -14,7 +14,7 @@ export const boardRun = (overrides: Partial<BoardLatestRun> = {}): BoardLatestRu
     id: "r1",
     runNumber: 1,
     status: "SUCCEEDED",
-    model: "claude-opus-5:medium",
+    model: "claude-opus-5-5:medium",
     codexServiceTier: "DEFAULT",
     costUsd: null,
     startedAt: null,

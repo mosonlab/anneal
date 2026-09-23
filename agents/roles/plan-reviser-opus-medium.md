@@ -1,7 +1,7 @@
 ---
 name: plan-reviser-opus-medium
 title: Plan Reviser
-model: claude-opus-5:medium
+model: claude-opus-5-5:medium
 runner: claude
 inboxAccess: true
 collaborators: []
