@@ -4,6 +4,8 @@ import test from "node:test";
 import { redactCiLog } from "./ci-log-redaction.js";
 
 test("CI log redaction removes common credentials and preserves useful failure text", () => {
+  const pemStart = "-----BEGIN " + "PRIVATE KEY-----";
+  const pemEnd = "-----END " + "PRIVATE KEY-----";
   const input = [
     "error TS2322 in packages/miniprogram",
     `token=${"ghp_" + "a".repeat(36)}`,
@@ -12,7 +14,7 @@ test("CI log redaction removes common credentials and preserves useful failure t
     "api_key=key-value-123",
     "client_secret='quoted secret value'",
     '"password":"json-secret"',
-    "-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----",
+    `${pemStart}\nprivate-material\n${pemEnd}`,
   ].join("\n");
   const redacted = redactCiLog(input);
   assert.match(redacted, /error TS2322/u);

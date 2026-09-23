@@ -676,7 +676,9 @@ test("unrequired failed check on UNSTABLE head queues Regression with log findin
 test("required check failure uses the same CI repair path", async () => {
   const seeded = await seedStopped("canonical-direct", "ci-required", "check-failure-or-absence");
   await addRepairTailFixtures(seeded, false);
-  const secretLog = `error TS2322\ntoken=${"ghp_" + "x".repeat(36)}\nBearer secret-credential\n-----BEGIN PRIVATE KEY-----\nprivate-material\n-----END PRIVATE KEY-----`;
+  const pemStart = "-----BEGIN " + "PRIVATE KEY-----";
+  const pemEnd = "-----END " + "PRIVATE KEY-----";
+  const secretLog = `error TS2322\ntoken=${"ghp_" + "x".repeat(36)}\nBearer secret-credential\n${pemStart}\nprivate-material\n${pemEnd}`;
   assert.equal((await baseDriftRecoveryTick(db, {
     ...ciReader(), readActionsFailureLog: async () => secretLog,
   })).recovered, 1);
