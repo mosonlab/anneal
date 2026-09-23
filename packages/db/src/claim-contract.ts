@@ -223,6 +223,7 @@ export type RegressionRecoveryContext = {
   authorizedHeadSha: string;
   recoveryRunId: string;
   priorOutput: { runId: string; kind: string; body: string; commitSha: string | null } | null;
+  ciFailures?: Array<{ name: string; conclusion: string; log: string }>;
 };
 
 /** Server-parsed authority for runner-owned direct-chain workspace bootstrap. */

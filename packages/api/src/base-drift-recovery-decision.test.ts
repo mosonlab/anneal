@@ -23,6 +23,7 @@ const BASE = "b".repeat(40);
 const CURRENT = "c".repeat(40);
 
 const candidate: RecoveryCandidate = {
+  recoveryKind: "base-drift",
   integratorTaskId: "integrator-1",
   readinessTaskId: "readiness-1",
   regressionTaskId: "regression-1",
@@ -43,6 +44,7 @@ const snapshot = (overrides: Partial<RecoveryPullRequestFacts> = {}): RecoveryPu
   state: "OPEN",
   isDraft: false,
   merged: false,
+  mergeStateStatus: "CLEAN",
   baseRefName: candidate.targetBranch,
   baseSha: CURRENT,
   headRefOid: HEAD,
@@ -69,6 +71,15 @@ test("same-base conflict evidence queues bounded Regression recovery without anc
   assert.deepEqual(freshDecision({ candidate: conflict, snapshot: snapshot({ baseSha: BASE }),
     comparisonAvailable: false, authorizedAdvance: null }),
   { kind: "queue", candidate: conflict, currentBaseSha: BASE });
+});
+
+test("a fresh BLOCKED merge state refuses recovery even when the head is unchanged", () => {
+  const ci = { ...candidate, recoveryKind: "ci-failure" as const, observedBaseSha: BASE };
+  assert.deepEqual(freshDecision({ candidate: ci, snapshot: snapshot({
+    baseSha: BASE, mergeStateStatus: "BLOCKED",
+  }), comparisonAvailable: false, authorizedAdvance: null }), {
+    kind: "ineligible", reason: "fresh pull request merge state is BLOCKED",
+  });
 });
 
 const durableFacts = (): DurableCandidateFacts => ({

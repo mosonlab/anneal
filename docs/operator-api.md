@@ -2563,6 +2563,22 @@ for a merge gate stop. A `PATCH /tasks/:taskId` request that supplies `status`
 is refused with `Chain task statuses are controlled by chain execution`. Both
 refusals are expected behaviour; do not use them to reopen the old Chain.
 
+#### Terminal CI check recovery
+
+Terminal PR-head CI failures have a separate automatic recovery allowance of
+two Regression births per Chain, cumulative across heads. The control plane
+checks all completed CheckRuns and StatusContexts on the exact authorized head,
+including non-required checks, and reads a bounded GitHub Actions failed-job
+log tail for each failure. The names and log excerpts become blocking findings
+for the existing `review-fix` or `gate-fix` path; the repaired branch repeats
+Regression, Merge readiness, and the full pre-merge checks. A `mergeTail.ciFailureRecovery`
+control-plane TaskActivity records the stop condition, check names, ordinal and
+remaining allowance. A held Chain waits for Resume. Incomplete rollup evidence,
+unreadable logs, an unchanged head with the same failures, or exhausted
+allowance opens the existing `merge-stop:<stopId>` question on the default
+Feishu thread with the reason. `BLOCKED`, draft and non-OPEN PRs remain operator
+cases. Approval gates still require approval on replacement evidence.
+
 #### Base-drift classification retry classes and `re-validate`
 
 Automatic pre-merge base-drift recovery accounts a classification tick that did

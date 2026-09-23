@@ -57,8 +57,9 @@ stop path with its reason rather than retrying silently.
 
 ## Human boundary
 
-Terminal failed checks, `UNSTABLE` with a failed check, `BLOCKED`, draft or
-non-OPEN pull requests, unverified ancestry, exhausted budgets, and uncertain
+Terminal failed checks and `UNSTABLE` with a failed check now follow the
+bounded recovery in [ADR-0012](0012-recover-terminal-ci-check-failures.md).
+`BLOCKED`, draft or non-OPEN pull requests, unverified ancestry, exhausted budgets, and uncertain
 merge outcomes still stop for an operator. Exact-head merge, gate attestation,
 and Run-birth guards are unchanged. Initial Approval gate rejection abandons
 the Chain; rejection of a post-stop confirmation card requeues the preceding

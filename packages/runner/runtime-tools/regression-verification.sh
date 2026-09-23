@@ -231,6 +231,9 @@ process.stdin.on("end", () => {
   const SHA = /^[0-9a-f]{40}$/u;
   const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
   const context = (() => { try { return object(JSON.parse(input)); } catch { return null; } })();
+  // A failed PR-head check is a fresh blocking finding even if the prior
+  // semantic verdict was PASS on exactly this commit.
+  if (Array.isArray(context?.ciFailures) && context.ciFailures.length > 0) return;
   const prior = object(context?.priorOutput);
   if (!context || !prior) return;
   if (context.state !== "queued" || context.recoveryRunId !== process.env.AGENTOS_RUN_ID) return;

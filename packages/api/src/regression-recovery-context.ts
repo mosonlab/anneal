@@ -25,6 +25,19 @@ const priorOutput = (value: unknown): RegressionRecoveryContext["priorOutput"] |
   };
 };
 
+const ciFailures = (value: unknown): RegressionRecoveryContext["ciFailures"] | undefined => {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0 || value.length > 8) return undefined;
+  const failures = value.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+    const raw = entry as Record<string, unknown>;
+    return text(raw.name) && text(raw.conclusion) && text(raw.log)
+      ? { name: raw.name, conclusion: raw.conclusion, log: raw.log } : null;
+  });
+  return failures.every((entry) => entry !== null)
+    ? failures as NonNullable<RegressionRecoveryContext["ciFailures"]> : undefined;
+};
+
 const contextFromMetadata = (
   metadata: Prisma.JsonValue | null | undefined,
   runId: string,
@@ -36,12 +49,15 @@ const contextFromMetadata = (
     || !text(raw.recoveryRunId) || !Object.hasOwn(raw, "priorOutput")) return null;
   const output = priorOutput(raw.priorOutput);
   if (output === undefined) return null;
+  const failures = ciFailures(raw.ciFailures);
+  if (Object.hasOwn(raw, "ciFailures") && !failures) return null;
   return {
     state: "queued",
     currentBaseSha: raw.currentBaseSha,
     authorizedHeadSha: raw.authorizedHeadSha,
     recoveryRunId: raw.recoveryRunId,
     priorOutput: output,
+    ...(failures ? { ciFailures: failures } : {}),
   };
 };
 

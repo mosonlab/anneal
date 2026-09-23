@@ -47,16 +47,16 @@ query($owner:String!,$name:String!,$number:Int!,$base:String!) {
       mergedBy { login }
       mergeCommit { oid parents(first:5) { nodes { oid } } }
       commits(last:1) { nodes { commit { oid statusCheckRollup {
-        state contexts(first:100) { nodes {
+        state contexts(first:100) { pageInfo { hasNextPage } nodes {
           __typename
-          ... on CheckRun { name conclusion status }
+          ... on CheckRun { name conclusion status detailsUrl }
           ... on StatusContext { context state } } } } } } }
     }
   }
 }`;
 
 export type CheckContext =
-  | { __typename: "CheckRun"; name: string; conclusion: string | null; status: string | null }
+  | { __typename: "CheckRun"; name: string; conclusion: string | null; status: string | null; detailsUrl?: string | null }
   | { __typename: "StatusContext"; context: string; state: string | null }
   | { __typename: string };
 
@@ -78,6 +78,8 @@ export type PullRequestSnapshot = {
   mergeCommit: { oid: string; parents: string[] } | null;
   requiredCheckNames: string[];
   checkContexts: CheckContext[];
+  /** Older test snapshots may omit this; CI recovery treats omission as unreadable evidence. */
+  checksComplete?: boolean;
   headCommitOid: string | null;
   readAt: string;
 };
@@ -122,6 +124,9 @@ export type GitHubReader = {
     commitSha: string,
     signal: AbortSignal,
   ) => Promise<Buffer>;
+  readActionsFailureLog: (
+    repository: string, headSha: string, check: { name: string; detailsUrl: string | null }, signal: AbortSignal,
+  ) => Promise<string>;
 };
 
 /** Required repository capabilities for resolver fallback ancestry verification. */
@@ -131,7 +136,8 @@ export type BranchAncestryReader = {
 };
 
 /** Read-only capability used by merge evidence workers that never fetch repository files. */
-export type PullRequestReader = Pick<GitHubReader, "readPullRequest" | "compareCommits">;
+export type PullRequestReader = Pick<GitHubReader, "readPullRequest" | "compareCommits"> &
+  Partial<Pick<GitHubReader, "readActionsFailureLog">>;
 
 type GitHubReadRetryOptions = {
   wait?: (delayMs: number, signal?: AbortSignal | null) => Promise<void>;
@@ -154,6 +160,64 @@ const decodeBase64 = (content: string): Buffer => {
     throw new GitHubReadError("repository file response has malformed base64 content", "response");
   }
   return bytes;
+};
+
+const actionsJobId = (repository: string, detailsUrl: string | null): { runId: string; jobId: string } | null => {
+  if (!detailsUrl) return null;
+  let url: URL;
+  try { url = new URL(detailsUrl); } catch { return null; }
+  if (url.protocol !== "https:" || url.hostname !== "github.com" || url.hash) return null;
+  const parts = url.pathname.split("/").filter(Boolean);
+  const [owner, name] = repository.split("/");
+  if (parts.length !== 7 || parts[0]?.toLowerCase() !== owner?.toLowerCase()
+    || parts[1]?.toLowerCase() !== name?.toLowerCase()
+    || parts[2] !== "actions" || parts[3] !== "runs" || parts[5] !== "job"
+    || !/^[0-9]+$/u.test(parts[4]!) || !/^[0-9]+$/u.test(parts[6]!)) return null;
+  return { runId: parts[4]!, jobId: parts[6]! };
+};
+
+const boundedJobLogTail = async (
+  response: Response,
+  failedSteps: Array<{ startedAt: string | null; completedAt: string | null }>,
+): Promise<string> => {
+  if (!response.ok || !response.body) throw new GitHubReadError("Actions job log is unavailable", "response");
+  const reader = response.body.getReader();
+  let total = 0;
+  let tail = Buffer.alloc(0);
+  try {
+    for (;;) {
+      const part = await reader.read();
+      if (part.done) break;
+      total += part.value.byteLength;
+      if (total > 16 * 1024 * 1024) throw new GitHubReadError("Actions job log exceeds 16 MiB", "response");
+      tail = Buffer.concat([tail, Buffer.from(part.value)]).subarray(-64 * 1024);
+    }
+  } catch (error: unknown) {
+    if (error instanceof GitHubReadError) throw error;
+    if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+      throw new GitHubReadError("Actions job log stream timed out", "timeout");
+    }
+    throw new GitHubReadError("Actions job log stream failed", "transport");
+  } finally {
+    reader.releaseLock();
+  }
+  const lines = tail.toString("utf8").split(/\r?\n/u).filter((line) => line.trim() !== "");
+  const windows = failedSteps.flatMap((step) => {
+    const start = Date.parse(step.startedAt ?? "");
+    const end = Date.parse(step.completedAt ?? "");
+    return Number.isFinite(start) && Number.isFinite(end) ? [{ start, end }] : [];
+  });
+  const timestamped = lines.some((line) => /^\d{4}-\d{2}-\d{2}T/u.test(line));
+  const selected = timestamped && windows.length > 0
+    ? lines.filter((line) => {
+      const stamp = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)\s/u.exec(line);
+      const time = Date.parse(stamp?.[1] ?? "");
+      return windows.some(({ start, end }) => Number.isFinite(time) && time >= start - 1_000 && time <= end + 1_000);
+    })
+    : lines;
+  const excerpt = (selected.length ? selected : lines).slice(-80).join("\n");
+  if (!excerpt) throw new GitHubReadError("Actions job log is empty", "response");
+  return Buffer.from(excerpt).subarray(-4_000).toString("utf8");
 };
 
 /**
@@ -213,7 +277,8 @@ export const parsePullRequestResponse = (
 
   const lastCommit = asObject(asObject(asArray(asObject(pr.commits)?.nodes)[0])?.commit);
   const rollup = asObject(lastCommit?.statusCheckRollup);
-  const checkContexts = asArray(asObject(rollup?.contexts)?.nodes)
+  const contexts = asObject(rollup?.contexts);
+  const checkContexts = asArray(contexts?.nodes)
     .flatMap((node) => (asObject(node) ? [asObject(node) as unknown as CheckContext] : []));
 
   const mergeCommit = asObject(pr.mergeCommit);
@@ -257,6 +322,8 @@ export const parsePullRequestResponse = (
     } : null,
     requiredCheckNames: requiredCheckNamesFor(rules, baseRef),
     checkContexts,
+    checksComplete: contexts !== null && (asObject(contexts.pageInfo)?.hasNextPage === false
+      || (asObject(contexts.pageInfo)?.hasNextPage === undefined && checkContexts.length < 100)),
     headCommitOid: typeof lastCommit?.oid === "string" ? lastCommit.oid : null,
     readAt,
   };
@@ -297,14 +364,14 @@ export const createGitHubReader = (
   const request = async (
     url: string,
     init: RequestInit,
-    options: { missingMessage?: string; retry?: boolean } = {},
+    options: { missingMessage?: string; retry?: boolean; allowRedirect?: boolean } = {},
   ): Promise<Response> => {
     for (let attempt = 0; ; attempt += 1) {
       let response: Response;
       try {
         response = await fetchImpl(url, init);
       } catch (error: unknown) {
-        if (error instanceof Error && error.name === "AbortError") {
+        if (init.signal?.aborted || (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))) {
           throw new GitHubReadError("GitHub read aborted at its deadline", "timeout");
         }
         const message = error instanceof Error ? error.message : "unknown";
@@ -320,7 +387,7 @@ export const createGitHubReader = (
       if (response.status === 404 && options.missingMessage !== undefined) {
         throw new GitHubReadError(options.missingMessage, "response");
       }
-      if (response.ok) return response;
+      if (response.ok || (options.allowRedirect && response.status === 302)) return response;
       const delay = options.retry === false ? undefined : GITHUB_READ_RETRY_DELAYS_MS[attempt];
       const transientStatus = response.status === 429 || response.status >= 500;
       if (transientStatus && delay !== undefined) {
@@ -361,6 +428,40 @@ export const createGitHubReader = (
         body: JSON.stringify({ query: PULL_REQUEST_QUERY, variables: { owner, name, number: prNumber, base: baseRef } }),
       });
       return parsePullRequestResponse(repository, baseRef, await response.json(), new Date().toISOString());
+    },
+    readActionsFailureLog: async (repository, headSha, check, signal) => {
+      const ids = actionsJobId(repository, check.detailsUrl);
+      if (!ids) throw new GitHubReadError(`check ${check.name} has no GitHub Actions job URL`, "response");
+      const [owner, name, ...rest] = repository.split("/");
+      if (!owner || !name || rest.length > 0) throw new GitHubReadError("malformed repository", "response");
+      const jobUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/actions/jobs/${ids.jobId}`;
+      const headers = { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json" };
+      const jobResponse = await request(jobUrl, { method: "GET", signal, headers });
+      const job = asObject(await jobResponse.json());
+      if (job?.id !== Number(ids.jobId) || job.run_id !== Number(ids.runId)
+        || job.head_sha !== headSha || job.name !== check.name || job.status !== "completed") {
+        throw new GitHubReadError(`Actions job identity does not match check ${check.name} on ${headSha}`, "response");
+      }
+      const failedSteps = asArray(job.steps).flatMap((step) => {
+        const entry = asObject(step);
+        return entry && typeof entry.name === "string"
+          && ["failure", "timed_out", "cancelled", "action_required", "startup_failure"].includes(String(entry.conclusion))
+          ? [{ name: entry.name, startedAt: typeof entry.started_at === "string" ? entry.started_at : null,
+            completedAt: typeof entry.completed_at === "string" ? entry.completed_at : null }] : [];
+      });
+      const redirect = await request(`${jobUrl}/logs`,
+        { method: "GET", signal, headers, redirect: "manual" }, { allowRedirect: true });
+      if (redirect.status !== 302) throw new GitHubReadError("Actions job log did not return a download URL", "response");
+      const location = redirect.headers.get("location");
+      let download: URL;
+      try { download = new URL(location ?? ""); } catch { throw new GitHubReadError("Actions job log URL is invalid", "response"); }
+      if (download.protocol !== "https:" || download.username || download.password) {
+        throw new GitHubReadError("Actions job log URL is not safe HTTPS", "response");
+      }
+      // The short-lived redirect is a signed storage URL. Never forward the GitHub token.
+      const logResponse = await request(download.toString(), { method: "GET", signal });
+      const tail = await boundedJobLogTail(logResponse, failedSteps);
+      return `Failed steps: ${failedSteps.length ? failedSteps.map((step) => step.name).join(", ") : "job-level failure"}\n${tail}`;
     },
     compareCommits: async (repository, baseSha, headSha, signal) => {
       const [owner, name, ...rest] = repository.split("/");
