@@ -385,6 +385,28 @@ const legacyTemplateGenerations = {
         { name: "Merge execution", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
       ],
     },
+    {
+      // Prompt-only rollover: Regression verification sweeps changed code and
+      // governed sites for every instance of a found defect class and reports
+      // blocking ones in one review-fail; Implementation and review enumerate
+      // every site governed by a changed shared contract; review fixes ask
+      // before changing specified behavior, scope, or an input premise and may
+      // reject proven pre-existing out-of-scope findings; and the Spec, Plan,
+      // Revalidate, Implementation, and plan-review steps trace consumed
+      // inputs. The graph is unchanged.
+      marker: "pre-defect-class-sweep",
+      promptDigest: "57c1f304441e38bf4a0dd63bb7a9f031dbcbc55acf52ac0ff16d416a885d5ceb",
+      shape: [
+        { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Code review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "review-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null, provisionDependencies: false },
+        { name: "Blind code review", assigneeType: AssigneeType.AGENT, approvalGate: false, optional: true, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null, provisionDependencies: false },
+        { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Regression verification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Merge authorization", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 6, spawnPolicy: null },
+        { name: "Merge execution", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
+      ],
+    },
   ],
   "compound-engineer-workflow": [
     {
@@ -648,6 +670,32 @@ const legacyTemplateGenerations = {
         { name: "Merge execution", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 11, spawnPolicy: null },
       ],
     },
+    {
+      // Prompt-only rollover: Regression verification sweeps changed code and
+      // governed sites for every instance of a found defect class and reports
+      // blocking ones in one review-fail; Implementation and review enumerate
+      // every site governed by a changed shared contract; review fixes ask
+      // before changing specified behavior, scope, or an input premise and may
+      // reject proven pre-existing out-of-scope findings; and the Spec, Plan,
+      // Revalidate, Implementation, and plan-review steps trace consumed
+      // inputs. The graph is unchanged.
+      marker: "pre-defect-class-sweep",
+      promptDigest: "2a3634bc7c7f74a066ab8fce78c4e0f02f2f9ac65acdcf37e07c993c445bed2c",
+      shape: [
+        { name: "Write a spec", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "spec", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: false, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Plan review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "plan-review", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+        { name: "Revise plan", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revised-plan", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: true, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Code review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "review-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null, provisionDependencies: false },
+        { name: "Blind code review", assigneeType: AssigneeType.AGENT, approvalGate: false, optional: true, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 5, layer: 6, spawnPolicy: null, provisionDependencies: false },
+        { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
+        { name: "Librarian", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "documentation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 8, spawnPolicy: null },
+        { name: "Regression verification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 9, spawnPolicy: null },
+        { name: "Merge authorization", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 10, spawnPolicy: null },
+        { name: "Merge execution", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 11, spawnPolicy: null },
+      ],
+    },
   ],
   [PR_TEMPLATE_NAME]: [
     {
@@ -723,6 +771,21 @@ const legacyTemplateGenerations = {
         { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
       ],
     },
+    {
+      // Prompt-only rollover: Implementation traces consumed inputs and, with
+      // both review prompts (shared with the Direct workflow), enumerates every
+      // site governed by a changed shared contract; review fixes ask before
+      // changing specified behavior, scope, or an input premise and may reject
+      // proven pre-existing out-of-scope findings. The graph is unchanged.
+      marker: "pre-defect-class-sweep",
+      promptDigest: "93a909a5d88b6aa158f9f86155853d7aed7762b61bd56dc9a1b17b6e7051281f",
+      shape: [
+        { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Code review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "review-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null, provisionDependencies: false },
+        { name: "Blind code review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null, provisionDependencies: false },
+        { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+      ],
+    },
   ],
 } as const satisfies Readonly<Record<string, readonly LegacyTemplateGeneration[]>>;
 
@@ -757,9 +820,9 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<
  * `agents/templates/` and fails on a mismatch.
  */
 export const CANONICAL_SOURCE_PROMPT_GENERATIONS = {
-  [DIRECT_TEMPLATE_NAME]: "57c1f304441e38bf4a0dd63bb7a9f031dbcbc55acf52ac0ff16d416a885d5ceb",
-  "compound-engineer-workflow": "2a3634bc7c7f74a066ab8fce78c4e0f02f2f9ac65acdcf37e07c993c445bed2c",
-  [PR_TEMPLATE_NAME]: "93a909a5d88b6aa158f9f86155853d7aed7762b61bd56dc9a1b17b6e7051281f",
+  [DIRECT_TEMPLATE_NAME]: "1f0e2e51164d32a69ba9911b845ba310e0651791c67b1f5f11bb40d6463cc458",
+  "compound-engineer-workflow": "b55e6923ea92e04f0def820e45a916b3c98407bdb0b8f0780fce1cfb94af5d53",
+  [PR_TEMPLATE_NAME]: "d749e399aa98598d802cb4b6704330a1f8a7031e54ab3bdff87f8c43be0c2130",
 } as const satisfies Readonly<Record<CanonicalTemplateRegistryName, string>>;
 
 export type CanonicalTemplateIdentity = Readonly<{

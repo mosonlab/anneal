@@ -16,7 +16,7 @@ import { after, before, test } from "node:test";
 
 import { AssigneeType, Prisma, PrismaClient, RepoPermission, RunnerPreference, TaskStatus } from "@prisma/client";
 
-import { restorePreOptionalReviewPrompt, restorePreTierRevalidationPrompt } from "./canonical-prompt-sync-fixtures.js";
+import { restorePreDefectClassSweepPrompt, restorePreOptionalReviewPrompt, restorePreTierRevalidationPrompt } from "./canonical-prompt-sync-fixtures.js";
 import { loadAgentSources } from "./agent-sources.js";
 import { parseCanonicalSyncSummary } from "./canonical-sync-report.js";
 import { isMergeReadinessStep } from "./merge-tail.js";
@@ -341,6 +341,10 @@ test("sync rolls the checkout Regression prompt generation once and preserves ch
       where: { taskTemplateId: template.id },
       data: { provisionDependencies: true, optional: false },
     });
+    for (const step of template.steps) {
+      const restored = restorePreDefectClassSweepPrompt(step.prompt);
+      if (restored !== step.prompt) await prisma.taskTemplateStep.update({ where: { id: step.id }, data: { prompt: restored } });
+    }
     const revalidation = template.steps.find(({ outputKind }) => outputKind === "revalidation");
     if (revalidation) {
       await prisma.taskTemplateStep.update({ where: { id: revalidation.id }, data: {
@@ -471,6 +475,10 @@ test("sync rolls the deployed pre-optional-review prompt generation once", async
       where: { taskTemplateId: template.id },
       data: { optional: false },
     });
+    for (const step of template.steps) {
+      const restored = restorePreDefectClassSweepPrompt(step.prompt);
+      if (restored !== step.prompt) await prisma.taskTemplateStep.update({ where: { id: step.id }, data: { prompt: restored } });
+    }
     const revalidation = template.steps.find(({ outputKind }) => outputKind === "revalidation");
     if (revalidation) {
       await prisma.taskTemplateStep.update({ where: { id: revalidation.id }, data: {

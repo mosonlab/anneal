@@ -1046,7 +1046,7 @@ export const createMergeTailRepairTask = async (
         ...(input.repairKind === "gate-fix" && input.gateFailureExcerpt !== undefined
           ? ["Gate failure excerpt", input.gateFailureExcerpt]
           : []),
-        "Make exactly the changes needed to close this failure, run affected suites, commit, and persist the result as task output. Before changing any shared type, schema, or route contract, enumerate its callers across every workspace, including apps/web, and update or test each one in the same change.",
+        "Close every listed in-scope failure and instance, then sweep the changed code and every consumer governed by a contract this chain changed, across every workspace including apps/web, for the same defect class. List any other instance in the summary and leave its code as it is, and escalate a specification contradiction through `inbox_ask`. Run affected suites, commit, and persist the result as task output whose summary lists checked sites, changed sites, and affected-test results.",
       ]),
     ...(chainContext ? [chainContext] : []),
   ].join("\n\n");

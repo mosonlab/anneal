@@ -208,6 +208,35 @@ const rebindFixStepToRetiredSeniorDev = async (projectId: string, templateId: st
 };
 
 /** Rebuild the pre-model-neutral shape that the retired registry identifies. */
+/** Every registered PR generation predates the defect-class sweep rollover;
+ * this restores the PR step prompt bytes it replaced. It mirrors
+ * `restorePreDefectClassSweepPrompt` in `@anneal/db`'s sync fixtures. */
+const restorePrePrDefectClassSweepPrompt = (prompt: string): string => prompt
+  .replace(
+    " Before implementing, trace each input the specification of record requires as pre-existing to a source at HEAD or a specified change, including the same Changes item, that creates it before use. Distinguish an implementation-created detail within scope from an unavailable input premise; ask one blocking `inbox_ask` question with the governing quote and tree evidence only for the latter, and finish independent work meanwhile.",
+    "",
+  )
+  .replace(
+    " For every shared contract this change adds, changes, or removes, enumerate all governed sites, verify each, update the inconsistent ones within the specification of record, and list checked sites, changed sites, and verification evidence in the summary.",
+    "",
+  )
+  .replace(
+    " Enumerate and inspect every site governed by a contract this change adds, changes, or removes at the pinned head, including sites outside `base...head`; report every inconsistency, grouping instances into one finding only when severity and required fix match, with every location listed in its evidence.",
+    "",
+  )
+  .replace(
+    "report. Enumerate and inspect every site governed by a contract this change\nadds, changes, or removes at the pinned head, including sites outside\n`base...head`; report every inconsistency, grouping instances into one finding\nonly when severity and required fix match, with every location listed in its\nevidence. Persist exactly one",
+    "report. Persist exactly one",
+  )
+  .replace(
+    " When closing a finding requires changing specified behavior, scope, or an unavailable input premise, ask one blocking `inbox_ask` question quoting the governing text with the tree evidence; finish the independent fixes meanwhile, and resume the dependent work only after the decision is recorded in the specification of record.",
+    "",
+  )
+  .replace(
+    " Reject a P0 or P1 finding only with evidence that it is unreachable, covered by another adopted finding, or proven pre-existing and outside the specification of record; for the last case, list every location and the governing scope constraint in `residualRisks`, and leave its code unchanged.",
+    " Reject a P0 or P1 finding only with a reason that names why the defect is unreachable or already covered by another adopted finding.",
+  );
+
 const restoreRetiredReviewContract = async (templateId: string): Promise<void> => {
   const steps = await db.taskTemplateStep.findMany({ where: { taskTemplateId: templateId } });
   for (const step of steps) {
@@ -370,6 +399,10 @@ test("canonical sync installs the reviewed PR prompt generation while instantiat
     where: { projectId_name: { projectId: project.id, name: PR_TEMPLATE_NAME } },
     include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
   });
+  for (const step of template.steps) {
+    step.prompt = restorePrePrDefectClassSweepPrompt(step.prompt);
+    await db.taskTemplateStep.update({ where: { id: step.id }, data: { prompt: step.prompt } });
+  }
   const fixed = template.steps.find(({ outputKind }) => outputKind === "fixed-implementation")!;
   // This deployed generation predates the salvage-resume exception as well as
   // the HEAD-tree cleanup check; reconstruct its exact authenticated prompt.

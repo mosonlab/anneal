@@ -82,6 +82,65 @@ written.
   committing non-implementation Step, such as the compound chain's plan Step,
   from a completion demand its own output write path refused.
 
+### Merge tail, merge train and the merge executor
+
+- **A merge-tail repair round now works on a whole defect class.** A defect
+  with several instances used to cost one Regression verdict and one repair
+  attempt per instance. `review-fix` and `gate-fix` repairs each get three
+  automatic attempts, so such a defect could exhaust the budget. The canonical
+  Regression step now sweeps the changed code and the sites governed by
+  changed contracts for each defect class in the prior findings or refreshed
+  fix. It reports every blocking instance in one `review-fail`, one line per
+  finding ID, location, and consequence. It records proven pre-existing
+  out-of-scope instances and non-blocking P2 observations in the activity
+  log, because the tail loops only on blocking findings
+  ([ADR 0007](docs/adr/0007-one-check-instead-of-a-mechanism.md)). The `review-fix` and `gate-fix` repair prompt
+  closes every listed in-scope instance and sweeps changed code and governed
+  consumers for the same class. It lists other instances without changing
+  them, escalates specification contradictions through the Inbox, and reports
+  checked sites, changed sites, and affected-test results.
+- **Changed shared contracts are checked before the merge tail.** For every
+  shared contract a change adds, changes, or removes, the canonical
+  Implementation step of every workflow enumerates and verifies every governed
+  site, updates the inconsistent ones within the specification of record, and
+  lists checked sites, changed sites, and evidence. Code review and blind code
+  review inspect the same sites, including sites outside `base...head`. They
+  group instances into one finding only when severity and required fix match.
+- **Review fixes ask before changing the specification.** When closing a
+  finding requires changing specified behavior, scope, or an unavailable input
+  premise, the review-fix step of every workflow asks one blocking `inbox_ask`
+  question and finishes the independent fixes meanwhile. A P0 or P1 finding
+  that is proven pre-existing and outside the specification of record may be
+  rejected. Its locations and governing scope constraint go into
+  `residualRisks`, and its code stays unchanged.
+- **Premise checks trace consumed inputs.** Direct revalidation traces every
+  table, column, field, fixture, or export a Changes or Acceptance item
+  consumes to HEAD or to a Changes item that creates it before use; an
+  untraceable input is a premise collapse. Direct and PR Implementation trace
+  each input the specification requires as pre-existing, because an unbound
+  Direct chain has no Revalidate step. They ask only when the input premise is
+  unavailable, not for an implementation-created detail within scope. In Full
+  Assurance, the Spec step traces its inputs before persisting. The Plan step's
+  Anneal-owned closing paragraph and plan review check that each slice's
+  inputs exist at the frozen base or are created before use by the same or a
+  prerequisite slice.
+- **Role contracts.** Senior developer, plan executor, and frontend developer
+  roles include required consumer updates within the specification's
+  constraints and escalate conflicts with explicit constraints. They record
+  chosen readings as interpretations, never as approvals, in the activity log
+  and the task output summary. The foundational prompt now defines a passing
+  test suite: setup succeeds, the command exits zero, at least one test
+  executes, and none fail.
+- **Standing decisions come before the Inbox.** Chains run unattended, so the
+  foundational prompt now has every agent apply a standing decision named by
+  the brief or specification of record before it asks an Inbox question or
+  escalates. The agent records `standing decision <id> applied` with evidence
+  in the activity log and the task output summary. It asks only when no
+  standing decision covers the case.
+- Canonical sync retires the `pre-defect-class-sweep` prompt generation of all
+  three templates on deploy. Agent prompts update in place as before. Steps of
+  already-instantiated chains keep the prompts they were created with.
+
 ## v0.9.0 — Developer Preview 9
 
 The ninth preview is about the end of a chain. A merge tail that stops now

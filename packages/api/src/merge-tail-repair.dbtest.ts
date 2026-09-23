@@ -789,7 +789,7 @@ test("a gate-fix prompt renders its failure excerpt while other repair prompts r
     "suite failed",
     "Gate failure excerpt",
     excerpt,
-    "Make exactly the changes needed to close this failure, run affected suites, commit, and persist the result as task output. Before changing any shared type, schema, or route contract, enumerate its callers across every workspace, including apps/web, and update or test each one in the same change.",
+    "Close every listed in-scope failure and instance, then sweep the changed code and every consumer governed by a contract this chain changed, across every workspace including apps/web, for the same defect class. List any other instance in the summary and leave its code as it is, and escalate a specification contradiction through `inbox_ask`. Run affected suites, commit, and persist the result as task output whose summary lists checked sites, changed sites, and affected-test results.",
     gateContext,
   ].join("\n\n"));
 
@@ -805,7 +805,7 @@ test("a gate-fix prompt renders its failure excerpt while other repair prompts r
   assert.equal(reviewRepair.description, [
     `Repair the autonomous merge tail failure at ${HEAD} against target ${BASE}.`,
     "MF-2 remains open",
-    "Make exactly the changes needed to close this failure, run affected suites, commit, and persist the result as task output. Before changing any shared type, schema, or route contract, enumerate its callers across every workspace, including apps/web, and update or test each one in the same change.",
+    "Close every listed in-scope failure and instance, then sweep the changed code and every consumer governed by a contract this chain changed, across every workspace including apps/web, for the same defect class. List any other instance in the summary and leave its code as it is, and escalate a specification contradiction through `inbox_ask`. Run affected suites, commit, and persist the result as task output whose summary lists checked sites, changed sites, and affected-test results.",
     reviewContext,
   ].join("\n\n"));
 
@@ -949,10 +949,10 @@ test("a repair task carries only the chain outputs its repair kind reads", async
 test("a review-fix prompt names the blast radius a summary-literal repair would miss", async () => {
   const seeded = await exercise("review-fail");
   const repair = await repairFor(seeded, "review-fix");
-  assert.match(repair.description, /enumerate its callers across every workspace, including apps\/web/u);
+  assert.match(repair.description, /every consumer governed by a contract this chain changed, across every workspace including apps\/web/u);
   const conflict = await exercise("refresh-conflict");
   const resolver = await repairFor(conflict, "refresh-conflict");
-  assert.doesNotMatch(resolver.description, /enumerate its callers/u);
+  assert.doesNotMatch(resolver.description, /every consumer governed by/u);
 });
 
 test("a Full Assurance repair revalidates documentation before Regression", async () => {

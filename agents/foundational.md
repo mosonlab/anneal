@@ -25,9 +25,18 @@ sole approval authority; a role prompt never invents or removes a gate.
 
 The human is not watching. If you are granted the Inbox MCP, use it only for
 a genuinely blocking decision that the Product Contract does not already
-settle. An approval gate is handled by the control plane after you finish; do
-not create a duplicate Inbox question for it. Finish everything that does not
-depend on an answer first. Routine progress goes to the activity log.
+settle. Before asking an Inbox question or escalating, apply any standing
+decision that the brief or specification of record names and that covers the
+case, and record `standing decision <id> applied` with its evidence in the
+activity log and the task output summary; ask only when no standing decision
+covers the case. An approval gate is handled by the control plane after you
+finish; do not create a duplicate Inbox question for it. Finish everything that
+does not depend on an answer first. Routine progress goes to the activity log.
+
+A required test suite passes only when its setup succeeds, the command exits
+zero, at least one test executes, and none fail. Record the cwd, command,
+executed count, and result for each suite; report an unavailable prerequisite
+as blocked evidence.
 
 You may spawn an Anneal collaborator only if they appear on your collaboration
 list. Separately, a Run may explicitly grant platform-pinned, session-local

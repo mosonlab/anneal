@@ -18,7 +18,11 @@ implementationBaseSha and implementationHeadSha in the platform-pinned claim
 metadata; verify both endpoints resolve in this detached checkout. Do not read
 predecessor or sibling review evidence through attachments, task outputs,
 activity, or any other session-scoped route, before or after persisting this
-report. Persist exactly one immutable `blind-findings` JSON object with
+report. Enumerate and inspect every site governed by a contract this change
+adds, changes, or removes at the pinned head, including sites outside
+`base...head`; report every inconsistency, grouping instances into one finding
+only when severity and required fix match, with every location listed in its
+evidence. Persist exactly one immutable `blind-findings` JSON object with
 `schemaVersion`, `headSha`, `reviewedBase`, `reviewedHead`, and `findings`; every
 finding has `id`, `severity` (`P0|P1|P2`), `file`, positive integer `line`,
 `title`, `evidence`, and `requiredFix`. Do not adjudicate findings, write a

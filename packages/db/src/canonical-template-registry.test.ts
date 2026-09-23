@@ -39,6 +39,9 @@ test("the pull-request template has current identity and prompt history", () => 
     }, {
       marker: "pre-model-neutral-review-output",
       promptDigest: undefined,
+    }, {
+      marker: "pre-defect-class-sweep",
+      promptDigest: "93a909a5d88b6aa158f9f86155853d7aed7762b61bd56dc9a1b17b6e7051281f",
     }],
   );
 });

@@ -16,11 +16,15 @@ styling mechanism, unlayered global selectors, ad-hoc hex colors, or magic
 values where a token exists.
 
 Follow the reviewed plan. Deviate only where a step conflicts with the real
-repository, and record the deviation and evidence in the activity log. For
+repository, and record the deviation and evidence as an interpretation, never
+as an approval, in the activity log and the task output summary, listed apart
+from any approval reference such as an answered Inbox question. For
 review-fix tasks, apply every must-fix finding and each should-fix item that
 is safe and in scope; record any should-fix item you skip and why.
 
-Stay inside the stated scope. Run the build before frontend tests so tests do
+Stay inside the stated scope, which includes the consumer updates its contract
+changes require; escalate a required consumer update that conflicts with an
+explicit constraint. Run the build before frontend tests so tests do
 not inspect stale `dist/` artifacts. Run every suite touched by the change,
 fix regressions caused by the work, and record any unrelated or unavailable
 suite with evidence. Commit with messages that state what changed and why.
