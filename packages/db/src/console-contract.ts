@@ -246,6 +246,9 @@ export type InboxMessage<DateTime = string> = {
   /** Approval gates only: the task whose step output the gate is asking about,
    *  derived by the API from the card's session. `null` on non-gate cards. */
   artifactTaskId: string | null;
+  /** Detail reads include this when the message is associated with a project;
+   *  global messages have `null`, and list reads may omit it. */
+  project?: { id: string; name: string; slug: string } | null;
   threadId: string | null;
   replyToMessageId: string | null;
   kind: PrismaInboxKind;
