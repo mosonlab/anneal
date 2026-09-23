@@ -76,7 +76,7 @@ const createLiveRun = async (taskId: string, projectId: string, agentId: string,
       claimedAt: now,
       heartbeatAt: now,
       startedAt: now,
-      model: "gpt-5.6-luna:max",
+      model: "gpt-6-luna:max",
       promptHash: "revalidation-routing-test",
     },
   });

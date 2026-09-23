@@ -757,13 +757,13 @@ test("Codex fresh and resume launches pin the Run service tier explicitly", () =
   const fast = runSpec();
   fast.claim = {
     ...fast.claim,
-    run: { ...fast.claim.run, model: "gpt-5.6-luna:max", codexServiceTier: "FAST" },
+    run: { ...fast.claim.run, model: "gpt-6-luna:max", codexServiceTier: "FAST" },
   };
   const resume = { ...fast, providerConversationId: "thread-fast", input: "continue" };
   for (const args of [argsForRunner("CODEX", fast), argsForRunner("CODEX", fast, resume)]) {
     assert.ok(args.includes('service_tier="fast"'));
     assert.ok(args.includes('model_reasoning_effort="max"'));
-    assert.ok(args.includes("gpt-5.6-luna"));
+    assert.ok(args.includes("gpt-6-luna"));
   }
   const env = buildChildEnvironment(
     { path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: [], workspaceRoot: productionRoot, hostProofSlots: 3 },
@@ -788,14 +788,14 @@ test("native implementation subagents are pinned on fresh and resumed Codex laun
     agent: { ...claim.agent, name: "plan-executor-astra-medium" },
     run: {
       ...claim.run,
-      subagentModel: "gpt-5.6-luna:max",
+      subagentModel: "gpt-6-luna:max",
       subagentMaxConcurrent: 8,
     },
   };
   const resume = { ...runSpec(), claim: executioner, providerConversationId: "thread-child", input: "continue" };
   for (const args of [argsForRunner("CODEX", { ...runSpec(), claim: executioner }), argsForRunner("CODEX", resume, resume)]) {
     assert.ok(args.includes("multi_agent_v2"));
-    assert.ok(args.includes('agents.default_subagent_model="gpt-5.6-luna"'));
+    assert.ok(args.includes('agents.default_subagent_model="gpt-6-luna"'));
     assert.ok(args.includes('agents.default_subagent_reasoning_effort="max"'));
     assert.ok(args.includes("agents.max_concurrent_threads_per_session=8"));
   }
@@ -817,8 +817,8 @@ test("native implementation subagents are pinned on fresh and resumed Codex laun
   );
   assert.throws(() => buildPrompt({
     ...executioner,
-    run: { ...executioner.run, subagentModel: "gpt-5.6-sol:high" },
-  }), /must use gpt-5\.6-luna:max with concurrency 8/u);
+    run: { ...executioner.run, subagentModel: "gpt-6-sol:high" },
+  }), /must use gpt-6-luna:max with concurrency 8/u);
   assert.throws(
     () => buildPrompt({ ...executioner, runner: "PI" }),
     /require a Codex root Run/u,
@@ -850,8 +850,8 @@ test("the PI extension injects the explicit tier only into openai-codex requests
   });
   try {
     process.env.AGENTOS_CODEX_SERVICE_TIER = "fast";
-    assert.deepEqual(handler({ type: "before_provider_request", payload: { model: "gpt-5.6-luna" } }, context("openai-codex")), {
-      model: "gpt-5.6-luna",
+    assert.deepEqual(handler({ type: "before_provider_request", payload: { model: "gpt-6-luna" } }, context("openai-codex")), {
+      model: "gpt-6-luna",
       service_tier: "priority",
     });
     assert.equal(handler({ type: "before_provider_request", payload: {} }, context("anthropic")), undefined);
@@ -885,7 +885,7 @@ test("PI runtime preflight rejects an openai-codex Run whose explicit service ti
     {
       ...claim,
       runner: "PI",
-      run: { ...claim.run, model: "openai-codex/gpt-5.6-sol:high" },
+      run: { ...claim.run, model: "openai-codex/gpt-6-sol:high" },
       secrets: { ...claim.secrets, AGENTOS_PI_EXPECTS_OPENAI_CODEX: "0" },
     },
     scratch,
@@ -896,7 +896,7 @@ test("PI runtime preflight rejects an openai-codex Run whose explicit service ti
   const result = await adapters.PI.preflight({
     config: {} as RunnerConfig,
     runner: "PI",
-    model: "openai-codex/gpt-5.6-sol:high",
+    model: "openai-codex/gpt-6-sol:high",
     env: { AGENTOS_RUN_ID: "run-1" },
   });
   assert.equal(result.ok, false);
@@ -1144,10 +1144,10 @@ test("Claude partial stream stdout is excluded from exit evidence", { timeout: S
 });
 
 // A REAL `pi --mode json` transcript, captured 2026-08-25 against pi 0.84.2 and
-// openai-codex/gpt-5.6-luna with the exact flags argsForRunner builds:
+// openai-codex/gpt-6-luna with the exact flags argsForRunner builds:
 //
 //   echo "Run the bash command 'echo hello' and then tell me its output." \
-//     | pi -p --mode json --session-dir ./sess --model openai-codex/gpt-5.6-luna \
+//     | pi -p --mode json --session-dir ./sess --model openai-codex/gpt-6-luna \
 //         --thinking low --no-skills --no-prompt-templates --no-themes \
 //         --no-context-files --no-approve
 //
@@ -1156,10 +1156,10 @@ test("Claude partial stream stdout is excluded from exit evidence", { timeout: S
 // count this must not make), and the empty terminal event. If an assertion below
 // ever disagrees with these numbers, the code is wrong, never the capture.
 const PI_TRANSCRIPT: unknown[] = [
-  {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "call_BRyJNXBbsbjHm3nGCztVKlvn|fc_00e0eb3701447702016a8e2fcce81487d0ae08cfa4c0db0a75", "name": "bash", "arguments": {"command": "echo hello"}}], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-5.6-luna", "usage": {"input": 4620, "output": 19, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0, "totalTokens": 4639, "cost": {"input": 0.0009240000000000001, "output": 2.28e-05, "cacheRead": 0, "cacheWrite": 0, "total": 0.0009468000000000001}}, "stopReason": "toolUse", "timestamp": 1787703240541, "responseId": "resp_00e0eb3701447702016a8e2fcb669887d0ade1277f25377b3a", "rawStopReason": "completed"}},
-  {"type": "turn_end", "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "call_BRyJNXBbsbjHm3nGCztVKlvn|fc_00e0eb3701447702016a8e2fcce81487d0ae08cfa4c0db0a75", "name": "bash", "arguments": {"command": "echo hello"}}], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-5.6-luna", "usage": {"input": 4620, "output": 19, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0, "totalTokens": 4639, "cost": {"input": 0.0009240000000000001, "output": 2.28e-05, "cacheRead": 0, "cacheWrite": 0, "total": 0.0009468000000000001}}, "stopReason": "toolUse", "timestamp": 1787703240541, "responseId": "resp_00e0eb3701447702016a8e2fcb669887d0ade1277f25377b3a", "rawStopReason": "completed"}, "toolResults": [{"role": "toolResult", "toolCallId": "call_BRyJNXBbsbjHm3nGCztVKlvn|fc_00e0eb3701447702016a8e2fcce81487d0ae08cfa4c0db0a75", "toolName": "bash", "content": [{"type": "text", "text": "hello\n"}], "isError": false, "timestamp": 1787703245849}]},
-  {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "hello", "textSignature": "{\"v\":1,\"id\":\"msg_00e0eb3701447702016a8e2fd2dea087d09a0c85f07de241ae\",\"phase\":\"final_answer\"}"}], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-5.6-luna", "usage": {"input": 1068, "output": 5, "cacheRead": 3584, "cacheWrite": 0, "reasoning": 0, "totalTokens": 4657, "cost": {"input": 0.00021360000000000001, "output": 6e-06, "cacheRead": 7.168e-05, "cacheWrite": 0, "total": 0.00029128000000000004}}, "stopReason": "stop", "timestamp": 1787703245851, "responseId": "resp_00e0eb3701447702016a8e2fcebd1087d0be678fe9ff2a3a20", "rawStopReason": "completed"}},
-  {"type": "turn_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "hello", "textSignature": "{\"v\":1,\"id\":\"msg_00e0eb3701447702016a8e2fd2dea087d09a0c85f07de241ae\",\"phase\":\"final_answer\"}"}], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-5.6-luna", "usage": {"input": 1068, "output": 5, "cacheRead": 3584, "cacheWrite": 0, "reasoning": 0, "totalTokens": 4657, "cost": {"input": 0.00021360000000000001, "output": 6e-06, "cacheRead": 7.168e-05, "cacheWrite": 0, "total": 0.00029128000000000004}}, "stopReason": "stop", "timestamp": 1787703245851, "responseId": "resp_00e0eb3701447702016a8e2fcebd1087d0be678fe9ff2a3a20", "rawStopReason": "completed"}, "toolResults": []},
+  {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "call_BRyJNXBbsbjHm3nGCztVKlvn|fc_00e0eb3701447702016a8e2fcce81487d0ae08cfa4c0db0a75", "name": "bash", "arguments": {"command": "echo hello"}}], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-6-luna", "usage": {"input": 4620, "output": 19, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0, "totalTokens": 4639, "cost": {"input": 0.0009240000000000001, "output": 2.28e-05, "cacheRead": 0, "cacheWrite": 0, "total": 0.0009468000000000001}}, "stopReason": "toolUse", "timestamp": 1787703240541, "responseId": "resp_00e0eb3701447702016a8e2fcb669887d0ade1277f25377b3a", "rawStopReason": "completed"}},
+  {"type": "turn_end", "message": {"role": "assistant", "content": [{"type": "toolCall", "id": "call_BRyJNXBbsbjHm3nGCztVKlvn|fc_00e0eb3701447702016a8e2fcce81487d0ae08cfa4c0db0a75", "name": "bash", "arguments": {"command": "echo hello"}}], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-6-luna", "usage": {"input": 4620, "output": 19, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0, "totalTokens": 4639, "cost": {"input": 0.0009240000000000001, "output": 2.28e-05, "cacheRead": 0, "cacheWrite": 0, "total": 0.0009468000000000001}}, "stopReason": "toolUse", "timestamp": 1787703240541, "responseId": "resp_00e0eb3701447702016a8e2fcb669887d0ade1277f25377b3a", "rawStopReason": "completed"}, "toolResults": [{"role": "toolResult", "toolCallId": "call_BRyJNXBbsbjHm3nGCztVKlvn|fc_00e0eb3701447702016a8e2fcce81487d0ae08cfa4c0db0a75", "toolName": "bash", "content": [{"type": "text", "text": "hello\n"}], "isError": false, "timestamp": 1787703245849}]},
+  {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "hello", "textSignature": "{\"v\":1,\"id\":\"msg_00e0eb3701447702016a8e2fd2dea087d09a0c85f07de241ae\",\"phase\":\"final_answer\"}"}], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-6-luna", "usage": {"input": 1068, "output": 5, "cacheRead": 3584, "cacheWrite": 0, "reasoning": 0, "totalTokens": 4657, "cost": {"input": 0.00021360000000000001, "output": 6e-06, "cacheRead": 7.168e-05, "cacheWrite": 0, "total": 0.00029128000000000004}}, "stopReason": "stop", "timestamp": 1787703245851, "responseId": "resp_00e0eb3701447702016a8e2fcebd1087d0be678fe9ff2a3a20", "rawStopReason": "completed"}},
+  {"type": "turn_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "hello", "textSignature": "{\"v\":1,\"id\":\"msg_00e0eb3701447702016a8e2fd2dea087d09a0c85f07de241ae\",\"phase\":\"final_answer\"}"}], "api": "openai-codex-responses", "provider": "openai-codex", "model": "gpt-6-luna", "usage": {"input": 1068, "output": 5, "cacheRead": 3584, "cacheWrite": 0, "reasoning": 0, "totalTokens": 4657, "cost": {"input": 0.00021360000000000001, "output": 6e-06, "cacheRead": 7.168e-05, "cacheWrite": 0, "total": 0.00029128000000000004}}, "stopReason": "stop", "timestamp": 1787703245851, "responseId": "resp_00e0eb3701447702016a8e2fcebd1087d0be678fe9ff2a3a20", "rawStopReason": "completed"}, "toolResults": []},
   {"type": "agent_settled"},
 ];
 
@@ -1719,7 +1719,7 @@ test("PI preflight fails closed when the CLI omits an isolation capability", { t
       binaries: { CLAUDE: stub, CODEX: stub, PI: stub },
       runAsPrefix: [],
     } as unknown as RunnerConfig;
-    const result = await adapters.PI.preflight({ config, runner: "PI", model: "openai-codex/gpt-5.6-sol:high", env: {} });
+    const result = await adapters.PI.preflight({ config, runner: "PI", model: "openai-codex/gpt-6-sol:high", env: {} });
     assert.equal(result.ok, false);
     assert.equal(result.error, "cli-incompatible: the CLI does not expose the required Anneal exec protocol");
     assert.equal(result.authMode, null);
@@ -1745,7 +1745,7 @@ test("PI preflight verifies every isolation capability before authentication", {
       binaries: { CLAUDE: stub, CODEX: stub, PI: stub },
       runAsPrefix: [],
     } as unknown as RunnerConfig;
-    const result = await adapters.PI.preflight({ config, runner: "PI", model: "openai-codex/gpt-5.6-sol:high", env: {} });
+    const result = await adapters.PI.preflight({ config, runner: "PI", model: "openai-codex/gpt-6-sol:high", env: {} });
     assert.equal(result.ok, true);
     assert.equal(result.authMode, "openai-codex");
     assert.equal(result.capabilities.cliProtocol, "json-stdin-resume-isolated");
@@ -2236,7 +2236,7 @@ test("the runner registry exposes provider-owned session policy", () => {
     {
       CLAUDE: { isolatesSessionConfig: false, startupPreflightModel: null, binaryEnvironment: "CLAUDE_BINARY" },
       CODEX: { isolatesSessionConfig: true, startupPreflightModel: CODEX_STARTER_MODEL, binaryEnvironment: "CODEX_BINARY" },
-      PI: { isolatesSessionConfig: true, startupPreflightModel: "openai-codex/gpt-5.6-luna", binaryEnvironment: "PI_BINARY" },
+      PI: { isolatesSessionConfig: true, startupPreflightModel: "openai-codex/gpt-6-luna", binaryEnvironment: "PI_BINARY" },
     },
   );
   assert.deepEqual(piDeclaration.protectedEnvironmentVariables, [

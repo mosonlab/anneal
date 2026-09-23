@@ -360,7 +360,7 @@ export const piDeclaration: AdapterDeclaration = Object.freeze({
   toolEntrypoint: piExtensionPath,
   enforcedTools: PI_ENFORCED_TOOLS,
   isolatesSessionConfig: true,
-  startupPreflightModel: "openai-codex/gpt-5.6-luna",
+  startupPreflightModel: "openai-codex/gpt-6-luna",
   // PI_CODING_AGENT_SESSION_DIR is real, but --session-dir is authoritative.
   // Deny task overrides without pretending the adapter depends on the variable.
   protectedEnvironmentVariables: [

@@ -23,8 +23,8 @@ const agent = (overrides: Partial<Agent> & Pick<Agent, "id" | "name" | "title" |
 });
 
 const seniorAstra = agent({ id: "a1", name: "senior-dev-astra-medium", title: "Senior Dev", model: "gpt-6-astra:medium", canonicalRole: "senior-dev-astra-medium" });
-const seniorLuna = agent({ id: "a2", name: "senior-dev-luna-max", title: "Senior Dev", model: "gpt-5.6-luna:max", canonicalRole: "senior-dev-luna-max" });
-const reviewer = agent({ id: "a3", name: "code-reviewer-sol-high", title: "Code Reviewer", model: "gpt-5.6-sol:high" });
+const seniorLuna = agent({ id: "a2", name: "senior-dev-luna-max", title: "Senior Dev", model: "gpt-6-luna:max", canonicalRole: "senior-dev-luna-max" });
+const reviewer = agent({ id: "a3", name: "code-reviewer-sol-high", title: "Code Reviewer", model: "gpt-6-sol:high" });
 const integrator = agent({
   id: "a4", name: "merge-integrator", title: "Merge Integrator", model: "mechanical/merge-executor-v1",
   runnerPreference: "INHERIT", assignable: false,
@@ -69,7 +69,7 @@ test("the list renders one header per title, chips instead of slugs, and keeps t
     assert.equal([...page.container.querySelectorAll("[data-agent-group]")].map((row) => row.getAttribute("data-agent-group")).join(","), "Senior Dev,Code Reviewer,Merge Integrator");
     // The runtime is what separates the two Senior Dev rows; the slug is not shown.
     assert.match(text, /GPT-6 Astra \(codex\) · medium/u);
-    assert.match(text, /GPT-5.6 Luna \(codex\) · max/u);
+    assert.match(text, /GPT-6 Luna \(codex\) · max/u);
     assert.doesNotMatch(text, /senior-dev-astra-medium/u);
     // Unassignable, but real: it spends and runs, so it stays in the roster.
     assert.match(text, /Merge Integrator/u);
@@ -364,7 +364,7 @@ test("a list row carries the runtime alone, and the title is read once in its he
     const variants = rows.slice(rows.indexOf(header) + 1, rows.indexOf(header) + 3);
     assert.deepEqual(
       variants.map((row) => row.querySelector("td")?.textContent?.trim()),
-      ["GPT-6 Astra (codex) · medium", "GPT-5.6 Luna (codex) · max"],
+      ["GPT-6 Astra (codex) · medium", "GPT-6 Luna (codex) · max"],
     );
   } finally {
     await page.dispose();

@@ -32,14 +32,14 @@ const prisma = new PrismaClient();
 // Canonical roles, not names: an operator may rename an Agent, and a historical
 // template is still the template these roles bound.
 const HISTORICAL_NINE_STEP_CONTRACT = [
-  [1, "spec-opus-high", AssigneeType.AGENT, "spec", true],
+  [1, "spec-opus-medium", AssigneeType.AGENT, "spec", true],
   [2, "plan-fable-medium", AssigneeType.AGENT, "plan", false],
   [3, "review-coordinator-astra-medium", AssigneeType.AGENT, "plan-review", false],
   [4, "plan-reviser-opus-medium", AssigneeType.AGENT, "revised-plan", true],
   [5, "plan-executor-astra-low", AssigneeType.AGENT, "implementation", false],
   [6, "review-coordinator-astra-medium", AssigneeType.AGENT, "code-review", false],
   [7, "senior-dev-astra-medium", AssigneeType.AGENT, "fixed-implementation", false],
-  [8, "librarian-luna-xhigh", AssigneeType.AGENT, "documentation", false],
+  [8, "librarian-luna-high", AssigneeType.AGENT, "documentation", false],
   [9, null, AssigneeType.HUMAN, "approval", true],
 ] as const;
 
@@ -94,7 +94,7 @@ const historicalSeedLegacyName = (
     && existing.steps.every((step, index) => step.stepIndex === index + 1)
     && stepRoleName(existing.steps[9]) === "regression-verifier-luna-max"
     && existing.steps[9]?.outputKind === "regression-verification"
-    && stepRoleName(existing.steps[10]) === "librarian-luna-xhigh"
+    && stepRoleName(existing.steps[10]) === "librarian-luna-high"
     && existing.steps[10]?.outputKind === "documentation"
     && existing.steps[11]?.outputKind === "merge-authorization"
     && stepRoleName(existing.steps[12]) === INTEGRATOR_AGENT_NAME

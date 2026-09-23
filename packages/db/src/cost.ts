@@ -10,7 +10,10 @@ export type TokenPrices = {
  * Repository-versioned base API prices. Values are USD per one million tokens;
  * the UI marks the result estimated because session totals cannot reconstruct
  * request-level pricing tiers or non-token fees. Source model pages (checked
- * 2026-08-20):
+ * 2026-08-20; GPT-6 Sol and Luna 2026-09-22). GPT-5.6 Sol and Luna stay priced
+ * for historical runs:
+ * https://developers.openai.com/api/docs/models/gpt-6-sol
+ * https://developers.openai.com/api/docs/models/gpt-6-luna
  * https://developers.openai.com/api/docs/models/gpt-5.6-sol
  * https://developers.openai.com/api/docs/models/gpt-5.6-terra
  * https://developers.openai.com/api/docs/models/gpt-5.6-luna
@@ -21,6 +24,8 @@ export const MODEL_TOKEN_PRICES: Readonly<Record<string, TokenPrices>> = {
   "gpt-5.6-sol": { inputPerMillionUsd: "5", cachedInputPerMillionUsd: "0.5", outputPerMillionUsd: "30" },
   "gpt-5.6-terra": { inputPerMillionUsd: "2", cachedInputPerMillionUsd: "0.2", outputPerMillionUsd: "12" },
   "gpt-5.6-luna": { inputPerMillionUsd: "0.2", cachedInputPerMillionUsd: "0.02", outputPerMillionUsd: "1.2" },
+  "gpt-6-sol": { inputPerMillionUsd: "2", cachedInputPerMillionUsd: "0.2", outputPerMillionUsd: "10" },
+  "gpt-6-luna": { inputPerMillionUsd: "0.1", cachedInputPerMillionUsd: "0.01", outputPerMillionUsd: "0.5" },
   "gpt-6-astra": { inputPerMillionUsd: "10", cachedInputPerMillionUsd: "1", outputPerMillionUsd: "50" },
   "claude-opus-5": { inputPerMillionUsd: "5", cachedInputPerMillionUsd: "0.5", outputPerMillionUsd: "25" },
   "claude-fable-5": { inputPerMillionUsd: "10", cachedInputPerMillionUsd: "1", outputPerMillionUsd: "50" },

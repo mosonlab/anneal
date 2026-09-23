@@ -13,7 +13,7 @@ const fixture = (options: { archived?: boolean; missing?: boolean; implementatio
   const agent = {
     id: "repair", name: "senior-dev-luna-max", projectId: "project",
     archivedAt: options.archived ? new Date() : null,
-    model: "gpt-5.6-luna:max", runnerPreference: RunnerPreference.CODEX,
+    model: "gpt-6-luna:max", runnerPreference: RunnerPreference.CODEX,
   };
   const tierAgents = Object.fromEntries(STAFFING_PROFILE_TIERS.map((tier) => [tier, tier === "default" ? agent : {
     id: `agent-${tier}`,

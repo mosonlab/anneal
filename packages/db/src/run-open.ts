@@ -171,7 +171,7 @@ export const isCompoundImplementationAssigneeError = (
 ): error is CompoundImplementationAssigneeError =>
   error instanceof Error && error.name === "CompoundImplementationAssigneeError";
 
-export const NATIVE_IMPLEMENTATION_SUBAGENT_MODEL = "gpt-5.6-luna:max";
+export const NATIVE_IMPLEMENTATION_SUBAGENT_MODEL = "gpt-6-luna:max";
 export const NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT = 8;
 
 export const isDirectImplementationStep = (templateStep: CompoundImplementationStepShape): boolean =>
@@ -1234,7 +1234,9 @@ export const openRun = async (
       runner: prior.runner,
       model: prior.model,
       codexServiceTier: prior.codexServiceTier,
-      subagentModel: prior.subagentModel,
+      // The subagent pin is platform-owned, not Agent configuration: a retry
+      // takes the current pin so a snapshot the adapter retired cannot fail it.
+      subagentModel: prior.subagentModel === null ? null : NATIVE_IMPLEMENTATION_SUBAGENT_MODEL,
       subagentMaxConcurrent: prior.subagentMaxConcurrent,
     }
     : null;

@@ -40,7 +40,7 @@ type AggregateWithRepair = ChainAggregate & {
 };
 
 const runWithTier = (overrides: Partial<RunWithTier> = {}): RunWithTier => ({
-  ...boardRun({ id: "run-1", model: "gpt-5.6-sol:high", ...overrides }),
+  ...boardRun({ id: "run-1", model: "gpt-6-sol:high", ...overrides }),
   codexServiceTier: overrides.codexServiceTier ?? "DEFAULT",
 });
 
@@ -295,7 +295,7 @@ test("aggregate card renders an active repair line and omits it when no repair i
   const activeMarkup = renderToStaticMarkup(<ChainAggregateCard aggregate={activeRepairAggregate()} />);
   const activeText = visibleText(activeMarkup);
   assert.match(activeMarkup, /data-chain-repair=""/u);
-  assert.match(activeText, /gate-fix · .*run 3 · gpt-5\.6-sol · high · fast · \d+m/u);
+  assert.match(activeText, /gate-fix · .*run 3 · gpt-6-sol · high · fast · \d+m/u);
   // The repair's own row is not on the page, so the aggregate is the one round
   // the card can count.
   assert.equal(element(activeMarkup, "[data-chain-repair-rounds]").textContent, "Repairs 1");
@@ -312,7 +312,7 @@ test("aggregate run lines split model effort, mark FAST only, and never say a ru
     },
   });
   const finishedText = visibleText(renderToStaticMarkup(<ChainAggregateCard aggregate={finished} />));
-  assert.match(finishedText, /run 1 · gpt-5\.6-sol · high · succeeded/u);
+  assert.match(finishedText, /run 1 · gpt-6-sol · high · succeeded/u);
   assert.doesNotMatch(finishedText, /fast/u);
 
   // The dot carries the state, so the word appears in neither locale.
@@ -324,7 +324,7 @@ test("aggregate run lines split model effort, mark FAST only, and never say a ru
     <LocaleProvider initialLocale="zh"><ChainAggregateCard aggregate={active} /></LocaleProvider>,
   ));
   assert.doesNotMatch(chineseText, /运行中/u);
-  assert.match(chineseText, /第 3 次运行 · gpt-5\.6-sol · high · fast · \d+ 分/u);
+  assert.match(chineseText, /第 3 次运行 · gpt-6-sol · high · fast · \d+ 分/u);
 });
 
 test("active elapsed preserves non-running statuses and merge-outcome badges", () => {

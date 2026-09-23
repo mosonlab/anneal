@@ -1442,7 +1442,7 @@ for (const outcome of ["review-fail", "gate-fail"] as const) {
       const seeded = await prepareBlockedRecovery("canonical-direct", `profile-${outcome}-${slot}`, outcome);
       const repairAgent = await db.agent.create({ data: {
         projectId: seeded.project.id, environmentId: seeded.agent.environmentId,
-        name: "residual-repair", title: "Residual repair", model: "gpt-5.6-luna:max",
+        name: "residual-repair", title: "Residual repair", model: "gpt-6-luna:max",
         runnerPreference: "CODEX", foundationalPrompt: "foundation", rolePrompt: "repair",
         ...(slot === "archived" ? { archivedAt: new Date() } : {}),
       } });

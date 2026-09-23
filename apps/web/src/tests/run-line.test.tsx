@@ -70,11 +70,11 @@ test("an active run reads as a duration alone, and the model drops its provider 
   // model name does not: both were the same fact printed twice.
   const line = parse(renderToStaticMarkup(
     <LocaleProvider initialLocale="en">
-      <RunLine run={run({ model: "openai-codex/gpt-5.6-luna:max" })} elapsed="line" showModel />
+      <RunLine run={run({ model: "openai-codex/gpt-6-luna:max" })} elapsed="line" showModel />
     </LocaleProvider>,
   ));
   const text = visibleText(line);
-  assert.match(text, /^run 7 · gpt-5\.6-luna · max · 2[23]m \d+s$/u);
+  assert.match(text, /^run 7 · gpt-6-luna · max · 2[23]m \d+s$/u);
   assert.doesNotMatch(text, /running/u);
   assert.doesNotMatch(text, /openai-codex/u);
 });

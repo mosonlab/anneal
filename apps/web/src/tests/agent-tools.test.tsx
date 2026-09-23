@@ -38,11 +38,11 @@ test("the eight tool toggles render in canonical order and reflect the denied se
 });
 
 test("honesty tags name exactly what each concrete runner enforces", () => {
-  const codex = cardDom(agent({ model: "gpt-5.6-sol:high", runnerPreference: "CODEX" }));
+  const codex = cardDom(agent({ model: "gpt-6-sol:high", runnerPreference: "CODEX" }));
   assert.match(codex.window.document.body.textContent ?? "", /codex has no per-tool switch/);
   assert.equal((codex.window.document.body.textContent?.match(/not enforced on codex/gu) ?? []).length, 8);
 
-  const pi = cardDom(agent({ model: "openai-codex\/gpt-5.6-luna:xhigh", runnerPreference: "PI" }));
+  const pi = cardDom(agent({ model: "openai-codex\/gpt-6-luna:xhigh", runnerPreference: "PI" }));
   const tagged = switches(pi).filter((button) => button.parentElement?.textContent?.includes("not enforced on pi"));
   assert.deepEqual(tagged.map((button) => button.getAttribute("aria-label")), ["Enable Glob", "Enable Grep", "Enable Web fetch", "Enable Web search"]);
   assert.equal(pi.window.document.querySelector('[title*="pi-help.stdout:177-178"]')?.textContent, "Glob");

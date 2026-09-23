@@ -1516,22 +1516,22 @@ const updateAgentUnderHeldLock = async <T>(
 test("Agent PATCH validates the locked current row instead of committing a raced runner/model contradiction", { timeout: 30_000 }, async () => {
   const context = await seedTask("locked-agent-patch", { status: "DONE" });
   await db.agent.update({ where: { id: context.agent.id }, data: {
-    model: "gpt-5.6-luna:max", runnerPreference: "CODEX", codexServiceTier: "DEFAULT",
+    model: "gpt-6-luna:max", runnerPreference: "CODEX", codexServiceTier: "DEFAULT",
   } });
   const patched = await updateAgentUnderHeldLock(context.agent.id, {
-    model: "openai-codex/gpt-5.6-sol:high", runnerPreference: "PI", codexServiceTier: "DEFAULT",
+    model: "openai-codex/gpt-6-sol:high", runnerPreference: "PI", codexServiceTier: "DEFAULT",
   }, () => call("PATCH", `/agents/${context.agent.id}`, { model: "gpt-5.6-terra:high" }));
   assert.equal(patched.status, 400, JSON.stringify(patched.body));
   assert.match(patched.body.error, /requires CODEX, but this Agent stores PI/u);
   const stored = await db.agent.findUniqueOrThrow({ where: { id: context.agent.id } });
   assert.equal(stored.runnerPreference, "PI");
-  assert.equal(stored.model, "openai-codex/gpt-5.6-sol:high");
+  assert.equal(stored.model, "openai-codex/gpt-6-sol:high");
 });
 
 test("task creation snapshots the Agent configuration re-read after its row lock", { timeout: 30_000 }, async () => {
   const context = await seedTask("locked-agent-run-snapshot", { status: "DONE" });
   const created = await updateAgentUnderHeldLock(context.agent.id, {
-    model: "gpt-5.6-luna:max", runnerPreference: "CODEX", codexServiceTier: "FAST",
+    model: "gpt-6-luna:max", runnerPreference: "CODEX", codexServiceTier: "FAST",
   }, () => call("POST", `/projects/${context.project.id}/tasks`, {
     name: "Fresh snapshot", description: "work", assigneeType: "AGENT",
     assigneeAgentId: context.agent.id, repoId: context.repo.id,
@@ -1539,7 +1539,7 @@ test("task creation snapshots the Agent configuration re-read after its row lock
   assert.equal(created.status, 201, JSON.stringify(created.body));
   const run = await db.run.findFirstOrThrow({ where: { taskId: created.body.id } });
   assert.equal(run.runner, "CODEX");
-  assert.equal(run.model, "gpt-5.6-luna:max");
+  assert.equal(run.model, "gpt-6-luna:max");
   assert.equal(run.codexServiceTier, "FAST");
 });
 
@@ -1547,18 +1547,18 @@ test("Run native subagent snapshots reject incomplete or noncanonical capability
   const context = await seedTask("subagent-snapshot", { status: "DONE" });
   const base = {
     projectId: context.project.id, taskId: context.task.id, agentId: context.agent.id, repoId: context.repo.id,
-    runner: "CODEX" as const, model: "gpt-5.6-sol:medium", promptHash: "hash",
+    runner: "CODEX" as const, model: "gpt-6-sol:medium", promptHash: "hash",
   };
   await assert.rejects(() => db.run.create({ data: {
-    ...base, runNumber: 1, dedupeKey: `task:${context.task.id}:run:1`, subagentModel: "gpt-5.6-luna:max",
+    ...base, runNumber: 1, dedupeKey: `task:${context.task.id}:run:1`, subagentModel: "gpt-6-luna:max",
   } }));
   await assert.rejects(() => db.run.create({ data: {
     ...base, runNumber: 2, dedupeKey: `task:${context.task.id}:run:2`,
-    subagentModel: "gpt-5.6-luna:max", subagentMaxConcurrent: 7,
+    subagentModel: "gpt-6-luna:max", subagentMaxConcurrent: 7,
   } }));
   await assert.rejects(() => db.run.create({ data: {
     ...base, runNumber: 3, dedupeKey: `task:${context.task.id}:run:3`, runner: "CLAUDE",
-    subagentModel: "gpt-5.6-luna:max", subagentMaxConcurrent: 8,
+    subagentModel: "gpt-6-luna:max", subagentMaxConcurrent: 8,
   } }));
 });
 

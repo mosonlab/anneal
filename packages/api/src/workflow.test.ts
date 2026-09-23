@@ -85,7 +85,7 @@ test("deriveRunConfig preserves the selected Agent runtime profile for ordinary 
   const executionerAgent = {
     ...ordinaryAgent,
     runnerPreference: RunnerPreference.CODEX,
-    model: "gpt-5.6-luna:max",
+    model: "gpt-6-luna:max",
     codexServiceTier: CodexServiceTier.FAST,
   };
   assert.deepEqual(deriveRunConfig(executionerAgent, {
@@ -95,7 +95,7 @@ test("deriveRunConfig preserves the selected Agent runtime profile for ordinary 
     taskTemplate: { name: "compound-engineer-workflow" },
   }), {
     runner: RunnerKind.CODEX,
-    model: "gpt-5.6-luna:max",
+    model: "gpt-6-luna:max",
     codexServiceTier: CodexServiceTier.FAST,
   });
   assert.throws(() => deriveRunConfig(ordinaryAgent, {
@@ -122,7 +122,7 @@ test("Codex implementation steps receive the fixed native Luna child capability"
     outputKind: "implementation",
     taskTemplate: { name: "pr-engineer-workflow" },
   };
-  const expected = { subagentModel: "gpt-5.6-luna:max", subagentMaxConcurrent: 8 };
+  const expected = { subagentModel: "gpt-6-luna:max", subagentMaxConcurrent: 8 };
   assert.deepEqual(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, compound), expected);
   assert.deepEqual(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, direct), expected);
   assert.equal(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, pullRequestWorkflow), null);

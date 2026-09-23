@@ -67,7 +67,7 @@ test("fresh canonical profiles get Luna Max once and preserve a later empty slot
       canonicalRole: MERGE_TAIL_REPAIR_AGENT_ROLE,
       name: MERGE_TAIL_REPAIR_AGENT_ROLE,
       title: "Senior Developer",
-      model: "gpt-5.6-luna:max",
+      model: "gpt-6-luna:max",
       runnerPreference: RunnerPreference.CODEX,
       foundationalPrompt: "foundation",
       rolePrompt: "role",

@@ -1,7 +1,7 @@
 ---
 name: senior-dev-luna-max
 title: Senior Dev
-model: gpt-5.6-luna:max
+model: gpt-6-luna:max
 runner: codex
 inboxAccess: true
 collaborators: []

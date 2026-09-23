@@ -41,11 +41,11 @@ test("the chip translates its unassigned state and leaves catalog labels alone",
   assert.doesNotMatch(zh, /Unassigned/u);
 
   // The model label is catalog data, not copy: it reads the same in both.
-  const named = <AgentChip agent={{ title: "Senior Dev", model: "gpt-5.6-luna:max" }} />;
+  const named = <AgentChip agent={{ title: "Senior Dev", model: "gpt-6-luna:max" }} />;
   const en = renderToStaticMarkup(<LocaleProvider initialLocale="en">{named}</LocaleProvider>);
   assert.equal(
     renderToStaticMarkup(<LocaleProvider initialLocale="zh">{named}</LocaleProvider>),
     en,
   );
-  assert.match(en, /GPT-5.6 Luna \(codex\) · max/u);
+  assert.match(en, /GPT-6 Luna \(codex\) · max/u);
 });

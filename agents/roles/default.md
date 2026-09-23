@@ -1,7 +1,7 @@
 ---
 name: default
 title: Default
-model: gpt-5.6-sol:medium
+model: gpt-6-sol:medium
 runner: codex
 inboxAccess: true
 collaborators: []

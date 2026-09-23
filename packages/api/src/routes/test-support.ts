@@ -97,7 +97,7 @@ export const taskRow = (overrides: Record<string, unknown> = {}): Record<string,
   templateId: null, templateStepId: null, source: "MANUAL", chainId: null, chainIndex: null, chainLayer: null, dispatchAfterTaskId: null,
   createdAt: new Date("2026-08-16T00:00:00.000Z"),
   updatedAt: new Date("2026-08-16T00:00:00.000Z"), templateStep: null,
-  assigneeAgent: { id: "a1", title: "Senior Developer", model: "gpt-5.6-sol:medium", archivedAt: null },
+  assigneeAgent: { id: "a1", title: "Senior Developer", model: "gpt-6-sol:medium", archivedAt: null },
   runs: [{
     id: "r1", runNumber: 1, status: "SUCCEEDED", model: "claude-opus-5", codexServiceTier: "DEFAULT", budgetGrants: 0,
     readyAt: new Date("2026-08-16T00:00:00.000Z"), endedAt: new Date("2026-08-16T00:05:00.000Z"),

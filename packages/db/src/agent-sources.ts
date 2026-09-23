@@ -52,6 +52,9 @@ export const CANONICAL_ROLE_RENAMES = [
   ["merge-resolver-opus-medium", "merge-resolver-luna-max"],
   ["plan-reviser-opus-high", "plan-reviser-opus-medium"],
   ["plan-executor-astra-medium", "plan-executor-astra-low"],
+  ["librarian-luna-xhigh", "librarian-luna-high"],
+  ["spec-revalidator-luna-xhigh", "spec-revalidator-luna-high"],
+  ["spec-opus-high", "spec-opus-medium"],
 ] as const;
 
 /** Adopt renamed identities without replacing Agent rows. The caller owns

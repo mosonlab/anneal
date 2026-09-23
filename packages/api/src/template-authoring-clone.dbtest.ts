@@ -50,7 +50,7 @@ const seedTemplate = async (label: string, name = "source-template") => {
       environmentId: environment.id,
       name: "authoring-agent",
       title: "Authoring agent",
-      model: "gpt-5.6-sol:medium",
+      model: "gpt-6-sol:medium",
       foundationalPrompt: "foundation",
       rolePrompt: "role",
     },

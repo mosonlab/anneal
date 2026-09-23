@@ -35,6 +35,7 @@ import {
   templateStepStructureDifferences,
 } from "../src/template-sources.js";
 import { CANONICAL_STAFFING_TIER_ROLES } from "../src/staffing-profile-canonical.js";
+import { NATIVE_IMPLEMENTATION_SUBAGENT_MODEL } from "../src/run-open.js";
 
 const rolesRoot = fileURLToPath(new URL("../../../agents/roles/", import.meta.url));
 const prismaRoot = fileURLToPath(new URL("./", import.meta.url));
@@ -66,7 +67,7 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
 
   for (const { name, model, runnerPreference } of roles) {
     if (name === "code-reviewer-sol-high" || name === "review-coordinator-sol-high") {
-      assert.equal(model, "openai-codex/gpt-5.6-sol:high");
+      assert.equal(model, "openai-codex/gpt-6-sol:high");
       assert.equal(runnerPreference, RunnerPreference.PI);
       continue;
     }
@@ -86,27 +87,27 @@ test("canonical OpenAI roles pin their Codex model and runner", async () => {
     roleSource("code-reviewer-sol-high"),
     roleSource("plan-executor-astra-low"),
     roleSource("plan-executor-sol-high"),
-    roleSource("librarian-luna-xhigh"),
-    roleSource("spec-revalidator-luna-xhigh"),
+    roleSource("librarian-luna-high"),
+    roleSource("spec-revalidator-luna-high"),
     roleSource("senior-dev-astra-medium"),
     roleSource("senior-dev-astra-low"),
   ]);
 
   assert.equal(frontmatterValue(reviewCoordinator, "model"), "gpt-6-astra:medium");
   assert.equal(frontmatterValue(reviewCoordinator, "runner"), "codex");
-  assert.equal(frontmatterValue(reviewCoordinatorSol, "model"), "openai-codex/gpt-5.6-sol:high");
+  assert.equal(frontmatterValue(reviewCoordinatorSol, "model"), "openai-codex/gpt-6-sol:high");
   assert.equal(frontmatterValue(reviewCoordinatorSol, "runner"), "pi");
-  assert.equal(frontmatterValue(codeReviewerSol, "model"), "openai-codex/gpt-5.6-sol:high");
+  assert.equal(frontmatterValue(codeReviewerSol, "model"), "openai-codex/gpt-6-sol:high");
   assert.equal(frontmatterValue(codeReviewerSol, "runner"), "pi");
   assert.equal(frontmatterValue(planExecutor, "model"), "gpt-6-astra:low");
   assert.equal(frontmatterValue(planExecutor, "runner"), "codex");
-  assert.equal(frontmatterValue(planExecutorSol, "model"), "gpt-5.6-sol:high");
+  assert.equal(frontmatterValue(planExecutorSol, "model"), "gpt-6-sol:high");
   assert.equal(frontmatterValue(planExecutorSol, "runner"), "codex");
   assert.equal(bodyOf(reviewCoordinatorSol), bodyOf(reviewCoordinator));
   assert.equal(bodyOf(planExecutorSol), bodyOf(planExecutor));
-  assert.equal(frontmatterValue(librarian, "model"), "gpt-5.6-luna:xhigh");
+  assert.equal(frontmatterValue(librarian, "model"), "gpt-6-luna:high");
   assert.equal(frontmatterValue(librarian, "runner"), "codex");
-  assert.equal(frontmatterValue(specRevalidator, "model"), "gpt-5.6-luna:xhigh");
+  assert.equal(frontmatterValue(specRevalidator, "model"), "gpt-6-luna:high");
   assert.equal(frontmatterValue(specRevalidator, "runner"), "codex");
   assert.equal(frontmatterValue(seniorDev, "model"), "gpt-6-astra:medium");
   assert.equal(frontmatterValue(seniorDev, "runner"), "codex");
@@ -159,6 +160,13 @@ test("canonical profiles start at Default and native child capability replaces A
   assert.match(nativeMigration, /DROP COLUMN "elevatedSubprocessModel"/u);
 });
 
+test("the GPT-6 subagent pin keeps finished snapshots and moves unfinished Runs", async () => {
+  const migration = await readFile(`${prismaRoot}migrations/20260922120000_gpt6_native_subagents/migration.sql`, "utf8");
+  assert.equal(NATIVE_IMPLEMENTATION_SUBAGENT_MODEL, "gpt-6-luna:max");
+  assert.match(migration, /"subagentModel" IN \('gpt-5\.6-luna:max', 'gpt-6-luna:max'\)/u);
+  assert.match(migration, /SET "subagentModel" = 'gpt-6-luna:max'[\s\S]*"status" IN \('queued', 'claimed', 'provisioning', 'running', 'waiting-inbox'\)/u);
+});
+
 test("canonical staffing profiles carry the dedicated merge-tail repair role", async () => {
   const [schema, migration, seed, sync] = await Promise.all([
     readFile(`${prismaRoot}schema.prisma`, "utf8"),
@@ -191,21 +199,19 @@ test("template-step dependency provisioning is a non-null true-default migration
 test("named canonical roles use their model catalog runner and retired role names stay absent", async () => {
   const canonical = new Map((await loadAgentSources()).roles.map((role) => [role.name, role]));
   for (const name of [
-    "spec-opus-high",
+    "spec-opus-medium",
     "code-reviewer-opus-medium",
     "frontend-dev-opus-medium",
-    "frontend-dev-opus-high",
     "review-coordinator-astra-medium",
     "review-coordinator-sol-high",
     "code-reviewer-sol-high",
     "regression-verifier-luna-max",
-    "librarian-luna-xhigh",
+    "librarian-luna-high",
     "senior-dev-astra-medium",
     "senior-dev-sol-high",
     "senior-dev-opus-medium",
-    "senior-dev-opus-high",
     "senior-dev-astra-low",
-    "spec-revalidator-luna-xhigh",
+    "spec-revalidator-luna-high",
     "plan-executor-astra-low",
     "plan-executor-sol-high",
   ]) {
@@ -213,8 +219,12 @@ test("named canonical roles use their model catalog runner and retired role name
     assert.ok(role, `role source must contain ${name}`);
     assert.equal(catalogRunnerForModel(role.model), role.runnerPreference);
   }
-  assert.equal(canonical.has("senior-dev-high"), false);
-  assert.equal(canonical.has("review-adjudicator-opus"), false);
+  for (const retired of ["senior-dev-high", "review-adjudicator-opus", "spec-opus-high", "senior-dev-opus-high", "frontend-dev-opus-high"]) {
+    assert.equal(canonical.has(retired), false, retired);
+  }
+  for (const role of canonical.values()) {
+    assert.notEqual(role.model, "claude-opus-5:high", `${role.name} must not pin Opus high`);
+  }
 });
 
 test("frontend implementation routing defaults to Opus medium", async () => {
@@ -224,7 +234,6 @@ test("frontend implementation routing defaults to Opus medium", async () => {
     .find((step) => step.outputKind === "revalidation");
   assert.ok(revalidation);
   assert.match(revalidation.prompt, /The current\s+Agent is `frontend-dev-opus-medium`/u);
-  assert.doesNotMatch(revalidation.prompt, /The current\s+Agent is `frontend-dev-opus-high`/u);
 });
 
 test("Sol high owns the hazard tier and current template defaults", async () => {
@@ -250,27 +259,6 @@ test("Sol high owns the hazard tier and current template defaults", async () => 
   assert.match(revalidation.prompt, /Astra role is used only when the user names it[\s\S]*after a Sol high attempt actually fails/u);
   assert.doesNotMatch(revalidation.prompt, /hazard[\s\S]*`senior-dev-astra-medium`/u);
 });
-
-/** Opus effort variants must preserve every line except name and model. */
-const withoutNameAndModelLines = (source: string): string[] => source
-  .split("\n")
-  .filter((line) => !/^(name|model):/u.test(line));
-
-for (const role of ["frontend-dev", "senior-dev"] as const) {
-  test(`the ${role} Opus roles differ only in their name and model frontmatter lines`, async () => {
-    const [medium, high] = await Promise.all([
-      roleSource(`${role}-opus-medium`),
-      roleSource(`${role}-opus-high`),
-    ]);
-
-    assert.equal(frontmatterValue(high, "name"), `${role}-opus-high`);
-    assert.equal(frontmatterValue(high, "model"), "claude-opus-5:high");
-    assert.equal(frontmatterValue(medium, "model"), "claude-opus-5:medium");
-
-    assert.deepEqual(withoutNameAndModelLines(high), withoutNameAndModelLines(medium));
-    assert.equal(bodyOf(high), bodyOf(medium));
-  });
-}
 
 test("the split review prompts enforce persisted-range, blindness, and regression contracts", async () => {
   const [planReview, firstReview, blindReview, regressionVerification] = await Promise.all([
@@ -321,7 +309,7 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
     assert.doesNotMatch(review, /adjudicate findings/u);
   }
 
-  assert.equal(frontmatterValue(regressionVerification, "model"), "gpt-5.6-luna:max");
+  assert.equal(frontmatterValue(regressionVerification, "model"), "gpt-6-luna:max");
   assert.equal(frontmatterValue(regressionVerification, "runner"), "codex");
   assert.equal(frontmatterValue(regressionVerification, "inboxAccess"), "false");
   assert.match(regressionVerification, /complete persisted review package/u);
@@ -341,7 +329,7 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
 
 test("the executioner delegates only through platform-pinned native Luna children", async () => {
   const executioner = await roleSource("plan-executor-sol-high");
-  assert.equal(frontmatterValue(executioner, "model"), "gpt-5.6-sol:high");
+  assert.equal(frontmatterValue(executioner, "model"), "gpt-6-sol:high");
   assert.match(executioner, /pins every native child to Luna max/u);
   assert.match(executioner, /eight concurrent child threads/u);
   assert.match(executioner, /Delegation is not one slice per child/u);
@@ -356,7 +344,7 @@ test("the canonical twelve-step layered template sources split review and preser
   assert.deepEqual(
     templateSteps.map(({ stepIndex, layer, agentName, outputKind }) => ({ stepIndex, layer, agentName, outputKind })),
     [
-      { stepIndex: 1, layer: 1, agentName: "spec-opus-high", outputKind: "spec" },
+      { stepIndex: 1, layer: 1, agentName: "spec-opus-medium", outputKind: "spec" },
       { stepIndex: 2, layer: 2, agentName: "plan-fable-medium", outputKind: "plan" },
       { stepIndex: 3, layer: 3, agentName: "review-coordinator-sol-high", outputKind: "plan-review" },
       { stepIndex: 4, layer: 4, agentName: "plan-reviser-opus-medium", outputKind: "revised-plan" },
@@ -364,7 +352,7 @@ test("the canonical twelve-step layered template sources split review and preser
       { stepIndex: 6, layer: 6, agentName: "code-reviewer-sol-high", outputKind: "review-findings" },
       { stepIndex: 7, layer: 6, agentName: "code-reviewer-opus-medium", outputKind: "blind-findings" },
       { stepIndex: 8, layer: 7, agentName: "senior-dev-opus-medium", outputKind: "fixed-implementation" },
-      { stepIndex: 9, layer: 8, agentName: "librarian-luna-xhigh", outputKind: "documentation" },
+      { stepIndex: 9, layer: 8, agentName: "librarian-luna-high", outputKind: "documentation" },
       { stepIndex: 10, layer: 9, agentName: "regression-verifier-luna-max", outputKind: "regression-verification-v2" },
       { stepIndex: 11, layer: 10, agentName: "review-coordinator-sol-high", outputKind: "merge-authorization" },
       { stepIndex: 12, layer: 11, agentName: "merge-integrator", outputKind: "merge-result" },
@@ -450,7 +438,7 @@ test("the direct template sources expose the layered review spine and mechanical
   assert.deepEqual(
     directTemplateSteps.map(({ stepIndex, layer, agentName, outputKind }) => ({ stepIndex, layer, agentName, outputKind })),
     [
-      { stepIndex: 1, layer: 1, agentName: "spec-revalidator-luna-xhigh", outputKind: "revalidation" },
+      { stepIndex: 1, layer: 1, agentName: "spec-revalidator-luna-high", outputKind: "revalidation" },
       { stepIndex: 2, layer: 2, agentName: "senior-dev-luna-max", outputKind: "implementation" },
       { stepIndex: 3, layer: 3, agentName: "code-reviewer-sol-high", outputKind: "review-findings" },
       { stepIndex: 4, layer: 3, agentName: "code-reviewer-opus-medium", outputKind: "blind-findings" },
@@ -585,7 +573,7 @@ test("canonical prompt sync can detect every Markdown-owned structural field", a
 });
 
 test("canonical prompt sync can detect every role frontmatter field", async () => {
-  const role = (await loadAgentSources()).roles.find(({ name }) => name === "librarian-luna-xhigh")!;
+  const role = (await loadAgentSources()).roles.find(({ name }) => name === "librarian-luna-high")!;
   const persisted: PersistedRoleStructure = {
     name: role.name,
     title: role.title,

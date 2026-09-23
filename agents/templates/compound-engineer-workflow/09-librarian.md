@@ -1,7 +1,7 @@
 ---
 stepIndex: 9
 layer: 8
-agent: librarian-luna-xhigh
+agent: librarian-luna-high
 approvalGate: false
 optional: false
 outputKind: documentation

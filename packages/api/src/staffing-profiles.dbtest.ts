@@ -65,11 +65,11 @@ const seed = async (templateName = "custom-workflow") => {
         ...(archived ? { archivedAt: new Date() } : {}),
       },
     });
-  const implementer = await agent("senior-dev-sol-high", "gpt-5.6-sol:high", RunnerPreference.CODEX);
-  const reviewer = await agent("code-reviewer-sol-high", "gpt-5.6-sol:high", RunnerPreference.CODEX);
+  const implementer = await agent("senior-dev-sol-high", "gpt-6-sol:high", RunnerPreference.CODEX);
+  const reviewer = await agent("code-reviewer-sol-high", "gpt-6-sol:high", RunnerPreference.CODEX);
   const claudeAgent = await agent("frontend-dev-opus-medium", "claude-opus-5:medium", RunnerPreference.CLAUDE);
   const integrator = await agent(INTEGRATOR_AGENT_NAME, "mechanical/merge-integrator", RunnerPreference.INHERIT);
-  const archivedAgent = await agent("senior-dev-luna-max", "gpt-5.6-luna:max", RunnerPreference.CODEX, true);
+  const archivedAgent = await agent("senior-dev-luna-max", "gpt-6-luna:max", RunnerPreference.CODEX, true);
   const repairAgent = await db.agent.create({
     data: {
       projectId: project.id,
@@ -77,7 +77,7 @@ const seed = async (templateName = "custom-workflow") => {
       canonicalRole: "senior-dev-luna-max",
       name: "senior-dev-luna-max-active",
       title: "Senior Developer Luna Max",
-      model: "gpt-5.6-luna:max",
+      model: "gpt-6-luna:max",
       runnerPreference: RunnerPreference.CODEX,
       foundationalPrompt: "foundation",
       rolePrompt: "role",
@@ -567,7 +567,7 @@ test("the merge-tail repair slot round-trips, checks its Repo grant and refuses 
       environmentId: (await db.environment.findFirstOrThrow({ where: { projectId: fixture.project.id } })).id,
       name: "ungranted-repair-agent",
       title: "Ungranted repair Agent",
-      model: "gpt-5.6-luna:max",
+      model: "gpt-6-luna:max",
       runnerPreference: RunnerPreference.CODEX,
       foundationalPrompt: "foundation",
       rolePrompt: "role",

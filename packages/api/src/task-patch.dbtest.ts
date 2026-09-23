@@ -45,7 +45,7 @@ const seed = async (overrides: {
   });
   const agent = await db.agent.create({ data: {
     projectId: project.id, environmentId: environment.id, name: `agent-${suffix}`, title: "Agent",
-    model: "gpt-5.6-sol:high", runnerPreference: "CODEX", foundationalPrompt: "foundation", rolePrompt: "role",
+    model: "gpt-6-sol:high", runnerPreference: "CODEX", foundationalPrompt: "foundation", rolePrompt: "role",
   } });
   const template = overrides.outputKind === undefined
     ? null

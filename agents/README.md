@@ -4,7 +4,7 @@ Source-of-truth files for canonical agent prompts and initial runtime defaults, 
 
 The chain prompts with an upstream counterpart in [mattpocock/skills](https://github.com/mattpocock/skills) do carry that text verbatim, wrapped in paragraphs written here for this platform's contracts; the notice is in [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md).
 
-Keep the [Spec Writer](roles/spec-opus-high.md) and
+Keep the [Spec Writer](roles/spec-opus-medium.md) and
 [Plan](templates/compound-engineer-workflow/02-plan.md) guidance aligned with the
 upstream baseline recorded in that notice. Update their imported text only
 through upstream synchronization, preserving Anneal's surrounding authority and
@@ -17,17 +17,12 @@ and full-tail readiness contract are maintained in the
 [Tier 0 / Tier 1 onboarding runbook](../docs/runbooks/add-a-project.md).
 Follow its Tier 1 checklist when onboarding another Project.
 
-For an already-seeded canonical project, `senior-dev-opus-high` and
-`frontend-dev-opus-high` rely on adoption of pre-existing active project Agent
-rows by name when their `canonicalRole` is null. The frontend implementation
-tier defaults to `frontend-dev-opus-medium`; `frontend-dev-opus-high` is used
-only when the user explicitly names that route for the current dispatch.
-Neither role is in `SPECIAL_CANONICAL_AGENTS` in
-`packages/db/prisma/sync-canonical-prompts.ts`, so ordinary canonical sync does
-not recreate a missing or archived row for these roles and refuses an
-incomplete canonical inventory. Fresh seeds install both roles from the source
-inventory. The current Sol high review coordinator, plan executor, and senior
-developer roles are in that special-agent list. When an already-seeded Project
+Canonical Opus roles run at medium effort; the roster carries no Opus high
+role. A role absent from `roles/` is left alone by canonical sync, so a
+Project's retired Opus high rows stay until an operator archives them.
+The current Sol high review coordinator, plan executor, and senior developer
+roles are in `SPECIAL_CANONICAL_AGENTS` in
+`packages/db/prisma/sync-canonical-prompts.ts`. When an already-seeded Project
 already has a canonical template that uses one of those roles, ordinary sync
 recreates a missing active row before it adopts the template's binding,
 copying the designated source Agent's environment, tools, and repository
@@ -171,9 +166,8 @@ cross-provider review contract explicitly requires separate identities.
 `review-coordinator-sol-high` and `plan-executor-sol-high` are canonical because
 the compound template uses them as Sol high defaults; `senior-dev-sol-high` is
 canonical for the `hard` and `hazard` implementation tiers; `senior-dev-opus-medium`
-is canonical because every template binds it to the review-fix step.
-`senior-dev-opus-high` remains an explicit Claude route an operator names to spend
-Claude capacity. The Astra roles — including
+is canonical because every template binds it to the review-fix step and is the
+explicit Claude route an operator names to spend Claude capacity. The Astra roles — including
 `review-coordinator-astra-medium`, `plan-executor-astra-low`,
 `senior-dev-astra-medium`, and `senior-dev-astra-low` — stay in the canonical
 roster for history and explicit staffing, but are used only when the user names

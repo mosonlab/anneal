@@ -37,7 +37,7 @@ import {
 } from "./runtime.js";
 import { provisionIsolatedSessionConfig, type SessionConfigOptions } from "./session-config.js";
 
-export const CODEX_STARTER_MODEL = "gpt-5.6-sol:medium";
+export const CODEX_STARTER_MODEL = "gpt-6-sol:medium";
 
 const CODEX_BARE_DISCONNECT = /^stream disconnected before completion:[^\r\n]+$/iu;
 const isCodexBareDisconnect = (message: string | null): boolean => CODEX_BARE_DISCONNECT.test(message?.trim() ?? "");
@@ -94,8 +94,8 @@ export const codexNativeSubagentProfile = (run: ClaimedTask["run"], runner: Runn
   }
   if (runner !== "CODEX") throw new Error("Native implementation subagents require a Codex root Run");
   const { model, effort } = modelSpec(run.subagentModel);
-  if (model !== "gpt-5.6-luna" || effort !== "max" || run.subagentMaxConcurrent !== 8) {
-    throw new Error("Native implementation subagents must use gpt-5.6-luna:max with concurrency 8");
+  if (model !== "gpt-6-luna" || effort !== "max" || run.subagentMaxConcurrent !== 8) {
+    throw new Error("Native implementation subagents must use gpt-6-luna:max with concurrency 8");
   }
   return { model, effort, maxConcurrent: run.subagentMaxConcurrent };
 };

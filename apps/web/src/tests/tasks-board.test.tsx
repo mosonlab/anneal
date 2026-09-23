@@ -59,7 +59,7 @@ const localizedCard = (locale: "en" | "zh", overrides: Partial<BoardTask> = {}):
 test("a member card links its newest run's pull request, after the assignee", () => {
   const withPr = card({
     latestRun: boardRun({
-      model: "gpt-5.6-sol:high", costUsd: "0.42", pullRequestUrl: "https://github.com/mosonlab/anneal/pull/351",
+      model: "gpt-6-sol:high", costUsd: "0.42", pullRequestUrl: "https://github.com/mosonlab/anneal/pull/351",
     }),
   });
   assert.match(withPr, /data-card-assignee=[\s\S]*data-card-pull-request/u);
@@ -676,43 +676,43 @@ test("Copy error is offered only when there is an error to copy", () => {
 test("the assignee is one line with a keyboard-reachable way to see the rest", () => {
   // 59 of 112 cards truncated this name with no reveal at all: `title` is a
   // hover affordance, which is none on touch and none from the keyboard.
-  const markup = card({ assigneeType: "AGENT", assigneeAgent: { id: "a1", title: "Implementation Plan Executioner", model: "gpt-5.6-sol:medium" } });
+  const markup = card({ assigneeType: "AGENT", assigneeAgent: { id: "a1", title: "Implementation Plan Executioner", model: "gpt-6-sol:medium" } });
   assert.match(markup, /<button[^>]*aria-expanded="false"[^>]*>Implementation Plan Executioner<\/button>/);
   assert.match(markup, /title="Implementation Plan Executioner"/);
-  assert.match(markup, /gpt-5\.6-sol:medium/);
-  assert.match(markup, /aria-label="Model gpt-5\.6-sol:medium"/);
-  assert.doesNotMatch(markup, /truncate[^>]*>gpt-5\.6-sol:medium/);
+  assert.match(markup, /gpt-6-sol:medium/);
+  assert.match(markup, /aria-label="Model gpt-6-sol:medium"/);
+  assert.doesNotMatch(markup, /truncate[^>]*>gpt-6-sol:medium/);
 });
 
 test("the model line is the run's snapshot, not the agent's current tier", () => {
   // A re-tiered agent used to relabel a finished run: the card read the
   // assignee's current model directly under the run line, so a run claimed with
-  // claude-opus-5:medium showed as gpt-5.6-sol:high.
+  // claude-opus-5:medium showed as gpt-6-sol:high.
   const markup = card({
-    assigneeAgent: { id: "a1", title: "merge-resolver-opus-medium", model: "gpt-5.6-sol:high" },
+    assigneeAgent: { id: "a1", title: "merge-resolver-opus-medium", model: "gpt-6-sol:high" },
     latestRun: boardRun(),
   });
   assert.match(markup, /claude-opus-5:medium/);
-  assert.doesNotMatch(markup, /gpt-5\.6-sol:high/);
+  assert.doesNotMatch(markup, /gpt-6-sol:high/);
   assert.match(markup, /aria-label="Model claude-opus-5:medium"/);
 });
 
 test("a FAST run adds a fast marker to the single-task model line, but DEFAULT does not", () => {
   const run = (codexServiceTier: "DEFAULT" | "FAST") =>
-    boardRun({ model: "gpt-5.6-sol:high", codexServiceTier }) as NonNullable<BoardTask["latestRun"]> & { codexServiceTier: "DEFAULT" | "FAST" };
+    boardRun({ model: "gpt-6-sol:high", codexServiceTier }) as NonNullable<BoardTask["latestRun"]> & { codexServiceTier: "DEFAULT" | "FAST" };
 
   const fast = card({ latestRun: run("FAST") });
-  assert.match(fast, /gpt-5\.6-sol:high · fast/u);
+  assert.match(fast, /gpt-6-sol:high · fast/u);
   const fastText = fast.replace(/<[^>]*>/gu, "");
   assert.equal((fastText.match(/fast/gu) ?? []).length, 1, fastText);
   const standard = card({ latestRun: run("DEFAULT") });
-  assert.match(standard, /gpt-5\.6-sol:high/u);
+  assert.match(standard, /gpt-6-sol:high/u);
   assert.doesNotMatch(standard, /fast/u);
 });
 
 test("a running single-task card shows its phase and the time in it, in both locales", () => {
   const latestRun = boardRun({
-    status: "RUNNING", model: "gpt-5.6-sol:high", startedAt: new Date(Date.now() - 4 * 60_000).toISOString(),
+    status: "RUNNING", model: "gpt-6-sol:high", startedAt: new Date(Date.now() - 4 * 60_000).toISOString(),
   });
 
   // The run line's amber dot is what says a run is live; the footer says where
@@ -865,8 +865,8 @@ test("a mechanical claim refusal is a red localized badge on cards and the phone
 });
 
 test("a task with no runs still shows the agent's configured model", () => {
-  const markup = card({ assigneeAgent: { id: "a1", title: "merge-resolver-opus-medium", model: "gpt-5.6-sol:high" }, latestRun: null });
-  assert.match(markup, /gpt-5\.6-sol:high/);
+  const markup = card({ assigneeAgent: { id: "a1", title: "merge-resolver-opus-medium", model: "gpt-6-sol:high" }, latestRun: null });
+  assert.match(markup, /gpt-6-sol:high/);
 });
 
 test("an unassigned task with a run still shows the run's model snapshot", () => {
@@ -892,7 +892,7 @@ test("a HUMAN card shows a person, an unassigned AGENT warns, and an assigned AG
   assert.match(unassignedAgent, /data-card-assignee="unassigned-agent"/);
   assert.match(unassignedAgent, /Unassigned/);
   // An agent, named, is unchanged.
-  const assigned = card({ assigneeType: "AGENT", assigneeAgent: { id: "a1", title: "merge-resolver-opus-medium", model: "gpt-5.6-sol:high" } });
+  const assigned = card({ assigneeType: "AGENT", assigneeAgent: { id: "a1", title: "merge-resolver-opus-medium", model: "gpt-6-sol:high" } });
   assert.match(assigned, new RegExp(`aria-label="${en("tasks.card.assignee", { name: "merge-resolver-opus-medium" })}"`));
   assert.match(assigned, />merge-resolver-opus-medium</);
 });

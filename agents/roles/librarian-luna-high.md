@@ -1,7 +1,7 @@
 ---
-name: librarian-luna-xhigh
+name: librarian-luna-high
 title: Librarian
-model: gpt-5.6-luna:xhigh
+model: gpt-6-luna:high
 runner: codex
 inboxAccess: false
 collaborators: []

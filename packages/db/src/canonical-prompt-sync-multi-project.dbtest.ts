@@ -360,7 +360,7 @@ test("ordinary sync covers active canonical Agents in every Project and preserve
     where: { projectId_name: { projectId: project.id, name: "code-reviewer-sol-high" } },
     select: { id: true },
   });
-  const compatibleCustomized = { model: "openai-codex/gpt-5.6-luna:max", runnerPreference: RunnerPreference.PI };
+  const compatibleCustomized = { model: "openai-codex/gpt-6-luna:max", runnerPreference: RunnerPreference.PI };
   await prisma.agent.update({
     where: { id: canonicalDefault.id },
     data: { foundationalPrompt: "canonical foundational drift", rolePrompt: "canonical default drift" },
@@ -370,7 +370,7 @@ test("ordinary sync covers active canonical Agents in every Project and preserve
     data: {
       foundationalPrompt: "second Project foundational drift",
       rolePrompt: "second Project role drift",
-      model: "gpt-5.6-sol:medium",
+      model: "gpt-6-sol:medium",
       runnerPreference: RunnerPreference.CODEX,
     },
   });
@@ -406,7 +406,7 @@ test("ordinary sync covers active canonical Agents in every Project and preserve
   assert.deepEqual(customized, { ...compatibleCustomized, customizedFields: ["model", "runnerPreference"], runtimeConfigDriftNoticeFingerprint: expectedFingerprint });
   assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "plan-executor-astra-low" } }), 0);
   assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "regression-verifier-luna-max" } }), 0);
-  assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "spec-revalidator-luna-xhigh" } }), 0);
+  assert.equal(await prisma.agent.count({ where: { projectId: project.id, name: "spec-revalidator-luna-high" } }), 0);
   const summary = parseCanonicalSyncSummary(synced.output);
   assertSummaryShape(summary);
   assert.equal(summary.projects[project.slug]!.adoptedAgentDefaults, 1);
@@ -426,7 +426,7 @@ test("sync recreates missing special Agents before adopting historical bindings"
   ]);
   const missingSpecialRoles = new Set([
     "regression-verifier-luna-max",
-    "spec-revalidator-luna-xhigh",
+    "spec-revalidator-luna-high",
     "review-coordinator-sol-high",
     "plan-executor-sol-high",
   ]);
@@ -519,7 +519,7 @@ test("sync recreates missing special Agents before adopting historical bindings"
     ["plan-executor-sol-high", RepoPermission.GIT_WRITE],
     ["regression-verifier-luna-max", RepoPermission.GIT_WRITE],
     ["review-coordinator-sol-high", RepoPermission.GIT_WRITE],
-    ["spec-revalidator-luna-xhigh", RepoPermission.GIT_READ],
+    ["spec-revalidator-luna-high", RepoPermission.GIT_READ],
   ]);
   const assigneeName = async (templateId: string, stepIndex: number): Promise<string | null> => (
     (await prisma.taskTemplateStep.findUniqueOrThrow({
@@ -554,6 +554,9 @@ test("sync adopts renamed canonical roles in place without duplicating Agents", 
     ["merge-resolver-luna-max", "merge-resolver-opus-medium"],
     ["plan-reviser-opus-medium", "plan-reviser-opus-high"],
     ["plan-executor-astra-low", "plan-executor-astra-medium"],
+    ["librarian-luna-high", "librarian-luna-xhigh"],
+    ["spec-revalidator-luna-high", "spec-revalidator-luna-xhigh"],
+    ["spec-opus-medium", "spec-opus-high"],
   ] as const;
   const agents = await createAgents(project, renames.map(([current]) => current));
   const ids = new Map<string, string>(renames.map(([current]) => {
@@ -583,7 +586,7 @@ test("sync adopts renamed canonical roles in place without duplicating Agents", 
     where: { id: idFor("merge-resolver-luna-max") },
     data: {
       name: "operator-resolver",
-      model: "gpt-5.6-sol:high",
+      model: "gpt-6-sol:high",
       runnerPreference: RunnerPreference.CODEX,
       customizedFields: ["name", "model", "runnerPreference"],
     },
@@ -604,7 +607,7 @@ test("sync adopts renamed canonical roles in place without duplicating Agents", 
   const operator = await prisma.agent.findUniqueOrThrow({ where: { id: idFor("merge-resolver-luna-max") } });
   assert.deepEqual(
     { name: operator.name, model: operator.model, runnerPreference: operator.runnerPreference },
-    { name: "operator-resolver", model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
+    { name: "operator-resolver", model: "gpt-6-sol:high", runnerPreference: RunnerPreference.CODEX },
   );
 });
 
@@ -741,7 +744,7 @@ test("canonical Project structural drift remains fatal and writes nothing", asyn
 
 test("ordinary sync identifies an archived canonical-Project Agent by name and id", async () => {
   const librarian = await prisma.agent.findUniqueOrThrow({
-    where: { projectId_name: { projectId: canonicalProject.id, name: "librarian-luna-xhigh" } },
+    where: { projectId_name: { projectId: canonicalProject.id, name: "librarian-luna-high" } },
   });
   await prisma.agent.update({ where: { id: librarian.id }, data: { archivedAt: new Date() } });
   try {
@@ -749,7 +752,7 @@ test("ordinary sync identifies an archived canonical-Project Agent by name and i
     assert.notEqual(refused.status, 0, refused.output);
     assert.match(
       refused.output,
-      new RegExp(`Project ${canonicalProject.slug}: Agent librarian-luna-xhigh \\(${librarian.id}\\) is archived`, "u"),
+      new RegExp(`Project ${canonicalProject.slug}: Agent librarian-luna-high \\(${librarian.id}\\) is archived`, "u"),
     );
   } finally {
     await prisma.agent.update({ where: { id: librarian.id }, data: { archivedAt: null } });
@@ -834,7 +837,7 @@ test("partial template rows synchronize across Projects, leave missing rows vali
   assert.equal(await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: compoundStep10.id } }).then(({ assigneeAgentId }) => assigneeAgentId), transitionAgents.get("regression-verifier-luna-max"));
   assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: compoundStep6.id } })).baseFromStepIndex, 5);
   assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: compoundStep11.id } })).name, "Merge authorization");
-  assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: directStep1.id } })).assigneeAgentId, transitionAgents.get("spec-revalidator-luna-xhigh"));
+  assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: directStep1.id } })).assigneeAgentId, transitionAgents.get("spec-revalidator-luna-high"));
   assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: directStep3.id } })).baseFromStepIndex, 2);
   assert.equal((await prisma.taskTemplateStep.findUniqueOrThrow({ where: { id: directStep7.id } })).name, "Merge authorization");
   // R8: a step's canonical binding is adopted, an instantiated Task's assignee is
@@ -863,7 +866,7 @@ test("full installation fills only the addressed Project's missing inventory and
     where: { taskTemplateId_stepIndex: { taskTemplateId: pr.id, stepIndex: 1 } },
   });
   await prisma.taskTemplateStep.update({ where: { id: prStep.id }, data: { prompt: "operator PR prompt drift" } });
-  const customized = { model: "openai-codex/gpt-5.6-luna:max", runnerPreference: RunnerPreference.PI };
+  const customized = { model: "openai-codex/gpt-6-luna:max", runnerPreference: RunnerPreference.PI };
   await prisma.agent.update({
     where: { id: agents.get("code-reviewer-sol-high")! },
     data: { ...customized, customizedFields: ["model", "runnerPreference"] },
@@ -1201,7 +1204,7 @@ test("summary reports every Project, nested canonical keys, lexical slugs, and f
     data: {
       foundationalPrompt: "summary foundational drift",
       rolePrompt: "summary role drift",
-      model: "gpt-5.6-sol:medium",
+      model: "gpt-6-sol:medium",
       runnerPreference: RunnerPreference.CODEX,
     },
   });
@@ -1234,7 +1237,7 @@ test("summary reports every Project, nested canonical keys, lexical slugs, and f
     runNumber: 1,
     dedupeKey: `a2-summary-started:${started.id}`,
     runner: "CODEX",
-    model: "gpt-5.6-sol:medium",
+    model: "gpt-6-sol:medium",
     promptHash: "a2-summary-started",
   } });
   const withOutput = await createPreservedTask("summary output", { status: TaskStatus.TODO, archivedAt: null });

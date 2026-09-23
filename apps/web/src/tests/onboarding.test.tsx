@@ -36,7 +36,7 @@ type RemoteCases = {
 const STATUS_BODY = JSON.stringify({
   complete: false,
   project: null,
-  starter: { name: "default", title: "Starter", model: "gpt-5.6-sol:medium", runnerPreference: "CODEX" },
+  starter: { name: "default", title: "Starter", model: "gpt-6-sol:medium", runnerPreference: "CODEX" },
   disclosure: {
     environmentNetworking: "OPEN",
     filesystemGrantCreated: false,
@@ -54,7 +54,7 @@ const STATUS_BODY = JSON.stringify({
 const COMPLETED_BODY = JSON.stringify({
   complete: true,
   project: { id: "p-existing", name: "Existing", slug: "existing" },
-  starter: { name: "default", title: "Starter", model: "gpt-5.6-sol:medium", runnerPreference: "CODEX" },
+  starter: { name: "default", title: "Starter", model: "gpt-6-sol:medium", runnerPreference: "CODEX" },
   disclosure: {
     environmentNetworking: "OPEN",
     filesystemGrantCreated: false,
@@ -94,7 +94,7 @@ const INSTALLATION_BODY = JSON.stringify({
   complete: true,
   project: { id: "p9", name: "Vibeville", slug: "vibeville" },
   environment: { id: "e9", name: "local", networking: "OPEN", allowedHosts: [] },
-  agent: { id: "a9", name: "default", title: "Starter", model: "gpt-5.6-sol:medium", runnerPreference: "CODEX" },
+  agent: { id: "a9", name: "default", title: "Starter", model: "gpt-6-sol:medium", runnerPreference: "CODEX" },
   repo: { id: "r9", name: "app", defaultBranch: "main", mountPath: "repo" },
   access: { agentId: "a9", repoId: "r9", permissions: "GIT_WRITE", mountPath: "repo" },
 });

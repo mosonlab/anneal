@@ -24,7 +24,7 @@ const fixture = async (label: string) => {
     environmentId: environment.id,
     name,
     title: name,
-    model: "gpt-5.6-sol:medium",
+    model: "gpt-6-sol:medium",
     foundationalPrompt: "foundation",
     rolePrompt: "role",
     archivedAt,
@@ -42,7 +42,7 @@ const fixture = async (label: string) => {
   });
   const foreign = await db.agent.create({ data: {
     projectId: foreignProject.id, environmentId: foreignEnvironment.id, name: "foreign", title: "foreign",
-    model: "gpt-5.6-sol:medium", foundationalPrompt: "foundation", rolePrompt: "role",
+    model: "gpt-6-sol:medium", foundationalPrompt: "foundation", rolePrompt: "role",
   } });
   const repo = await db.repo.create({
     data: { projectId: project.id, name: "repo", remoteUrl: "https://example.test/repo.git", mountPath: "/repo", dependencyProvisioning: DependencyProvisioning.NONE },
@@ -314,7 +314,7 @@ test("integrator and pinned compound implementation bindings are checked after o
     // §R14: the compound root is a capability, so this canonical binding has to
     // be a Codex gpt-* Agent or the whole graph is refused before the override
     // cases this test is about are reached.
-    name: "plan-executor-astra-low", title: "executioner", model: "gpt-5.6-sol:high",
+    name: "plan-executor-astra-low", title: "executioner", model: "gpt-6-sol:high",
     runnerPreference: RunnerPreference.CODEX,
     foundationalPrompt: "foundation", rolePrompt: "role",
   } });

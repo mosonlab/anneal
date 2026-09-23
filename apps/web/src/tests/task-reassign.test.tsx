@@ -69,7 +69,7 @@ test("a chain step names each assignable role as title · model effort", () => {
 });
 
 test("the option label falls back to the stored model id for a model outside the catalog", () => {
-  assert.equal(agentOptionLabel({ title: "Sol", model: "gpt-5.6-sol:high" }), "Sol · GPT-5.6 Sol (codex) high");
+  assert.equal(agentOptionLabel({ title: "Sol", model: "gpt-6-sol:high" }), "Sol · GPT-6 Sol (codex) high");
   assert.equal(agentOptionLabel({ title: "Bespoke", model: "some-private-build" }), "Bespoke · some-private-build");
 });
 

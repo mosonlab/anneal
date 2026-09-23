@@ -28,7 +28,7 @@ import {
  * one of these.
  */
 export const REGRESSION_VERIFIER_AGENT_NAME = "regression-verifier-luna-max";
-export const SPEC_REVALIDATOR_AGENT_NAME = "spec-revalidator-luna-xhigh";
+export const SPEC_REVALIDATOR_AGENT_NAME = "spec-revalidator-luna-high";
 
 /** The sync report counter one adoption increments. */
 export type CanonicalAdoptionCounter =

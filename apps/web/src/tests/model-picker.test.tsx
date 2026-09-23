@@ -29,16 +29,16 @@ test("catalog selection retains a supported effort, falls back otherwise, and wr
   const seen: Array<{ model: string; runnerPreference: string }> = [];
   try {
     await act(async () => root.render(
-      <ModelPicker model="gpt-5.6-luna:max" runnerPreference="CODEX" onChange={(next) => seen.push(next)} />,
+      <ModelPicker model="gpt-6-luna:max" runnerPreference="CODEX" onChange={(next) => seen.push(next)} />,
     ));
     const model = dom.window.document.querySelector("select");
     assert.ok(model);
-    model.value = "gpt-5.6-sol";
+    model.value = "gpt-6-sol";
     await act(async () => model.dispatchEvent(new dom.window.Event("change", { bubbles: true })));
-    assert.deepEqual(seen.pop(), { model: "gpt-5.6-sol:max", runnerPreference: "CODEX" });
+    assert.deepEqual(seen.pop(), { model: "gpt-6-sol:max", runnerPreference: "CODEX" });
 
     await act(async () => root.render(
-      <ModelPicker model="gpt-5.6-luna:none" runnerPreference="CODEX" onChange={(next) => seen.push(next)} />,
+      <ModelPicker model="gpt-6-luna:none" runnerPreference="CODEX" onChange={(next) => seen.push(next)} />,
     ));
     const nextModel = dom.window.document.querySelector("select");
     assert.ok(nextModel);
@@ -47,10 +47,10 @@ test("catalog selection retains a supported effort, falls back otherwise, and wr
     assert.deepEqual(seen.pop(), { model: "claude-sonnet-5:high", runnerPreference: "CLAUDE" });
 
     await act(async () => root.render(
-      <ModelPicker model="openai-codex/gpt-5.6-luna:xhigh" runnerPreference="PI" onChange={() => undefined} />,
+      <ModelPicker model="openai-codex/gpt-6-luna:xhigh" runnerPreference="PI" onChange={() => undefined} />,
     ));
-    assert.match(dom.window.document.body.textContent ?? "", /GPT-5.6 Luna \(pi\)/);
-    assert.match(renderToStaticMarkup(<ModelLabel model="openai-codex/gpt-5.6-luna:xhigh" />), /GPT-5.6 Luna \(pi\)[\s\S]*xhigh/);
+    assert.match(dom.window.document.body.textContent ?? "", /GPT-6 Luna \(pi\)/);
+    assert.match(renderToStaticMarkup(<ModelLabel model="openai-codex/gpt-6-luna:xhigh" />), /GPT-6 Luna \(pi\)[\s\S]*xhigh/);
   } finally {
     await act(async () => root.unmount());
     dom.window.close();
@@ -85,13 +85,13 @@ test("Chinese custom-model and goal forms render translated runner preference la
 test("the real Create button blocks a contradictory model and runner pair", () => {
   const common = { projectId: "p", onClose: () => undefined, onCreated: () => undefined };
   const mismatch = renderToStaticMarkup(
-    <NewAgent {...common} initial={{ name: "senior-dev-astra-medium", environmentId: "e", model: "gpt-5.6-luna:high", runnerPreference: "CLAUDE" }} />,
+    <NewAgent {...common} initial={{ name: "senior-dev-astra-medium", environmentId: "e", model: "gpt-6-luna:high", runnerPreference: "CLAUDE" }} />,
   );
   assert.match(mismatch, /<button[^>]*disabled=""[^>]*>[^<]*Create/);
   assert.match(mismatch, /requires CODEX, but this agent stores CLAUDE/);
 
   const valid = renderToStaticMarkup(
-    <NewAgent {...common} initial={{ name: "senior-dev-astra-medium", environmentId: "e", model: "gpt-5.6-luna:high", runnerPreference: "CODEX" }} />,
+    <NewAgent {...common} initial={{ name: "senior-dev-astra-medium", environmentId: "e", model: "gpt-6-luna:high", runnerPreference: "CODEX" }} />,
   );
   assert.doesNotMatch(valid, /<button[^>]*disabled=""[^>]*>[^<]*Create/);
   assert.match(valid, /Codex service tier/u);
@@ -104,7 +104,7 @@ test("the real detail Save button blocks a stored contradiction until the picker
   const root = (await reactDom()).createRoot(container);
   const agent: Agent = {
     id: "a", projectId: "p", environmentId: "e", name: "senior-dev-astra-medium", canonicalRole: null, customizedFields: [], title: "Senior Developer",
-    model: "gpt-5.6-luna:high", codexServiceTier: "DEFAULT", runnerPreference: "CLAUDE", inboxAccess: false, disabledTools: [],
+    model: "gpt-6-luna:high", codexServiceTier: "DEFAULT", runnerPreference: "CLAUDE", inboxAccess: false, disabledTools: [],
     foundationalPrompt: "foundation", rolePrompt: "role", createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(), archivedAt: null,
   };
@@ -127,7 +127,7 @@ test("the real detail Save button blocks a stored contradiction until the picker
 
     const model = dom.window.document.querySelector("select");
     assert.ok(model);
-    model.value = "gpt-5.6-sol";
+    model.value = "gpt-6-sol";
     await act(async () => model.dispatchEvent(new dom.window.Event("change", { bubbles: true })));
     assert.equal(save.disabled, false);
   } finally {
@@ -142,7 +142,7 @@ test("the executioner Setup page has no legacy subprocess profile controls", asy
   const root = (await reactDom()).createRoot(container);
   const agent: Agent = {
     id: "a", projectId: "p", environmentId: "e", name: "plan-executor-astra-low", canonicalRole: "plan-executor-astra-low", customizedFields: [], title: "Implementation Plan Executioner",
-    model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT", runnerPreference: "CODEX", inboxAccess: true, disabledTools: [],
+    model: "gpt-6-sol:high", codexServiceTier: "DEFAULT", runnerPreference: "CODEX", inboxAccess: true, disabledTools: [],
     foundationalPrompt: "foundation", rolePrompt: "role", createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(), archivedAt: null,
   };

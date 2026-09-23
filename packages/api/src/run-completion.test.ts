@@ -279,7 +279,7 @@ const statefulCompletionHarness = (
     currentRun = {
       id: `run-${runNumber}`, projectId: task.projectId, taskId: task.id, goalId: null,
       agentId: task.assigneeAgentId, repoId: task.repoId, runNumber, maxRunsPerTask, budgetGrants,
-      runner: "CODEX", model: "gpt-5.6-sol:high", targetBranch: "main", branch: "feat/refunds",
+      runner: "CODEX", model: "gpt-6-sol:high", targetBranch: "main", branch: "feat/refunds",
       headSha: null, pushedBranch: null, baseSha: null, runnerId: "runner-1", fencingToken: `fence-${runNumber}`,
       requiresCommit: false, opensPullRequest: task.opensPullRequest, codexServiceTier: "DEFAULT",
       subagentModel: null, subagentMaxConcurrent: null, promptHash: "hash",

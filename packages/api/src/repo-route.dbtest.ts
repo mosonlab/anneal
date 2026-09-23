@@ -69,7 +69,7 @@ const createAgent = async (
     environmentId,
     name,
     title: name,
-    model: "gpt-5.6-sol:medium",
+    model: "gpt-6-sol:medium",
     runnerPreference: RunnerPreference.CODEX,
     foundationalPrompt: "foundation",
     rolePrompt: "role",

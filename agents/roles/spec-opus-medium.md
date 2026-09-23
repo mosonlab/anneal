@@ -1,7 +1,7 @@
 ---
-name: spec-opus-high
+name: spec-opus-medium
 title: Spec Writer
-model: claude-opus-5:high
+model: claude-opus-5:medium
 runner: claude
 inboxAccess: true
 collaborators: []

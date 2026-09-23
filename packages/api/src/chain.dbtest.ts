@@ -99,7 +99,7 @@ const seedCompoundImplementationApproval = async (validSuccessor = false) => {
     environmentId: environment.id,
     name: "senior-dev-high",
     title: "Senior developer",
-    model: "gpt-5.6-sol:high",
+    model: "gpt-6-sol:high",
     foundationalPrompt: "foundation",
     rolePrompt: "role",
   } });
@@ -108,7 +108,7 @@ const seedCompoundImplementationApproval = async (validSuccessor = false) => {
     environmentId: environment.id,
     name: "plan-executor-astra-low",
     title: "Implementation Plan Executioner",
-    model: "gpt-5.6-sol:high",
+    model: "gpt-6-sol:high",
     foundationalPrompt: "foundation",
     rolePrompt: "role",
   } });
@@ -410,7 +410,7 @@ test("repaired compound Inbox approval is atomic and exactly once across replay 
     db.agent.update({
       where: { id: executioner.id },
       data: {
-        model: "gpt-5.6-luna:max",
+        model: "gpt-6-luna:max",
         runnerPreference: "CODEX",
         codexServiceTier: "FAST",
       },
@@ -457,9 +457,9 @@ test("repaired compound Inbox approval is atomic and exactly once across replay 
     },
   }), {
     runner: "CODEX",
-    model: "gpt-5.6-luna:max",
+    model: "gpt-6-luna:max",
     codexServiceTier: "FAST",
-    subagentModel: "gpt-5.6-luna:max",
+    subagentModel: "gpt-6-luna:max",
     subagentMaxConcurrent: 8,
   });
 

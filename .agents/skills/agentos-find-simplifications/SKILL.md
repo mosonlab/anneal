@@ -20,11 +20,11 @@ Use the current repository instructions as authority. Bind every report to an ex
 
 ## Model and delegation contract
 
-Launch the discovery task with `gpt-5.6-sol` at `high` reasoning effort; the skill cannot reconfigure its parent task. If runtime metadata explicitly exposes the effective parent model and effort, record them and stop before surveying only when they conflict with this launch contract. If the runtime does not expose either field, record `requested gpt-5.6-sol/high; runtime metadata unavailable` and continue. Do not infer task settings from documentation, global defaults, process inspection, or environment variables.
+Launch the discovery task with `gpt-6-sol` at `high` reasoning effort; the skill cannot reconfigure its parent task. If runtime metadata explicitly exposes the effective parent model and effort, record them and stop before surveying only when they conflict with this launch contract. If the runtime does not expose either field, record `requested gpt-6-sol/high; runtime metadata unavailable` and continue. Do not infer task settings from documentation, global defaults, process inspection, or environment variables.
 
 When the runtime supports subagents, use available capacity to widen the read-only survey:
 
-- Spawn every survey worker with explicit `gpt-5.6-luna` and `max`; never rely on inherited or default model settings.
+- Spawn every survey worker with explicit `gpt-6-luna` and `max`; never rely on inherited or default model settings.
 - Give each worker a disjoint tracked corpus or subsystem and the same evidence fields required by the candidate report.
 - Workers gather coverage, consumers, dynamic entrypoints, intent, history, candidate leads, and unresolved ambiguity. They do not assign final verdicts or authorize deletion.
 - Wait for every worker, then have the Sol parent inspect the returned evidence, fill coverage gaps, reject thin leads, deduplicate candidates, and assign the final classifications.

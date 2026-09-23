@@ -60,7 +60,7 @@ test("merge-tail repair slot refuses a foreign or archived Agent", () => {
     name: "repairer",
     projectId: "project-1",
     archivedAt: null,
-    model: "gpt-5.6-luna:max",
+    model: "gpt-6-luna:max",
     runnerPreference: RunnerPreference.CODEX,
   };
   const archived = { ...active, id: "agent-archived", archivedAt: new Date() };

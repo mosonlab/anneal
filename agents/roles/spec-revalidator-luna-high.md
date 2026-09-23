@@ -1,7 +1,7 @@
 ---
-name: spec-revalidator-luna-xhigh
+name: spec-revalidator-luna-high
 title: Spec Revalidator
-model: gpt-5.6-luna:xhigh
+model: gpt-6-luna:high
 runner: codex
 inboxAccess: true
 collaborators: []

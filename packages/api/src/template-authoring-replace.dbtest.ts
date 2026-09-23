@@ -51,7 +51,7 @@ const seedTemplate = async (label: string, name = "editable-template") => {
         environmentId: environment.id,
         name: agentName,
         title: agentName,
-        model: "gpt-5.6-sol:medium",
+        model: "gpt-6-sol:medium",
         foundationalPrompt: "foundation",
         rolePrompt: "role",
       },

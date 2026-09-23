@@ -97,7 +97,7 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
       {
         stepIndex: 1,
         name: "Revalidate specification",
-        agentName: "spec-revalidator-luna-xhigh",
+        agentName: "spec-revalidator-luna-high",
         outputKind: "revalidation",
         opensPullRequest: false,
       },

@@ -87,7 +87,7 @@ test("the agent menu Doing action opens confirmation and never PATCHes", async (
   const mutations: TaskStatus[] = [];
   const page = await mountPage(<StartMenuHarness Card={TaskCard} useStart={useTaskStartConfirmation} row={task({
     assigneeType: "AGENT",
-    assigneeAgent: { id: "a1", title: "Senior dev", model: "gpt-5.6-luna:max" },
+    assigneeAgent: { id: "a1", title: "Senior dev", model: "gpt-6-luna:max" },
     moveTargets: [{ status: "BACKLOG", via: "patch" }, { status: "DOING", via: "start" }],
   })} onMutation={(status) => mutations.push(status)} />, { "*": ({ input, method }) => {
     const path = String(input);
@@ -128,7 +128,7 @@ test("a non-startable agent menu does not advertise Doing", async () => {
   const { TaskCard } = await import("../components/task-card");
   const requests: Array<{ method: string; path: string }> = [];
   const mutations: TaskStatus[] = [];
-  const page = await mountPage(<StartMenuHarness Card={TaskCard} useStart={useTaskStartConfirmation} row={task({ assigneeType: "AGENT", assigneeAgent: { id: "a1", title: "Senior dev", model: "gpt-5.6-luna:max" } })} onMutation={(status) => mutations.push(status)} />, { "*": ({ input, method }) => {
+  const page = await mountPage(<StartMenuHarness Card={TaskCard} useStart={useTaskStartConfirmation} row={task({ assigneeType: "AGENT", assigneeAgent: { id: "a1", title: "Senior dev", model: "gpt-6-luna:max" } })} onMutation={(status) => mutations.push(status)} />, { "*": ({ input, method }) => {
     const path = String(input);
     requests.push({ method, path });
     if (path === "/api/tasks/t1/startability") return Response.json(startability(false));

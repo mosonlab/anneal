@@ -1,7 +1,7 @@
 ---
 name: review-coordinator-sol-high
 title: Review Coordinator
-model: openai-codex/gpt-5.6-sol:high
+model: openai-codex/gpt-6-sol:high
 runner: pi
 inboxAccess: false
 collaborators: []

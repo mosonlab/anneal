@@ -312,7 +312,7 @@ test("--project applies the canonical runtime override treatment", async () => {
     const agent = fixture.agents.get("senior-dev-luna-max")!;
     await prisma.agent.update({
       where: { id: agent.id },
-      data: { model: "gpt-5.6-luna:high", runnerPreference: RunnerPreference.CODEX, customizedFields: ["model", "runnerPreference"] },
+      data: { model: "gpt-6-luna:high", runnerPreference: RunnerPreference.CODEX, customizedFields: ["model", "runnerPreference"] },
     });
     const compatible = verify(fixture.id);
     assert.equal(compatible.status, 0, compatible.output);
@@ -322,7 +322,7 @@ test("--project applies the canonical runtime override treatment", async () => {
     const agent = fixture.agents.get("senior-dev-luna-max")!;
     await prisma.agent.update({
       where: { id: agent.id },
-      data: { model: "gpt-5.6-luna:high", runnerPreference: RunnerPreference.CODEX, customizedFields: [] },
+      data: { model: "gpt-6-luna:high", runnerPreference: RunnerPreference.CODEX, customizedFields: [] },
     });
     const uncustomized = verify(fixture.id);
     assert.notEqual(uncustomized.status, 0, uncustomized.output);
@@ -334,7 +334,7 @@ test("--project applies the canonical runtime override treatment", async () => {
     const agent = fixture.agents.get("senior-dev-luna-max")!;
     await prisma.agent.update({
       where: { id: agent.id },
-      data: { model: "gpt-5.6-luna:max", runnerPreference: RunnerPreference.CLAUDE, customizedFields: ["model", "runnerPreference"] },
+      data: { model: "gpt-6-luna:max", runnerPreference: RunnerPreference.CLAUDE, customizedFields: ["model", "runnerPreference"] },
     });
     const incompatible = verify(fixture.id);
     assert.notEqual(incompatible.status, 0, incompatible.output);
@@ -522,7 +522,7 @@ test("default verification keeps the complete-inventory requirement and success 
   });
   await prisma.agent.update({
     where: { id: customized.id },
-    data: { model: "gpt-5.6-luna:high", runnerPreference: RunnerPreference.CODEX, customizedFields: ["model", "runnerPreference"] },
+    data: { model: "gpt-6-luna:high", runnerPreference: RunnerPreference.CODEX, customizedFields: ["model", "runnerPreference"] },
   });
   try {
     const compatible = verify();

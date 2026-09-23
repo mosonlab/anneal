@@ -141,7 +141,7 @@ const nativeRun: NativeTaskList["runs"][number] = {
   status: "LOST",
   runner: "CODEX",
   runnerId: null,
-  model: "gpt-5.6-sol",
+  model: "gpt-6-sol",
   codexServiceTier: "DEFAULT",
   subagentModel: null,
   subagentMaxConcurrent: null,

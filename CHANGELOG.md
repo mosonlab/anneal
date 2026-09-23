@@ -11,9 +11,22 @@ written.
 
 ### Staffing and model routes
 
+- **Sol and Luna move to GPT-6.** Every canonical Sol role now runs
+  `gpt-6-sol` and every Luna role `gpt-6-luna`; the model picker offers GPT-6
+  Sol and Luna in place of GPT-5.6, and cost estimates price both. Native
+  implementation subagents pin `gpt-6-luna:max`: unfinished Runs move to the
+  new pin on migration, a retry takes the current pin, and finished Runs keep
+  the GPT-5.6 snapshot they ran.
+- **Retrieval roles run Luna high.** `librarian-luna-xhigh` and
+  `spec-revalidator-luna-xhigh` become `librarian-luna-high` and
+  `spec-revalidator-luna-high`; canonical sync renames existing rows in place.
+- **Canonical Opus roles run at medium effort only.** `spec-opus-high` becomes
+  `spec-opus-medium` and is renamed in place. `senior-dev-opus-high` and
+  `frontend-dev-opus-high` leave the roster; sync leaves existing rows alone,
+  so archive them once no staffing profile references them.
 - **Code review and plan review default to PI runner for Sol high.** The
   canonical `code-reviewer-sol-high` and `review-coordinator-sol-high` roles now
-  run under the PI CLI runner using `openai-codex/gpt-5.6-sol:high`, reducing
+  run under the PI CLI runner using `openai-codex/gpt-6-sol:high`, reducing
   startup latency and context overhead for read-only reviews.
 - **Apply review fixes defaults to Claude Opus medium across all templates.**
   The review-fix step in `direct-engineer-workflow`, `compound-engineer-workflow`,
