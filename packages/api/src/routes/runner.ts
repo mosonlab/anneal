@@ -19,7 +19,7 @@ import { FAILURE_REASON_LIMIT, failureReasonText } from "../failure-reason.js";
 import { recordRunnerBackendReport } from "../runner-backend-health.js";
 import { publishReclaimIntents, recordReclaimOutcomes, acknowledgeReclaimSalvage } from "../workspace-reclaim.js";
 import { createArchivedRunNoticeScheduler, reconcileDatabaseRuns, ReconciliationMaintenanceError } from "../reconcile.js";
-import { claimInput, claimRun } from "../run-claim.js";
+import { claimInput, claimRun, runnerPresenceInput } from "../run-claim.js";
 import { completeRun, completionInput, worktreeContainmentViolationsInput } from "../run-completion.js";
 import { acknowledgeCancellation } from "../run-cancel.js";
 import {
@@ -143,6 +143,12 @@ export const registerRunnerRoutes = (
     const state = await recordRunnerBackendReport(db, { kind: "preflight", ...body });
     preflightRecoveryLeases.delete(body.runner);
     return context.json(state);
+  });
+
+  app.post("/runner/presence", async (context) => {
+    const body = await readJson(context.req.raw, runnerPresenceInput);
+    runners.note(body.runnerId, body, new Date());
+    return context.body(null, 204);
   });
 
   /**

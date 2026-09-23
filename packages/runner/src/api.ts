@@ -165,6 +165,8 @@ export type RunnerTelemetryBody = {
   diskFreeBytes?: number;
 };
 
+export type RunnerPresenceBody = RunnerTelemetryBody & { runnerId: string };
+
 export const runnerTelemetryBody = async (config: RunnerConfig, readStats: StatFs = statfs): Promise<RunnerTelemetryBody> => {
   const base = {
     daemonVersion: config.daemonVersion,
@@ -175,17 +177,31 @@ export const runnerTelemetryBody = async (config: RunnerConfig, readStats: StatF
     const stats = await readStats(config.workspaceRoot);
     return { ...base, diskFreeBytes: stats.bavail * stats.bsize };
   } catch {
-    // Telemetry must never stop the runner from claiming or heartbeating.
+    // Telemetry must never stop the runner from claiming, reporting presence, or heartbeating.
     return base;
   }
 };
 
-export const claimRequestBody = async (config: RunnerConfig, readStats: StatFs = statfs): Promise<Record<string, unknown>> => ({
+export const presenceRequestBody = async (
+  config: RunnerConfig,
+  readStats: StatFs = statfs,
+): Promise<RunnerPresenceBody> => ({
   runnerId: config.runnerId,
-  leaseSeconds: config.leaseSeconds,
   ...await runnerTelemetryBody(config, readStats),
+});
+
+export const claimRequestBody = async (config: RunnerConfig, readStats: StatFs = statfs): Promise<Record<string, unknown>> => ({
+  ...await presenceRequestBody(config, readStats),
+  leaseSeconds: config.leaseSeconds,
   ...(config.servedKinds === null ? {} : { servedKinds: config.servedKinds }),
 });
+
+export const reportPresence = async (config: RunnerConfig): Promise<void> => {
+  await request(config, "/runner/presence", {
+    method: "POST",
+    body: JSON.stringify(await presenceRequestBody(config)),
+  });
+};
 
 const claimTask = async (config: RunnerConfig): Promise<ClaimedTask | null> => {
   const response = await request(config, "/runner/tasks/claim", {

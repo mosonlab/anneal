@@ -23,6 +23,8 @@ export type PollingLoopDependencies = {
   wait?: (delayMs: number) => Promise<void>;
   /** Reclaim the workspaces due for this iteration's sweep. */
   reclaim: () => Promise<void>;
+  /** Report daemon presence without asking the control plane for work. */
+  reportPresence: () => Promise<void>;
   /** Try one control-plane claim and execute it when present. */
   claim: () => Promise<ClaimOutcome>;
   /** Return whether the process has received a stop request. */
@@ -76,6 +78,11 @@ export const runPollingLoop = async (
         overloaded = true;
         log(`Runner claim overloaded: load=${load} threshold=${config.claimMaxLoadAverage}`);
       }
+      try {
+        await dependencies.reportPresence();
+      } catch (error: unknown) {
+        reportError("Runner presence report failed", error);
+      }
       await waitFor(config.pollIntervalMs);
       continue;
     }
@@ -88,8 +95,8 @@ export const runPollingLoop = async (
     try {
       const outcome = await dependencies.claim();
       // Paired like the overload lines above: the state is logged when it is
-      // entered and when it is left, not once per poll. The runner keeps
-      // polling throughout, so its heartbeat still says it is alive.
+      // entered and when it is left, not once per poll. A claim poll is noted
+      // before a deploy-drain refusal; overload instead uses presence above.
       if (outcome === "draining" && !draining) {
         draining = true;
         log("Runner claim draining: the control plane is refusing claims until a pending deploy lands");

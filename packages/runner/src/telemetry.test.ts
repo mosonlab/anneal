@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
 import { createServer } from "node:http";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import test from "node:test";
 
-import { claimRequestBody, openRunSession, runnerTelemetryBody, type RunSessionClaim } from "./api.js";
+import { claimRequestBody, openRunSession, presenceRequestBody, runnerTelemetryBody, type RunSessionClaim } from "./api.js";
 import { loadRunnerConfig } from "./config.js";
 
 const require = createRequire(import.meta.url);
@@ -21,21 +24,26 @@ const loadUndeclaredRunnerConfig = (): ReturnType<typeof loadRunnerConfig> => {
   }
 };
 
-test("claim and heartbeat telemetry carry the exact package version", async () => {
+test("claim, presence, and heartbeat telemetry carry the exact package version", async () => {
   const config = loadUndeclaredRunnerConfig();
   const stats = async (): Promise<{ bavail: number; bsize: number }> => ({ bavail: 12, bsize: 4_096 });
   const claim = await claimRequestBody(config, stats);
+  const presence = await presenceRequestBody(config, stats);
   const heartbeat = await runnerTelemetryBody(config, stats);
   assert.equal(claim.daemonVersion, packageVersion);
+  assert.equal(presence.daemonVersion, packageVersion);
   assert.equal(heartbeat.daemonVersion, packageVersion);
   assert.equal(claim.daemonVersion, heartbeat.daemonVersion);
-  assert.deepEqual(claim, {
+  assert.deepEqual(presence, {
     runnerId: config.runnerId,
-    leaseSeconds: config.leaseSeconds,
     daemonVersion: packageVersion,
     diskFreeBytes: 49_152,
     pollIntervalMs: config.pollIntervalMs,
     workspaceRoot: config.workspaceRoot,
+  });
+  assert.deepEqual(claim, {
+    ...presence,
+    leaseSeconds: config.leaseSeconds,
   });
 });
 
@@ -54,7 +62,10 @@ test("claim declaration is sent only when the runner serves an explicit set", as
 test("a statfs failure omits disk telemetry without blocking a claim", async () => {
   const config = loadUndeclaredRunnerConfig();
   const claim = await claimRequestBody(config, async () => { throw new Error("unmounted"); });
+  const presence = await presenceRequestBody(config, async () => { throw new Error("unmounted"); });
   assert.equal(Object.hasOwn(claim, "diskFreeBytes"), false);
+  assert.equal(Object.hasOwn(presence, "diskFreeBytes"), false);
+  assert.equal(presence.runnerId, config.runnerId);
   assert.equal(claim.runnerId, config.runnerId);
   assert.equal(claim.leaseSeconds, config.leaseSeconds);
 });
@@ -78,6 +89,7 @@ test("a control-plane call that connects but never answers fails instead of hold
   const address = server.address() as AddressInfo;
   const config = {
     ...loadUndeclaredRunnerConfig(),
+    home: mkdtempSync(join(tmpdir(), "runner-telemetry-home-")),
     apiUrl: `http://127.0.0.1:${address.port}`,
     apiTimeoutMs: 300,
   };
