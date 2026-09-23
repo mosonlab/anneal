@@ -22,7 +22,7 @@ import {
   rejectMergeReadinessGate,
   releaseMergeReadinessGate,
 } from "./merge-gate.js";
-import { isMergeReadinessStep } from "./merge-tail.js";
+import { isMergeReadinessStep, MERGE_TAIL_KIND } from "./merge-tail.js";
 import {
   ArchivedTaskError,
   WorkflowRefusalError,
@@ -284,7 +284,16 @@ export const applyInboxDecisionTx = async (
   });
   if (claimed.count !== 1) {
     const current = await tx.inboxMessage.findUnique({ where: { id: question.id }, select: { status: true } });
-    if (gateDecision && current?.status === InboxStatus.CLOSED) {
+    const refreshed = gateDecision && current?.status === InboxStatus.CLOSED
+      ? await tx.taskActivity.findFirst({ where: {
+        taskId: question.gateTaskId!, actorType: "control-plane",
+        AND: [
+          { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.evidenceRefresh } },
+          { metadata: { path: ["state"], equals: "queued" } },
+          { metadata: { path: ["cardId"], equals: question.id } },
+        ],
+      }, select: { id: true } }) : null;
+    if (refreshed) {
       throw new WorkflowRefusalError("conflict", "Merge evidence was refreshed; this approval card is closed");
     }
     return { duplicate: true, resumed: false };
