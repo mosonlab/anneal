@@ -230,7 +230,8 @@ test("named canonical roles use their model catalog runner and retired role name
     assert.equal(canonical.has(retired), false, retired);
   }
   for (const role of canonical.values()) {
-    assert.notEqual(role.model, "claude-opus-5:high", `${role.name} must not pin Opus high`);
+    if (!role.model.startsWith("claude-opus-")) continue;
+    assert.equal(role.model, "claude-opus-5-5:medium", `${role.name} must run Opus 5.5 at medium`);
   }
 });
 

@@ -92,8 +92,8 @@ export const slugForModel = (name: string, model: string): string | null => {
 /** `title · model effort` — the role and the price of running it, which is the
  *  pair an operator weighs in every Agent picker: the chain's staffing select,
  *  the task header's, and the New Task panel's. The model half is resolved
- *  through the catalog so the option reads `Claude Opus 5 high` rather than the
- *  stored `claude-opus-5:high`. */
+ *  through the catalog so the option reads `Claude Opus 5.5 high` rather than the
+ *  stored `claude-opus-5-5:high`. */
 export const agentOptionLabel = (agent: { title: string; model: string }): string => {
   const parsed = splitModel(agent.model);
   const model = findModel(parsed.model)?.label ?? parsed.model;

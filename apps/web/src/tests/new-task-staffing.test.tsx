@@ -30,7 +30,7 @@ const agent = (id: string, title: string, model: string): Agent => ({
 
 const implementer = agent("agent-impl", "Senior Developer", "gpt-6-astra:medium");
 const reviewer = agent("agent-review", "Reviewer", "gpt-6-luna:max");
-const stand_in = agent("agent-standin", "Stand In", "claude-opus-5:high");
+const stand_in = agent("agent-standin", "Stand In", "claude-opus-5-5:high");
 const integrator: Agent = { ...agent("agent-merge", "Merge Integrator", "gpt-6-sol:low"), assignable: false };
 
 const step = (stepIndex: number, name: string, outputKind: string, overrides: Partial<TaskTemplateStep> = {}): TaskTemplateStep => ({
@@ -350,7 +350,7 @@ test("the agent picker offers assignable agents as title, model and effort", asy
     assert.deepEqual(options, [
       "Senior Developer · GPT-6 Astra (codex) medium",
       "Reviewer · GPT-6 Luna (codex) max",
-      "Stand In · Claude Opus 5 high",
+      "Stand In · Claude Opus 5.5 high",
     ]);
     // The merge-integrator sentinel is not an assignee an operator may pick.
     assert.ok(!options.some((option) => option.includes(integrator.title)));

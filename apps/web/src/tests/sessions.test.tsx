@@ -48,7 +48,7 @@ const session = (overrides: Partial<Session> = {}): Session => ({
   costUsd: null, inputTokens: null, outputTokens: null, cachedInputTokens: null, totalTokens: null,
   failureReason: null, agent: { id: "agent-1", title: "Frontend Dev" },
   task: { id: "task-1", name: "Batch 4", chainId: null, chainName: null },
-  goal: null, run: { id: "run-1", runNumber: 3, model: "claude-opus-5", branch: "feat/x", pullRequestUrl: null, workspacePath: "/tmp/w", repo: null },
+  goal: null, run: { id: "run-1", runNumber: 3, model: "claude-opus-5-5", branch: "feat/x", pullRequestUrl: null, workspacePath: "/tmp/w", repo: null },
   ...overrides,
 });
 
@@ -280,7 +280,7 @@ test("a session row's chip carries the model that run executed with", () => {
   const markup = renderToStaticMarkup(<SessionRow session={session()} />);
   // One chip, two facts: who ran it and what it ran. The row's own Run snapshot
   // holds the model, so no second read is needed to say it.
-  assert.match(markup, /data-agent-chip-model="true"[^>]*>Claude Opus 5</u);
+  assert.match(markup, /data-agent-chip-model="true"[^>]*>Claude Opus 5.5</u);
 
   const withEffort = renderToStaticMarkup(<SessionRow session={session({
     run: { id: "run-1", runNumber: 3, model: "gpt-6-astra:high", branch: null, pullRequestUrl: null, workspacePath: null, repo: null },

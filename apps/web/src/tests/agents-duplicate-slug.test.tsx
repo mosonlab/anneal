@@ -248,7 +248,7 @@ test("a name the operator typed is kept, and the offer follows that role", async
 });
 
 test("the model-free roles are never renamed, and the sentinel is never duplicated", async () => {
-  const starter = agent({ id: "d1", name: "default", title: "Default", model: "claude-opus-5:medium", runnerPreference: "CLAUDE" });
+  const starter = agent({ id: "d1", name: "default", title: "Default", model: "claude-opus-5-5:medium", runnerPreference: "CLAUDE" });
   const page = await mountDetail(starter, [starter, ...ROSTER]);
   try {
     await page.press("Edit");
@@ -319,7 +319,7 @@ test("changing a canonical Agent's effort offers the matching slug and leaves th
 test("the exemption follows the canonical role, not the name an operator typed", async () => {
   // Renamed by its operator, but still the starter Agent whose name names no model.
   const renamed = agent({
-    id: "a6", name: "house-default", title: "Default", model: "claude-opus-5:medium",
+    id: "a6", name: "house-default", title: "Default", model: "claude-opus-5-5:medium",
     canonicalRole: "default", runnerPreference: "CLAUDE",
   });
   const page = await mountDetail(renamed, [renamed, ...ROSTER]);
@@ -332,7 +332,7 @@ test("the exemption follows the canonical role, not the name an operator typed",
   }
 
   // And an Agent of no canonical role is judged by the name it carries.
-  const ownName = agent({ id: "a7", name: "nightly-triage", title: "Nightly", model: "claude-opus-5:medium", runnerPreference: "CLAUDE" });
+  const ownName = agent({ id: "a7", name: "nightly-triage", title: "Nightly", model: "claude-opus-5-5:medium", runnerPreference: "CLAUDE" });
   const own = await mountDetail(ownName, [ownName, ...ROSTER]);
   try {
     await own.press("Edit");

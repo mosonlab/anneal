@@ -32,7 +32,7 @@ const session = (overrides: Partial<Session> & Pick<Session, "id">): Session => 
   failureReason: null, agent: { id: "agent-match", title: "Matching agent" },
   task: { id: `task-${overrides.id}`, name: overrides.id, chainId: null, chainName: null },
   goal: null,
-  run: { id: `run-${overrides.id}`, runNumber: 1, model: "claude-opus-5", branch: "feat/x", pullRequestUrl: null, workspacePath: null, repo: null },
+  run: { id: `run-${overrides.id}`, runNumber: 1, model: "claude-opus-5-5", branch: "feat/x", pullRequestUrl: null, workspacePath: null, repo: null },
   ...overrides,
 });
 

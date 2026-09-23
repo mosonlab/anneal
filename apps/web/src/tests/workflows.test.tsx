@@ -41,7 +41,7 @@ const agent = (overrides: Partial<Agent> & Pick<Agent, "id" | "name" | "title">)
   environmentId: "env-1",
   canonicalRole: null,
   customizedFields: [],
-  model: "claude-opus-5:medium",
+  model: "claude-opus-5-5:medium",
   codexServiceTier: "DEFAULT",
   foundationalPrompt: "",
   rolePrompt: "",
@@ -425,7 +425,7 @@ for (const locale of ["en", "zh"] as const) {
       const options = [...implementation.querySelectorAll("option")].map((node) => node.textContent);
       assert.deepEqual(options, [
         t(locale, "workflows.editor.canonical", { name: SENIOR.title }),
-        `${SENIOR.title} · Claude Opus 5 medium`,
+        `${SENIOR.title} · Claude Opus 5.5 medium`,
       ]);
       assert.equal((implementation.querySelector("select") as HTMLSelectElement).value, SENIOR.id);
 

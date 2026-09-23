@@ -43,7 +43,7 @@ test("catalog ids are unique and every default effort is selectable", () => {
 });
 
 test("model effort encoding round-trips on the runner's last-colon rule", () => {
-  for (const raw of ["claude-fable-5:medium", "claude-opus-5:high", "gpt-6-luna:max", "openai-codex/gpt-6-luna:xhigh", "claude-opus-5", ":high"]) {
+  for (const raw of ["claude-fable-5:medium", "claude-opus-5-5:high", "gpt-6-luna:max", "openai-codex/gpt-6-luna:xhigh", "claude-opus-5-5", ":high"]) {
     const parsed = splitModel(raw);
     assert.equal(joinModel(parsed.model, parsed.effort), raw);
   }
@@ -65,14 +65,14 @@ test("validateModelPair names mismatches and permits the Custom escape hatch", (
   assert.equal(validateModelPair("gpt-6-luna", "CODEX"), null);
   assert.equal(validateModelPair("my-own-model", "INHERIT"), null);
   assert.deepEqual(validateModelPair("", "CLAUDE"), { kind: "empty-model" });
-  assert.equal(validateModelPair("claude-opus-5:high", "CLAUDE"), null);
+  assert.equal(validateModelPair("claude-opus-5-5:high", "CLAUDE"), null);
 });
 
 /* ------------------------------------------------------------ slug naming */
 
 test("every catalog model names the short name its slugs carry", () => {
   assert.deepEqual(
-    ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "claude-opus-5", "claude-fable-5"].map(modelShortName),
+    ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "claude-opus-5-5", "claude-fable-5"].map(modelShortName),
     ["astra", "luna", "sol", "opus", "fable"],
   );
   // The pi-hosted entries name the same model as their codex twins.
@@ -96,7 +96,7 @@ test("the role half of a slug survives a runtime that changed under it", () => {
 test("a slug is role-model-effort, and the model-free roles have none to regenerate", () => {
   assert.equal(slugForModel("senior-dev-luna-max", "gpt-6-astra:medium"), "senior-dev-astra-medium");
   assert.equal(slugForModel("senior-dev-astra-medium", "gpt-6-luna:max"), "senior-dev-luna-max");
-  assert.equal(slugForModel("code-reviewer-sol-high", "claude-opus-5:high"), "code-reviewer-opus-high");
+  assert.equal(slugForModel("code-reviewer-sol-high", "claude-opus-5-5:high"), "code-reviewer-opus-high");
   assert.equal(slugForModel("librarian-opus-medium", "claude-fable-5:low"), "librarian-fable-low");
   // An operator's own role name is the whole role.
   assert.equal(slugForModel("nightly-triage", "gpt-6-sol:high"), "nightly-triage-sol-high");
@@ -110,6 +110,6 @@ test("a slug is role-model-effort, and the model-free roles have none to regener
 test("the chip label states the catalog model and the effort, and nothing else", () => {
   assert.equal(modelChipLabel("gpt-6-astra:medium"), "GPT-6 Astra (codex) · medium");
   assert.equal(modelChipLabel("openai-codex/gpt-6-luna:max"), "GPT-6 Luna (pi) · max");
-  assert.equal(modelChipLabel("claude-opus-5"), "Claude Opus 5");
+  assert.equal(modelChipLabel("claude-opus-5-5"), "Claude Opus 5.5");
   assert.equal(modelChipLabel("private/model:turbo"), "private/model · turbo");
 });

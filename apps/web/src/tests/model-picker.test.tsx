@@ -13,13 +13,13 @@ import { installDom, installFetchFunction, reactDom } from "./dom-harness";
 test("catalog models render a default effort without rewriting a bare stored value", () => {
   let changes = 0;
   const markup = renderToStaticMarkup(
-    <ModelPicker model="claude-opus-5" runnerPreference="CLAUDE" onChange={() => { changes += 1; }} />,
+    <ModelPicker model="claude-opus-5-5" runnerPreference="CLAUDE" onChange={() => { changes += 1; }} />,
   );
   assert.equal(changes, 0);
-  assert.match(markup, /Claude Opus 5/);
+  assert.match(markup, /Claude Opus 5.5/);
   assert.match(markup, /<option value="medium" selected="">medium<\/option>/);
   assert.match(markup, /<select[^>]*disabled=""[^>]*>[\s\S]*?<option value="CLAUDE" selected="">Claude<\/option>/);
-  assert.equal(modelForSave("claude-opus-5"), "claude-opus-5:medium");
+  assert.equal(modelForSave("claude-opus-5-5"), "claude-opus-5-5:medium");
   assert.equal(modelForSave("private/model:turbo"), "private/model:turbo");
 });
 

@@ -485,21 +485,21 @@ test("the by-model card names every model verbatim, with its share of the total"
 
 test("the model bar draws one segment per model and names it on hover", () => {
   const byModel: CostsReport["byModel"] = [
-    { model: "claude-opus-5", usd: "75", runs: 3, costUnavailableRuns: 0 },
+    { model: "claude-opus-5-5", usd: "75", runs: 3, costUnavailableRuns: 0 },
     { model: "mixed", usd: "25", runs: 1, costUnavailableRuns: 0 },
   ];
   const markup = renderToStaticMarkup(
-    <ModelBar byModel={byModel} totalUsd="100" colors={colorsFor(["claude-opus-5", "mixed"])} />,
+    <ModelBar byModel={byModel} totalUsd="100" colors={colorsFor(["claude-opus-5-5", "mixed"])} />,
   );
   assert.equal(markup.match(/<span /g)?.length, 2);
   assert.ok(markup.includes("width:75%"));
   assert.ok(markup.includes("width:25%"));
-  assert.ok(markup.includes("claude-opus-5 · $75.00 · 75.0%"));
+  assert.ok(markup.includes("claude-opus-5-5 · $75.00 · 75.0%"));
   assert.ok(markup.includes('role="img"'));
 });
 
 test("a window with no priced spend draws no bar rather than an empty one", () => {
-  const byModel: CostsReport["byModel"] = [{ model: "claude-opus-5", usd: "0", runs: 2, costUnavailableRuns: 2 }];
+  const byModel: CostsReport["byModel"] = [{ model: "claude-opus-5-5", usd: "0", runs: 2, costUnavailableRuns: 2 }];
   assert.equal(renderToStaticMarkup(<ModelBar byModel={byModel} totalUsd="0" colors={colorsFor([])} />), "");
 });
 

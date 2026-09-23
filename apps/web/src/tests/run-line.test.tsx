@@ -9,7 +9,7 @@ import type { BoardLatestRun } from "../lib/types";
 import { boardRun } from "./board-run";
 
 const run = (overrides: Partial<BoardLatestRun> = {}): BoardLatestRun => boardRun({
-  id: "run-1", runNumber: 7, status: "RUNNING", model: "claude-opus-5:high",
+  id: "run-1", runNumber: 7, status: "RUNNING", model: "claude-opus-5-5:high",
   startedAt: new Date(Date.now() - 23 * 60_000).toISOString(), ...overrides,
 });
 
@@ -122,7 +122,7 @@ test("the zh run line wraps under the same rules", () => {
   const line = parse(renderToStaticMarkup(
     <LocaleProvider initialLocale="zh"><RunLine run={run()} elapsed="line" showModel /></LocaleProvider>,
   ));
-  assert.match(visibleText(line), /claude-opus-5 · high/u);
+  assert.match(visibleText(line), /claude-opus-5-5 · high/u);
   const details = line.querySelector("[data-run-line-details]");
   assert.ok(details);
   assert.doesNotMatch(details.className, /text-ellipsis|overflow-hidden/u);
