@@ -20,8 +20,9 @@ predecessor or sibling review evidence through attachments, task outputs,
 activity, or any other session-scoped route, before or after persisting this
 report. When the change widens or adds a shared contract, invariant, or
 cross-cutting rule, enumerate every existing consumer, call site, and endpoint
-it now governs and check each one; report every one left inconsistent as its
-own finding. Persist exactly one immutable `blind-findings` JSON object with
+it now governs, reading them in the tree at head even outside `base...head`,
+and check each one; report every one left inconsistent as its own finding.
+Persist exactly one immutable `blind-findings` JSON object with
 `schemaVersion`, `headSha`, `reviewedBase`, `reviewedHead`, and `findings`; every
 finding has `id`, `severity` (`P0|P1|P2`), `file`, positive integer `line`,
 `title`, `evidence`, and `requiredFix`. Do not adjudicate findings, write a

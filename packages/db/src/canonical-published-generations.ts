@@ -64,7 +64,7 @@ export const PUBLISHED_PROMPT_GENERATIONS = {
     { digest: "667f0aadce31cc62aa7043d6c46a1ee89d08ce4f8690bd5a5fe50a5fd5662abd" },
     { digest: "cea709c7937fb307648ca7a5be2ed6de14aef3747ee96cff53e4d34270b03536" },
     { digest: "57c1f304441e38bf4a0dd63bb7a9f031dbcbc55acf52ac0ff16d416a885d5ceb" },
-    { digest: "a47afe8c86d047f684792706aebec58a87379443531ca41ec2a2daad2e5d1ca2" },
+    { digest: "8ade6e8ff6b27570427a807a6f1a59048c5c05dc0dfd6f48941d24ea0b61d4c9" },
   ],
   "compound-engineer-workflow": [
     { digest: "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9", retiredByShape: "model-neutral-review-step-names" },
@@ -72,14 +72,14 @@ export const PUBLISHED_PROMPT_GENERATIONS = {
     { digest: "be4428549ef4c428fd82ea9e6315bee040bd7874561f2fcc362a49216497bb66", retiredByShape: "pre-model-neutral-review-output" },
     { digest: "6d0e84947f79d3c1307727d4d0cdfae7827828e488dc6a05c2a9366480791142" },
     { digest: "2a3634bc7c7f74a066ab8fce78c4e0f02f2f9ac65acdcf37e07c993c445bed2c" },
-    { digest: "97f7f07c267b0226a8d799dd59e28b5a6d32bba3bf028e091d6a687208fdb810" },
+    { digest: "baf3e01dff045746085453fc5897c580f79ade3e83bc31e744a1c2d3cdd20326" },
   ],
   [PR_TEMPLATE_NAME]: [
     { digest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8", retiredByShape: "model-neutral-review-step-names" },
     { digest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8" },
     { digest: "e1bbe7b7e56d287f1f4e7ea85beeef29bc84ab8c162882f1c4050540ca46f734", retiredByShape: "pre-model-neutral-review-output" },
     { digest: "93a909a5d88b6aa158f9f86155853d7aed7762b61bd56dc9a1b17b6e7051281f" },
-    { digest: "95fdc85e4f0fda6943fd22929de1ab322b82f83d69cea0ab7aa12c5993d333bb" },
+    { digest: "530c5a0c8b0a16902794713271edcc7373c3509b0ea229d58c4917c3699dd711" },
   ],
 } as const satisfies Readonly<Record<CanonicalTemplateRegistryName, readonly PublishedPromptGeneration[]>>;
 

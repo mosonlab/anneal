@@ -1,13 +1,14 @@
 /**
  * Restore the prompt bytes retired by the defect-class sweep rollover
- * (2026-09-23): the Regression review-fail handoff and the shared-contract
- * consumer sentence in the Implementation and review prompts. Every registered
- * generation predates it, so the older fixtures apply it before reconstructing
- * their earlier prompt bytes.
+ * (2026-09-23): the Regression review-fail sweep, the shared-contract consumer
+ * sentences in Implementation and review, the review-fix `inbox_ask` rule, and
+ * the revalidation and plan-review input checks. Every registered generation
+ * predates it, so the older fixtures apply it before reconstructing their
+ * earlier prompt bytes.
  */
 export const restorePreDefectClassSweepPrompt = (prompt: string): string => prompt
   .replace(
-    "If an adopted finding remains open, a rejection is unsupported, or a new defect exists, do not stop at the first:\naccount for every open finding and sweep the change for every other instance of each defect class (the same rule,\ncontract, or invariant broken at another call site, endpoint, or code path reachable from the diff or a contract it\nwidened). Report all of them in one call, one line each as `file:line — what breaks`:",
+    "If an adopted finding remains open, a rejection is unsupported, or a new defect exists, do not stop at the first:\naccount for every open finding and sweep the change for every other instance of each defect class introduced or\nexposed by this chain (the same rule, contract, or invariant broken at another call site, endpoint, or code path).\nReport all of them in one call, one line each as `file:line — what breaks`:",
     "If an adopted finding remains open, a rejection is unsupported, or a new\ndefect exists, run",
   )
   .replace(
@@ -15,12 +16,24 @@ export const restorePreDefectClassSweepPrompt = (prompt: string): string => prom
     "",
   )
   .replace(
-    " When the change widens or adds a shared contract, invariant, or cross-cutting rule, enumerate every existing consumer, call site, and endpoint it now governs and check each one; report every one left inconsistent as its own finding.",
+    " When the change widens or adds a shared contract, invariant, or cross-cutting rule, enumerate every existing consumer, call site, and endpoint it now governs, reading them in the tree at head even outside `base...head`, and check each one; report every one left inconsistent as its own finding.",
     "",
   )
   .replace(
-    "report. When the change widens or adds a shared contract, invariant, or\ncross-cutting rule, enumerate every existing consumer, call site, and endpoint\nit now governs and check each one; report every one left inconsistent as its\nown finding. Persist exactly one",
+    "report. When the change widens or adds a shared contract, invariant, or\ncross-cutting rule, enumerate every existing consumer, call site, and endpoint\nit now governs, reading them in the tree at head even outside `base...head`,\nand check each one; report every one left inconsistent as its own finding.\nPersist exactly one",
     "report. Persist exactly one",
+  )
+  .replace(
+    " When closing a finding would require data, fields or behavior the specification of record does not provide, do not invent it; call `inbox_ask` quoting the spec text and the tree evidence.",
+    "",
+  )
+  .replace(
+    "For each Changes item, check whether its premise still holds. Also test that\nevery input a Changes or Acceptance item consumes — table, column, field,\nfixture, export — exists at HEAD or is created by another Changes item; a\nmissing input is a premise collapse. If the thing a Changes item exists to\nchange is gone or already delivered, or an input is missing, collect concrete\ntree evidence and call",
+    "For each Changes item, check whether its premise still holds. If the thing it\nexists to change is gone or already delivered, collect concrete tree evidence\nand call",
+  )
+  .replace(
+    "every input a slice consumes (table, column, field, fixture, export) existing at the frozen base or created by a slice it is blocked by, ",
+    "",
   );
 
 /**
@@ -86,7 +99,7 @@ export const restorePreOptionalReviewPrompt = (prompt: string): string => restor
   );
 
 /** Restore the revalidation v1 bytes carried by both deployed generations. */
-export const restorePreTierRevalidationPrompt = (prompt: string): string => prompt
+export const restorePreTierRevalidationPrompt = (prompt: string): string => restorePreDefectClassSweepPrompt(prompt)
   .replace(/After checking the brief and the tree, judge the implementation tier\.[\s\S]*?(?=After the PATCH succeeds)/u, "")
   .replace('"schemaVersion":2', '"schemaVersion":1')
   .replace(',"route":{"tier":"default|frontend|hard|hazard","reason":"<criterion that applies, or why none does>"}', "");

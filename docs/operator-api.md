@@ -2351,12 +2351,14 @@ the persisted verdict and not another source of semantic authority.
 
 Because each repair round spends one automatic repair attempt, both halves of
 the loop work on a whole defect class rather than one instance. A canonical
-Regression step that finds a defect sweeps the change for every other instance
-of the same defect class and reports all of them, with every other open
-finding, in one `review-fail` summary. The `review-fix` and `gate-fix` repair
-prompt requires closing every listed instance and every other instance of that
-class found by sweeping the same contract, without unrelated refactors, and
-listing the sites checked and changed in the repair's task output summary.
+Regression step that finds a defect sweeps for every other instance of the
+same defect class that the chain introduced or exposed, and reports all of
+them, with every other open finding, in one `review-fail` summary. The
+`review-fix` and `gate-fix` repair prompt requires closing every listed
+instance and every other instance of that class reachable from the chain's
+diff or a contract it widened, without unrelated refactors. It lists
+pre-existing instances outside that scope in the summary without changing them,
+and lists the sites checked and changed in the repair's task output summary.
 Earlier in the chain, the canonical Implementation and review steps enumerate
 every existing consumer of a shared contract, invariant, or cross-cutting rule
 the change widens or adds, so such a defect should be caught before the merge

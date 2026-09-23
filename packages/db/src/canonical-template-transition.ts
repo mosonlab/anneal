@@ -386,10 +386,12 @@ const legacyTemplateGenerations = {
       ],
     },
     {
-      // Prompt-only rollover: Regression verification sweeps the change for every
+      // Prompt-only rollover: Regression verification sweeps the chain for every
       // instance of a found defect class and reports all open findings in one
-      // review-fail, and Implementation and review enumerate every consumer of
-      // a widened shared contract. The graph is unchanged.
+      // review-fail; Implementation and review enumerate every consumer of a
+      // widened shared contract; review fixes ask instead of inventing missing
+      // specification; and the premise checks test every consumed input. The
+      // graph is unchanged.
       marker: "pre-defect-class-sweep",
       promptDigest: "57c1f304441e38bf4a0dd63bb7a9f031dbcbc55acf52ac0ff16d416a885d5ceb",
       shape: [
@@ -667,10 +669,12 @@ const legacyTemplateGenerations = {
       ],
     },
     {
-      // Prompt-only rollover: Regression verification sweeps the change for every
+      // Prompt-only rollover: Regression verification sweeps the chain for every
       // instance of a found defect class and reports all open findings in one
-      // review-fail, and Implementation and review enumerate every consumer of
-      // a widened shared contract. The graph is unchanged.
+      // review-fail; Implementation and review enumerate every consumer of a
+      // widened shared contract; review fixes ask instead of inventing missing
+      // specification; and the premise checks test every consumed input. The
+      // graph is unchanged.
       marker: "pre-defect-class-sweep",
       promptDigest: "2a3634bc7c7f74a066ab8fce78c4e0f02f2f9ac65acdcf37e07c993c445bed2c",
       shape: [
@@ -764,9 +768,9 @@ const legacyTemplateGenerations = {
       ],
     },
     {
-      // Prompt-only rollover: both review prompts, shared with the Direct
-      // workflow, enumerate every consumer of a widened shared contract. The
-      // graph is unchanged.
+      // Prompt-only rollover: Implementation and both review prompts, the
+      // latter shared with the Direct workflow, enumerate every consumer of a
+      // widened shared contract. The graph is unchanged.
       marker: "pre-defect-class-sweep",
       promptDigest: "93a909a5d88b6aa158f9f86155853d7aed7762b61bd56dc9a1b17b6e7051281f",
       shape: [
@@ -810,9 +814,9 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<
  * `agents/templates/` and fails on a mismatch.
  */
 export const CANONICAL_SOURCE_PROMPT_GENERATIONS = {
-  [DIRECT_TEMPLATE_NAME]: "a47afe8c86d047f684792706aebec58a87379443531ca41ec2a2daad2e5d1ca2",
-  "compound-engineer-workflow": "97f7f07c267b0226a8d799dd59e28b5a6d32bba3bf028e091d6a687208fdb810",
-  [PR_TEMPLATE_NAME]: "95fdc85e4f0fda6943fd22929de1ab322b82f83d69cea0ab7aa12c5993d333bb",
+  [DIRECT_TEMPLATE_NAME]: "8ade6e8ff6b27570427a807a6f1a59048c5c05dc0dfd6f48941d24ea0b61d4c9",
+  "compound-engineer-workflow": "baf3e01dff045746085453fc5897c580f79ade3e83bc31e744a1c2d3cdd20326",
+  [PR_TEMPLATE_NAME]: "530c5a0c8b0a16902794713271edcc7373c3509b0ea229d58c4917c3699dd711",
 } as const satisfies Readonly<Record<CanonicalTemplateRegistryName, string>>;
 
 export type CanonicalTemplateIdentity = Readonly<{

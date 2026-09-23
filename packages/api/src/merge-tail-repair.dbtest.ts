@@ -789,7 +789,7 @@ test("a gate-fix prompt renders its failure excerpt while other repair prompts r
     "suite failed",
     "Gate failure excerpt",
     excerpt,
-    "Close every failure and instance listed above, then sweep the codebase for the same contract and close every other instance of the same defect class; stay within that defect class and make no unrelated refactors. Run affected suites, commit, and persist the result as task output whose summary lists the sites checked and the sites changed. Before changing any shared type, schema, or route contract, enumerate its callers across every workspace, including apps/web, and update or test each one in the same change.",
+    "Close every failure and instance listed above, then sweep what this chain's diff reaches, and any contract it widened, for every other instance of the same defect class and close each one; stay within that defect class and make no unrelated refactors. Pre-existing instances outside that scope are listed in the summary, not changed. Run affected suites, commit, and persist the result as task output whose summary lists the sites checked and the sites changed. Before changing any shared type, schema, or route contract, enumerate its callers across every workspace, including apps/web, and update or test each one in the same change.",
     gateContext,
   ].join("\n\n"));
 
@@ -805,7 +805,7 @@ test("a gate-fix prompt renders its failure excerpt while other repair prompts r
   assert.equal(reviewRepair.description, [
     `Repair the autonomous merge tail failure at ${HEAD} against target ${BASE}.`,
     "MF-2 remains open",
-    "Close every failure and instance listed above, then sweep the codebase for the same contract and close every other instance of the same defect class; stay within that defect class and make no unrelated refactors. Run affected suites, commit, and persist the result as task output whose summary lists the sites checked and the sites changed. Before changing any shared type, schema, or route contract, enumerate its callers across every workspace, including apps/web, and update or test each one in the same change.",
+    "Close every failure and instance listed above, then sweep what this chain's diff reaches, and any contract it widened, for every other instance of the same defect class and close each one; stay within that defect class and make no unrelated refactors. Pre-existing instances outside that scope are listed in the summary, not changed. Run affected suites, commit, and persist the result as task output whose summary lists the sites checked and the sites changed. Before changing any shared type, schema, or route contract, enumerate its callers across every workspace, including apps/web, and update or test each one in the same change.",
     reviewContext,
   ].join("\n\n"));
 

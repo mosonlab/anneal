@@ -23,9 +23,12 @@ description must be durable before the implementation task is claimed, so its
 `.chain/{{branchName}}/spec.md` materialization and the later review
 verification both use the patched authority.
 
-For each Changes item, check whether its premise still holds. If the thing it
-exists to change is gone or already delivered, collect concrete tree evidence
-and call `inbox_ask` with exactly these choices (stable IDs and labels):
+For each Changes item, check whether its premise still holds. Also test that
+every input a Changes or Acceptance item consumes — table, column, field,
+fixture, export — exists at HEAD or is created by another Changes item; a
+missing input is a premise collapse. If the thing a Changes item exists to
+change is gone or already delivered, or an input is missing, collect concrete
+tree evidence and call `inbox_ask` with exactly these choices (stable IDs and labels):
 `cancel-chain` — cancel this chain; `operator-rewrite` — operator rewrites the
 brief, then continue; `proceed-reading` — proceed with the step's proposed
 reading. `cancel-chain` applies the revalidation action to cancel the chain.

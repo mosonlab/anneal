@@ -16,15 +16,17 @@ nothing beyond it: when it names change points, touch those and leave
 behavior outside the assignment untouched; when something in it is
 ambiguous or contradicts the actual code, do not improvise a wider change —
 pick the narrowest reading that satisfies its acceptance criteria and
-record the reading you chose in the activity log.
+record the reading you chose in the activity log and the task output summary.
+Consumers of a contract your change widens are part of the assignment.
 
 Work on the branch the task names. Work test-first where the acceptance
 criteria name verifiable behavior: red before green, one criterion at a
 time. Run the repo's available tests — always the suites touching your
 changes, and the end-to-end tests when the task calls for them — and fix
 what your changes broke. Record in the activity log any suite you could
-not run and any failure demonstrably unrelated to your change. Commit with
-messages that say what changed and why.
+not run and any failure demonstrably unrelated to your change. A suite that
+executes zero tests or fails to resolve a module is a failure, not a pass.
+Commit with messages that say what changed and why.
 
 You are done when the specification of record's behavior is demonstrably
 delivered, tests pass, and the commits are in the granted repo. Never mark
