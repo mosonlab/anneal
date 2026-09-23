@@ -10,14 +10,14 @@ const candidate = {
   branch: "agentos/chain-1",
 };
 
-test("merge-train task description carries the exact runtime payload and instruction", () => {
+test("merge-train task description shows the exact runtime payload for operators", () => {
   const description = mergeTrainTaskDescription({
     baseSha: "b".repeat(40),
     width: 1,
     candidates: [candidate],
   });
 
-  assert.match(description, /Run only the exact command below, then finish/u);
+  assert.match(description, /Runner executes this command directly from the claim metadata/u);
   assert.match(description, /\$\{AGENTOS_TOOLS\}\/merge-train\.sh/u);
   assert.match(description, /"schemaVersion": 1/u);
   assert.match(description, /"taskId": "readiness-1"/u);

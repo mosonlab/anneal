@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
+import { join } from "node:path";
 
 import {
   agentExitVerdict,
@@ -20,8 +22,10 @@ import {
   manifestFor,
   outputTail,
   PREFLIGHT_CLASS,
+  launchAdapterArgv,
   promptHashFor,
   RUNNER_DEFINITIONS,
+  createAdapterState,
   type AdapterEvent,
   type CliAdapter,
   type ExitEvidence,
@@ -88,6 +92,12 @@ const serializeTool = (tool: RuntimeHandle["inFlightTool"]): Record<string, unkn
 
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
+const MERGE_TRAIN_LAUNCHER_ENVIRONMENT = [
+  "AGENTOS_WORKSPACE_PATH",
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+] as const;
+const MERGE_TRAIN_ADAPTER_VERSION = "merge-train-runtime-tool-v1";
+
 const persistMechanicalOutputHandoff = async (
   session: RunSession,
   handoff: SessionTaskOutput,
@@ -145,6 +155,103 @@ const exitEvidencePayload = (evidence: ExitEvidence): Record<string, unknown> =>
   providerErrorTail: summarizeEvidence(evidence.providerError),
   stdoutTail: summarizeEvidence(evidence.stdout),
   stderrTail: summarizeEvidence(evidence.stderr),
+});
+
+const startMergeTrainTool = (
+  config: RunnerConfig,
+  spec: Parameters<CliAdapter["start"]>[0],
+): Promise<RuntimeHandle> => new Promise((resolve, reject) => {
+  const train = spec.claim.task.mergeTrain;
+  if (!train) {
+    reject(new Error("Detached merge-train claim metadata is missing"));
+    return;
+  }
+  const state = createAdapterState(spec.claim.runner, spec.claim.run.id);
+  const startedAt = state.startedAt;
+  state.inFlightTool = {
+    id: "merge-train-runtime-tool",
+    name: "merge-train.sh",
+    startedAt,
+    lastProgressAt: startedAt,
+  };
+  const executable = join(spec.env.AGENTOS_TOOLS ?? "", "merge-train.sh");
+  if (!spec.env.AGENTOS_TOOLS || executable === "merge-train.sh") {
+    reject(new Error("AGENTOS_TOOLS is required to start the merge-train runtime tool"));
+    return;
+  }
+  const input = JSON.stringify(train);
+  const providerEnvironment = new Set(RUNNER_DEFINITIONS[spec.claim.runner].launcherEnvironmentVariables);
+  const childEnvironment = Object.fromEntries(Object.entries(spec.env).filter(([name]) =>
+    name !== "AGENTOS_API_URL"
+    && name !== "AGENTOS_SESSION_TOKEN"
+    && name !== "AGENTOS_FENCING_TOKEN"
+    && !providerEnvironment.has(name)));
+  const command = launchAdapterArgv(
+    config,
+    { runner: spec.claim.runner, launcherEnvironmentVariables: [] },
+    [],
+    spec.env,
+    executable,
+    MERGE_TRAIN_LAUNCHER_ENVIRONMENT,
+  );
+  const child = spawn(command.executable, command.args, {
+    cwd: spec.workingDirectory,
+    env: childEnvironment,
+    stdio: ["pipe", "pipe", "pipe"],
+    detached: true,
+  });
+  const handle = Object.assign(state, {
+    child,
+    pid: child.pid ?? null,
+    exit: new Promise<ExitEvidence>((resolveExit) => {
+      let settled = false;
+      let spawnError: string | null = null;
+      const finish = (exitCode: number | null, signal: NodeJS.Signals | null): void => {
+        if (settled) return;
+        settled = true;
+        state.terminalEventSeen = true;
+        state.terminalSuccess = exitCode === 0 && signal === null;
+        state.inFlightTool = null;
+        resolveExit({
+          exitCode: spawnError ? 127 : exitCode,
+          signal,
+          terminalEventSeen: true,
+          terminalSuccess: exitCode === 0 && signal === null && spawnError === null,
+          terminationReason: state.terminationReason,
+          finalOutput: state.stdout || null,
+          providerError: spawnError,
+          stdout: state.stdout,
+          stderr: state.stderr,
+        });
+      };
+      child.once("error", (error: Error) => {
+        spawnError = error.message;
+        state.stderr += `${error.message}\n`;
+        finish(127, null);
+      });
+      child.once("close", finish);
+      child.stdout.setEncoding("utf8");
+      child.stderr.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        state.stdout = (state.stdout + chunk).slice(-1_000_000);
+        state.lastProgressEventAt = new Date();
+        if (state.inFlightTool) state.inFlightTool.lastProgressAt = state.lastProgressEventAt;
+      });
+      child.stderr.on("data", (chunk: string) => {
+        state.stderr = (state.stderr + chunk).slice(-1_000_000);
+        state.lastProgressEventAt = new Date();
+        if (state.inFlightTool) state.inFlightTool.lastProgressAt = state.lastProgressEventAt;
+      });
+      child.stdin.once("error", (error: NodeJS.ErrnoException) => {
+        if (error.code !== "EPIPE") {
+          spawnError = error.message;
+          state.stderr += `${error.message}\n`;
+        }
+      });
+      child.stdin.end(input);
+    }),
+  }) satisfies RuntimeHandle;
+  resolve(handle);
 });
 
 type MechanicalHandoff =
@@ -241,7 +348,18 @@ export const executeClaim = async (
   claim: ClaimedTask,
   dependencies: ExecuteClaimDependencies = {},
 ): Promise<void> => {
-  const adapter = dependencies.adapter ?? adapters[claim.runner];
+  const providerAdapter = dependencies.adapter ?? adapters[claim.runner];
+  const isMergeTrain = claim.task.isMergeTrain === true || claim.task.mergeTrain != null;
+  const adapter: CliAdapter = isMergeTrain ? {
+    ...providerAdapter,
+    // A detached train is a bounded platform command. Keep the ordinary
+    // RuntimeHandle heartbeat and process-group cancellation, but never start
+    // a provider model session for this claim.
+    preflight: async () => ({ ok: true, cliVersion: "merge-train-runtime-tool", authMode: null, capabilities: {} }),
+    start: (spec) => startMergeTrainTool(config, spec),
+    resume: async () => { throw new Error("The merge-train runtime command cannot be resumed as a model session"); },
+    isProviderDisconnect: () => false,
+  } : providerAdapter;
   const controlPlane = dependencies.controlPlane ?? openControlPlane(config);
   const session = controlPlane.openRun(claim);
   let workspace: Workspace | null = null;
@@ -422,6 +540,16 @@ export const executeClaim = async (
   };
 
   try {
+    if (isMergeTrain && claim.task.mergeTrain == null) {
+      await session.finish({
+        outcome: { case: "terminal-protocol-failure", reason: "Detached merge-train claim has no valid platform metadata" },
+        exitCode: null,
+        terminationReason: "detached merge-train metadata missing or invalid",
+        cleanupStatus: "SUCCEEDED",
+        workspaceRetained: false,
+      });
+      return;
+    }
     // The dependency decision is made once, here, and passed down. It is the
     // first thing this function does: a refused claim shape must not reach a
     // runner workspace, scratch, child environment, adapter preflight or
@@ -487,10 +615,12 @@ export const executeClaim = async (
     const prompt = buildPrompt(claim);
     scratch = await provisionAgentScratch(config, claim.session.id);
     await (dependencies.materializeRuntimeTools ?? materializeRuntimeTools)(config, scratch);
-    sessionConfigLease = openSessionConfig(config, claim, scratch, dependencies);
-    await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch, {
-      reuse: claim.resume !== null,
-    });
+    sessionConfigLease = openSessionConfig(config, claim, scratch, dependencies, { isolate: !isMergeTrain });
+    if (!isMergeTrain) {
+      await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch, {
+        reuse: claim.resume !== null,
+      });
+    }
     const env = buildChildEnvironment(config, claim, scratch, workspace.path, workspace.commitHooksPath);
     const preflight = await adapter.preflight({ config, runner: claim.runner, model: claim.run.model, env });
     if (!runLease.held) {
@@ -592,13 +722,21 @@ export const executeClaim = async (
     // Keep the launch manifest and durable Run hash tied to the bytes that this
     // invocation actually handed to the provider.
     const dispatchedPrompt = claim.resume?.input ?? prompt;
-    const manifest = manifestFor(spec, dispatchedPrompt);
+    const mergeTrainInput = isMergeTrain ? JSON.stringify(claim.task.mergeTrain) : null;
+    const manifest = isMergeTrain
+      ? {
+        adapterVersion: MERGE_TRAIN_ADAPTER_VERSION,
+        runtimeTool: "merge-train.sh",
+        inputSha256: createHash("sha256").update(mergeTrainInput ?? "").digest("hex"),
+      }
+      : manifestFor(spec, dispatchedPrompt);
+    const startPromptHash = isMergeTrain ? promptHashFor(mergeTrainInput ?? "") : promptHashFor(dispatchedPrompt);
     await session.start({
-      adapterVersion: ADAPTER_VERSION,
-      cliVersion: preflight.cliVersion ?? "unknown",
-      authMode: preflight.authMode,
+      adapterVersion: isMergeTrain ? MERGE_TRAIN_ADAPTER_VERSION : ADAPTER_VERSION,
+      cliVersion: isMergeTrain ? "merge-train-runtime-tool" : preflight.cliVersion ?? "unknown",
+      authMode: isMergeTrain ? null : preflight.authMode,
       manifest,
-      promptHash: promptHashFor(dispatchedPrompt),
+      promptHash: startPromptHash,
       workspacePath: workspace.path,
       branch: workspace.branch,
       baseSha: workspace.baseSha,
@@ -691,7 +829,7 @@ export const executeClaim = async (
     // process ended is one case of this verdict.
     const exitVerdict = agentExitVerdict(evidence);
     let mechanicalHandoffPersisted = false;
-    if (runLease.held) {
+    if (runLease.held && (!isMergeTrain || exitVerdict.case === "succeeded")) {
       try {
         const handoff = await readMechanicalOutputHandoff(config, claim, workspace);
         if (handoff) {
@@ -719,6 +857,10 @@ export const executeClaim = async (
           type: "REGRESSION_OUTPUT_HANDOFF_FAILED",
           payload: { message: errorMessage(error) },
         });
+      }
+      if (isMergeTrain && exitVerdict.case === "succeeded" && !mechanicalHandoffPersisted
+        && terminalFailureReason === null) {
+        terminalFailureReason = `Merge-train runtime command finished without a current-Run mechanical handoff for Run ${claim.run.id}`;
       }
     }
     if (exitVerdict.case === "succeeded"
@@ -974,7 +1116,7 @@ export const executeClaim = async (
       });
       return;
     }
-    const mechanicallySettled = mechanicalHandoffPersisted
+    const mechanicallySettled = !isMergeTrain && mechanicalHandoffPersisted
       // A validated, fenced Regression handoff is the step's terminal product
       // only when the provider did not explicitly reject the session. Transport
       // loss remains recoverable, but a terminal failure keeps its authority.
@@ -990,7 +1132,7 @@ export const executeClaim = async (
     // Bound outside the closures below: `workspace` is nullable at the top of
     // this function, and the narrowing does not survive into a callback.
     const delivered = { ...workspace, branch: gitResult.branch };
-    if (executionSucceeded) {
+    if (executionSucceeded && !isMergeTrain) {
       // A pinned review started from an object-id-only detached checkout. It
       // produces a platform output, not a branch artifact, so publishing it
       // would either create a forbidden local chain ref or overwrite the chain
@@ -1027,6 +1169,7 @@ export const executeClaim = async (
       // branch is already durable even though the run must fail, so salvaging it
       // would publish a second ref and replace the primary delivery evidence.
       succeeded
+        || isMergeTrain
         || workspacePublicationForbidden
         || Boolean(workspace.pinnedBaseSha)
         || Boolean(primaryDelivery?.pushedBranch),
@@ -1215,7 +1358,7 @@ export const executeClaim = async (
         }
       } else {
         await (dependencies.cleanupAgentScratch ?? cleanupAgentScratch)(config, scratch, {
-          retainConfigRoot: RUNNER_DEFINITIONS[claim.runner].isolatesSessionConfig,
+          retainConfigRoot: !isMergeTrain && RUNNER_DEFINITIONS[claim.runner].isolatesSessionConfig,
         }).catch((cleanupError: unknown) => console.error("Agent scratch cleanup failed", cleanupError));
       }
     }

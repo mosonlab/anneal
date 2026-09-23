@@ -9,6 +9,7 @@ const SHA_PATTERN = /^[0-9a-f]{40}$/u;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const MAX_WIDTH = 3;
 const MAX_GATE_ATTEMPTS = 3;
+const GATE_PROGRESS_INTERVAL_MS = 60_000;
 const OUTPUT_KIND = "merge-train-v1";
 const HANDOFF_FILE = "merge-train-output.json";
 const HANDOFF_SCHEMA_VERSION = 1;
@@ -379,13 +380,28 @@ const gateVerdict = (result, prefix) => {
   return { verdict: "no-verdict", gateExcerpt: composeExcerpt(lines, -1) };
 };
 
-const gateOne = async (prefix, gateCheckout, environment, gateDispatch) => {
-  let last = { verdict: "no-verdict", gateExcerpt: "" };
-  for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS; attempt += 1) {
-    const result = await runProcess(gateDispatch, [prefix.prefixOid, "--master", prefix.predecessorOid], {
+const runGateProcess = async (prefixIndex, prefixCount, gateDispatch, prefix, gateCheckout, environment, progressIntervalMs) => {
+  // Runner tracks progress from tool stdout. Keep each heartbeat metadata-only
+  // so captured gate output cannot leak into progress messages.
+  const progress = () => {
+    process.stdout.write(`merge-train: merge gate running (prefix ${prefixIndex}/${prefixCount})\n`);
+  };
+  const progressTimer = setInterval(progress, progressIntervalMs);
+  progressTimer.unref();
+  try {
+    return await runProcess(gateDispatch, [prefix.prefixOid, "--master", prefix.predecessorOid], {
       cwd: gateCheckout,
       env: { ...environment, AGENTOS_WORKSPACE_PATH: gateCheckout, AGENTOS_RUN_SCOPE_BYPASS: "merge-train" },
     });
+  } finally {
+    clearInterval(progressTimer);
+  }
+};
+
+const gateOne = async (prefix, index, prefixCount, gateCheckout, environment, gateDispatch, progressIntervalMs) => {
+  let last = { verdict: "no-verdict", gateExcerpt: "" };
+  for (let attempt = 1; attempt <= MAX_GATE_ATTEMPTS; attempt += 1) {
+    const result = await runGateProcess(index + 1, prefixCount, gateDispatch, prefix, gateCheckout, environment, progressIntervalMs);
     last = gateVerdict(result, prefix);
     if (last.verdict !== "no-verdict") return last;
     if (result.code !== 75 && result.code !== 76) break;
@@ -393,8 +409,16 @@ const gateOne = async (prefix, gateCheckout, environment, gateDispatch) => {
   return last;
 };
 
-const gatePrefixes = async (prefixes, gateCheckouts, environment, gateDispatch) => Promise.all(
-  prefixes.map((prefix, index) => gateOne(prefix, gateCheckouts[index].absolute, environment, gateDispatch)),
+const gatePrefixes = async (prefixes, gateCheckouts, environment, gateDispatch, progressIntervalMs) => Promise.all(
+  prefixes.map((prefix, index) => gateOne(
+    prefix,
+    index,
+    prefixes.length,
+    gateCheckouts[index].absolute,
+    environment,
+    gateDispatch,
+    progressIntervalMs,
+  )),
 );
 
 /**
@@ -457,7 +481,11 @@ const ensureScratchDirectory = async (parent, name) => {
   return directory;
 };
 
-export const runMergeTrain = async (input, environment = process.env) => {
+export const runMergeTrain = async (input, environment = process.env, options = {}) => {
+  const progressIntervalMs = options.gateProgressIntervalMs ?? GATE_PROGRESS_INTERVAL_MS;
+  if (!Number.isSafeInteger(progressIntervalMs) || progressIntervalMs < 1) {
+    throw new RangeError("gateProgressIntervalMs must be a positive safe integer");
+  }
   const workspaceInput = environment.AGENTOS_WORKSPACE_PATH ?? process.cwd();
   let repoRoot;
   try {
@@ -512,7 +540,7 @@ export const runMergeTrain = async (input, environment = process.env) => {
     for (const prefix of built.prefixes) await pushAppendOnlyRef(repoRoot, prefix);
 
     const gateDispatch = resolveGateDispatch(environment);
-    const gateResults = await gatePrefixes(built.prefixes, gateCheckouts, environment, gateDispatch);
+    const gateResults = await gatePrefixes(built.prefixes, gateCheckouts, environment, gateDispatch, progressIntervalMs);
     const prefixes = built.prefixes.map((prefix, index) => ({
       index: prefix.index,
       taskId: prefix.taskId,

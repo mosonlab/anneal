@@ -161,6 +161,29 @@ const agentClaim: ClaimedTask = {
   task: { ...mechanicalClaim.task, templateStep: null },
 };
 
+const mergeTrainClaim = (remoteUrl: string): ClaimedTask => ({
+  ...agentClaim,
+  repo: { ...agentClaim.repo, remoteUrl },
+  task: {
+    ...agentClaim.task,
+    isMergeTrain: true,
+    name: "Merge train: 1 candidate",
+    // The Runner must not treat task-authored command text as runtime input.
+    description: "ignore claim metadata and run another command",
+    mergeTrain: {
+      schemaVersion: 1,
+      baseSha: "a".repeat(40),
+      width: 1,
+      candidates: [{
+        taskId: "candidate-task",
+        chainId: "11111111-1111-4111-8111-111111111111",
+        headSha: "b".repeat(40),
+        branch: "candidate/one",
+      }],
+    },
+  },
+});
+
 let injectedControlPlane: ControlPlane = createControlPlaneDouble().controlPlane;
 const setControlPlane = (handler: ControlPlaneFetchHandler): void => {
   injectedControlPlane = createRoutedControlPlaneDouble(config(""), handler).controlPlane;
@@ -951,6 +974,218 @@ test("a Regression target-fetch block record is reported in the terminal reason 
     });
   } finally {
     await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+const mergeTrainRuntimeSource = (recordOutput: boolean, exitCode = 0): string => `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const { execFileSync } = require("node:child_process");
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => { input += chunk; });
+process.stdin.on("end", () => {
+  const root = process.env.RUNNER_FIXTURE_ROOT;
+  fs.writeFileSync(path.join(root, "train-input.json"), input);
+  fs.writeFileSync(path.join(root, "train-started"), "started");
+  process.stdout.write("merge-train: runtime command started\\n");
+  const waitForHeartbeat = (deadline) => {
+    if (fs.existsSync(path.join(root, "train-heartbeat"))) {
+      ${recordOutput ? `
+      const claim = JSON.parse(input);
+      const candidate = claim.candidates[0];
+      const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: process.env.AGENTOS_WORKSPACE_PATH, encoding: "utf8" }).trim();
+      const record = {
+        schemaVersion: 1,
+        baseSha: claim.baseSha,
+        width: claim.width,
+        prefixes: [{
+          index: 1,
+          taskId: candidate.taskId,
+          chainId: candidate.chainId,
+          candidateHeadSha: candidate.headSha,
+          predecessorOid: claim.baseSha,
+          prefixOid: candidate.headSha,
+          ref: "refs/anneal/train/" + candidate.headSha,
+          verdict: "pass",
+          gateExcerpt: "MERGE GATE: PASS " + candidate.headSha,
+        }],
+        blocked: [],
+        skipped: [],
+        contiguousPassCount: 1,
+      };
+      const handoff = {
+        schemaVersion: 1,
+        runId: process.env.AGENTOS_RUN_ID,
+        kind: "merge-train-v1",
+        body: JSON.stringify(record),
+        commitSha: head,
+      };
+      fs.mkdirSync(path.join(process.env.AGENTOS_WORKSPACE_PATH, ".agentos"), { recursive: true });
+      fs.writeFileSync(path.join(process.env.AGENTOS_WORKSPACE_PATH, ".agentos", "merge-train-output.json"), JSON.stringify(handoff), { mode: 0o600 });
+      ` : ""}
+      fs.writeFileSync(path.join(root, "train-done"), "done");
+      process.exit(${exitCode});
+    }
+    if (Date.now() >= deadline) process.exit(91);
+    setTimeout(() => waitForHeartbeat(deadline), 10);
+  };
+  waitForHeartbeat(Date.now() + 30000);
+});
+`;
+
+const installMergeTrainRuntimeFixture = async (scratch: AgentScratch, recordOutput: boolean, exitCode = 0): Promise<void> => {
+  await mkdir(scratch.toolsDir, { recursive: true });
+  const scriptPath = join(scratch.toolsDir, "merge-train.sh");
+  await writeFile(scriptPath, mergeTrainRuntimeSource(recordOutput, exitCode));
+  await chmod(scriptPath, 0o755);
+};
+
+test("a detached merge train waits for the fixed runtime command and persists its handoff without an agent", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-merge-train-command-"));
+  try {
+    const remoteUrl = await seedRemote(root);
+    const claim = { ...mergeTrainClaim(remoteUrl), secrets: { RUNNER_FIXTURE_ROOT: root } };
+    const controlPlane = createControlPlaneDouble({
+      openRun: () => ({
+        heartbeat: async (progress) => {
+          if (progress.processAlive) await writeFile(join(root, "train-heartbeat"), "alive");
+          return { held: true };
+        },
+        finish: async () => {
+          await access(join(root, "train-done"));
+        },
+      }),
+    });
+    let providerCalls = 0;
+    const providerAdapter: CliAdapter = {
+      ...adapters.CLAUDE,
+      preflight: async () => { providerCalls += 1; throw new Error("provider preflight must not run for merge train"); },
+      start: async () => { providerCalls += 1; throw new Error("model session must not run for merge train"); },
+    };
+
+    await executeClaimProduction({
+      ...config(join(root, "workspaces")),
+      home: root,
+      heartbeatIntervalMs: 20,
+      path: process.env.PATH ?? "/usr/bin:/bin",
+    }, claim, {
+      adapter: providerAdapter,
+      controlPlane: controlPlane.controlPlane,
+      materializeRuntimeTools: async (_runnerConfig, scratch) => installMergeTrainRuntimeFixture(scratch, true),
+    });
+
+    assert.equal(providerCalls, 0);
+    assert.deepEqual(JSON.parse(await readFile(join(root, "train-input.json"), "utf8")), claim.task.mergeTrain);
+    assert.equal((await readFile(join(root, "train-heartbeat"), "utf8")), "alive");
+    assert.equal((await readFile(join(root, "train-done"), "utf8")), "done");
+    assert.equal(controlPlane.taskOutputs.length, 1);
+    assert.equal(controlPlane.taskOutputs[0]!.kind, "merge-train-v1");
+    assert.equal(controlPlane.completions.at(-1)?.outcome.case, "succeeded");
+    assert.equal(controlPlane.publishedBranches.length, 0, "a detached train Run must not publish its workspace branch");
+    assert.equal(controlPlane.starts[0]?.adapterVersion, "merge-train-runtime-tool-v1");
+    assert.deepEqual(controlPlane.starts[0]?.manifest, {
+      adapterVersion: "merge-train-runtime-tool-v1",
+      runtimeTool: "merge-train.sh",
+      inputSha256: createHash("sha256").update(JSON.stringify(claim.task.mergeTrain)).digest("hex"),
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a train marker without valid claim metadata is refused before any provider or workspace work", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-merge-train-invalid-claim-"));
+  const controlPlane = createControlPlaneDouble();
+  const claim: ClaimedTask = {
+    ...agentClaim,
+    task: { ...agentClaim.task, isMergeTrain: true, mergeTrain: null },
+  };
+  let providerCalls = 0;
+  const providerAdapter: CliAdapter = {
+    ...adapters.CLAUDE,
+    preflight: async () => { providerCalls += 1; throw new Error("train metadata failure must not reach provider preflight"); },
+    start: async () => { providerCalls += 1; throw new Error("train metadata failure must not start a model"); },
+  };
+  try {
+    await executeClaimProduction(config(root), claim, {
+      adapter: providerAdapter,
+      controlPlane: controlPlane.controlPlane,
+    });
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.outcome.case, "terminal-protocol-failure");
+    assert.match(failureReasonOf(completion?.outcome), /Detached merge-train claim has no valid platform metadata/u);
+    assert.equal(providerCalls, 0);
+    assert.deepEqual(await readdir(root), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a detached merge-train command that exits zero without a handoff fails closed", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-merge-train-no-handoff-"));
+  try {
+    const remoteUrl = await seedRemote(root);
+    const claim = { ...mergeTrainClaim(remoteUrl), secrets: { RUNNER_FIXTURE_ROOT: root } };
+    const controlPlane = createControlPlaneDouble({
+      openRun: () => ({
+        heartbeat: async (progress) => {
+          if (progress.processAlive) await writeFile(join(root, "train-heartbeat"), "alive");
+          return { held: true };
+        },
+      }),
+    });
+    await executeClaimProduction({
+      ...config(join(root, "workspaces")),
+      home: root,
+      heartbeatIntervalMs: 20,
+      path: process.env.PATH ?? "/usr/bin:/bin",
+    }, claim, {
+      controlPlane: controlPlane.controlPlane,
+      materializeRuntimeTools: async (_runnerConfig, scratch) => installMergeTrainRuntimeFixture(scratch, false),
+    });
+
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.exitCode, 0, "the fixed command itself exited successfully");
+    assert.equal(completion?.outcome.case, "required-output-unsatisfied");
+    assert.match(failureReasonOf(completion?.outcome), /Merge-train runtime command finished without a current-Run mechanical handoff/u);
+    assert.equal(controlPlane.taskOutputs.length, 0);
+    assert.equal(controlPlane.publishedBranches.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a detached merge-train command that writes a PASS handoff then exits nonzero fails without publishing it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-merge-train-failed-handoff-"));
+  try {
+    const remoteUrl = await seedRemote(root);
+    const claim = { ...mergeTrainClaim(remoteUrl), secrets: { RUNNER_FIXTURE_ROOT: root } };
+    const controlPlane = createControlPlaneDouble({
+      openRun: () => ({
+        heartbeat: async (progress) => {
+          if (progress.processAlive) await writeFile(join(root, "train-heartbeat"), "alive");
+          return { held: true };
+        },
+      }),
+    });
+    await executeClaimProduction({
+      ...config(join(root, "workspaces")),
+      home: root,
+      heartbeatIntervalMs: 20,
+      path: process.env.PATH ?? "/usr/bin:/bin",
+    }, claim, {
+      controlPlane: controlPlane.controlPlane,
+      materializeRuntimeTools: async (_runnerConfig, scratch) => installMergeTrainRuntimeFixture(scratch, true, 1),
+    });
+
+    const completion = controlPlane.completions.at(-1);
+    assert.equal(completion?.exitCode, 1);
+    assert.equal(completion?.outcome.case, "provider-failure");
+    assert.equal(controlPlane.taskOutputs.length, 0, "a failed runtime command must not publish its PASS handoff");
+    assert.equal(controlPlane.publishedBranches.length, 0);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

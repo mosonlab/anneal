@@ -3,12 +3,13 @@ import { execFileSync, spawn } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { parseMergeTrainRecord } from "@anneal/db";
 
 const script = resolve(dirname(fileURLToPath(import.meta.url)), "../runtime-tools/merge-train.sh");
+const runtimeModule = resolve(dirname(fileURLToPath(import.meta.url)), "../runtime-tools/merge-train.mjs");
 const CHAIN_ID = "11111111-1111-4111-8111-111111111111";
 
 const git = (cwd: string, ...args: string[]): string => execFileSync("git", args, {
@@ -42,6 +43,7 @@ type Fixture = {
   workspace: string;
   baseSha: string;
   gateLog: string;
+  gateRelease: string;
   gateScript: string;
   env: NodeJS.ProcessEnv;
   handoff: () => Record<string, unknown> | null;
@@ -73,6 +75,7 @@ const makeFixture = async (): Promise<Fixture> => {
   git(workspace, "config", "user.email", "merge-train@example.invalid");
 
   const gateLog = join(root, "gate.log");
+  const gateRelease = join(root, "gate.release");
   const gateScript = join(root, "bin", "gate-dispatch.sh");
   writeFileSync(gateLog, "");
   executable(gateScript, `#!/usr/bin/env node
@@ -125,6 +128,19 @@ if (behavior === "delayed-pass") {
     say("MERGE GATE: PASS " + oid);
     process.exit(0);
   }, 10);
+} else if (behavior === "hold-until-progress") {
+  fs.appendFileSync(process.env.MERGE_TRAIN_FIXTURE_GATE_LOG, "start " + oid + "\\n");
+  const deadline = Date.now() + 10000;
+  const interval = setInterval(() => {
+    if (fs.existsSync(process.env.MERGE_TRAIN_FIXTURE_GATE_RELEASE)) {
+      clearInterval(interval);
+      fs.appendFileSync(process.env.MERGE_TRAIN_FIXTURE_GATE_LOG, "end " + oid + "\\n");
+      say("GATE-PRIVATE-SENTINEL");
+      say("MERGE GATE: PASS " + oid);
+      process.exit(0);
+    }
+    if (Date.now() >= deadline) process.exit(97);
+  }, 5);
 } else if (behavior === "busy-pass") {
   say("MERGE GATE: PASS " + oid);
   process.exit(75);
@@ -197,6 +213,7 @@ if (behavior === "delayed-pass") {
     AGENTOS_WORKSPACE_PATH: workspace,
     RUNNER_WORKSPACE_ROOT: join(root, "runner-workspaces"),
     MERGE_TRAIN_FIXTURE_GATE_LOG: gateLog,
+    MERGE_TRAIN_FIXTURE_GATE_RELEASE: gateRelease,
     MERGE_TRAIN_FIXTURE_BASE: baseSha,
     GIT_AUTHOR_DATE: "2026-01-01T00:00:00Z",
     GIT_COMMITTER_DATE: "2026-01-01T00:00:00Z",
@@ -209,6 +226,7 @@ if (behavior === "delayed-pass") {
     workspace,
     baseSha,
     gateLog,
+    gateRelease,
     gateScript,
     env,
     handoff: () => {
@@ -235,15 +253,34 @@ if (behavior === "delayed-pass") {
 
 type ToolResult = { status: number | null; stdout: string; stderr: string };
 
-const runTool = (fixture: Fixture, input: Record<string, unknown>, env: NodeJS.ProcessEnv = {}): Promise<ToolResult> => new Promise((resolveRun) => {
-  const child = spawn("bash", [script], {
+const runTool = (
+  fixture: Fixture,
+  input: Record<string, unknown>,
+  env: NodeJS.ProcessEnv = {},
+  options: { gateProgressIntervalMs?: number; onStdout?: (chunk: string) => void } = {},
+): Promise<ToolResult> => new Promise((resolveRun) => {
+  const runtimeInvocation = options.gateProgressIntervalMs === undefined
+    ? { command: "bash", args: [script] }
+    : {
+      command: process.execPath,
+      args: ["--input-type=module", "-e", [
+        `import { parseMergeTrainInput, runMergeTrain } from ${JSON.stringify(pathToFileURL(runtimeModule).href)};`,
+        "let raw = \"\"; for await (const chunk of process.stdin) raw += chunk;",
+        `const record = await runMergeTrain(parseMergeTrainInput(raw), process.env, { gateProgressIntervalMs: ${options.gateProgressIntervalMs} });`,
+        "process.stdout.write(JSON.stringify(record) + '\\n');",
+      ].join("\n")],
+    };
+  const child = spawn(runtimeInvocation.command, runtimeInvocation.args, {
     cwd: fixture.workspace,
     env: { ...fixture.env, ...env },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const stdout: Buffer[] = [];
   const stderr: Buffer[] = [];
-  child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+  child.stdout.on("data", (chunk: Buffer) => {
+    stdout.push(chunk);
+    options.onStdout?.(chunk.toString("utf8"));
+  });
   child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
   child.on("close", (status) => resolveRun({
     status,
@@ -262,8 +299,9 @@ const trainInput = (fixture: Fixture, candidates: Candidate[], width = candidate
 
 const recordOf = (result: ToolResult): Record<string, any> => {
   assert.equal(result.stderr, "", `unexpected stderr: ${result.stderr}`);
-  assert.match(result.stdout, /^\{"schemaVersion":1,/u);
-  return JSON.parse(result.stdout) as Record<string, any>;
+  const finalLine = result.stdout.trimEnd().split(/\r?\n/u).at(-1) ?? "";
+  assert.match(finalLine, /^\{"schemaVersion":1,/u);
+  return JSON.parse(finalLine) as Record<string, any>;
 };
 
 test("runtime merge train builds and gates three cumulative prefixes", async () => {
@@ -303,6 +341,45 @@ test("runtime merge train builds and gates three cumulative prefixes", async () 
     assert.ok(gates.includes(`${record.prefixes[0].prefixOid} ${fixture.baseSha}`));
     assert.ok(gates.includes(`${record.prefixes[1].prefixOid} ${record.prefixes[0].prefixOid}`));
     assert.ok(gates.includes(`${record.prefixes[2].prefixOid} ${record.prefixes[1].prefixOid}`));
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("a running Merge gate emits fixed progress lines until it exits", async () => {
+  const fixture = await makeFixture();
+  try {
+    const candidate = fixture.candidate("task-1", "chain-1", { "a.txt": "a\n" });
+    let observed = "";
+    const result = await runTool(
+      fixture,
+      trainInput(fixture, [candidate]),
+      { MERGE_TRAIN_FIXTURE_GATE_BEHAVIOR: "hold-until-progress" },
+      {
+        gateProgressIntervalMs: 25,
+        onStdout: (chunk) => {
+          observed += chunk;
+          const completeLines = observed.split(/\r?\n/u).slice(0, -1);
+          const heartbeatCount = completeLines.filter((line) => /^merge-train: merge gate running \(prefix 1\/1\)$/u.test(line)).length;
+          if (heartbeatCount >= 2) {
+            writeFileSync(fixture.gateRelease, "released\n");
+          }
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    const progressLines = result.stdout.split(/\r?\n/u)
+      .filter((line) => line.startsWith("merge-train: merge gate running"));
+    assert.ok(progressLines.length >= 2, "a still-running gate receives periodic heartbeats");
+    assert.ok(progressLines.every((line) => /^merge-train: merge gate running \(prefix 1\/1\)$/u.test(line)));
+    assert.doesNotMatch(result.stdout, /^GATE-PRIVATE-SENTINEL$/mu, "gate output is not forwarded as progress");
+    const events = readFileSync(fixture.gateLog, "utf8").trim().split("\n");
+    const start = events.find((event) => event.startsWith("start "));
+    assert.ok(start);
+    assert.equal(events.find((event) => event.startsWith("end ")), start.replace("start ", "end "));
+    const record = recordOf(result);
+    assert.equal(record.prefixes[0].verdict, "pass");
+    assert.equal(start, "start " + record.prefixes[0].prefixOid);
   } finally {
     await fixture.cleanup();
   }

@@ -94,6 +94,8 @@ export type ClaimTask = {
   stallTimeoutMin: number;
   maxSessionsPerTask: number;
   templateStep: ClaimTemplateStep | null;
+  /** True for a detached train even when its latest marker cannot supply valid input. */
+  isMergeTrain?: boolean;
   /** Present for a detached merge-train Task; absent on legacy claims. */
   mergeTrain?: MergeTrainClaimMetadata | null;
 };

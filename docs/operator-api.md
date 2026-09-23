@@ -1702,8 +1702,9 @@ the ordinary single-candidate authorization path.
 The control plane represents a train with one detached platform Task of kind
 `merge-train`. This Task has `assigneeType: AGENT`,
 `maxSessionsPerTask: 1`, and the Agent bound to the first candidate Chain's
-Regression verification Step. Its description instructs the session only to
-run `"${AGENTOS_TOOLS}/merge-train.sh"` and finish. The task claim metadata
+Regression verification Step. The Runner executes
+`"${AGENTOS_TOOLS}/merge-train.sh"` directly and waits for it to exit. Its
+description displays the command for operators. The task claim metadata
 contains the tool's input, including the live `baseSha`, configured `width`,
 and ordered `candidates` with each candidate's `taskId`, `chainId`, `headSha`,
 and `branch`:
@@ -1739,8 +1740,11 @@ train formation. The Lease is released after the last
 authorization or on every failure path. Merge executor publication occurs
 after the handoff and is outside this Lease. A train Run that is lost or ends
 without a stored `merge-train-v1` record releases the Lease, marks the train
-aborted, and returns its candidates to `ready`; the detached Task is not
-retried.
+aborted, and checks the live default-branch base. If the base moved, every
+candidate returns to `ready`. Otherwise a structured candidate-tip mismatch
+stops the named candidate's Merge readiness Step; other failures stop the first
+candidate as a loop guard. The stop opens a default-thread Inbox notice, and
+the other candidates return to `ready`. The detached Task is not retried.
 
 Before authorizing, readiness parses `merge-train-v1`, requires its `baseSha`
 to equal the live default-branch head and every `candidateHeadSha` to equal
@@ -1771,10 +1775,11 @@ candidate head and its predecessor prefix OID as `baseHeadSha`; the existing
 shared Regression completion and repair-task handler preserves the repair
 budget and task shape. A `no-verdict` prefix and every `skipped` candidate
 return to `ready` unchanged; and a `blocked` candidate enters the existing
-refresh-conflict recovery stop with the recorded reason. A `fail`, `blocked`,
-or aborted train writes one existing Inbox stop notice for each affected
-candidate. Initial Regression semantic verification remains part of the
-candidate evidence, but it is deliberately not repeated after a base move
+refresh-conflict recovery stop with the recorded reason. A stopped candidate
+receives one existing Inbox notice. A moved-base abort returns candidates to
+`ready` without a stop notice. Initial Regression semantic verification remains
+part of the candidate evidence, but it is deliberately not repeated after a
+base move
 while train readiness is enabled; the cumulative Merge gate and readiness
 second read provide the train's fresh checks.
 
@@ -3090,8 +3095,10 @@ train Task is enqueued and keeps it through the train's record validation,
 second-read checks, and authorization settlement. The Lease is released after
 the last authorization or on every failure and abort path; merge executor's
 publication is outside this window. A lost train Run or a Run without a stored
-`merge-train-v1` record aborts the train, releases the Lease, and returns its
-candidates to `ready` for a later tick.
+`merge-train-v1` record aborts the train and releases the Lease. A moved live
+base returns every candidate to `ready`; otherwise a structured tip mismatch
+stops its named candidate, or the first candidate is stopped as a loop guard.
+The stop opens a default-thread Inbox notice and the others return to `ready`.
 
 Response fields:
 
