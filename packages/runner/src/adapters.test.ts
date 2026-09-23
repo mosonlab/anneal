@@ -817,8 +817,15 @@ test("native implementation subagents are pinned on fresh and resumed Codex laun
   );
   assert.throws(() => buildPrompt({
     ...executioner,
-    run: { ...executioner.run, subagentModel: "gpt-6-sol:high" },
-  }), /must use gpt-6-luna:max with concurrency 8/u);
+    run: { ...executioner.run, subagentMaxConcurrent: 4 },
+  }), /need a gpt-\* model:effort snapshot with concurrency 8/u);
+  assert.throws(() => buildPrompt({
+    ...executioner,
+    run: { ...executioner.run, subagentModel: "claude-opus-5:medium" },
+  }), /need a gpt-\* model:effort snapshot/u);
+  // A Run opened before a pin bump keeps executing the child model it snapshotted.
+  const earlierPin = { ...executioner, run: { ...executioner.run, subagentModel: "gpt-5.6-luna:max" } };
+  assert.ok(argsForRunner("CODEX", { ...runSpec(), claim: earlierPin }).includes('agents.default_subagent_model="gpt-5.6-luna"'));
   assert.throws(
     () => buildPrompt({ ...executioner, runner: "PI" }),
     /require a Codex root Run/u,

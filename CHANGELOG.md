@@ -16,7 +16,9 @@ written.
   Sol and Luna in place of GPT-5.6, and cost estimates price both. Native
   implementation subagents pin `gpt-6-luna:max`: unfinished Runs move to the
   new pin on migration, a retry takes the current pin, and finished Runs keep
-  the GPT-5.6 snapshot they ran.
+  the GPT-5.6 snapshot they ran. The runner now executes each Run's own child
+  snapshot and the database checks only its shape, so the next pin bump is a
+  one-constant change with no migration.
 - **Retrieval roles run Luna high.** `librarian-luna-xhigh` and
   `spec-revalidator-luna-xhigh` become `librarian-luna-high` and
   `spec-revalidator-luna-high`; canonical sync renames existing rows in place.

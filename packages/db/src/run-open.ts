@@ -171,6 +171,8 @@ export const isCompoundImplementationAssigneeError = (
 ): error is CompoundImplementationAssigneeError =>
   error instanceof Error && error.name === "CompoundImplementationAssigneeError";
 
+/** The child model new implementation Runs and their retries snapshot. Bumping it
+ * needs no migration: a Run already opened keeps executing its own snapshot. */
 export const NATIVE_IMPLEMENTATION_SUBAGENT_MODEL = "gpt-6-luna:max";
 export const NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT = 8;
 

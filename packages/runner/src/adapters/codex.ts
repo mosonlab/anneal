@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { isCodexReconnectStatus } from "@anneal/db";
+import { isCodexReconnectStatus, NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT } from "@anneal/db";
 
 import type { ClaimedTask } from "../api.js";
 import type { RunnerConfig, RunnerKind } from "../config.js";
@@ -93,9 +93,11 @@ export const codexNativeSubagentProfile = (run: ClaimedTask["run"], runner: Runn
     throw new Error("Run contains an incomplete native subagent snapshot");
   }
   if (runner !== "CODEX") throw new Error("Native implementation subagents require a Codex root Run");
+  // The control plane chose the child model when it opened the Run; executing
+  // that snapshot lets a Run opened before a model bump finish on its own pin.
   const { model, effort } = modelSpec(run.subagentModel);
-  if (model !== "gpt-6-luna" || effort !== "max" || run.subagentMaxConcurrent !== 8) {
-    throw new Error("Native implementation subagents must use gpt-6-luna:max with concurrency 8");
+  if (!model.startsWith("gpt-") || !effort || run.subagentMaxConcurrent !== NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT) {
+    throw new Error(`Native implementation subagents need a gpt-* model:effort snapshot with concurrency ${NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT}`);
   }
   return { model, effort, maxConcurrent: run.subagentMaxConcurrent };
 };

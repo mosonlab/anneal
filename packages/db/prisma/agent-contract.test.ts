@@ -167,6 +167,13 @@ test("the GPT-6 subagent pin keeps finished snapshots and moves unfinished Runs"
   assert.match(migration, /SET "subagentModel" = 'gpt-6-luna:max'[\s\S]*"status" IN \('queued', 'claimed', 'provisioning', 'running', 'waiting-inbox'\)/u);
 });
 
+test("the native subagent snapshot constraint checks shape, not the model pin", async () => {
+  const migration = await readFile(`${prismaRoot}migrations/20260923010000_native_subagent_model_unpinned/migration.sql`, "utf8");
+  assert.match(migration, /"subagentModel" IS NOT NULL/u);
+  assert.match(migration, /"subagentMaxConcurrent" = 8/u);
+  assert.doesNotMatch(migration, /gpt-/u);
+});
+
 test("canonical staffing profiles carry the dedicated merge-tail repair role", async () => {
   const [schema, migration, seed, sync] = await Promise.all([
     readFile(`${prismaRoot}schema.prisma`, "utf8"),

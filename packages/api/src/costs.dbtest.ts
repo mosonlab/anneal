@@ -101,8 +101,7 @@ const seedRun = async (
     projectId, taskId: task.id, agentId: spec.agentId, repoId, runNumber: 1,
     dedupeKey: `task:${task.id}:run:1:${runOrdinal}`, runner: spec.runner, status: spec.status ?? "SUCCEEDED",
     model: spec.model, promptHash: "hash", startedAt: spec.startedAt,
-    // `Run_native_subagent_snapshot_check` only accepts the pinned pair, so a
-    // mixed-model run is seeded exactly as the control plane writes one.
+    // A mixed-model run seeded with the child pin such Runs recorded before GPT-6.
     ...(spec.subagentModel === true ? { subagentModel: "gpt-5.6-luna:max", subagentMaxConcurrent: 8 } : {}),
   } });
   if (spec.session !== null) {
