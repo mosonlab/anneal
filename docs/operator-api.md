@@ -3216,7 +3216,8 @@ requeue enters the existing stop path with a recorded reason. Healthy OPEN
 cards are read no more than every five minutes, and unchanged `checked`
 observations do not add TaskActivity rows. Timeout, 429, 5xx and Lease
 transport failures retry for at most 30 minutes or 30 attempts; deterministic
-identity or ancestry mismatches stop immediately. A held Chain waits for
+identity, ancestry, permission (403/404), or malformed/null GitHub responses
+stop immediately. A held Chain waits for
 resume. A human answer
 and automatic refresh race on the same OPEN card under the Chain lock: the
 first transaction wins, and the late answer receives `409 conflict`.

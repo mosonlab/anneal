@@ -226,6 +226,7 @@ export const enterRepair = async (
     now: Date;
     automaticDisposition?: { condition: string; ordinal: number; remaining: number };
     readinessRequeue?: { staleBaseSha: string; reason: string; baseDrift: boolean };
+    evidenceSweep?: true;
     /**
      * A one-shot grant for a re-run the branch did not earn. An operator rerun
      * of a host-caused gate FAIL is platform compensation, exactly like the
@@ -244,7 +245,7 @@ export const enterRepair = async (
   const requeue = input.readinessRequeue;
   if (requeue
     ? aggregate.status !== MergeRecoveryStatus.AWAITING_AUTHORIZATION
-      && aggregate.status !== MergeRecoveryStatus.REPAIRING
+      && !(input.evidenceSweep && aggregate.status === MergeRecoveryStatus.REPAIRING)
     : aggregate.status === MergeRecoveryStatus.AWAITING_AUTHORIZATION) {
     throw new Error(`Merge recovery ${input.aggregateId} repair intent does not match ${aggregate.status}`);
   }

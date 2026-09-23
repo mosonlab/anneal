@@ -25,6 +25,8 @@ completed Regression or its semantic work.
   Lease, waits with doubling backoff (2–60 seconds), then re-enters the same
   mechanical decision. Six hours total, including repeated deferrals, is the
   ceiling; only then does it open the existing stop question with elapsed time.
+  A held Chain is excluded from the ceiling; if the hold spans the six-hour
+  boundary, Resume grants one final mechanical determination before a stop.
 - `CONFLICTING` or `DIRTY` with terminal checks enters the existing base-drift
   recovery even if the base is unchanged; if it has moved, forward advancement
   must still be verified. Recovery
@@ -65,3 +67,4 @@ control-plane-owned action, not either human rejection.
 
 Train post-publication read-back cannot defer: publication may already have
 landed, so it must settle the observed merge or stop for operator investigation.
+Same-base conflict recovery does not reread mergeability before its bounded Regression replay; a redundant replay can consume one of two attempts but cannot bypass merge checks. Non-train resends have no separate send-count cap: every resend locks the exact head, rechecks all merge conditions, and remains within the six-hour wait ceiling.

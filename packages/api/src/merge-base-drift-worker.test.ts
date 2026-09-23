@@ -15,6 +15,7 @@ test("the base-drift recovery worker never overlaps ticks in one process", async
   let maximumActive = 0;
   let calls = 0;
   const db = {
+    $queryRaw: async () => [],
     mergeRecoveryAttempt: { findMany: async () => [] },
     taskActivity: { findMany: async () => [] },
     task: {

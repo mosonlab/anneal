@@ -129,6 +129,9 @@ releases the Merge Lease and retries the same mechanical decision after a
 2–60-second doubling backoff. Repeated deferrals share one six-hour wait
 ceiling; the eventual `unresolved-mergeability` stop card names the elapsed
 wait. A new head or base is still classified by the existing drift guards.
+Held Chains do not exhaust this ceiling while held; Resume after the boundary
+gets one final mechanical determination. The scheduler reads a bounded window
+of due active deferrals ordered by eligibility, not stopped-task history.
 The train's pre-publication poll and the ordinary merge's final pre-send and
 resend guards also defer pending mergeability. A train post-publication
 read-back cannot defer because a ref update may already have landed.

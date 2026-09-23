@@ -869,6 +869,7 @@ export const completeRun = async (
             body: `Mergeability pending after Run ${run.id}; automatic recheck ${ordinal} in ${backoffMs}ms`,
             metadata: { condition: outcome.condition, observed: outcome.evidence,
               sourceRunId: run.id, sourceStopId, ordinal, firstDeferredAt,
+              finalAttempt: sameRecheck && previousWait.raw.finalAttempt === true,
               nextEligibleAt: new Date(now.getTime() + backoffMs).toISOString(),
               elapsedMs: now.getTime() - Date.parse(firstDeferredAt),
               remainingMs: Math.max(0, BASE_DRIFT_WAITING_CEILING_MS - (now.getTime() - Date.parse(firstDeferredAt))) },

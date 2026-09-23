@@ -625,41 +625,58 @@ export const pendingMergeabilityTick = async (
 ): Promise<number> => {
   let queued = 0;
   let examined = 0;
-  let cursor: string | undefined;
-  const visited = new Set<string>();
-  while (examined < limit) {
-    const markers = await db.taskActivity.findMany({
-      where: { actorType: "control-plane", AND: [
-        { metadata: { path: ["kind"], equals: "mergeTail.mergeabilityWait" } },
-        { metadata: { path: ["state"], equals: "deferred" } },
-      ] },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-      take: 100,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-      select: { id: true, taskId: true },
-    });
-    if (markers.length === 0) break;
-    cursor = markers[markers.length - 1]!.id;
-    for (const row of markers) {
+  const candidates = await db.$queryRaw<Array<{ taskId: string }>>(Prisma.sql`
+    SELECT task.id AS "taskId"
+    FROM "Task" AS task
+    JOIN "TaskTemplateStep" AS step ON step.id = task."templateStepId"
+    JOIN LATERAL (
+      SELECT activity.metadata
+      FROM "TaskActivity" AS activity
+      WHERE activity."taskId" = task.id
+        AND activity."actorType" = 'control-plane'
+        AND activity.metadata->>'kind' = 'mergeTail.mergeabilityWait'
+      ORDER BY activity."createdAt" DESC, activity.id DESC
+      LIMIT 1
+    ) AS wait_marker ON true
+    WHERE task.status::text = 'review'
+      AND task."chainId" IS NOT NULL
+      AND step."outputKind" = ${INTEGRATOR_OUTPUT_KIND}
+      AND wait_marker.metadata->>'state' = 'deferred'
+      AND COALESCE(wait_marker.metadata->>'nextEligibleAt', '') <= ${now.toISOString()}
+      AND NOT EXISTS (SELECT 1 FROM "ChainControl" AS control
+        WHERE control."projectId" = task."projectId" AND control."chainId" = task."chainId"
+          AND control.state::text = 'held')
+      AND (COALESCE(wait_marker.metadata->>'firstDeferredAt', '') <= ${new Date(now.getTime() - MERGEABILITY_WAIT_CEILING_MS).toISOString()}
+        OR NOT EXISTS (SELECT 1 FROM "MergeLeaseEvent" AS lease_event
+          WHERE lease_event."projectId" = task."projectId" AND lease_event."chainId" = task."chainId"
+            AND lease_event.state::text IN ('handoff-pending', 'release-deferred')))
+    ORDER BY wait_marker.metadata->>'nextEligibleAt' ASC, task.id ASC
+    LIMIT ${Math.max(limit * 20, 100)}
+  `);
+  for (const row of candidates) {
       if (examined >= limit) break;
-      if (visited.has(row.taskId)) continue;
-      visited.add(row.taskId);
       try {
         const task = await db.task.findUnique({ where: { id: row.taskId },
           select: { id: true, projectId: true, chainId: true, status: true } });
         if (!task?.chainId || task.status !== TaskStatus.REVIEW) continue;
         const marker = await readLatestMarker(db, task.id, "mergeabilityWait");
         if (marker?.state !== "deferred") continue;
-        examined += 1;
-        queued += await processPendingMergeability(db,
+        const disposition = await processPendingMergeability(db,
           { id: task.id, projectId: task.projectId, chainId: task.chainId }, marker, now, leased);
+        if (disposition.attempted) examined += 1;
+        queued += disposition.queued;
       } catch (error: unknown) {
         const reason = `automatic mergeability recheck failed for ${row.taskId}: ${error instanceof Error ? error.message : String(error)}`;
         console.error(reason);
         try {
-          const marker = await readLatestMarker(db, row.taskId, "mergeabilityWait");
-          const sourceRunId = marker?.state === "deferred" && typeof marker.raw.sourceRunId === "string"
-            ? marker.raw.sourceRunId : null;
+          let sourceRunId: string | null = null;
+          try {
+            const marker = await readLatestMarker(db, row.taskId, "mergeabilityWait");
+            sourceRunId = marker?.state === "deferred" && typeof marker.raw.sourceRunId === "string"
+              ? marker.raw.sourceRunId : null;
+          } catch (readError: unknown) {
+            console.error(reason, readError);
+          }
           if (sourceRunId) {
             await settleMergeabilityWaitStop(db, { taskId: row.taskId, sourceRunId,
               condition: "api-error", reason, now });
@@ -681,8 +698,6 @@ export const pendingMergeabilityTick = async (
           }
         } catch (recordError: unknown) { console.error(reason, recordError); }
       }
-    }
-    if (markers.length < 100) break;
   }
   return queued;
 };
@@ -693,7 +708,8 @@ const processPendingMergeability = async (
   marker: NonNullable<Awaited<ReturnType<typeof readLatestMarker>>>,
   now: Date,
   leased: WithMergeLease,
-): Promise<number> => {
+): Promise<{ attempted: boolean; queued: number }> => {
+    const skipped = { attempted: false, queued: 0 };
     const sourceRunId = typeof marker.raw.sourceRunId === "string" ? marker.raw.sourceRunId : null;
     if (!sourceRunId) {
       throw new Error(`Mergeability wait on ${task.id} has no source Run`);
@@ -703,12 +719,20 @@ const processPendingMergeability = async (
     if (!Number.isFinite(firstAt) || !Number.isFinite(eligibleAt)) {
       await settleMergeabilityWaitStop(db, { taskId: task.id, sourceRunId, condition: "api-error",
         reason: "mergeability wait budget marker is invalid", now });
-      return 0;
+      return skipped;
     }
-    if (now.getTime() - firstAt >= MERGEABILITY_WAIT_CEILING_MS) {
+    const target = { projectId: task.projectId, chainId: task.chainId };
+    const control = await db.chainControl.findUnique({ where: { projectId_chainId: target },
+      select: { state: true, heldAt: true, releasedAt: true } });
+    if (control?.state === "HELD") return skipped;
+    const ceilingAt = firstAt + MERGEABILITY_WAIT_CEILING_MS;
+    const heldThroughCeiling = control?.state === "RELEASED" && !!control.heldAt && !!control.releasedAt
+      && control.heldAt.getTime() <= ceilingAt && control.releasedAt.getTime() >= ceilingAt;
+    const finalAttempt = heldThroughCeiling && now.getTime() >= ceilingAt && marker.raw.finalAttempt !== true;
+    if (now.getTime() >= ceilingAt && !finalAttempt) {
       await settleMergeabilityWaitStop(db, { taskId: task.id, sourceRunId,
         condition: "unresolved-mergeability", reason: "six-hour mergeability wait ceiling exhausted", now });
-      return 0;
+      return skipped;
     }
     const transportFirstAt = typeof marker.raw.transportFirstAt === "string"
       ? Date.parse(marker.raw.transportFirstAt) : Number.NaN;
@@ -716,12 +740,10 @@ const processPendingMergeability = async (
       && now.getTime() - transportFirstAt >= BASE_DRIFT_TRANSPORT_CEILING_MS) {
       await settleMergeabilityWaitStop(db, { taskId: task.id, sourceRunId, condition: "api-error",
         reason: "merge lease transport retry ceiling exhausted after 30 minutes", now });
-      return 0;
+      return skipped;
     }
-    if (eligibleAt > now.getTime()) return 0;
-    const target = { projectId: task.projectId, chainId: task.chainId };
-    if (await db.chainControl.count({ where: { ...target, state: "HELD" } })) return 0;
-    if (await db.mergeLeaseEvent.count({ where: { ...target, state: { in: ["HANDOFF_PENDING", "RELEASE_DEFERRED"] } } })) return 0;
+    if (eligibleAt > now.getTime() && !finalAttempt) return skipped;
+    if (await db.mergeLeaseEvent.count({ where: { ...target, state: { in: ["HANDOFF_PENDING", "RELEASE_DEFERRED"] } } })) return skipped;
     try {
       const result = await leased(target, async () => {
         const runId = await db.$transaction(async (tx) => {
@@ -750,6 +772,7 @@ const processPendingMergeability = async (
             body: `Pending mergeability recheck ${current.raw.ordinal ?? "?"} queued as Run ${opened.run.id}`,
             metadata: { sourceRunId, sourceStopId, nextRunId: opened.run.id,
               ordinal: current.raw.ordinal ?? null, firstDeferredAt: current.raw.firstDeferredAt ?? null,
+              finalAttempt,
               observed: current.raw.observed ?? null,
               elapsedMs: now.getTime() - firstAt,
               remainingMs: MERGEABILITY_WAIT_CEILING_MS - (now.getTime() - firstAt) },
@@ -759,16 +782,16 @@ const processPendingMergeability = async (
         return { leaseOutcome: runId ? { kind: "continue" as const }
           : { kind: "stop" as const, taskId: task.id }, value: runId };
       }, db);
-      if (result.outcome === "ran" && result.value) return 1;
+      if (result.outcome === "ran" && result.value) return { attempted: true, queued: 1 };
       else if (result.outcome === "unreachable") {
         await retryMergeabilityTransport(db, task.id, marker, sourceRunId, `merge lease unavailable: ${result.detail}`, now);
       }
     } catch (error: unknown) {
-      if (error instanceof Error && error.message.includes("chain-held")) return 0;
+      if (error instanceof Error && error.message.includes("chain-held")) return skipped;
       await settleMergeabilityWaitStop(db, { taskId: task.id, sourceRunId, condition: "api-error",
         reason: `automatic mergeability recheck failed: ${error instanceof Error ? error.message : String(error)}`, now });
     }
-    return 0;
+    return { attempted: true, queued: 0 };
 };
 
 const addTickDelta = (result: BaseDriftRecoveryTickResult, delta: RecoveryTickDelta): void => {

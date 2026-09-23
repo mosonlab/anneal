@@ -34,6 +34,7 @@ import {
   readinessRequeueActivityWhere,
   readinessRequeueTotals,
   recordReadinessRequeue,
+  recoveryContext,
   writeMarker,
   type MergeEvidence,
   type PendingEvidenceRequest,
@@ -47,8 +48,20 @@ import { enterRepair, requeueMergeTailRun } from "./merge-tail-state.js";
 
 const SWEEP_READ_INTERVAL_MS = 5 * 60_000;
 const recentCardReads = new Map<string, number>();
-const transientEvidenceError = (error: unknown): boolean => error instanceof GitHubReadError
-  || error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name);
+export const transientEvidenceError = (error: unknown): boolean => error instanceof GitHubReadError
+  ? error.kind === "timeout" || error.kind === "transport"
+  : error instanceof Error && ["AbortError", "TimeoutError"].includes(error.name);
+
+const activeEvidenceRecovery = async (tx: Prisma.TransactionClient, regressionTaskId: string) => {
+  const aggregate = await tx.mergeRecoveryAttempt.findFirst({ where: {
+    regressionTaskId,
+    status: { in: [MergeRecoveryStatus.REPAIRING, MergeRecoveryStatus.AWAITING_AUTHORIZATION] },
+  }, orderBy: [{ updatedAt: "desc" }, { id: "desc" }] });
+  if (!aggregate) return null;
+  const context = recoveryContext(aggregate);
+  if (!context) throw new Error(`Active merge recovery ${aggregate.id} has incomplete tail identity`);
+  return context;
+};
 
 export const evidenceReadTimeoutMs = (): number => {
   const raw = Number(process.env.MERGE_EVIDENCE_READ_TIMEOUT_MS);
@@ -325,7 +338,7 @@ export const refreshStaleMergeCardsTick = async (
         const current = await tx.inboxMessage.findUnique({ where: { id: card.id }, select: { status: true } });
         if (current?.status !== InboxStatus.OPEN) return;
         await stopMergeTail(tx, { phase: "readiness", readinessTaskId: gate.id,
-          regressionTaskId: regression.id, recovery: null, reason, at: now });
+          regressionTaskId: regression.id, recovery: await activeEvidenceRecovery(tx, regression.id), reason, at: now });
         await writeMarker(tx, gate.id, "evidenceRefresh", "stopped", {
           actorType: "control-plane", body: reason,
           metadata: { cardId: card.id, condition: "evidence-refresh-failed",
@@ -353,10 +366,8 @@ export const refreshStaleMergeCardsTick = async (
       if (await tx.chainControl.count({ where: { projectId: gate.projectId, chainId: gate.chainId!, state: "HELD" } })) return "busy" as const;
       if (await tx.run.count({ where: { task: { projectId: gate.projectId, chainId: gate.chainId! },
         status: { in: ACTIVE_RUN_STATUSES } } })) return "busy" as const;
-      const aggregate = await tx.mergeRecoveryAttempt.findFirst({ where: {
-        regressionTaskId: regression.id,
-        status: { in: [MergeRecoveryStatus.REPAIRING, MergeRecoveryStatus.AWAITING_AUTHORIZATION] },
-      }, orderBy: [{ updatedAt: "desc" }, { id: "desc" }], select: { id: true } });
+      const recovery = await activeEvidenceRecovery(tx, regression.id);
+      const aggregate = recovery ? { id: recovery.aggregateId } : null;
       const rows = await tx.taskActivity.findMany({
         where: readinessRequeueActivityWhere(gate.id), select: { metadata: true },
       });
@@ -381,6 +392,7 @@ export const refreshStaleMergeCardsTick = async (
       let regressionRunId: string;
       if (aggregate) {
         const entered = await enterRepair(tx, { aggregateId: aggregate.id, currentBaseSha: currentBaseSha!, now,
+          evidenceSweep: true,
           readinessRequeue: { staleBaseSha: evidence.baseSha, baseDrift: true,
             reason: "OPEN approval evidence base became stale" } });
         if (!entered) throw new Error("stale approval evidence recovery Regression Run birth refused");
@@ -416,7 +428,7 @@ export const refreshStaleMergeCardsTick = async (
         const current = await tx.inboxMessage.findUnique({ where: { id: card.id }, select: { status: true } });
         if (current?.status !== InboxStatus.OPEN) return;
         await stopMergeTail(tx, { phase: "readiness", readinessTaskId: gate.id,
-          regressionTaskId: regression.id, recovery: null, reason, at: now });
+          regressionTaskId: regression.id, recovery: await activeEvidenceRecovery(tx, regression.id), reason, at: now });
         await writeMarker(tx, gate.id, "evidenceRefresh", "stopped", {
           actorType: "control-plane", body: reason,
           metadata: { cardId: card.id, condition: "evidence-refresh-failed",
@@ -441,7 +453,7 @@ export const refreshStaleMergeCardsTick = async (
               chainId: gate.chainId, chainIndex: gate.chainIndex - 1 }, select: { id: true } });
             if (current?.status === InboxStatus.OPEN && regression) {
               await stopMergeTail(tx, { phase: "readiness", readinessTaskId: gate.id,
-                regressionTaskId: regression.id, recovery: null, reason, at: now });
+                regressionTaskId: regression.id, recovery: await activeEvidenceRecovery(tx, regression.id), reason, at: now });
             }
           }
           await writeMarker(tx, card.gateTaskId!, "evidenceRefresh", "stopped", {

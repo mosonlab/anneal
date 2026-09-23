@@ -14,6 +14,7 @@ import {
   Prisma,
   PrismaClient,
   readMarkerHistory,
+  readLatestMarker,
   readMarkers,
   latestMarker,
   recordIntegratorStop,
@@ -783,6 +784,79 @@ test("pending mergeability finds a deferred integrator behind more than the old 
   assert.equal(await db.run.count({ where: { taskId: task.id, status: "QUEUED" } }), 1);
 });
 
+test("due mergeability wait runs before newer not-due and held waits", async () => {
+  const due = await seedStopped("canonical-direct", "due-mergeability-wait");
+  const notDue = await seedStopped("canonical-direct", "not-due-mergeability-wait");
+  const held = await seedStopped("canonical-direct", "held-mergeability-wait");
+  const now = new Date("2026-09-23T01:00:00.000Z");
+  for (const [seeded, eligibleAt] of [
+    [due, now], [notDue, new Date(now.getTime() + 60_000)], [held, now],
+  ] as const) {
+    const taskId = seeded.integratorTask!.id;
+    await db.taskStepOutput.update({ where: { taskId }, data: { body: JSON.stringify({
+      outcome: "deferred", condition: "unresolved-mergeability", evidence: "pending checks",
+    }) } });
+    const sourceStopId = (await db.$transaction((tx) => stopStateFor(tx, taskId)))?.stop.stopId ?? null;
+    await db.$transaction((tx) => writeMarker(tx, taskId, "mergeabilityWait", "deferred", {
+      actorType: "control-plane", body: "pending checks",
+      metadata: { sourceRunId: seeded.sourceRun.id, sourceStopId, ordinal: 1,
+        firstDeferredAt: now.toISOString(), nextEligibleAt: eligibleAt.toISOString() },
+    }));
+  }
+  await db.chainControl.create({ data: { projectId: held.project.id, chainId: held.chainId,
+    state: "HELD", heldLayer: held.integratorTask!.chainLayer ?? 0, heldAt: now } });
+  const leased: WithMergeLease = (target, fn, database) => withMergeLease(target, fn, database, {
+    acquire: acquireChainLease, release: releaseLeaseAdapter,
+  });
+  assert.equal(await pendingMergeabilityTick(db, now, 1, leased), 1);
+  assert.equal(await db.run.count({ where: { taskId: due.integratorTask!.id, status: "QUEUED" } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: notDue.integratorTask!.id, status: "QUEUED" } }), 0);
+  assert.equal(await db.run.count({ where: { taskId: held.integratorTask!.id, status: "QUEUED" } }), 0);
+});
+
+test("held mergeability wait survives six hours and gets one final recheck on resume", async () => {
+  const seeded = await seedStopped("canonical-direct", "held-pending-mergeability");
+  const taskId = seeded.integratorTask!.id;
+  const started = new Date("2026-09-23T00:00:00.000Z");
+  await db.taskStepOutput.update({ where: { taskId }, data: { body: JSON.stringify({
+    outcome: "deferred", condition: "unresolved-mergeability", evidence: "pending checks",
+  }) } });
+  const sourceStopId = (await db.$transaction((tx) => stopStateFor(tx, taskId)))?.stop.stopId ?? null;
+  await db.$transaction((tx) => writeMarker(tx, taskId, "mergeabilityWait", "deferred", {
+    actorType: "control-plane", body: "pending checks",
+    metadata: { sourceRunId: seeded.sourceRun.id, sourceStopId, ordinal: 1,
+      firstDeferredAt: started.toISOString(), nextEligibleAt: started.toISOString() },
+  }));
+  const hold = await db.chainControl.create({ data: { projectId: seeded.project.id,
+    chainId: seeded.chainId, state: "HELD", heldLayer: seeded.integratorTask!.chainLayer ?? 0,
+    heldAt: started } });
+  const resumedAt = new Date(started.getTime() + 7 * 60 * 60_000);
+  const leased: WithMergeLease = (target, fn, database) => withMergeLease(target, fn, database, {
+    acquire: acquireChainLease, release: releaseLeaseAdapter,
+  });
+  assert.equal(await pendingMergeabilityTick(db, resumedAt, 1, leased), 0);
+  assert.equal((await db.$transaction((tx) => readLatestMarker(tx, taskId, "mergeabilityWait")))?.state, "deferred");
+  await db.chainControl.update({ where: { id: hold.id }, data: { state: "RELEASED", releasedAt: resumedAt } });
+  assert.equal(await pendingMergeabilityTick(db, resumedAt, 1, leased), 1);
+  const queued = await db.$transaction((tx) => readLatestMarker(tx, taskId, "mergeabilityWait"));
+  assert.equal(queued?.state, "queued");
+  assert.equal(queued?.raw.finalAttempt, true);
+  const finalRunId = queued?.raw.nextRunId;
+  assert.equal(typeof finalRunId, "string");
+  await db.run.update({ where: { id: finalRunId as string }, data: { status: "SUCCEEDED" } });
+  await db.session.create({ data: { runId: finalRunId as string, projectId: seeded.project.id,
+    taskId, agentId: seeded.integratorAgent.id, runner: "CLAUDE", executionStatus: "SUCCEEDED" } });
+  await db.taskStepOutput.update({ where: { taskId }, data: { runId: finalRunId as string } });
+  await db.task.update({ where: { id: taskId }, data: { status: TaskStatus.REVIEW } });
+  await db.$transaction((tx) => writeMarker(tx, taskId, "mergeabilityWait", "deferred", {
+    actorType: "control-plane", body: "final determination is still pending",
+    metadata: { sourceRunId: finalRunId as string, sourceStopId, ordinal: 2,
+      firstDeferredAt: started.toISOString(), nextEligibleAt: resumedAt.toISOString(), finalAttempt: true },
+  }));
+  assert.equal(await pendingMergeabilityTick(db, resumedAt, 1, leased), 0);
+  assert.equal((await db.$transaction((tx) => readLatestMarker(tx, taskId, "mergeabilityWait")))?.state, "stopped");
+});
+
 test("merge lease transport failure retries a pending mergeability deferral", async () => {
   const seeded = await seedStopped("canonical-direct", "pending-lease-unreachable");
   const taskId = seeded.integratorTask!.id;
@@ -859,6 +933,43 @@ test("one pending mergeability task failure does not block another deferral", as
   assert.equal(await db.run.count({ where: { taskId: first.integratorTask!.id, status: "QUEUED" } }), 1);
   assert.equal(await db.taskActivity.count({ where: { taskId: second.integratorTask!.id,
     metadata: { path: ["state"], equals: "stopped" } } }), 1);
+});
+
+test("pending mergeability isolates an outer task-read failure", async () => {
+  const first = await seedStopped("canonical-direct", "pending-outer-failure-first");
+  const second = await seedStopped("canonical-direct", "pending-outer-failure-second");
+  const now = new Date("2026-09-23T01:00:00.000Z");
+  for (const seeded of [first, second]) {
+    const taskId = seeded.integratorTask!.id;
+    await db.taskStepOutput.update({ where: { taskId }, data: { body: JSON.stringify({
+      outcome: "deferred", condition: "unresolved-mergeability", evidence: "pending checks",
+    }) } });
+    const sourceStopId = (await db.$transaction((tx) => stopStateFor(tx, taskId)))?.stop.stopId ?? null;
+    await db.$transaction((tx) => writeMarker(tx, taskId, "mergeabilityWait", "deferred", {
+      actorType: "control-plane", body: "pending checks",
+      metadata: { sourceRunId: seeded.sourceRun.id, sourceStopId, ordinal: 1,
+        firstDeferredAt: now.toISOString(), nextEligibleAt: new Date(now.getTime()
+          - (seeded === first ? 1_000 : 0)).toISOString() },
+    }));
+  }
+  const faultDb = new Proxy(db, { get(target, property) {
+    if (property !== "task") return Reflect.get(target, property);
+    return new Proxy(target.task, { get(delegate, method) {
+      if (method !== "findUnique") return Reflect.get(delegate, method);
+      return async (args: { where: { id: string } }) => {
+        if (args.where.id === first.integratorTask!.id) throw new Error("outer task read failed");
+        return delegate.findUnique(args);
+      };
+    } });
+  } });
+  const leased: WithMergeLease = (target, fn, database) => withMergeLease(target, fn, database, {
+    acquire: acquireChainLease, release: releaseLeaseAdapter,
+  });
+  assert.equal(await pendingMergeabilityTick(faultDb, now, 1, leased), 1);
+  assert.equal(await db.run.count({ where: { taskId: second.integratorTask!.id, status: "QUEUED" } }), 1);
+  const stopped = await db.$transaction((tx) => readLatestMarker(tx, first.integratorTask!.id, "mergeabilityWait"));
+  assert.equal(stopped?.state, "stopped");
+  assert.match(String(stopped?.raw.condition), /api-error/u);
 });
 
 test("a fresh base-drift recovery claim carries its pre-recovery Regression output snapshot", async () => {

@@ -4,9 +4,16 @@ import { after, test } from "node:test";
 
 import type { PrismaClient } from "@anneal/db";
 
-import type { PullRequestReader } from "./github-read.js";
-import { startEvidenceWorker } from "./merge-evidence-worker.js";
+import { GitHubReadError, type PullRequestReader } from "./github-read.js";
+import { startEvidenceWorker, transientEvidenceError } from "./merge-evidence-worker.js";
 import { waitUntil } from "./worker-tick-wait.js";
+
+test("only GitHub transport and deadline errors receive evidence retry", () => {
+  assert.equal(transientEvidenceError(new GitHubReadError("deadline", "timeout")), true);
+  assert.equal(transientEvidenceError(new GitHubReadError("server unavailable", "transport")), true);
+  assert.equal(transientEvidenceError(new GitHubReadError("forbidden", "permission")), false);
+  assert.equal(transientEvidenceError(new GitHubReadError("pull request is null", "response")), false);
+});
 
 /**
  * A tick reads GitHub up to three times under an 8 s deadline, which is longer
