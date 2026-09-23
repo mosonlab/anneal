@@ -711,8 +711,13 @@ test("a state that degrades after the intent, without moving an oid, is caught b
         { status: "ok", snapshot: cleanSnapshot(degraded) },
       ],
     });
-    const verdict = stopped(await execute(fake.deps));
-    assert.equal(verdict.condition, condition, `${label}: ${JSON.stringify(verdict)}`);
+    const outcome = await execute(fake.deps);
+    if (condition === "unresolved-mergeability") {
+      assert.equal(outcome.outcome, "deferred");
+      if (outcome.outcome === "deferred") assert.equal(outcome.condition, condition);
+    } else {
+      assert.equal(stopped(outcome).condition, condition, `${label}: ${JSON.stringify(outcome)}`);
+    }
     assert.equal(fake.calls().includes("merge"), false, label);
   }
 });

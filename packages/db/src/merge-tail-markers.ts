@@ -45,7 +45,7 @@ export const MARKER_STATES = {
     "validation-budget", "waiting-ceiling",
   ],
   executorOffline: ["requeued-executor-offline"],
-  evidenceRefresh: ["checked", "queued", "ceiling", "stopped"],
+  evidenceRefresh: ["checked", "transport-retry", "queued", "ceiling", "stopped"],
   leaseContention: ["alerted", "contended", "resolved", "unreachable"],
   leaseHandoff: ["invalid", "pending", "released"],
   leaseHold: [],

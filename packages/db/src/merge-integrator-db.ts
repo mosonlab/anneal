@@ -43,6 +43,7 @@ import {
   parseStopAnswerMetadata,
 } from "./merge-integrator.js";
 import { revalidateAfterClassCeiling } from "./merge-recovery-revalidate.js";
+import { MERGE_TAIL_KIND } from "./merge-tail.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -1001,11 +1002,19 @@ const liveConfirmationGeneration = async (
     const dedupeKey = confirmationCardKey(integratorTaskId, stopId, generation);
     const card = await tx.inboxMessage.findUnique({
       where: { dedupeKey },
-      select: { id: true, status: true, selectedChoiceId: true },
+      select: { id: true, status: true, selectedChoiceId: true, gateTaskId: true },
     });
     if (!card) return { generation, dedupeKey, card: null };
     const rejected = card.status === InboxStatus.ANSWERED && card.selectedChoiceId === "reject";
-    if (!rejected) return { generation, dedupeKey, card: { id: card.id } };
+    const refreshed = card.status === InboxStatus.CLOSED && card.gateTaskId && await tx.taskActivity.findFirst({
+      where: { taskId: card.gateTaskId, actorType: "control-plane", AND: [
+        { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.evidenceRefresh } },
+        { metadata: { path: ["state"], equals: "queued" } },
+        { metadata: { path: ["cardId"], equals: card.id } },
+      ] },
+      select: { id: true },
+    });
+    if (!rejected && !refreshed) return { generation, dedupeKey, card: { id: card.id } };
   }
 };
 

@@ -27,7 +27,6 @@ import {
   parseMergeResult,
   readLatestMarker,
   recordIntegratorStop,
-  stopStateFor,
   openRun,
   REGRESSION_VERIFICATION_OUTPUT_KINDS,
   resolveChainTarget,
@@ -591,23 +590,110 @@ const settleMergeabilityWaitStop = async (
   });
 };
 
+const retryMergeabilityTransport = async (
+  db: PrismaClient,
+  taskId: string,
+  marker: NonNullable<Awaited<ReturnType<typeof readLatestMarker>>>,
+  sourceRunId: string,
+  reason: string,
+  now: Date,
+): Promise<void> => {
+  const firstFailedAt = typeof marker.raw.transportFirstAt === "string"
+    ? Date.parse(marker.raw.transportFirstAt) : now.getTime();
+  const attempt = typeof marker.raw.transportAttempts === "number" ? marker.raw.transportAttempts + 1 : 1;
+  if (!Number.isFinite(firstFailedAt) || attempt >= 30 || now.getTime() - firstFailedAt >= BASE_DRIFT_TRANSPORT_CEILING_MS) {
+    await settleMergeabilityWaitStop(db, { taskId, sourceRunId, condition: "api-error",
+      reason: `${reason}; transport retry ceiling exhausted after ${attempt} attempts`, now });
+    return;
+  }
+  const backoffMs = Math.min(BASE_DRIFT_RETRY_BACKOFF_CAP_MS,
+    BASE_DRIFT_RETRY_BACKOFF_START_MS * 2 ** Math.min(attempt - 1, 10));
+  await writeMarker(db, taskId, "mergeabilityWait", "deferred", {
+    actorType: "control-plane", body: `${reason}; transport retry ${attempt}/30 in ${backoffMs}ms`,
+    metadata: { ...marker.raw, transportFirstAt: new Date(firstFailedAt).toISOString(),
+      transportAttempts: attempt, nextEligibleAt: new Date(now.getTime() + backoffMs).toISOString(),
+      remainingTransportAttempts: 30 - attempt,
+      remainingTransportMs: BASE_DRIFT_TRANSPORT_CEILING_MS - (now.getTime() - firstFailedAt) },
+  });
+};
+
 export const pendingMergeabilityTick = async (
   db: PrismaClient,
   now = new Date(),
   limit = 5,
   leased: WithMergeLease = withMergeLease,
 ): Promise<number> => {
-  const tasks = await db.task.findMany({
-    where: { status: TaskStatus.REVIEW, templateStep: { outputKind: INTEGRATOR_OUTPUT_KIND } },
-    orderBy: [{ updatedAt: "asc" }, { id: "asc" }],
-    select: { id: true, projectId: true, chainId: true }, take: Math.max(limit * 10, 50),
-  });
   let queued = 0;
-  for (const task of tasks) {
-    if (queued >= limit) break;
-    if (!task.chainId) continue;
-    const marker = await readLatestMarker(db, task.id, "mergeabilityWait");
-    if (marker?.state !== "deferred") continue;
+  let examined = 0;
+  let cursor: string | undefined;
+  const visited = new Set<string>();
+  while (examined < limit) {
+    const markers = await db.taskActivity.findMany({
+      where: { actorType: "control-plane", AND: [
+        { metadata: { path: ["kind"], equals: "mergeTail.mergeabilityWait" } },
+        { metadata: { path: ["state"], equals: "deferred" } },
+      ] },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: 100,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      select: { id: true, taskId: true },
+    });
+    if (markers.length === 0) break;
+    cursor = markers[markers.length - 1]!.id;
+    for (const row of markers) {
+      if (examined >= limit) break;
+      if (visited.has(row.taskId)) continue;
+      visited.add(row.taskId);
+      try {
+        const task = await db.task.findUnique({ where: { id: row.taskId },
+          select: { id: true, projectId: true, chainId: true, status: true } });
+        if (!task?.chainId || task.status !== TaskStatus.REVIEW) continue;
+        const marker = await readLatestMarker(db, task.id, "mergeabilityWait");
+        if (marker?.state !== "deferred") continue;
+        examined += 1;
+        queued += await processPendingMergeability(db,
+          { id: task.id, projectId: task.projectId, chainId: task.chainId }, marker, now, leased);
+      } catch (error: unknown) {
+        const reason = `automatic mergeability recheck failed for ${row.taskId}: ${error instanceof Error ? error.message : String(error)}`;
+        console.error(reason);
+        try {
+          const marker = await readLatestMarker(db, row.taskId, "mergeabilityWait");
+          const sourceRunId = marker?.state === "deferred" && typeof marker.raw.sourceRunId === "string"
+            ? marker.raw.sourceRunId : null;
+          if (sourceRunId) {
+            await settleMergeabilityWaitStop(db, { taskId: row.taskId, sourceRunId,
+              condition: "api-error", reason, now });
+          } else {
+            await db.$transaction(async (tx) => {
+              await tx.task.update({ where: { id: row.taskId }, data: {
+                status: TaskStatus.REVIEW, failureReason: reason,
+              } });
+              await tx.inboxMessage.upsert({ where: { dedupeKey: `mergeability-wait-error:${row.taskId}` },
+                create: { from: "AGENT", taskId: row.taskId, kind: "TEXT", body: reason,
+                  dedupeKey: `mergeability-wait-error:${row.taskId}` },
+                update: { status: "OPEN", body: reason },
+              });
+              await writeMarker(tx, row.taskId, "mergeabilityWait", "stopped", {
+                actorType: "control-plane", body: reason,
+                metadata: { condition: "api-error", sourceRunId: null, remainingMs: 0 },
+              });
+            });
+          }
+        } catch (recordError: unknown) { console.error(reason, recordError); }
+      }
+    }
+    if (markers.length < 100) break;
+  }
+  return queued;
+};
+
+const processPendingMergeability = async (
+  db: PrismaClient,
+  task: { id: string; projectId: string; chainId: string },
+  marker: NonNullable<Awaited<ReturnType<typeof readLatestMarker>>>,
+  now: Date,
+  leased: WithMergeLease,
+): Promise<number> => {
     const sourceRunId = typeof marker.raw.sourceRunId === "string" ? marker.raw.sourceRunId : null;
     if (!sourceRunId) {
       throw new Error(`Mergeability wait on ${task.id} has no source Run`);
@@ -617,16 +703,25 @@ export const pendingMergeabilityTick = async (
     if (!Number.isFinite(firstAt) || !Number.isFinite(eligibleAt)) {
       await settleMergeabilityWaitStop(db, { taskId: task.id, sourceRunId, condition: "api-error",
         reason: "mergeability wait budget marker is invalid", now });
-      continue;
+      return 0;
     }
     if (now.getTime() - firstAt >= MERGEABILITY_WAIT_CEILING_MS) {
       await settleMergeabilityWaitStop(db, { taskId: task.id, sourceRunId,
         condition: "unresolved-mergeability", reason: "six-hour mergeability wait ceiling exhausted", now });
-      continue;
+      return 0;
     }
-    if (eligibleAt > now.getTime()) continue;
+    const transportFirstAt = typeof marker.raw.transportFirstAt === "string"
+      ? Date.parse(marker.raw.transportFirstAt) : Number.NaN;
+    if (Number.isFinite(transportFirstAt)
+      && now.getTime() - transportFirstAt >= BASE_DRIFT_TRANSPORT_CEILING_MS) {
+      await settleMergeabilityWaitStop(db, { taskId: task.id, sourceRunId, condition: "api-error",
+        reason: "merge lease transport retry ceiling exhausted after 30 minutes", now });
+      return 0;
+    }
+    if (eligibleAt > now.getTime()) return 0;
     const target = { projectId: task.projectId, chainId: task.chainId };
-    if (await db.mergeLeaseEvent.count({ where: { ...target, state: { in: ["HANDOFF_PENDING", "RELEASE_DEFERRED"] } } })) continue;
+    if (await db.chainControl.count({ where: { ...target, state: "HELD" } })) return 0;
+    if (await db.mergeLeaseEvent.count({ where: { ...target, state: { in: ["HANDOFF_PENDING", "RELEASE_DEFERRED"] } } })) return 0;
     try {
       const result = await leased(target, async () => {
         const runId = await db.$transaction(async (tx) => {
@@ -643,16 +738,17 @@ export const pendingMergeabilityTick = async (
             || output?.runId !== sourceRunId || parseMergeResult(output).outcome !== "deferred") {
             throw new Error("deferred mergeability source Run or output is no longer valid");
           }
-          const stop = await stopStateFor(tx, task.id);
+          const sourceStopId = typeof current.raw.sourceStopId === "string" ? current.raw.sourceStopId : null;
           const opened = await openRun(tx, task.id, { kind: "integrator-deferred", readyAt: now,
-            sourceRunId, sourceStopId: stop?.stop.stopId ?? null });
+            sourceRunId, sourceStopId });
+          if (!opened.ok && opened.refusal.code === "chain-held") return null;
           if (!opened.ok) throw new Error(`deferred mergeability Run birth refused: ${opened.refusal.message}`);
           await tx.task.update({ where: { id: task.id }, data: { status: TaskStatus.TODO, failureReason: null } });
           await recordLeaseHandoff(tx, { target, toRunId: opened.run.id, at: now });
           await writeMarker(tx, task.id, "mergeabilityWait", "queued", {
             actorType: "control-plane",
             body: `Pending mergeability recheck ${current.raw.ordinal ?? "?"} queued as Run ${opened.run.id}`,
-            metadata: { sourceRunId, nextRunId: opened.run.id,
+            metadata: { sourceRunId, sourceStopId, nextRunId: opened.run.id,
               ordinal: current.raw.ordinal ?? null, firstDeferredAt: current.raw.firstDeferredAt ?? null,
               observed: current.raw.observed ?? null,
               elapsedMs: now.getTime() - firstAt,
@@ -663,17 +759,16 @@ export const pendingMergeabilityTick = async (
         return { leaseOutcome: runId ? { kind: "continue" as const }
           : { kind: "stop" as const, taskId: task.id }, value: runId };
       }, db);
-      if (result.outcome === "ran" && result.value) queued += 1;
+      if (result.outcome === "ran" && result.value) return 1;
       else if (result.outcome === "unreachable") {
-        await settleMergeabilityWaitStop(db, { taskId: task.id, sourceRunId, condition: "api-error",
-          reason: `merge lease unavailable: ${result.detail}`, now });
+        await retryMergeabilityTransport(db, task.id, marker, sourceRunId, `merge lease unavailable: ${result.detail}`, now);
       }
     } catch (error: unknown) {
+      if (error instanceof Error && error.message.includes("chain-held")) return 0;
       await settleMergeabilityWaitStop(db, { taskId: task.id, sourceRunId, condition: "api-error",
         reason: `automatic mergeability recheck failed: ${error instanceof Error ? error.message : String(error)}`, now });
     }
-  }
-  return queued;
+    return 0;
 };
 
 const addTickDelta = (result: BaseDriftRecoveryTickResult, delta: RecoveryTickDelta): void => {
@@ -913,7 +1008,8 @@ export const baseDriftRecoveryTick = async (
         const timer = setTimeout(() => controller.abort(), 8_000);
         try {
           snapshot = await reader.readPullRequest(candidate.repository, candidate.prNumber, candidate.targetBranch, controller.signal);
-          if (reader.compareCommits && snapshot.baseSha) {
+          if (reader.compareCommits && snapshot.baseSha
+            && snapshot.baseSha !== candidate.authorizedBaseSha) {
             authorizedAdvance = await reader.compareCommits(
               candidate.repository, candidate.authorizedBaseSha, snapshot.baseSha, controller.signal,
             );

@@ -38,6 +38,7 @@ import {
   type PrismaClient,
   PushStatus,
   recordIntegratorStop,
+  stopStateFor,
   refundDecision,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
   type RunOutcome,
@@ -850,11 +851,13 @@ export const completeRun = async (
           await advanceTemplateTask(tx, run.taskId, run.id, process.env.FEISHU_DEFAULT_CHAT_ID ?? null, now, completionTaskStatus);
         } else if (outcome.outcome === "deferred") {
           const previousWait = await readLatestMarker(tx, run.taskId, "mergeabilityWait");
-          const ordinal = previousWait?.state === "queued"
+          const sameRecheck = previousWait?.state === "queued" && previousWait.raw.nextRunId === run.id;
+          const ordinal = sameRecheck
             && typeof previousWait.raw.ordinal === "number" ? previousWait.raw.ordinal + 1 : 1;
-          const firstDeferredAt = previousWait?.state === "queued"
+          const firstDeferredAt = sameRecheck
             && typeof previousWait.raw.firstDeferredAt === "string"
             ? previousWait.raw.firstDeferredAt : now.toISOString();
+          const sourceStopId = (await stopStateFor(tx, run.taskId))?.stop.stopId ?? null;
           const backoffMs = Math.min(BASE_DRIFT_RETRY_BACKOFF_CAP_MS,
             BASE_DRIFT_RETRY_BACKOFF_START_MS * 2 ** Math.min(ordinal - 1, 10));
           await tx.task.update({ where: { id: run.taskId }, data: {
@@ -865,7 +868,7 @@ export const completeRun = async (
             actorType: "control-plane",
             body: `Mergeability pending after Run ${run.id}; automatic recheck ${ordinal} in ${backoffMs}ms`,
             metadata: { condition: outcome.condition, observed: outcome.evidence,
-              sourceRunId: run.id, ordinal, firstDeferredAt,
+              sourceRunId: run.id, sourceStopId, ordinal, firstDeferredAt,
               nextEligibleAt: new Date(now.getTime() + backoffMs).toISOString(),
               elapsedMs: now.getTime() - Date.parse(firstDeferredAt),
               remainingMs: Math.max(0, BASE_DRIFT_WAITING_CEILING_MS - (now.getTime() - Date.parse(firstDeferredAt))) },

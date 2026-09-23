@@ -325,7 +325,14 @@ export function classifyFresh(facts: FreshRecoveryFacts): FreshDecision {
   if (snapshot.headRefOid !== candidate.authorizedHeadSha || snapshot.headCommitOid !== candidate.authorizedHeadSha) {
     return { kind: "ineligible", reason: "pull-request head changed after authorization" };
   }
-  if (!snapshot.baseSha || !/^[0-9a-f]{40}$/u.test(snapshot.baseSha) || snapshot.baseSha === candidate.authorizedBaseSha) {
+  if (!snapshot.baseSha || !/^[0-9a-f]{40}$/u.test(snapshot.baseSha)) {
+    return { kind: "ineligible", reason: "fresh target base does not prove an advanced SHA" };
+  }
+  if (snapshot.baseSha === candidate.authorizedBaseSha
+    && candidate.observedBaseSha === candidate.authorizedBaseSha) {
+    return { kind: "queue", candidate, currentBaseSha: snapshot.baseSha };
+  }
+  if (snapshot.baseSha === candidate.authorizedBaseSha) {
     return { kind: "ineligible", reason: "fresh target base does not prove an advanced SHA" };
   }
   if (!facts.comparisonAvailable) {

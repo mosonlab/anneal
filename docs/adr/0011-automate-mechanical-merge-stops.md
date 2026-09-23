@@ -20,12 +20,14 @@ completed Regression or its semantic work.
 ### K13 `bounded-mechanical-merge-recovery`
 
 - Pending required checks or `UNKNOWN` mergeability after the executor's poll
-  budget yield a durable deferred result. The control plane releases the Merge
+  budget, train pre-publication poll, or final pre-merge read yield a durable
+  deferred result. The control plane releases the Merge
   Lease, waits with doubling backoff (2–60 seconds), then re-enters the same
   mechanical decision. Six hours total, including repeated deferrals, is the
   ceiling; only then does it open the existing stop question with elapsed time.
 - `CONFLICTING` or `DIRTY` with terminal checks enters the existing base-drift
-  recovery only when the target's forward advancement is verified. Recovery
+  recovery even if the base is unchanged; if it has moved, forward advancement
+  must still be verified. Recovery
   requeues Regression against the current target; `refresh-conflict` remains
   Regression's one-per-head repair path. The existing two automatic recovery
   attempts and retry-class ceilings apply. An ineligible or exhausted
@@ -34,9 +36,15 @@ completed Regression or its semantic work.
   confirmation card is refreshed when its recorded base SHA trails the
   verified current target head. The control plane atomically closes the old
   card and requeues Regression. At most three automatic base-drift requeues
-  outside recovery are permitted; on exhaustion the card stays OPEN with the
+  outside recovery are permitted; an active recovery aggregate uses its own
+  two-requeue allowance instead. On exhaustion the card stays OPEN with the
   reason. An enabled project Approval gate still requires a human to approve
   the replacement card.
+- OPEN evidence cards are read no more frequently than every five minutes
+  while healthy; unchanged `checked` state does not append another activity.
+  Timeout, 429, 5xx and Lease transport failures retry for at most 30 minutes
+  or 30 attempts with the same bounded backoff. A held Chain waits for resume.
+  A deterministic identity or ancestry mismatch stops immediately.
 
 Each automatic disposition writes a control-plane TaskActivity with its
 condition, observed values, attempt and remaining budget. It never writes an
@@ -54,3 +62,6 @@ and Run-birth guards are unchanged. Initial Approval gate rejection abandons
 the Chain; rejection of a post-stop confirmation card requeues the preceding
 executable Step instead. Automatic stale-evidence refresh is a third,
 control-plane-owned action, not either human rejection.
+
+Train post-publication read-back cannot defer: publication may already have
+landed, so it must settle the observed merge or stop for operator investigation.

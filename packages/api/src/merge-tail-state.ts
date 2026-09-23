@@ -242,7 +242,10 @@ export const enterRepair = async (
     select: { status: true },
   });
   const requeue = input.readinessRequeue;
-  if ((aggregate.status === MergeRecoveryStatus.AWAITING_AUTHORIZATION) !== Boolean(requeue)) {
+  if (requeue
+    ? aggregate.status !== MergeRecoveryStatus.AWAITING_AUTHORIZATION
+      && aggregate.status !== MergeRecoveryStatus.REPAIRING
+    : aggregate.status === MergeRecoveryStatus.AWAITING_AUTHORIZATION) {
     throw new Error(`Merge recovery ${input.aggregateId} repair intent does not match ${aggregate.status}`);
   }
 

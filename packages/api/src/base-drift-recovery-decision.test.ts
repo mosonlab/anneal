@@ -64,6 +64,13 @@ const freshDecision = (overrides: Partial<SnapshotFacts> = {}) => classifyFresh(
   ...overrides,
 });
 
+test("same-base conflict evidence queues bounded Regression recovery without ancestry", () => {
+  const conflict = { ...candidate, observedBaseSha: BASE };
+  assert.deepEqual(freshDecision({ candidate: conflict, snapshot: snapshot({ baseSha: BASE }),
+    comparisonAvailable: false, authorizedAdvance: null }),
+  { kind: "queue", candidate: conflict, currentBaseSha: BASE });
+});
+
 const durableFacts = (): DurableCandidateFacts => ({
   task: {
     id: candidate.integratorTaskId,

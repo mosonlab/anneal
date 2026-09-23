@@ -185,6 +185,31 @@ test("train final pre-send read catches drift after intent without publishing", 
   assert.equal(f.state.sends, 0);
 });
 
+test("train final pre-send UNKNOWN defers without publishing", async () => {
+  const f = fixture();
+  const write = f.deps.writeIntent;
+  f.deps.writeIntent = async (intent) => { await write(intent); f.state.pr.mergeable = "UNKNOWN"; };
+  const result = await execute(f.deps);
+  assert.equal(result.outcome, "deferred");
+  assert.equal(result.condition, "unresolved-mergeability");
+  assert.equal(f.state.sends, 0);
+});
+
+test("train resend guard UNKNOWN defers instead of publishing twice", async () => {
+  const f = fixture();
+  f.state.lose = true; f.state.land = false;
+  const publish = f.train.publishTrain;
+  f.train.publishTrain = async (...args) => {
+    const response = await publish(...args);
+    f.state.pr.mergeable = "UNKNOWN";
+    return response;
+  };
+  const result = await execute(f.deps);
+  assert.equal(result.outcome, "deferred");
+  assert.equal(result.condition, "unresolved-mergeability");
+  assert.equal(f.state.sends, 1);
+});
+
 test("executor train authorization parser retains the descriptor and rejects every malformed field", async () => {
   const { authorizationMetadata, parseAuthorizationMetadata } = await import("@anneal/db/merge-integrator");
   const { auth } = fixture();
@@ -233,7 +258,8 @@ test("train publication polls an unknown mergeability within its bound", async (
   const f = fixture();
   Object.assign(f.state.pr, { mergeable: "UNKNOWN" as const });
   const result = await execute(f.deps);
-  assert.equal(result.outcome === "stopped" && result.condition, "unresolved-mergeability");
+  assert.equal(result.outcome, "deferred");
+  assert.equal(result.condition, "unresolved-mergeability");
   assert.equal(f.state.sends, 0);
 });
 

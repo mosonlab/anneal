@@ -29,6 +29,7 @@ import {
   stopStateFor,
 } from "./merge-integrator-db.js";
 import { runnerFor } from "./model-routing.js";
+import { readLatestMarker } from "./merge-tail-markers.js";
 import {
   LEASE_LOSS_REFUND_CAP,
   LEASE_LOSS_REFUND_EXHAUSTED_PREFIX,
@@ -1006,8 +1007,13 @@ export const openRun = async (
   // from this unresolved stop. Its named intent is the only path that may open
   // the renewed mechanical Run while the original stop remains in history.
   const humanReauthorization = intent.kind === "integrator-authorized";
+  const deferredMarker = intent.kind === "integrator-deferred"
+    ? await readLatestMarker(tx, task.id, "mergeabilityWait") : null;
   const deferredStopBypass = intent.kind === "integrator-deferred"
-    && stopped?.stop.stopId === intent.sourceStopId;
+    && deferredMarker?.state === "deferred"
+    && deferredMarker.raw.sourceRunId === intent.sourceRunId
+    && deferredMarker.raw.sourceStopId === intent.sourceStopId
+    && (stopped?.stop.stopId ?? null) === intent.sourceStopId;
   if (stopped && !humanReauthorization && !deferredStopBypass
     && (stopBypass?.integratorTaskId !== task.id || stopBypass.sourceStopId !== stopped.stop.stopId)) {
     return openRunRefusal(

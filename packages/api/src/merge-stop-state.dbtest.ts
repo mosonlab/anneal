@@ -24,12 +24,14 @@ import {
   parseStopAnswerMetadata,
   Prisma,
   PrismaClient,
+  readLatestMarker,
   TaskStatus,
+  writeMarker,
 } from "@anneal/db";
 import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
 import { type PullRequestSnapshot } from "./github-read.js";
-import { evidenceTick } from "./merge-evidence-worker.js";
+import { evidenceTick, refreshStaleMergeCardsTick } from "./merge-evidence-worker.js";
 import { baseDriftRecoveryTick } from "./merge-base-drift-worker.js";
 import { seedIntegratorChain, type IntegratorChain } from "./merge-integrator-fixture.js";
 import { recordMergeLeaseHold } from "./merge-lease-hold.js";
@@ -1272,6 +1274,77 @@ test("a rejected confirmation card is recoverable: the redo earns the next gener
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: integratorTaskId } })).status, "DONE");
   const merged = await db.taskStepOutput.findUniqueOrThrow({ where: { taskId: integratorTaskId } });
   assert.deepEqual(JSON.parse(merged.body), { outcome: "merged", mergeCommitSha: "e".repeat(40) });
+});
+
+test("a swept real-stop confirmation G0 earns G1 after Regression and readiness return", async () => {
+  const { chain } = await stoppedChain("swept-confirmation-generation", "head-drift", "twelve-step-readiness", 1, 5, true);
+  assert.ok(chain.readinessTask && chain.integratorTask);
+  const readinessTaskId = chain.readinessTask.id;
+  const integratorTaskId = chain.integratorTask.id;
+  const stop = await stopQuestionFor(integratorTaskId);
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: stop!.id, externalEventId: "evt-swept-g0-reauthorize", decision: "re-authorize",
+  }));
+  const firstId = (await confirmationCardIds(readinessTaskId))[0]!;
+  await evidenceTick(db, { readPullRequest: async () => freshSnapshot() }, new Date());
+  const first = await db.inboxMessage.findUniqueOrThrow({ where: { id: firstId } });
+  assert.match(first.dedupeKey!, /^confirmation:[^:]+:[^:]+$/u);
+  const movedBase = "d".repeat(40);
+  const moved = { ...freshSnapshot(), baseSha: movedBase };
+  assert.equal((await refreshStaleMergeCardsTick(db, {
+    readPullRequest: async () => moved,
+    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+  }, new Date(Date.now() + 6 * 60_000))).refreshed, 1);
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: firstId } })).status, "CLOSED");
+  const lateHuman = await call("POST", `/inbox/messages/${firstId}/decision`, {
+    requestId: "evt-swept-g0-late-human", decision: "approve",
+  });
+  assert.equal(lateHuman.status, 409);
+  const redo = await db.run.findFirstOrThrow({ where: { taskId: chain.gateTask.id }, orderBy: { runNumber: "desc" } });
+  assert.equal(redo.status, "QUEUED");
+  await db.session.create({ data: { runId: redo.id, projectId: chain.project.id,
+    agentId: redo.agentId, taskId: chain.gateTask.id, runner: "CLAUDE", executionStatus: "SUCCEEDED" } });
+  await db.run.update({ where: { id: redo.id }, data: { status: "SUCCEEDED" } });
+  await db.task.update({ where: { id: chain.gateTask.id }, data: { status: "DONE" } });
+  await db.$transaction((tx) => advanceTemplateTask(tx, chain.gateTask.id, redo.id, null, new Date()));
+  const gateCard = await db.inboxMessage.findFirstOrThrow({ where: {
+    gateTaskId: readinessTaskId, status: "OPEN",
+  }, orderBy: { createdAt: "desc" } });
+  await evidenceTick(db, { readPullRequest: async () => moved }, new Date());
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: gateCard.id, externalEventId: "evt-swept-g0-gate-approve", decision: "approve",
+  }));
+  await db.task.update({ where: { id: readinessTaskId }, data: { status: "DONE" } });
+  const readiness = await db.task.findUniqueOrThrow({ where: { id: readinessTaskId } });
+  await db.$transaction((tx) => activateChainSuccessor(tx, readiness, {}, new Date()));
+  const generations = await confirmationCardIds(readinessTaskId);
+  assert.equal(generations.length, 2);
+  const second = await db.inboxMessage.findUniqueOrThrow({ where: { id: generations[1]! } });
+  assert.equal(second.status, "OPEN");
+  assert.equal(second.dedupeKey, `${first.dedupeKey!}:r1`);
+});
+
+test("deferred completion inherits the six-hour clock only from its own queued Run", async () => {
+  const firstDeferredAt = "2026-09-22T23:00:00.000Z";
+  for (const matches of [true, false]) {
+    const chain = await seedIntegratorChain(db, { label: `deferred-clock-${matches}` });
+    const run = await liveIntegratorRun(chain);
+    await db.$transaction((tx) => writeMarker(tx, chain.integratorTask!.id, "mergeabilityWait", "queued", {
+      actorType: "control-plane", body: "previous pending mergeability recheck",
+      metadata: { sourceRunId: "previous-run", nextRunId: matches ? run.id : "another-run",
+        ordinal: 4, firstDeferredAt },
+    }));
+    await persistOutcome(chain.integratorTask!.id, run.id, JSON.stringify({
+      outcome: "deferred", condition: "unresolved-mergeability", evidence: "pending checks",
+    }));
+    const completed = await completeRun(run);
+    assert.equal(completed.status, 200, JSON.stringify(completed.body));
+    const marker = await db.$transaction((tx) => readLatestMarker(tx, chain.integratorTask!.id, "mergeabilityWait"));
+    assert.equal(marker?.state, "deferred");
+    assert.equal(marker?.raw.ordinal, matches ? 5 : 1);
+    if (matches) assert.equal(marker?.raw.firstDeferredAt, firstDeferredAt);
+    else assert.notEqual(marker?.raw.firstDeferredAt, firstDeferredAt);
+  }
 });
 
 test("N20 an external failure at the ceiling buys an integrator step no extra run", async () => {
