@@ -64,6 +64,13 @@ const freshDecision = (overrides: Partial<SnapshotFacts> = {}) => classifyFresh(
   ...overrides,
 });
 
+test("same-base conflict evidence queues bounded Regression recovery without ancestry", () => {
+  const conflict = { ...candidate, observedBaseSha: BASE };
+  assert.deepEqual(freshDecision({ candidate: conflict, snapshot: snapshot({ baseSha: BASE }),
+    comparisonAvailable: false, authorizedAdvance: null }),
+  { kind: "queue", candidate: conflict, currentBaseSha: BASE });
+});
+
 const durableFacts = (): DurableCandidateFacts => ({
   task: {
     id: candidate.integratorTaskId,
@@ -165,6 +172,21 @@ test("durable candidate classification narrows skip and inspect outcomes", () =>
   terminalAttempt.existingAttempt = { status: "FAILED", reopenableLegacyRefusal: false, nextEligibleAt: null };
   assert.deepEqual(classifyCandidate(terminalAttempt), { kind: "skip" });
   assert.deepEqual(classifyCandidate(durableFacts()), { kind: "inspect", candidate });
+});
+
+test("terminal merge conflicts can recover only with executor-bound evidence", () => {
+  for (const conflict of [{ mergeable: "CONFLICTING" }, { mergeStateStatus: "DIRTY" }]) {
+    const facts = durableFacts();
+    const evidence = JSON.stringify({ ...conflict, observed: BASE, authorized: BASE });
+    facts.stop = { ...facts.stop!, condition: "non-clean-mergeability", evidence };
+    facts.output = { ...facts.output!, condition: "non-clean-mergeability", evidence };
+    assert.deepEqual(classifyCandidate(facts), {
+      kind: "inspect",
+      candidate: { ...candidate, observedBaseSha: BASE },
+    });
+    facts.output.evidence = JSON.stringify({ mergeStateStatus: "BLOCKED" });
+    assert.equal(classifyCandidate(facts).kind, "ineligible");
+  }
 });
 
 test("all fresh pull-request refusal paths decide without a database", () => {

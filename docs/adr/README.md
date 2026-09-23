@@ -11,6 +11,7 @@ successors for current behavior.
 | Merge readiness Lease acquisition and handoff | [0003 - Acquire the merge lease in readiness](0003-acquire-merge-lease-in-readiness.md) | Accepted (2026-08-28) |
 | Chain batch publication, base drift, or merge-train settlement | [0004 - Publish ready Chains through a merge train](0004-publish-chains-through-a-merge-train.md) | Accepted (2026-09-07) |
 | Approval gate defaults and human control points | [0005 - Zero human gates by default](0005-zero-human-gates-by-default.md) | Accepted (2026-09-08) |
+| Bounded recovery from mechanical merge stops and stale OPEN evidence | [0011 - Automate mechanical merge stops](0011-automate-mechanical-merge-stops.md) | Accepted (2026-09-23) |
 | Merge Lease correctness, post-gate base checks, or refund budgets | [0006 - Merge lease is not a correctness boundary](0006-merge-lease-is-not-a-correctness-boundary.md) | Accepted (2026-09-08) |
 | Recovery mechanisms, repair budgets, or missing pull requests | [0007 - One check instead of a mechanism](0007-one-check-instead-of-a-mechanism.md) | Accepted (2026-09-08) |
 | Canonical templates, prompt generations, or review base pinning | [0008 - Templates are immutable once used](0008-templates-are-immutable-once-used.md) | Accepted (2026-09-08) |

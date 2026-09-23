@@ -689,6 +689,7 @@ export const parseStopAnswerMetadata = (metadata: unknown): StopAnswerRecord | n
 
 export type MergeOutcome =
   | { outcome: "merged"; mergeCommitSha: string }
+  | { outcome: "deferred"; condition: "unresolved-mergeability"; evidence: string }
   | { outcome: "stopped"; condition: StopCondition; evidence: string }
   | { outcome: "malformed"; condition: "missing-or-malformed-result"; reason: string };
 
@@ -718,6 +719,12 @@ export const parseMergeResult = (
       return malformed("merged outcome without a well-formed mergeCommitSha");
     }
     return { outcome: "merged", mergeCommitSha: value.mergeCommitSha };
+  }
+  if (value.outcome === "deferred") {
+    if (value.condition !== "unresolved-mergeability" || typeof value.evidence !== "string") {
+      return malformed("deferred outcome without mergeability evidence");
+    }
+    return { outcome: "deferred", condition: value.condition, evidence: value.evidence };
   }
   if (value.outcome === "stopped") {
     if (!isStopCondition(value.condition)) return malformed("stopped outcome without a known condition");
@@ -769,6 +776,7 @@ export const projectMergeOutcome = (
   if (!output || output.kind !== INTEGRATOR_OUTPUT_KIND) return null;
   const parsed = parseMergeResult(output);
   if (parsed.outcome === "merged") return { outcome: "merged", condition: null, incident: false };
+  if (parsed.outcome === "deferred") return null;
   if (parsed.outcome === "stopped") {
     return { outcome: "stopped", condition: parsed.condition, incident: isIncidentCondition(parsed.condition) };
   }

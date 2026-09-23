@@ -323,7 +323,7 @@ const refuseResend = async (
   if (verdict.kind === "poll") {
     // Mergeability that has gone back to UNKNOWN is not a state we may merge
     // on, and the bounded poll belongs to the first send, not to this one.
-    return stop("unresolved-mergeability", JSON.stringify({ observed: verdict.observed, phase: "resend guard" }));
+    return { outcome: "deferred", condition: "unresolved-mergeability", evidence: JSON.stringify({ observed: verdict.observed, phase: "resend guard" }) };
   }
   const sync = synchronousExecution(snapshot);
   if (sync.armed) return disarmAndReadBack(deps, reference, snapshot, sync.reason);
@@ -402,11 +402,11 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
     attempt += 1;
     const elapsed = deps.now().getTime() - pollStartedAt;
     if (attempt > deps.pollAttempts || elapsed >= deps.pollBudgetMs) {
-      return stop("unresolved-mergeability", JSON.stringify({
+      return { outcome: "deferred", condition: "unresolved-mergeability", evidence: JSON.stringify({
         observed: pending.observed,
         pollAttempts: attempt - 1,
         elapsedMs: elapsed,
-      }));
+      }) };
     }
     await deps.sleep(deps.pollIntervalMs);
   }
@@ -466,7 +466,7 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
   if (finalPending.kind === "poll") {
     // The bounded poll is spent. A state that has gone back to UNKNOWN at the
     // last moment is not a state we may merge on.
-    return stop("unresolved-mergeability", JSON.stringify({ observed: finalPending.observed, phase: "pre-merge re-read" }));
+    return { outcome: "deferred", condition: "unresolved-mergeability", evidence: JSON.stringify({ observed: finalPending.observed, phase: "pre-merge re-read" }) };
   }
   const finalSync = synchronousExecution(finalRead.snapshot);
   if (finalSync.armed) return disarmAndReadBack(deps, reference, finalRead.snapshot, finalSync.reason);
@@ -719,10 +719,16 @@ export const classifyPreMerge = (
     };
   }
   if (pr.mergeable !== "MERGEABLE") {
-    return { kind: "stop", outcome: stop("non-clean-mergeability", JSON.stringify({ mergeable: describe(pr.mergeable) })) };
+    return { kind: "stop", outcome: stop("non-clean-mergeability", JSON.stringify({
+      mergeable: describe(pr.mergeable),
+      ...(pr.mergeable === "CONFLICTING" ? { observed: snapshot.baseRefOid, authorized: authorization.baseSha } : {}),
+    })) };
   }
   if (pr.mergeStateStatus !== "CLEAN") {
-    return { kind: "stop", outcome: stop("non-clean-mergeability", JSON.stringify({ mergeStateStatus: describe(pr.mergeStateStatus) })) };
+    return { kind: "stop", outcome: stop("non-clean-mergeability", JSON.stringify({
+      mergeStateStatus: describe(pr.mergeStateStatus),
+      ...(pr.mergeStateStatus === "DIRTY" ? { observed: snapshot.baseRefOid, authorized: authorization.baseSha } : {}),
+    })) };
   }
   return { kind: "ok" };
 };

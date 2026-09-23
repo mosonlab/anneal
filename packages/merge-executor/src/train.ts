@@ -5,6 +5,7 @@ import type { PullRequestRef, PullRequestSnapshot, TrainGitHub } from "./github.
 
 type TrainAuthorization = AuthorizationPayload & { activityId: string; train: NonNullable<AuthorizationPayload["train"]> };
 const stop = (condition: StopCondition, evidence: Record<string, unknown>): MergeOutcome => ({ outcome: "stopped", condition, evidence: JSON.stringify(evidence) });
+const defer = (evidence: Record<string, unknown>): MergeOutcome => ({ outcome: "deferred", condition: "unresolved-mergeability", evidence: JSON.stringify(evidence) });
 const failed = (check: string, evidence: Record<string, unknown> = {}): MergeOutcome => stop("train-precondition-failed", { check, ...evidence });
 /** A read that did not answer is not an observation of drift. */
 const unreadable = (phase: string, reason: string): MergeOutcome => stop("api-error", { phase, reason });
@@ -162,7 +163,7 @@ export const executeTrain = async (
       if (pending.kind === "poll") {
         const elapsed = deps.now().getTime() - started;
         if (attempt >= deps.pollAttempts || elapsed >= deps.pollBudgetMs) {
-          return { outcome: stop("unresolved-mergeability", { observed: pending.observed, phase: "train precondition", pollAttempts: attempt, elapsedMs: elapsed }) };
+          return { outcome: defer({ observed: pending.observed, phase: "train precondition", pollAttempts: attempt, elapsedMs: elapsed }) };
         }
         await deps.sleep(deps.pollIntervalMs);
         continue;

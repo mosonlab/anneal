@@ -1229,7 +1229,7 @@ export const handleRegressionCompletion = async (
     return "advance";
   }
 
-  if (recovery) {
+  if (recovery && verdict.outcome !== "refresh-conflict") {
     await recordVerdict();
     await stopMergeTail(tx, {
       phase: "regression",
@@ -1239,11 +1239,9 @@ export const handleRegressionCompletion = async (
       sessionId: input.run.sessionId,
       at: input.now,
       reason: truncateFailureReason(
-        verdict.outcome === "refresh-conflict"
-          ? `refresh conflict at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
-          : verdict.outcome === "review-fail"
-            ? `semantic regression FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
-            : `merge gate FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`,
+        verdict.outcome === "review-fail"
+          ? `semantic regression FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`
+          : `merge gate FAIL at ${verdict.headSha} against ${verdict.baseHeadSha}: ${verdict.summary}`,
         FAILURE_REASON_LIMIT,
       ),
     });

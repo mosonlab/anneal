@@ -216,7 +216,7 @@ export const runClaim = async (
       claimed,
       outcome.outcome === "merged"
         ? `Mechanical merge completed as ${outcome.mergeCommitSha}`
-        : `Mechanical merge stopped: ${outcome.condition}`,
+        : `Mechanical merge ${outcome.outcome === "deferred" ? "deferred" : "stopped"}: ${outcome.condition}`,
       { kind: MERGE_INTEGRATOR_KIND.result, schemaVersion: MERGE_INTEGRATOR_SCHEMA_VERSION, ...outcome },
     );
     // Every executed contract ends SUCCESS, stop or merge alike. FAILURE is for

@@ -12,23 +12,26 @@ import {
   applyInboxDecisionTx,
   advanceTemplateTask,
   gateQuestion,
+  recordReadinessRequeue,
+  requestMergeEvidence,
 } from "@anneal/db";
 import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
-import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
+import { GitHubReadError, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";
 import { persistSessionTaskOutput } from "./canonical-task-output.js";
 import {
   withMergeLease,
   type ReleaseMergeLease,
   type WithMergeLease,
 } from "./merge-lease.js";
-import { evidenceTick } from "./merge-evidence-worker.js";
+import { evidenceTick, refreshStaleMergeCardsTick } from "./merge-evidence-worker.js";
 import { executorsOnline } from "./merge-executor-daemon-fixture.js";
 import { readinessTick } from "./merge-readiness-worker.js";
 import { claimRun } from "./run-claim.js";
 import { completeRun, completionInput } from "./run-completion.js";
 import { patchTask } from "./task-patch.js";
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
+import { enterRepair } from "./merge-tail-state.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
 let db: PrismaClient;
@@ -323,6 +326,370 @@ test("Inbox approval releases gated readiness only after exact-head authorizatio
     if (priorExecutors === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;
     else process.env.MERGE_EXECUTOR_RUNNER_IDS = priorExecutors;
   }
+});
+
+test("stale OPEN gate evidence closes without a human answer and requeues Regression", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-gate-stale-auto-refresh", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask);
+  await attestRegression(chain);
+  const oldCard = await fillGate(chain);
+  const refreshed = await refreshStaleMergeCardsTick(db, reader({ baseSha: NEW_BASE }), testTime(70));
+  assert.deepEqual(refreshed, { checked: 1, refreshed: 1, exhausted: 0 });
+  const closed = await db.inboxMessage.findUniqueOrThrow({ where: { id: oldCard.id } });
+  assert.equal(closed.status, "CLOSED");
+  assert.match(closed.body, /目标分支已前进，证据已刷新/u);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.gateTask.id } })).status, TaskStatus.TODO);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.TODO);
+  assert.equal(await db.run.count({ where: { taskId: chain.gateTask.id, status: "QUEUED" } }), 1);
+  await assert.rejects(() => approveInbox(oldCard.id, "stale-card-approval"),
+    /Merge evidence was refreshed/u);
+  const newRegression = await recordRegressionRetry(chain, HEAD, NEW_BASE);
+  await db.$transaction((tx) => advanceTemplateTask(tx, chain.gateTask.id, newRegression.id, null, testTime(71)));
+  await evidenceTick(db, reader({ baseSha: NEW_BASE }), testTime(72));
+  const newCard = await db.inboxMessage.findFirstOrThrow({ where: {
+    gateTaskId: chain.readinessTask.id, status: "OPEN",
+  } });
+  assert.notEqual(newCard.id, oldCard.id);
+  assert.match(newCard.body, new RegExp(NEW_BASE, "u"));
+});
+
+test("OPEN evidence transport failure retries without stopping and checked markers only record changes", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-gate-refresh-transport", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask);
+  await attestRegression(chain);
+  const card = await fillGate(chain);
+  const failing: PullRequestReader = { readPullRequest: async () => {
+    throw new GitHubReadError("temporary GitHub 502", "transport");
+  } };
+  assert.equal((await refreshStaleMergeCardsTick(db, failing, testTime(70))).refreshed, 0);
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: card.id } })).status, "OPEN");
+  const retry = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: chain.readinessTask.id,
+    metadata: { path: ["state"], equals: "transport-retry" },
+  } });
+  assert.equal((retry.metadata as Record<string, unknown>).attempt, 1);
+  assert.equal((await refreshStaleMergeCardsTick(db, reader(), testTime(71))).checked, 0);
+  assert.equal((await refreshStaleMergeCardsTick(db, reader(), testTime(73))).checked, 1);
+  const checkedCount = await db.taskActivity.count({ where: {
+    taskId: chain.readinessTask.id, metadata: { path: ["state"], equals: "checked" },
+  } });
+  assert.equal(checkedCount, 1);
+  assert.equal((await refreshStaleMergeCardsTick(db, reader(), testTime(73 + 301))).checked, 1);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: chain.readinessTask.id, metadata: { path: ["state"], equals: "checked" },
+  } }), checkedCount);
+});
+
+test("OPEN evidence transport attempt thirty reaches the existing stop card", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-gate-refresh-transport-ceiling", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask);
+  await attestRegression(chain);
+  const card = await fillGate(chain);
+  await db.taskActivity.create({ data: { taskId: chain.readinessTask.id, actorType: "control-plane",
+    body: "prior transport retry", metadata: { kind: MERGE_TAIL_KIND.evidenceRefresh,
+      state: "transport-retry", schemaVersion: 1, cardId: card.id, condition: "transport",
+      staleBaseSha: BASE, attempt: 29, firstFailedAt: testTime(0).toISOString(),
+      nextEligibleAt: testTime(70).toISOString() } } });
+  const failing: PullRequestReader = { readPullRequest: async () => {
+    throw new GitHubReadError("temporary GitHub 502", "transport");
+  } };
+  await refreshStaleMergeCardsTick(db, failing, testTime(70));
+  assert.equal(await db.taskActivity.count({ where: { taskId: chain.readinessTask.id,
+    metadata: { path: ["state"], equals: "stopped" } } }), 1);
+  const stop = await db.inboxMessage.findFirstOrThrow({ where: {
+    taskId: chain.gateTask.id, status: "OPEN", kind: "TEXT",
+    body: { contains: "approval evidence refresh failed" },
+  } });
+  assert.match(stop.body, /approval evidence refresh failed/u);
+});
+
+test("OPEN evidence deterministic identity mismatch stops rather than retrying", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-gate-refresh-identity", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask);
+  await attestRegression(chain);
+  await fillGate(chain);
+  await refreshStaleMergeCardsTick(db, reader({ headRefOid: NEW_HEAD }), testTime(70));
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: chain.readinessTask.id, metadata: { path: ["state"], equals: "stopped" },
+  } }), 1);
+});
+
+test("OPEN evidence refresh waits for a held Chain instead of stopping it", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-gate-refresh-held", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask);
+  await attestRegression(chain);
+  const card = await fillGate(chain);
+  const hold = await db.chainControl.create({ data: {
+    projectId: chain.project.id, chainId: chain.chainId, state: "HELD",
+    heldLayer: chain.readinessTask.chainLayer, holdRequestId: "held-refresh-test", holdGeneration: 1,
+  } });
+  assert.deepEqual(await refreshStaleMergeCardsTick(db, reader({ baseSha: NEW_BASE }), testTime(70)),
+    { checked: 0, refreshed: 0, exhausted: 0 });
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: card.id } })).status, "OPEN");
+  assert.equal(await db.taskActivity.count({ where: { taskId: chain.readinessTask.id,
+    metadata: { path: ["state"], equals: "stopped" } } }), 0);
+  await db.chainControl.update({ where: { id: hold.id }, data: { state: "RELEASED" } });
+  assert.equal((await refreshStaleMergeCardsTick(db, reader({ baseSha: NEW_BASE }), testTime(71))).refreshed, 1);
+});
+
+test("a failed OPEN card does not interrupt another stale-card refresh", async () => {
+  const first = await seedIntegratorChain(db, {
+    label: "merge-refresh-isolated-first", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  const second = await seedIntegratorChain(db, {
+    label: "merge-refresh-isolated-second", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  await attestRegression(first);
+  await attestRegression(second);
+  await fillGate(first);
+  const secondCard = await fillGate(second);
+  let reads = 0;
+  const flaky: PullRequestReader = {
+    ...reader({ baseSha: NEW_BASE }),
+    readPullRequest: async () => {
+      reads += 1;
+      if (reads === 1) throw new Error("first card reader failed");
+      return snapshot({ baseSha: NEW_BASE });
+    },
+  };
+  const result = await refreshStaleMergeCardsTick(db, flaky, testTime(70), 2);
+  assert.equal(result.checked, 2);
+  assert.equal(result.refreshed, 1);
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: secondCard.id } })).status, "CLOSED");
+});
+
+test("stale post-stop confirmation evidence refreshes without rejecting the Chain", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-confirmation-stale-auto-refresh", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask && chain.integratorTask);
+  await attestRegression(chain);
+  const requested = await db.$transaction((tx) => requestMergeEvidence(tx, {
+    gateTaskId: chain.readinessTask!.id, integratorTaskId: chain.integratorTask!.id,
+    sourceRunId: chain.gateRun.id, agentId: chain.agent.id, sessionId: chain.gateSession.id,
+    purpose: "confirmation", repository: "acme/widgets", prNumber: 123,
+    dedupeKey: `confirmation:${chain.chainId}`,
+  }, testTime(1)));
+  await evidenceTick(db, reader(), testTime(2));
+  assert.deepEqual(await refreshStaleMergeCardsTick(db, reader({ baseSha: NEW_BASE }), testTime(70)),
+    { checked: 1, refreshed: 1, exhausted: 0 });
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: requested.cardId } })).status, "CLOSED");
+  assert.equal(await db.run.count({ where: { taskId: chain.gateTask.id, status: "QUEUED" } }), 1);
+  assert.equal(await db.inboxDecision.count({ where: { inboxMessageId: requested.cardId } }), 0);
+});
+
+test("OPEN evidence refresh stays inside an active recovery aggregate and its two-requeue budget", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-recovery-stale-card", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask && chain.integratorTask);
+  await attestRegression(chain);
+  await fillGate(chain);
+  const aggregate = await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: chain.integratorTask.id, sourceStopId: "recovery-stale-card-stop", attempt: 1,
+    status: "REPAIRING", boundSourceRunId: chain.gateRun.id,
+    authorizationActivityId: "recovery-stale-card-authorization",
+    readinessTaskId: chain.readinessTask.id, regressionTaskId: chain.gateTask.id,
+    repository: "acme/widgets", prNumber: 123, targetBranch: "master",
+    authorizedHeadSha: HEAD, authorizedBaseSha: BASE, observedBaseSha: NEW_BASE,
+    currentBaseSha: NEW_BASE, recoveryRunId: chain.gateRun.id,
+  } });
+  await assert.rejects(db.$transaction((tx) => enterRepair(tx, { aggregateId: aggregate.id,
+    currentBaseSha: NEW_BASE, now: testTime(70), readinessRequeue: {
+      staleBaseSha: BASE, baseDrift: true, reason: "non-sweep caller",
+    } })), /repair intent does not match REPAIRING/u);
+  assert.equal((await refreshStaleMergeCardsTick(db, reader({ baseSha: NEW_BASE }), testTime(70))).refreshed, 1);
+  const requeue = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: chain.readinessTask.id,
+    metadata: { path: ["recoveryAggregateId"], equals: aggregate.id },
+  } });
+  assert.equal((requeue.metadata as Record<string, unknown>).baseDrift, true);
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } })).status, "REPAIRING");
+});
+
+test("active recovery aggregate refresh stops at its own two-requeue ceiling", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-recovery-stale-ceiling", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask && chain.integratorTask);
+  await attestRegression(chain);
+  const card = await fillGate(chain);
+  const aggregate = await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: chain.integratorTask.id, sourceStopId: "recovery-stale-ceiling-stop", attempt: 1,
+    status: "REPAIRING", boundSourceRunId: chain.gateRun.id,
+    authorizationActivityId: "recovery-stale-ceiling-authorization",
+    readinessTaskId: chain.readinessTask.id, regressionTaskId: chain.gateTask.id,
+    repository: "acme/widgets", prNumber: 123, targetBranch: "master",
+    authorizedHeadSha: HEAD, authorizedBaseSha: BASE, observedBaseSha: NEW_BASE,
+    currentBaseSha: NEW_BASE, recoveryRunId: chain.gateRun.id,
+  } });
+  await db.$transaction(async (tx) => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await recordReadinessRequeue(tx, { readinessTaskId: chain.readinessTask!.id,
+        regressionTaskId: chain.gateTask.id, recoveryAggregateId: aggregate.id,
+        staleBaseSha: BASE, currentBaseSha: NEW_BASE, budgetGrant: 1, baseDrift: true,
+        reason: "prior active recovery base advance" });
+    }
+  });
+  assert.equal((await refreshStaleMergeCardsTick(db, reader({ baseSha: NEW_BASE }), testTime(70))).exhausted, 1);
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: card.id } })).status, "OPEN");
+  assert.equal(await db.run.count({ where: { taskId: chain.gateTask.id, status: "QUEUED" } }), 0);
+});
+
+test("deterministic evidence read failure closes an active recovery aggregate", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-recovery-evidence-permission", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask && chain.integratorTask);
+  await attestRegression(chain);
+  await fillGate(chain);
+  const aggregate = await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: chain.integratorTask.id, sourceStopId: "evidence-permission-stop", attempt: 1,
+    status: "AWAITING_AUTHORIZATION", boundSourceRunId: chain.gateRun.id,
+    authorizationActivityId: "evidence-permission-authorization",
+    readinessTaskId: chain.readinessTask.id, regressionTaskId: chain.gateTask.id,
+    repository: "acme/widgets", prNumber: 123, targetBranch: "master",
+    authorizedHeadSha: HEAD, authorizedBaseSha: BASE, observedBaseSha: NEW_BASE,
+    currentBaseSha: NEW_BASE, recoveryRunId: chain.gateRun.id,
+  } });
+  const denied: PullRequestReader = { readPullRequest: async () => {
+    throw new GitHubReadError("permission denied", "permission");
+  } };
+  assert.equal((await refreshStaleMergeCardsTick(db, denied, testTime(70))).checked, 1);
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } })).status,
+    "BLOCKED_DOWNSTREAM");
+  assert.ok(await db.inboxMessage.count({ where: { taskId: chain.gateTask.id, status: "OPEN" } }) >= 1);
+});
+
+test("evidence refresh Run-birth refusal closes its active recovery aggregate", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-recovery-refresh-refusal", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask && chain.integratorTask);
+  await attestRegression(chain);
+  await fillGate(chain);
+  const aggregate = await db.mergeRecoveryAttempt.create({ data: {
+    integratorTaskId: chain.integratorTask.id, sourceStopId: "refresh-refusal-stop", attempt: 1,
+    status: "REPAIRING", boundSourceRunId: chain.gateRun.id,
+    authorizationActivityId: "refresh-refusal-authorization",
+    readinessTaskId: chain.readinessTask.id, regressionTaskId: chain.gateTask.id,
+    repository: "acme/widgets", prNumber: 123, targetBranch: "master",
+    authorizedHeadSha: HEAD, authorizedBaseSha: BASE, observedBaseSha: NEW_BASE,
+    currentBaseSha: NEW_BASE, recoveryRunId: chain.gateRun.id,
+  } });
+  await db.task.update({ where: { id: chain.gateTask.id }, data: { assigneeType: "HUMAN" } });
+  assert.equal((await refreshStaleMergeCardsTick(db, reader({ baseSha: NEW_BASE }), testTime(70))).refreshed, 0);
+  const settled = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } });
+  assert.equal(settled.status, "BLOCKED_DOWNSTREAM");
+  assert.match(settled.failureReason ?? "", /Run birth refused/u);
+});
+
+test("OPEN-card sweep isolates an outer marker-read failure", async () => {
+  const first = await seedIntegratorChain(db, { label: "sweep-outer-first",
+    shape: "canonical-compound-readiness", gatedReadiness: true });
+  const second = await seedIntegratorChain(db, { label: "sweep-outer-second",
+    shape: "canonical-compound-readiness", gatedReadiness: true });
+  assert.ok(first.readinessTask && second.readinessTask);
+  await attestRegression(first);
+  await fillGate(first);
+  await attestRegression(second);
+  await fillGate(second);
+  const faultDb = new Proxy(db, { get(target, property) {
+    if (property !== "taskActivity") return Reflect.get(target, property);
+    return new Proxy(target.taskActivity, { get(delegate, method) {
+      if (method !== "findFirst") return Reflect.get(delegate, method);
+      return async (args: { where: { taskId: string } }) => {
+        if (args.where.taskId === first.readinessTask!.id) throw new Error("outer marker read failed");
+        return delegate.findFirst(args);
+      };
+    } });
+  } });
+  const result = await refreshStaleMergeCardsTick(faultDb, reader({ baseSha: NEW_BASE }), testTime(70), 2);
+  assert.equal(result.refreshed, 1);
+  assert.equal(await db.run.count({ where: { taskId: second.gateTask.id, status: "QUEUED" } }), 1);
+  assert.ok(await db.taskActivity.count({ where: { taskId: first.readinessTask.id,
+    metadata: { path: ["state"], equals: "stopped" } } }) >= 1);
+});
+
+test("stale-card refresh and a human decision have one winner", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-gate-stale-race", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask);
+  await attestRegression(chain);
+  const card = await fillGate(chain);
+  let releaseRead!: () => void;
+  const blockedRead = new Promise<void>((resolve) => { releaseRead = () => resolve(); });
+  let readStarted!: () => void;
+  const started = new Promise<void>((resolve) => { readStarted = () => resolve(); });
+  const pending = refreshStaleMergeCardsTick(db, {
+    ...reader({ baseSha: NEW_BASE }),
+    readPullRequest: async () => { readStarted(); await blockedRead; return snapshot({ baseSha: NEW_BASE }); },
+  }, testTime(70));
+  await started;
+  const approved = await approveInbox(card.id, "stale-race-human-wins");
+  assert.equal(approved.gateAction, "approved");
+  releaseRead();
+  assert.deepEqual(await pending, { checked: 1, refreshed: 0, exhausted: 0 });
+  assert.equal(await db.run.count({ where: { taskId: chain.gateTask.id, status: "QUEUED" } }), 0);
+});
+
+test("human gate rejection wins a stale-card refresh race without a second requeue", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-gate-stale-reject-race", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask);
+  await attestRegression(chain);
+  const card = await fillGate(chain);
+  let releaseRead!: () => void;
+  const blockedRead = new Promise<void>((resolve) => { releaseRead = resolve; });
+  let readStarted!: () => void;
+  const started = new Promise<void>((resolve) => { readStarted = resolve; });
+  const pending = refreshStaleMergeCardsTick(db, {
+    ...reader({ baseSha: NEW_BASE }),
+    readPullRequest: async () => { readStarted(); await blockedRead; return snapshot({ baseSha: NEW_BASE }); },
+  }, testTime(70));
+  await started;
+  const rejected = await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: card.id, externalEventId: "stale-race-reject-wins",
+    decision: "reject", actorOpenId: "operator-1",
+  }));
+  assert.equal(rejected.gateAction, "rejected");
+  releaseRead();
+  assert.deepEqual(await pending, { checked: 1, refreshed: 0, exhausted: 0 });
+  assert.equal(await db.run.count({ where: { taskId: chain.gateTask.id, status: "QUEUED" } }), 0);
+});
+
+test("stale-card refresh budget retains the OPEN card with an explanation", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-gate-stale-budget", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask);
+  await attestRegression(chain);
+  const card = await fillGate(chain);
+  await db.$transaction(async (tx) => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await recordReadinessRequeue(tx, { readinessTaskId: chain.readinessTask!.id,
+        regressionTaskId: chain.gateTask.id, staleBaseSha: BASE, currentBaseSha: NEW_BASE,
+        budgetGrant: 1, baseDrift: true, reason: "prior base advancement" });
+    }
+  });
+  assert.deepEqual(await refreshStaleMergeCardsTick(db, reader({ baseSha: NEW_BASE }), testTime(70)),
+    { checked: 1, refreshed: 0, exhausted: 1 });
+  const retained = await db.inboxMessage.findUniqueOrThrow({ where: { id: card.id } });
+  assert.equal(retained.status, "OPEN");
+  assert.match(retained.body, /自动刷新已达 3 次上限/u);
+  assert.equal(await db.run.count({ where: { taskId: chain.gateTask.id, status: "QUEUED" } }), 0);
 });
 
 test("task PATCH approval shares the Inbox disposition and leaves readiness worker-owned", async () => {

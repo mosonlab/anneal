@@ -43,6 +43,7 @@ import {
   parseStopAnswerMetadata,
 } from "./merge-integrator.js";
 import { revalidateAfterClassCeiling } from "./merge-recovery-revalidate.js";
+import { MERGE_TAIL_KIND } from "./merge-tail.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -54,6 +55,27 @@ export const evidenceDeadlineMs = (): number => {
 
 const asRecord = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
+
+export const parseRecoverableMergeEvidence = (
+  condition: string,
+  value: string,
+): { observed: string; authorized: string } | null => {
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { return null; }
+  const evidence = asRecord(parsed);
+  if (!evidence) return null;
+  const keys = Object.keys(evidence).sort().join(",");
+  if (condition === "base-drift") {
+    if (keys !== "authorized,observed") return null;
+  } else if (condition === "non-clean-mergeability") {
+    if (keys !== "authorized,mergeable,observed" && keys !== "authorized,mergeStateStatus,observed") return null;
+    if (evidence.mergeable !== "CONFLICTING" && evidence.mergeStateStatus !== "DIRTY") return null;
+  } else return null;
+  if (typeof evidence.observed !== "string" || !/^[0-9a-f]{40}$/u.test(evidence.observed)) return null;
+  if (typeof evidence.authorized !== "string" || !/^[0-9a-f]{40}$/u.test(evidence.authorized)) return null;
+  if (condition === "base-drift" && evidence.observed === evidence.authorized) return null;
+  return { observed: evidence.observed, authorized: evidence.authorized };
+};
 
 // ---------------------------------------------------------------------------
 // Locating the integrator step of a chain
@@ -631,12 +653,13 @@ export const openDeferredBaseDriftQuestion = async (
 ) => {
   const task = await loadIntegratorTask(tx, integratorTaskId);
   const stop = await latestRecordedStop(tx, integratorTaskId);
-  if (!task || stop?.stopId !== stopId || stop.condition !== "base-drift") {
+  if (!task || stop?.stopId !== stopId
+    || (stop.condition !== "base-drift" && stop.condition !== "non-clean-mergeability")) {
     throw new Error(`Cannot open the settled base-drift question for unresolved stop ${stopId}`);
   }
   const identity = await stopQuestionIdentity(tx, task, stop);
   return openStopQuestion(tx, {
-    integratorTaskId, stopId, condition: "base-drift", evidence: stop.evidence,
+    integratorTaskId, stopId, condition: stop.condition, evidence: stop.evidence,
     ...identity, generation: card.revalidations,
     ...(card.ceiling ? { choices: BASE_DRIFT_CLASS_CEILING_CHOICES } : {}),
   });
@@ -756,10 +779,14 @@ export const landIntegratorStop = async (
       stopId: activity.id,
       questionId: null,
       resultCreated,
-      questionDeferred: stopped.condition === "base-drift" && isCanonicalIntegratorStep(task.templateStep),
+      questionDeferred: isCanonicalIntegratorStep(task.templateStep)
+        && (stopped.condition === "base-drift"
+          || parseRecoverableMergeEvidence(stopped.condition, stopped.evidence) !== null),
     };
   }
-  const questionDeferred = stopped.condition === "base-drift" && isCanonicalIntegratorStep(task.templateStep);
+  const questionDeferred = isCanonicalIntegratorStep(task.templateStep)
+    && (stopped.condition === "base-drift"
+      || parseRecoverableMergeEvidence(stopped.condition, stopped.evidence) !== null);
   const sourceRunIsActive = questionDeferred && stopped.sourceRunId
     ? await tx.run.findUnique({ where: { id: stopped.sourceRunId }, select: { taskId: true, status: true } })
       .then((sourceRun) => {
@@ -975,11 +1002,19 @@ const liveConfirmationGeneration = async (
     const dedupeKey = confirmationCardKey(integratorTaskId, stopId, generation);
     const card = await tx.inboxMessage.findUnique({
       where: { dedupeKey },
-      select: { id: true, status: true, selectedChoiceId: true },
+      select: { id: true, status: true, selectedChoiceId: true, gateTaskId: true },
     });
     if (!card) return { generation, dedupeKey, card: null };
     const rejected = card.status === InboxStatus.ANSWERED && card.selectedChoiceId === "reject";
-    if (!rejected) return { generation, dedupeKey, card: { id: card.id } };
+    const refreshed = card.status === InboxStatus.CLOSED && card.gateTaskId && await tx.taskActivity.findFirst({
+      where: { taskId: card.gateTaskId, actorType: "control-plane", AND: [
+        { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.evidenceRefresh } },
+        { metadata: { path: ["state"], equals: "queued" } },
+        { metadata: { path: ["cardId"], equals: card.id } },
+      ] },
+      select: { id: true },
+    });
+    if (!rejected && !refreshed) return { generation, dedupeKey, card: { id: card.id } };
   }
 };
 
