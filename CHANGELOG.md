@@ -131,6 +131,12 @@ written.
   and the task output summary. The foundational prompt now defines a passing
   test suite: setup succeeds, the command exits zero, at least one test
   executes, and none fail.
+- **Standing decisions come before the Inbox.** Chains run unattended, so the
+  foundational prompt now has every agent apply a standing decision named by
+  the brief or specification of record before it asks an Inbox question or
+  escalates. The agent records `standing decision <id> applied` with evidence
+  in the activity log and the task output summary. It asks only when no
+  standing decision covers the case.
 - Canonical sync retires the `pre-defect-class-sweep` prompt generation of all
   three templates on deploy. Agent prompts update in place as before. Steps of
   already-instantiated chains keep the prompts they were created with.
