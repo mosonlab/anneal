@@ -688,6 +688,7 @@ export const CostsPage = (): ReactNode => {
                               <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.avg")}</TableHead>
                               <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.cache")}</TableHead>
                               <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.uncached")}</TableHead>
+                              <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.cachedRead")}</TableHead>
                               <TableHead className={TABLE_TIGHT}>{t("costs.byAgent.waste")}</TableHead>
                             </TableRow>
                           </TableHeader>
@@ -725,6 +726,11 @@ export const CostsPage = (): ReactNode => {
                                   {entry.uncachedInputUsd === null
                                     ? "—"
                                     : usageMoney(entry.uncachedInputUsd)}
+                                </TableCell>
+                                <TableCell className={TABLE_TIGHT}>
+                                  {entry.cachedReadUsd === null
+                                    ? "—"
+                                    : usageMoney(entry.cachedReadUsd)}
                                 </TableCell>
                                 <TableCell className={TABLE_TIGHT}>{percent(wasteShare(entry))}</TableCell>
                               </TableRow>

@@ -253,7 +253,9 @@ curl -X DELETE "$BASE_URL/projects/$PROJECT_ID" -H "Authorization: Bearer $OPERA
 - Optional query parameter: `days` (`1`, `7`, `30`, or `90`; default `30`).
 - The response retains the aggregate totals, daily series, model totals, agent
   totals, and top runs. Agent rows additionally report cached-read percentage,
-  unknown-split run count, and known uncached-input tokens and spend.
+  unknown-split run count, known uncached-input tokens and spend, and
+  `cachedReadUsd`: cached-read input at the model table's cached rate, already
+  included in the agent's API-equivalent `usd`.
 - Model totals retain each Run's root model, including native-child Runs whose
   unsplit token usage is estimated at that root model's rates.
 - `waste` partitions `wastedUsd` exactly into operator-cancelled and failed

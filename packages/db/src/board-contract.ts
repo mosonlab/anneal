@@ -126,6 +126,9 @@ export type CostsAgentTotal<DecimalValue = string> = {
   /** Uncached input spend at the model table rate, or null when a contributing
    * model has no repository price. */
   uncachedInputUsd: DecimalValue | null;
+  /** Cached-read input at the model table's cached rate, already inside
+   * `usd`; null under the same conditions as `uncachedInputUsd`. */
+  cachedReadUsd: DecimalValue | null;
   wastedUsd: DecimalValue;
 };
 

@@ -170,6 +170,7 @@ test("cache metrics count reads only and retain unknown split runs separately", 
     cacheUnknownRuns: 1,
     uncachedInputTokens: 10,
     uncachedInputUsd: new Prisma.Decimal("0.000002"),
+    cachedReadUsd: new Prisma.Decimal("0.000002"),
     wastedUsd: new Prisma.Decimal(0),
   });
 });
@@ -213,6 +214,8 @@ test("uncached input dollars use the model input rate and stay unknown for absen
   const unlisted = report.byAgent.find((entry) => entry.agent === "unlisted");
   assert.equal(claude?.uncachedInputUsd?.toString(), "0.00005");
   assert.equal(unlisted?.uncachedInputUsd, null);
+  assert.equal(claude?.cachedReadUsd?.toString(), "0.00005");
+  assert.equal(unlisted?.cachedReadUsd, null);
 });
 
 const chainTask = (

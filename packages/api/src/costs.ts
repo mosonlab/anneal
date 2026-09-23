@@ -313,6 +313,15 @@ const uncachedInputUsd = (run: CostsRunRow, split: CacheSplit): Prisma.Decimal |
     : new Prisma.Decimal(split.uncachedInputTokens).times(prices.inputPerMillionUsd).dividedBy(1_000_000);
 };
 
+/** Cached reads at the same model's cached-input rate: the part of an
+ * API-equivalent total that a subscription operator may not pay for. */
+const cachedReadUsd = (run: CostsRunRow, split: CacheSplit): Prisma.Decimal | null => {
+  const prices = MODEL_TOKEN_PRICES[modelNameForPricing(run.model)];
+  return prices === undefined
+    ? null
+    : new Prisma.Decimal(split.cachedInputTokens).times(prices.cachedInputPerMillionUsd).dividedBy(1_000_000);
+};
+
 type CostsChainTask = CostsTaskRow & { repairKind?: string };
 
 const chainKey = (task: Pick<CostsTaskRow, "projectId" | "chainId">): string =>
@@ -510,6 +519,7 @@ export const aggregateCosts = (
     inputTokens: number;
     uncachedInputTokens: number;
     uncachedInputUsd: Prisma.Decimal;
+    cachedReadUsd: Prisma.Decimal;
     cacheKnownRuns: number;
     cachePricingKnown: boolean;
     cacheUnknownRuns: number;
@@ -539,7 +549,7 @@ export const aggregateCosts = (
     const cost = runCost(run);
     const agentTotal = perAgent.get(agentId) ?? {
       agent, usd: ZERO, pricedRuns: 0, costUnavailableRuns: 0,
-      cachedInputTokens: 0, inputTokens: 0, uncachedInputTokens: 0, uncachedInputUsd: ZERO,
+      cachedInputTokens: 0, inputTokens: 0, uncachedInputTokens: 0, uncachedInputUsd: ZERO, cachedReadUsd: ZERO,
       cacheKnownRuns: 0, cachePricingKnown: true, cacheUnknownRuns: 0, wastedUsd: ZERO,
     };
     const split = cacheSplit(run);
@@ -550,6 +560,7 @@ export const aggregateCosts = (
           inputTokens: agentTotal.inputTokens + split.inputTokens,
           uncachedInputTokens: agentTotal.uncachedInputTokens + split.uncachedInputTokens,
           uncachedInputUsd: agentTotal.uncachedInputUsd.plus(uncachedInputUsd(run, split) ?? ZERO),
+          cachedReadUsd: agentTotal.cachedReadUsd.plus(cachedReadUsd(run, split) ?? ZERO),
           cacheKnownRuns: agentTotal.cacheKnownRuns + 1,
           cachePricingKnown: agentTotal.cachePricingKnown && uncachedInputUsd(run, split) !== null,
         }
@@ -652,6 +663,9 @@ export const aggregateCosts = (
         uncachedInputTokens: agentTotal.uncachedInputTokens,
         uncachedInputUsd: agentTotal.cacheKnownRuns > 0 && agentTotal.cachePricingKnown
           ? amount(agentTotal.uncachedInputUsd)
+          : null,
+        cachedReadUsd: agentTotal.cacheKnownRuns > 0 && agentTotal.cachePricingKnown
+          ? amount(agentTotal.cachedReadUsd)
           : null,
         wastedUsd: amount(agentTotal.wastedUsd),
       }))

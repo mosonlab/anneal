@@ -302,7 +302,7 @@ test("an entirely unpriced agent is explicit rather than indistinguishable from 
   const { body } = await call(costsPath(project.id, 7));
   assert.deepEqual(body.byAgent, [{
     agent: "codex", usd: "0", runs: 1, costUnavailableRuns: 1, avgUsd: "0", cachePct: null,
-    cacheUnknownRuns: 1, uncachedInputTokens: 0, uncachedInputUsd: null, wastedUsd: "0",
+    cacheUnknownRuns: 1, uncachedInputTokens: 0, uncachedInputUsd: null, cachedReadUsd: null, wastedUsd: "0",
   }]);
 });
 

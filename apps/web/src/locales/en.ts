@@ -204,6 +204,7 @@ export const en = {
   "costs.byAgent.avg": "Avg / priced run",
   "costs.byAgent.cache": "Cache %",
   "costs.byAgent.cacheUnknown": "{n} unknown cache split runs",
+  "costs.byAgent.cachedRead": "Cache read $",
   "costs.byAgent.empty": "No settled runs in this window.",
   "costs.byAgent.runs": "Runs",
   "costs.byAgent.spend": "Spend",

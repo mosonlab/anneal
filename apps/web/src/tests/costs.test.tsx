@@ -182,7 +182,7 @@ const agents = (count: number): CostsReport["byAgent"] =>
   Array.from({ length: count }, (_, index) => ({
     agent: `Agent ${index}`, usd: String(count - index), runs: 1, costUnavailableRuns: 0,
     avgUsd: String(count - index), cachePct: null, cacheUnknownRuns: 1,
-    uncachedInputTokens: 0, uncachedInputUsd: null, wastedUsd: "0",
+    uncachedInputTokens: 0, uncachedInputUsd: null, cachedReadUsd: null, wastedUsd: "0",
   }));
 
 test("six agents or fewer are each their own series", () => {
@@ -222,11 +222,11 @@ const report = (overrides: Partial<CostsPageReport> = {}): CostsPageReport => ({
   byAgent: [
     {
       agent: "Senior Developer", usd: "1800", runs: 400, costUnavailableRuns: 100, avgUsd: "6",
-      cachePct: 72.5, cacheUnknownRuns: 0, uncachedInputTokens: 2_000, uncachedInputUsd: "24.50", wastedUsd: "180",
+      cachePct: 72.5, cacheUnknownRuns: 0, uncachedInputTokens: 2_000, uncachedInputUsd: "24.50", cachedReadUsd: "3.10", wastedUsd: "180",
     },
     {
       agent: "Planner", usd: "689.211742", runs: 288, costUnavailableRuns: 53, avgUsd: "2.932816",
-      cachePct: null, cacheUnknownRuns: 1, uncachedInputTokens: 0, uncachedInputUsd: null, wastedUsd: "0",
+      cachePct: null, cacheUnknownRuns: 1, uncachedInputTokens: 0, uncachedInputUsd: null, cachedReadUsd: null, wastedUsd: "0",
     },
   ],
   byModel: [
@@ -360,7 +360,7 @@ test("an agent with no priced runs shows unavailable cost instead of zero spend"
     daily: [], topRuns: [], byModel: [],
     byAgent: [{
       agent: "codex", usd: "0", runs: 3, costUnavailableRuns: 3, avgUsd: "0", cachePct: null,
-      cacheUnknownRuns: 3, uncachedInputTokens: 0, uncachedInputUsd: null, wastedUsd: "0",
+      cacheUnknownRuns: 3, uncachedInputTokens: 0, uncachedInputUsd: null, cachedReadUsd: null, wastedUsd: "0",
     }],
   }));
   assert.match(text, /codex/);
@@ -388,11 +388,11 @@ test("a share is taken from the wire amounts, and is null when there is no total
 test("waste is a share of the agent's own spend, and null when it has none", () => {
   assert.equal(wasteShare({
     agent: "dev", usd: "200", runs: 4, costUnavailableRuns: 0, avgUsd: "50",
-    cachePct: null, cacheUnknownRuns: 4, uncachedInputTokens: 0, uncachedInputUsd: null, wastedUsd: "50",
+    cachePct: null, cacheUnknownRuns: 4, uncachedInputTokens: 0, uncachedInputUsd: null, cachedReadUsd: null, wastedUsd: "50",
   }), 25);
   assert.equal(wasteShare({
     agent: "dev", usd: "0", runs: 2, costUnavailableRuns: 2, avgUsd: "0",
-    cachePct: null, cacheUnknownRuns: 2, uncachedInputTokens: 0, uncachedInputUsd: null, wastedUsd: "0",
+    cachePct: null, cacheUnknownRuns: 2, uncachedInputTokens: 0, uncachedInputUsd: null, cachedReadUsd: null, wastedUsd: "0",
   }), null);
 });
 
@@ -400,10 +400,12 @@ test("the by-agent table states a cache rate and a waste rate per agent", async 
   const { text } = await readPage(report());
   assert.match(text, /Cache %/);
   assert.match(text, /Uncached input \$/);
+  assert.match(text, /Cache read \$/);
   assert.match(text, /Waste %/);
   // Senior Developer: 72.5% cached, $180 wasted of $1800 spent.
   assert.match(text, /72\.5%/);
   assert.match(text, /\$24\.50/);
+  assert.match(text, /\$3\.10/);
   assert.match(text, /10\.0%/);
   // Planner has one run whose cache split is unknown. It is counted explicitly,
   // while the percentage and uncached amount remain unknown.

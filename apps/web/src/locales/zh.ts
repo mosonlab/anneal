@@ -203,6 +203,7 @@ export const zh = {
   "costs.byAgent.avg": "每次可计价 run 均值",
   "costs.byAgent.cache": "缓存 %",
   "costs.byAgent.cacheUnknown": "{n} 笔缓存拆分未知的 run",
+  "costs.byAgent.cachedRead": "缓存读取 $",
   "costs.byAgent.empty": "该区间内没有已结束的 run。",
   "costs.byAgent.runs": "Run 数",
   "costs.byAgent.spend": "花费",
