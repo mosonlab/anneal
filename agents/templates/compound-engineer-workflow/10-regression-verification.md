@@ -30,10 +30,10 @@ is preserved without a new defect. Run focused regressions for the findings and
 changed behavior; the Merge gate owns full workspace and repository suites. Do not modify code or repair
 a failure.
 
-If an adopted finding remains open, a rejection is unsupported, or a new defect exists, do not stop at the first:
-account for every open finding and sweep the change for every other instance of each defect class introduced or
-exposed by this chain (the same rule, contract, or invariant broken at another call site, endpoint, or code path).
-Report all of them in one call, one line each as `file:line — what breaks`:
+If an adopted finding remains open, a rejection is unsupported, or a new defect exists, sweep the changed code and
+the sites governed by changed contracts for every instance of each defect class. Report every blocking instance in
+one call, one line each: finding ID or `new`, `file:line` (command and cwd for an execution failure), and
+consequence; record proven pre-existing instances outside that scope in the activity log:
 `"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh" review-fail '<concise finding IDs or defect>'`
 and finish. Otherwise run `"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh" finalize`.
 

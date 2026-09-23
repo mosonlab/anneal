@@ -18,9 +18,8 @@ implementation with its dispositions and closed findings, the exact pre-fix and
 proposed fixed heads, the approved specification, and relevant prior outputs.
 Review the whole fix diff and account for every finding id. Run focused
 regressions for the findings and changed behavior; the Merge gate owns full
-workspace and repository suites. A suite that executes zero tests or fails to
-resolve a module is a failure, not a pass. Reject an unresolved adopted
-finding, an unsupported disposition, a regression, or a new defect.
+workspace and repository suites. Reject an unresolved adopted finding, an
+unsupported disposition, a regression, or a new defect.
 
 A failure you observe is this chain's defect until you have shown otherwise
 yourself. An earlier step's report that a failure is pre-existing, baseline or

@@ -86,37 +86,45 @@ written.
 
 - **A merge-tail repair round now works on a whole defect class.** A defect
   with several instances used to cost one Regression verdict and one repair
-  attempt per instance, so it could exhaust the three automatic attempts. The
-  canonical Regression step now sweeps for every other instance of each
-  defect class that this chain introduced or exposed, and reports all of
-  them, with every other open finding, in one `review-fail`. The `review-fix`
-  and `gate-fix` repair prompt asks the repair to close every listed instance
-  and every other instance of the same class reachable from the chain's diff
-  or a contract it widened. It lists pre-existing instances outside that scope
-  without changing them, and lists the sites it checked and changed.
-- **Widened shared contracts are checked before the merge tail.** When a change
-  widens or adds a shared contract, invariant, or cross-cutting rule, the
-  canonical Implementation step of every workflow enumerates and updates every
-  existing consumer, call site, and endpoint it now governs and lists them in
-  its summary. The code review and blind code review steps check each one,
-  reading outside `base...head` where needed, and report every inconsistent
-  one as its own finding.
-- **Review fixes ask instead of inventing specification.** When closing a
-  finding would need data, fields, or behavior the specification of record
-  does not provide, the Direct and Full review-fix steps call `inbox_ask`
-  with the spec text and tree evidence.
-- **Premise checks cover consumed inputs.** Direct revalidation treats a
-  table, column, field, fixture, or export that a Changes or Acceptance item
-  consumes, but that neither exists at HEAD nor is created by another Changes
-  item, as a premise collapse. Full plan review checks the same for every
-  slice against the frozen base and its blocking slices.
-- **Role contracts.** Senior developer roles treat the consumers of a contract
-  their change widens as part of the assignment. They record an ambiguous
-  reading in the task output summary as well as the activity log. Senior
-  developer and Regression verifier roles count a suite that executes zero
-  tests or fails to resolve a module as a failure.
+  attempt per instance. `review-fix` and `gate-fix` repairs each get three
+  automatic attempts, so such a defect could exhaust the budget. The canonical
+  Regression step now sweeps the changed code and the sites governed by
+  changed contracts for every instance of each defect class. It reports every
+  blocking instance in one `review-fail`, one line per finding ID, location,
+  and consequence, and records proven pre-existing instances outside that
+  scope in the activity log. The `review-fix` and `gate-fix` repair prompt
+  closes every listed in-scope instance and sweeps changed code and governed
+  consumers for the same class. It lists other instances without changing
+  them, escalates specification contradictions through the Inbox, and reports
+  checked sites, changed sites, and affected-test results.
+- **Changed shared contracts are checked before the merge tail.** For every
+  shared contract a change adds, changes, or removes, the canonical
+  Implementation step of every workflow enumerates and verifies every governed
+  site, updates the inconsistent ones within the specification of record, and
+  lists checked sites, changed sites, and evidence. Code review and blind code
+  review inspect the same sites, including sites outside `base...head`. They
+  group instances into one finding only when severity and required fix match.
+- **Review fixes ask before changing the specification.** When closing a
+  finding requires changing specified behavior, scope, or an unavailable input
+  premise, the review-fix step of every workflow asks one blocking `inbox_ask`
+  question and finishes the independent fixes meanwhile.
+- **Premise checks trace consumed inputs.** Direct revalidation traces every
+  table, column, field, fixture, or export a Changes or Acceptance item
+  consumes to HEAD or to a Changes item that creates it before use; an
+  untraceable input is a premise collapse. Direct and PR Implementation run the
+  same trace, because an unbound Direct chain has no Revalidate step. Full plan
+  review accepts an input created before use by the same slice or a
+  prerequisite slice.
+- **Role contracts.** Senior developer, plan executor, and frontend developer
+  roles include required consumer updates within the specification's
+  constraints and escalate conflicts with explicit constraints. They record
+  chosen readings as interpretations, never as approvals, in the activity log
+  and the task output summary. The foundational prompt now defines a passing
+  test suite: setup succeeds, the command exits zero, at least one test
+  executes, and none fail.
 - Canonical sync retires the `pre-defect-class-sweep` prompt generation of all
-  three templates on deploy; role prompts update in place as before.
+  three templates on deploy. Agent prompts update in place as before. Steps of
+  already-instantiated chains keep the prompts they were created with.
 
 ## v0.9.0 — Developer Preview 9
 

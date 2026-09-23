@@ -2349,19 +2349,20 @@ base. The external failure remains visible as a diagnostic
 `GET /tasks/:taskId/activity`. It is diagnostic history, not a replacement for
 the persisted verdict and not another source of semantic authority.
 
-Because each repair round spends one automatic repair attempt, both halves of
-the loop work on a whole defect class rather than one instance. A canonical
-Regression step that finds a defect sweeps for every other instance of the
-same defect class that the chain introduced or exposed, and reports all of
-them, with every other open finding, in one `review-fail` summary. The
-`review-fix` and `gate-fix` repair prompt requires closing every listed
-instance and every other instance of that class reachable from the chain's
-diff or a contract it widened, without unrelated refactors. It lists
-pre-existing instances outside that scope in the summary without changing them,
-and lists the sites checked and changed in the repair's task output summary.
-Earlier in the chain, the canonical Implementation and review steps enumerate
-every existing consumer of a shared contract, invariant, or cross-cutting rule
-the change widens or adds, so such a defect should be caught before the merge
+Each repair round spends one automatic attempt of its kind: `review-fix` and
+`gate-fix` get three attempts each. Both halves of the loop therefore work on
+a whole defect class rather than one instance. A canonical Regression step
+that finds a defect sweeps the changed code and the sites governed by changed
+contracts for every instance of that defect class. It reports every blocking
+instance in one `review-fail` summary and records proven pre-existing
+instances outside that scope in its activity log. The `review-fix` and
+`gate-fix` repair prompt closes every listed in-scope instance and sweeps
+changed code and governed consumers for the same class. It lists other
+instances in its summary without changing them, escalates a specification
+contradiction through `inbox_ask`, and reports checked sites, changed sites,
+and affected-test results. Earlier in the chain, the canonical Implementation
+and review steps enumerate every site governed by a shared contract the change
+adds, changes, or removes, so such a defect should be caught before the merge
 tail.
 
 Inside a base-drift recovery Run, the same validation and precedence apply,

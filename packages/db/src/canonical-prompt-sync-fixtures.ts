@@ -1,38 +1,42 @@
 /**
  * Restore the prompt bytes retired by the defect-class sweep rollover
- * (2026-09-23): the Regression review-fail sweep, the shared-contract consumer
- * sentences in Implementation and review, the review-fix `inbox_ask` rule, and
- * the revalidation and plan-review input checks. Every registered generation
+ * (2026-09-23): the Regression review-fail sweep, the input trace and
+ * shared-contract consumer sentences in Implementation and review, the
+ * review-fix `inbox_ask` rule, and the revalidation and plan-review input checks. Every registered generation
  * predates it, so the older fixtures apply it before reconstructing their
  * earlier prompt bytes.
  */
 export const restorePreDefectClassSweepPrompt = (prompt: string): string => prompt
   .replace(
-    "If an adopted finding remains open, a rejection is unsupported, or a new defect exists, do not stop at the first:\naccount for every open finding and sweep the change for every other instance of each defect class introduced or\nexposed by this chain (the same rule, contract, or invariant broken at another call site, endpoint, or code path).\nReport all of them in one call, one line each as `file:line — what breaks`:",
+    "If an adopted finding remains open, a rejection is unsupported, or a new defect exists, sweep the changed code and\nthe sites governed by changed contracts for every instance of each defect class. Report every blocking instance in\none call, one line each: finding ID or `new`, `file:line` (command and cwd for an execution failure), and\nconsequence; record proven pre-existing instances outside that scope in the activity log:",
     "If an adopted finding remains open, a rejection is unsupported, or a new\ndefect exists, run",
   )
   .replace(
-    " When the change widens or adds a shared contract, invariant, or cross-cutting rule (such as a new policy field, enum member, or required parameter), enumerate every existing consumer, call site, and endpoint it now governs, update each one, and list them in the summary.",
+    " Before implementing, trace every input the work consumes to a source available at HEAD or to a specified change that creates it before use; for an input you cannot trace, ask one blocking `inbox_ask` question with the tree evidence.",
     "",
   )
   .replace(
-    " When the change widens or adds a shared contract, invariant, or cross-cutting rule, enumerate every existing consumer, call site, and endpoint it now governs, reading them in the tree at head even outside `base...head`, and check each one; report every one left inconsistent as its own finding.",
+    " For every shared contract this change adds, changes, or removes, enumerate all governed sites, verify each, update the inconsistent ones within the specification of record, and list checked sites, changed sites, and verification evidence in the summary.",
     "",
   )
   .replace(
-    "report. When the change widens or adds a shared contract, invariant, or\ncross-cutting rule, enumerate every existing consumer, call site, and endpoint\nit now governs, reading them in the tree at head even outside `base...head`,\nand check each one; report every one left inconsistent as its own finding.\nPersist exactly one",
+    " Enumerate and inspect every site governed by a contract this change adds, changes, or removes at the pinned head, including sites outside `base...head`; report every inconsistency, grouping instances into one finding only when severity and required fix match, with every location listed in its evidence.",
+    "",
+  )
+  .replace(
+    "report. Enumerate and inspect every site governed by a contract this change\nadds, changes, or removes at the pinned head, including sites outside\n`base...head`; report every inconsistency, grouping instances into one finding\nonly when severity and required fix match, with every location listed in its\nevidence. Persist exactly one",
     "report. Persist exactly one",
   )
   .replace(
-    " When closing a finding would require data, fields or behavior the specification of record does not provide, do not invent it; call `inbox_ask` quoting the spec text and the tree evidence.",
+    " When closing a finding requires changing specified behavior, scope, or an unavailable input premise, ask one blocking `inbox_ask` question quoting the governing text with the tree evidence; finish the independent fixes meanwhile, and resume the dependent work only after the decision is recorded in the specification of record.",
     "",
   )
   .replace(
-    "For each Changes item, check whether its premise still holds. Also test that\nevery input a Changes or Acceptance item consumes — table, column, field,\nfixture, export — exists at HEAD or is created by another Changes item; a\nmissing input is a premise collapse. If the thing a Changes item exists to\nchange is gone or already delivered, or an input is missing, collect concrete\ntree evidence and call",
+    "For each Changes item, check whether its premise still holds. Also trace every\ninput a Changes or Acceptance item consumes — table, column, field, fixture,\nexport — to a source at HEAD or to an explicit Changes item, including the same\none, that creates it before use; an untraceable input is a premise collapse. If\nthe thing a Changes item exists to change is gone or already delivered, or an\ninput is untraceable, collect concrete tree evidence and call",
     "For each Changes item, check whether its premise still holds. If the thing it\nexists to change is gone or already delivered, collect concrete tree evidence\nand call",
   )
   .replace(
-    "every input a slice consumes (table, column, field, fixture, export) existing at the frozen base or created by a slice it is blocked by, ",
+    "every consumed input existing at the frozen base or created before use by the same slice or a prerequisite slice, ",
     "",
   );
 
