@@ -7,6 +7,8 @@ import {
   confirmationCardKey,
   landIntegratorStop,
   latestRecordedStop,
+  openStopQuestion,
+  parseEvidenceRequest,
   recordIntegratorStop,
   stopQuestionKey,
   type IntegratorStopLandingInput,
@@ -145,6 +147,7 @@ test("landing creates one result and one condition-specific question, then adopt
   assert.equal(questions[0]!.agentId, "run-agent");
   assert.equal(questions[0]!.sessionId, "run-session");
   assert.equal(questions[0]!.threadId, "default-thread");
+  assert.match(questions[0]!.body, /^推荐：需调查/u);
   assert.equal(task.status, "REVIEW");
   assert.equal(task.failureReason, "Mechanical merge stopped: base-drift-post-merge");
 
@@ -158,6 +161,43 @@ test("landing creates one result and one condition-specific question, then adopt
   assert.equal(activities.length, 1);
   assert.equal(questions.length, 1);
   assert.match(questions[0]!.body, /landed commit 8bfa2f08/u);
+});
+
+test("stop questions recommend re-authorization for UNSTABLE failures and DIRTY conflicts", async () => {
+  const { tx, questions } = makeTransaction();
+
+  await openStopQuestion(tx, {
+    integratorTaskId: "integrator-task",
+    stopId: "unstable-stop",
+    condition: "check-failure-or-absence",
+    evidence: JSON.stringify({
+      mergeStateStatus: "UNSTABLE",
+      failedChecks: ["ci/build", "lint"],
+      reason: "required check ci/build concluded FAILURE",
+    }),
+    agentId: "run-agent",
+    sessionId: "run-session",
+  });
+  await openStopQuestion(tx, {
+    integratorTaskId: "integrator-task",
+    stopId: "dirty-stop",
+    condition: "non-clean-mergeability",
+    evidence: JSON.stringify({
+      mergeStateStatus: "DIRTY",
+      observed: "b".repeat(40),
+      authorized: "a".repeat(40),
+    }),
+    agentId: "run-agent",
+    sessionId: "run-session",
+  });
+
+  assert.match(questions[0]!.body, /^推荐：重新授权/u);
+  assert.match(questions[0]!.body, /ci\/build、lint/u);
+  assert.deepEqual((questions[0]!.choices as Array<{ id: string }>).map(({ id }) => id), ["re-authorize", "abandon"]);
+  assert.match((questions[0]!.choices as Array<{ label: string }>)[0]!.label, /（推荐）$/u);
+  assert.match(questions[1]!.body, /^推荐：重新授权/u);
+  assert.match(questions[1]!.body, /refresh-conflict/u);
+  assert.match((questions[1]!.choices as Array<{ label: string }>)[0]!.label, /（推荐）$/u);
 });
 
 test("recordIntegratorStop adopts the newest same-source stopped result", async () => {
@@ -381,4 +421,25 @@ test("a confirmation card key keeps generation zero historical and suffixes ever
   assert.equal(confirmationCardKey("task-1", "stop-1", 2), "confirmation:task-1:stop-1:r2");
   assert.equal(stopQuestionKey("stop-1"), "merge-stop:stop-1");
   assert.equal(stopQuestionKey("stop-1", 1), "merge-stop:stop-1:r1");
+});
+
+test("an evidence request retains the source Run that owns the Regression base", () => {
+  const parsed = parseEvidenceRequest({
+    id: "activity-1",
+    taskId: "readiness-task",
+    metadata: {
+      kind: "mergeIntegrator.evidenceRequest",
+      schemaVersion: 1,
+      nonce: "nonce-1",
+      gateTaskId: "readiness-task",
+      integratorTaskId: "integrator-task",
+      sourceRunId: "regression-run",
+      repository: "acme/widgets",
+      prNumber: 42,
+      cardId: "card-1",
+      purpose: "gate",
+    },
+  });
+
+  assert.equal(parsed?.sourceRunId, "regression-run");
 });

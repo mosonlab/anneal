@@ -246,7 +246,13 @@ test("UNSTABLE with a terminal failed check still stops rather than deferring", 
     mergeStateStatus: "UNSTABLE",
     checks: [{ kind: "CheckRun", name: "ci", conclusion: "FAILURE", status: "COMPLETED" }],
   } }) }] });
-  assert.equal(stopped(await execute(fake.deps)).condition, "check-failure-or-absence");
+  const result = stopped(await execute(fake.deps));
+  assert.equal(result.condition, "check-failure-or-absence");
+  assert.deepEqual(JSON.parse(result.evidence), {
+    mergeStateStatus: "UNSTABLE",
+    failedChecks: ["ci"],
+    reason: "required check ci concluded FAILURE",
+  });
 });
 
 test("N3 — a check that succeeded for a different head is not credited to the authorized one", async () => {
@@ -604,6 +610,10 @@ test("with no protection rule, a completed FAILURE is still ok here and is stopp
   const outcome = stopped(await execute(fake.deps));
   assert.equal(outcome.condition, "non-clean-mergeability");
   assert.match(outcome.evidence, /UNSTABLE/u);
+  assert.deepEqual(JSON.parse(outcome.evidence), {
+    mergeStateStatus: "UNSTABLE",
+    failedChecks: ["ci", "codecov"],
+  });
   assertNoPublication(fake.calls());
 });
 

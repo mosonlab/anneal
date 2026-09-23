@@ -30,9 +30,12 @@ import {
   TaskStatus,
   isMergeReadinessStep,
   lockChainRows,
+  putRecommendedChoiceFirst,
   parseEvidence,
+  parseRegressionVerdict,
   readinessRequeueActivityWhere,
   readinessRequeueTotals,
+  recommendMergeApproval,
   recordReadinessRequeue,
   recoveryContext,
   writeMarker,
@@ -109,19 +112,37 @@ export const evidenceFromSnapshot = (
   };
 };
 
-const humanReadable = (evidence: MergeEvidence, snapshot: PullRequestSnapshot): string => {
+export const renderMergeEvidenceCard = (
+  evidence: MergeEvidence,
+  snapshot: PullRequestSnapshot,
+  readBaseRef: string,
+  currentDefaultBranch: string | null,
+  regressionBaseSha: string | null,
+): { body: string; choices: Array<{ id: string; label: string }> } => {
   const checks = evidence.requiredChecks.length === 0
     ? "（无必需检查）"
     : evidence.requiredChecks.map((check) => `  - ${check.name}: ${check.conclusion}`).join("\n");
-  return [
+  const recommendation = recommendMergeApproval({
+    checks: evidence.requiredChecks,
+    mergeStateStatus: snapshot.mergeStateStatus,
+    pullRequestBaseRef: snapshot.baseRefName,
+    regressionBaseSha,
+    readBaseRef,
+    currentDefaultBranch,
+    currentDefaultBranchSha: readBaseRef === currentDefaultBranch ? snapshot.baseSha : null,
+  });
+  const body = [
+    recommendation.line,
     `审批闸门：合并 ${evidence.repository} PR #${evidence.prNumber}`,
     "",
-    "批准即授权机械合并**这一个确切的提交**。合并前每项前提都会重新校验；任何漂移都会停下并重新请求授权。",
+    "推荐只供参考；只有你选择并提交决定后才会执行。批准即授权机械合并**这一个确切的提交**。合并前每项前提都会重新校验；任何漂移都会停下并重新请求授权。",
     "",
     `  仓库：${evidence.repository}`,
     `  Pull request：#${evidence.prNumber}`,
     `  Head SHA：${evidence.headSha}`,
-    `  Base：${evidence.baseRef} @ ${evidence.baseSha}`,
+    `  PR base branch：${snapshot.baseRefName ?? "UNKNOWN"}`,
+    `  Regression base SHA：${regressionBaseSha ?? "UNKNOWN"}`,
+    `  当前默认分支：${currentDefaultBranch ?? "UNKNOWN"}（读取 ${readBaseRef} @ ${readBaseRef === currentDefaultBranch ? snapshot.baseSha ?? "UNKNOWN" : "未读取"}）`,
     `  合并方式：${evidence.mergeMethod}`,
     `  可合并性：${snapshot.mergeable ?? "UNKNOWN"} / ${snapshot.mergeStateStatus ?? "UNKNOWN"}`,
     "  必需检查：",
@@ -130,9 +151,17 @@ const humanReadable = (evidence: MergeEvidence, snapshot: PullRequestSnapshot): 
     "",
     serializeEvidence(evidence),
   ].join("\n");
+  return {
+    body,
+    choices: putRecommendedChoiceFirst([
+      { id: "approve", label: "批准并合并" },
+      { id: "reject", label: "打回上一步" },
+    ], recommendation.choiceId),
+  };
 };
 
 const unavailableBody = (request: PendingEvidenceRequest, reason: string): string => [
+  "无推荐：无法读取当前合并证据，不能核实检查、mergeState 或 base。",
   `审批闸门：合并 ${request.repository} PR #${request.prNumber}`,
   "",
   `无法读取合并证据（${EVIDENCE_UNAVAILABLE_MARKER}）：${reason}`,
@@ -187,7 +216,7 @@ export const evidenceTick = async (
     // `ref(qualifiedName:)`. The chain's integration line is its first run's
     // targetBranch — the same durable value the claim route carries as
     // `pullRequestBase` — not the shared chain head every later run targets.
-    const baseRef = await chainBaseRefFor(db, request);
+    const { readBaseRef, currentDefaultBranch } = await chainBaseRefFor(db, request);
     const attempts = evidenceAttempts();
     const deadline = evidenceReadTimeoutMs();
     for (let attempt = 1; attempt <= attempts && !filled; attempt += 1) {
@@ -204,16 +233,24 @@ export const evidenceTick = async (
         // bound is the point — a stalled read must never become a card the
         // human waits on indefinitely.
         const snapshot = await Promise.race([
-          reader.readPullRequest(request.repository, request.prNumber, baseRef, controller.signal),
+          reader.readPullRequest(request.repository, request.prNumber, readBaseRef, controller.signal),
           new Promise<never>((_resolve, reject) => {
             deadlinePassed = () => { reject(new GitHubReadError(`merge evidence read exceeded ${deadline}ms`, "timeout")); };
           }),
         ]);
         const evidence = evidenceFromSnapshot(snapshot, request.nonce);
         if ("error" in evidence) { lastError = evidence.error; continue; }
+        const regressionBaseSha = await regressionBaseShaFor(db, request);
+        const card = renderMergeEvidenceCard(
+          evidence,
+          snapshot,
+          readBaseRef,
+          currentDefaultBranch,
+          regressionBaseSha,
+        );
         const written = await db.inboxMessage.updateMany({
           where: { id: request.cardId, status: InboxStatus.OPEN, body: EVIDENCE_PLACEHOLDER_BODY },
-          data: { body: humanReadable(evidence, snapshot), nextDeliveryAt: now },
+          data: { body: card.body, choices: card.choices, nextDeliveryAt: now },
         });
         if (written.count === 1) { filled = true; result.filled += 1; }
         else { filled = true; }
@@ -474,18 +511,45 @@ export const refreshStaleMergeCardsTick = async (
  * `pullRequestBase`. The repo default is the fallback, matching
  * `resolveRunBranches` for a chain's first run.
  */
-const chainBaseRefFor = async (db: PrismaClient, request: PendingEvidenceRequest): Promise<string> => {
+const chainBaseRefFor = async (
+  db: PrismaClient,
+  request: PendingEvidenceRequest,
+): Promise<{ readBaseRef: string; currentDefaultBranch: string | null }> => {
   const gate = await db.task.findUnique({
     where: { id: request.gateTaskId },
     select: { projectId: true, chainId: true, repo: { select: { defaultBranch: true } } },
   });
-  if (!gate?.chainId) return gate?.repo?.defaultBranch ?? "main";
+  const currentDefaultBranch = gate?.repo?.defaultBranch ?? null;
+  if (!gate?.chainId) return { readBaseRef: currentDefaultBranch ?? "main", currentDefaultBranch };
   const first = await db.run.findFirst({
     where: { task: { projectId: gate.projectId, chainId: gate.chainId, chainIndex: { not: null } } },
     select: { targetBranch: true },
     orderBy: [{ task: { chainIndex: "asc" } }, { runNumber: "asc" }],
   });
-  return first?.targetBranch ?? gate.repo?.defaultBranch ?? "main";
+  return {
+    readBaseRef: first?.targetBranch ?? currentDefaultBranch ?? "main",
+    currentDefaultBranch,
+  };
+};
+
+const regressionBaseShaFor = async (
+  db: PrismaClient,
+  request: PendingEvidenceRequest,
+): Promise<string | null> => {
+  const run = await db.run.findUnique({
+    where: { id: request.sourceRunId },
+    select: { taskId: true },
+  });
+  if (!run?.taskId) return null;
+  const output = await db.taskStepOutput.findUnique({
+    where: { taskId: run.taskId },
+    select: { runId: true, kind: true, body: true },
+  });
+  if (!output || output.runId !== request.sourceRunId) return null;
+  const parsed = parseRegressionVerdict(output.body, output.kind);
+  return parsed.status === "ok" && parsed.verdict.outcome === "pass"
+    ? parsed.verdict.baseHeadSha
+    : null;
 };
 
 export const startEvidenceWorker = (

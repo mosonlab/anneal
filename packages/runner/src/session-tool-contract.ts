@@ -91,14 +91,14 @@ export const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
   {
     name: "inbox_ask",
     title: "Ask the human a question",
-    description: "Ask the human a question through the Anneal Inbox. This SUSPENDS the Session until they answer, and the Session resumes in place with their reply. Routine progress belongs in task_activity_log, not here.",
+    description: "Ask the human a decision question through the Anneal Inbox. This SUSPENDS the Session until they answer, and the Session resumes in place with their reply. Start the body with a recommendation and one-sentence reason (or say what information is missing), list each option's consequence on its own line, then put background evidence last. With fixed choices, put the recommended choice first and end its label with `（推荐）`. Routine progress belongs in task_activity_log, not here.",
     inputSchema: {
       type: "object",
       properties: {
-        body: { type: "string", description: "The question, with enough context for a human to answer it cold." },
+        body: { type: "string", description: "First line: `推荐：<choice id 或做法> —— <一句理由>`, or `无推荐：<缺什么信息>`. Then list each option's consequence on its own line; put background evidence last." },
         choices: {
           type: "array",
-          description: "Optional fixed choices. Omit for a free-text question.",
+          description: "Optional fixed choices. Put the recommended choice first and append `（推荐）` to its label. Omit for a free-text question.",
           items: {
             type: "object",
             properties: { id: { type: "string" }, label: { type: "string" } },
@@ -110,7 +110,7 @@ export const SESSION_TOOLS: readonly SessionToolDefinition[] = Object.freeze([
       required: ["body"],
       additionalProperties: false,
     },
-    manifest: "- inbox_ask(body, choices?): ask the human. Suspends this Session until they answer; the Session resumes in place with the reply.",
+    manifest: "- inbox_ask(body, choices?): ask the human. First line recommends a choice/action with one reason, or names missing information; next list option consequences one per line; background evidence comes last. Put a recommended fixed choice first and mark its label `（推荐）`. Suspends this Session until answered.",
   },
   {
     name: "revalidation_cancel",

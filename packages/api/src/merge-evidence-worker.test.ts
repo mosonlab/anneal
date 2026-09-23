@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
 import { after, test } from "node:test";
 
-import type { PrismaClient } from "@anneal/db";
+import type { MergeEvidence, PrismaClient } from "@anneal/db";
 
-import { GitHubReadError, type PullRequestReader } from "./github-read.js";
-import { startEvidenceWorker, transientEvidenceError } from "./merge-evidence-worker.js";
+import { GitHubReadError, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";
+import { renderMergeEvidenceCard, startEvidenceWorker, transientEvidenceError } from "./merge-evidence-worker.js";
 import { waitUntil } from "./worker-tick-wait.js";
 
 test("only GitHub transport and deadline errors receive evidence retry", () => {
@@ -13,6 +13,102 @@ test("only GitHub transport and deadline errors receive evidence retry", () => {
   assert.equal(transientEvidenceError(new GitHubReadError("server unavailable", "transport")), true);
   assert.equal(transientEvidenceError(new GitHubReadError("forbidden", "permission")), false);
   assert.equal(transientEvidenceError(new GitHubReadError("pull request is null", "response")), false);
+});
+
+const gateEvidence: MergeEvidence = {
+  schemaVersion: 1,
+  nonce: "nonce",
+  repository: "acme/widgets",
+  prNumber: 42,
+  headSha: "a".repeat(40),
+  baseRef: "main",
+  baseSha: "b".repeat(40),
+  mergeMethod: "merge",
+  requiredChecks: [{ name: "ci/build", conclusion: "SUCCESS" }],
+  readAt: new Date(0).toISOString(),
+};
+
+const mergeSnapshot = (overrides: Partial<PullRequestSnapshot> = {}): PullRequestSnapshot => ({
+  repository: "acme/widgets",
+  number: 42,
+  state: "OPEN",
+  isDraft: false,
+  merged: false,
+  mergeable: "MERGEABLE",
+  mergeStateStatus: "CLEAN",
+  baseRefName: "main",
+  headRefOid: "a".repeat(40),
+  baseSha: "b".repeat(40),
+  autoMergeRequest: null,
+  mergeQueueEntry: null,
+  repositoryMergeQueue: null,
+  mergedBy: null,
+  mergeCommit: null,
+  requiredCheckNames: ["ci/build"],
+  checkContexts: [{ __typename: "CheckRun", name: "ci/build", status: "COMPLETED", conclusion: "SUCCESS" }],
+  headCommitOid: "a".repeat(40),
+  readAt: new Date(0).toISOString(),
+  ...overrides,
+});
+
+test("a completed merge approval card puts its recommendation first and preserves choice ids", () => {
+  const card = renderMergeEvidenceCard(gateEvidence, mergeSnapshot(), "main", "main", "b".repeat(40));
+
+  assert.match(card.body, /^推荐：批准并合并/u);
+  assert.deepEqual(card.choices, [
+    { id: "approve", label: "批准并合并（推荐）" },
+    { id: "reject", label: "打回上一步" },
+  ]);
+});
+
+test("a failed merge approval card puts reject first and names the failed check", () => {
+  const evidence = { ...gateEvidence, requiredChecks: [{ name: "ci/build", conclusion: "FAILURE" }] };
+  const snapshot = mergeSnapshot({
+    mergeStateStatus: "UNSTABLE",
+    checkContexts: [{ __typename: "CheckRun", name: "ci/build", status: "COMPLETED", conclusion: "FAILURE" }],
+  });
+  const card = renderMergeEvidenceCard(evidence, snapshot, "main", "main", "b".repeat(40));
+
+  assert.match(card.body, /^推荐：打回/u);
+  assert.match(card.body, /ci\/build（FAILURE）/u);
+  assert.deepEqual(card.choices, [
+    { id: "reject", label: "打回上一步（推荐）" },
+    { id: "approve", label: "批准并合并" },
+  ]);
+});
+
+test("a merge approval card recommends reject when Regression's base is stale", () => {
+  const card = renderMergeEvidenceCard(gateEvidence, mergeSnapshot(), "main", "main", "c".repeat(40));
+
+  assert.match(card.body, /^推荐：打回/u);
+  assert.match(card.body, /Regression base.*落后/u);
+  assert.equal(card.choices[0]?.id, "reject");
+  assert.match(card.choices[0]?.label ?? "", /（推荐）$/u);
+});
+
+test("a pending merge approval card says to wait without recommending an answer", () => {
+  const evidence = { ...gateEvidence, requiredChecks: [{ name: "ci/build", conclusion: "PENDING:IN_PROGRESS" }] };
+  const snapshot = mergeSnapshot({
+    checkContexts: [{ __typename: "CheckRun", name: "ci/build", status: "IN_PROGRESS", conclusion: null }],
+  });
+  const card = renderMergeEvidenceCard(evidence, snapshot, "main", "main", "b".repeat(40));
+
+  assert.match(card.body, /^推荐：等待 CI，先不操作/u);
+  assert.deepEqual(card.choices.map(({ id, label }) => ({ id, label })), [
+    { id: "approve", label: "批准并合并" },
+    { id: "reject", label: "打回上一步" },
+  ]);
+});
+
+test("a DIRTY confirmation card recommends reject and puts it first", () => {
+  const snapshot = mergeSnapshot({ mergeStateStatus: "DIRTY" });
+  const card = renderMergeEvidenceCard(gateEvidence, snapshot, "main", "main", "b".repeat(40));
+
+  assert.match(card.body, /^推荐：打回/u);
+  assert.deepEqual(card.choices, [
+    { id: "reject", label: "打回上一步（推荐）" },
+    { id: "approve", label: "批准并合并" },
+  ]);
 });
 
 /**

@@ -671,6 +671,20 @@ type PreMergeVerdict =
   | { kind: "poll"; observed: Record<string, unknown> }
   | { kind: "stop"; outcome: MergeOutcome };
 
+const terminalFailedCheckNames = (snapshot: RepositorySnapshot): string[] => [...new Set(
+  snapshot.pullRequest.checks.flatMap((check) => {
+    if (check.kind === "CheckRun") {
+      return check.status === "COMPLETED" && check.conclusion !== "SUCCESS" ? [check.name] : [];
+    }
+    return check.state !== null
+      && check.state !== "SUCCESS"
+      && check.state !== "PENDING"
+      && check.state !== "EXPECTED"
+      ? [check.context]
+      : [];
+  }),
+)];
+
 /** SPEC §3 preconditions 1-7, exactly §11.2's accepted values. */
 export const classifyPreMerge = (
   snapshot: RepositorySnapshot,
@@ -703,7 +717,11 @@ export const classifyPreMerge = (
 
   const checks = verifyRequiredChecks(snapshot, authorization.headSha, authorization.baseRef);
   if (checks.status === "stop") {
-    return { kind: "stop", outcome: stop("check-failure-or-absence", JSON.stringify({ reason: checks.reason })) };
+    return { kind: "stop", outcome: stop("check-failure-or-absence", JSON.stringify({
+      mergeStateStatus: pr.mergeStateStatus,
+      failedChecks: terminalFailedCheckNames(snapshot),
+      reason: checks.reason,
+    })) };
   }
 
   const mergeableUnknown = pr.mergeable === "UNKNOWN";
@@ -722,12 +740,17 @@ export const classifyPreMerge = (
     return { kind: "stop", outcome: stop("non-clean-mergeability", JSON.stringify({
       mergeable: describe(pr.mergeable),
       ...(pr.mergeable === "CONFLICTING" ? { observed: snapshot.baseRefOid, authorized: authorization.baseSha } : {}),
+      ...(pr.mergeStateStatus === "UNSTABLE" ? {
+        mergeStateStatus: pr.mergeStateStatus,
+        failedChecks: terminalFailedCheckNames(snapshot),
+      } : {}),
     })) };
   }
   if (pr.mergeStateStatus !== "CLEAN") {
     return { kind: "stop", outcome: stop("non-clean-mergeability", JSON.stringify({
       mergeStateStatus: describe(pr.mergeStateStatus),
       ...(pr.mergeStateStatus === "DIRTY" ? { observed: snapshot.baseRefOid, authorized: authorization.baseSha } : {}),
+      ...(pr.mergeStateStatus === "UNSTABLE" ? { failedChecks: terminalFailedCheckNames(snapshot) } : {}),
     })) };
   }
   return { kind: "ok" };

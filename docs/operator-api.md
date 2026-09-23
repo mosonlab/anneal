@@ -3271,6 +3271,21 @@ the aggregate is `BLOCKED_DOWNSTREAM` and the tail tasks are in `REVIEW`.
 
 ## Inbox
 
+Decision messages start with a recommendation and one short reason, or state
+what information is missing. Agent-authored `inbox_ask` messages then list each
+option's consequence on its own line and put background evidence last. Platform
+merge Approval gate cards recommend approval only when required checks pass,
+`mergeState` is `CLEAN`, the PR targets the current default branch, and the
+Regression PASS base matches that branch's live head; failed or missing checks,
+an out-of-date Regression base, or terminal `DIRTY` conflicts recommend
+reject, while running checks recommend waiting. Merge stop questions recommend
+re-authorization for `UNSTABLE` with failed checks or `DIRTY` conflicts, followed
+by rejection of the fresh confirmation card; other stop states recommend
+investigation. Text-only merge-tail notices recommend investigating their
+recorded stop reason. When a fixed choice is recommended, it appears first and
+its label ends in `（推荐）`. These hints use recorded or read-only evidence and
+never submit a choice or change its id or decision meaning.
+
 ### GET `/inbox/messages`
 
 - Required parameters: none.
