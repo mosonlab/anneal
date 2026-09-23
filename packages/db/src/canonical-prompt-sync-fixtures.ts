@@ -1,10 +1,21 @@
 /**
+ * Restore the Regression review-fail handoff retired by the defect-class sweep
+ * rollover (2026-09-22). Every registered generation predates it, so the older
+ * fixtures apply it before reconstructing their earlier prompt bytes.
+ */
+export const restorePreDefectClassSweepPrompt = (prompt: string): string => prompt
+  .replace(
+    "If an adopted finding remains open, a rejection is unsupported, or a new defect exists, do not stop at the first:\naccount for every open finding and sweep the change for every other instance of each defect class (the same rule,\ncontract, or invariant broken at another call site, endpoint, or code path reachable from the diff or a contract it\nwidened). Report all of them in one call, one line each as `file:line — what breaks`, within 40 lines and 4000 bytes:",
+    "If an adopted finding remains open, a rejection is unsupported, or a new\ndefect exists, run",
+  );
+
+/**
  * Restore the `hazard` tier Agent name the revalidation prompt carried before
  * the tier's canonical role moved to `senior-dev-sol-high` (2026-09-19). Every
  * registered generation predates that rollover, so the older fixtures apply
  * it before reconstructing their earlier prompt bytes.
  */
-export const restorePreSolHighHazardTierPrompt = (prompt: string): string => prompt
+export const restorePreSolHighHazardTierPrompt = (prompt: string): string => restorePreDefectClassSweepPrompt(prompt)
   .replace(
     "The current Agent is\n  `senior-dev-sol-high`. An Astra role is used only when the user names it for\n  this dispatch after a Sol high attempt actually fails; it is never a default.",
     "The current Agent is\n  `senior-dev-astra-medium`.",

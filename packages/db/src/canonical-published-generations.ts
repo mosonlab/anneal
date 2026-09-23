@@ -64,6 +64,7 @@ export const PUBLISHED_PROMPT_GENERATIONS = {
     { digest: "667f0aadce31cc62aa7043d6c46a1ee89d08ce4f8690bd5a5fe50a5fd5662abd" },
     { digest: "cea709c7937fb307648ca7a5be2ed6de14aef3747ee96cff53e4d34270b03536" },
     { digest: "57c1f304441e38bf4a0dd63bb7a9f031dbcbc55acf52ac0ff16d416a885d5ceb" },
+    { digest: "26d992eca6f771a9d7bdff5e515de7905185cf830e81d388a1eddd0388e9c9c2" },
   ],
   "compound-engineer-workflow": [
     { digest: "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9", retiredByShape: "model-neutral-review-step-names" },
@@ -71,6 +72,7 @@ export const PUBLISHED_PROMPT_GENERATIONS = {
     { digest: "be4428549ef4c428fd82ea9e6315bee040bd7874561f2fcc362a49216497bb66", retiredByShape: "pre-model-neutral-review-output" },
     { digest: "6d0e84947f79d3c1307727d4d0cdfae7827828e488dc6a05c2a9366480791142" },
     { digest: "2a3634bc7c7f74a066ab8fce78c4e0f02f2f9ac65acdcf37e07c993c445bed2c" },
+    { digest: "e2cc63158da51175e3cd61dcc3dbb06894634b6408ebb71c36b332fdc68fe4bf" },
   ],
   [PR_TEMPLATE_NAME]: [
     { digest: "1c1169bf0586f6bb71f4ed34b3eb6b166828802a9b24c6b07844b2f526b5f8a8", retiredByShape: "model-neutral-review-step-names" },

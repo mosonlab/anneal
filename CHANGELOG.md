@@ -82,6 +82,18 @@ written.
   committing non-implementation Step, such as the compound chain's plan Step,
   from a completion demand its own output write path refused.
 
+### Merge tail, merge train and the merge executor
+
+- **A merge-tail repair round now works on a whole defect class.** A defect
+  with several instances used to cost one Regression verdict and one repair
+  attempt per instance, so it could exhaust the three automatic attempts. The
+  canonical Regression step now sweeps the change for every other instance of
+  each defect class it finds and reports all of them, with every other open
+  finding, in one `review-fail`. The `review-fix` and `gate-fix` repair prompt
+  asks the repair to close every listed instance and every other instance of
+  the same class, and to list the sites it checked and changed. Canonical sync
+  retires the `pre-defect-class-sweep` prompt generation on deploy.
+
 ## v0.9.0 — Developer Preview 9
 
 The ninth preview is about the end of a chain. A merge tail that stops now

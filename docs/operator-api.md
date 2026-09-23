@@ -2349,6 +2349,15 @@ base. The external failure remains visible as a diagnostic
 `GET /tasks/:taskId/activity`. It is diagnostic history, not a replacement for
 the persisted verdict and not another source of semantic authority.
 
+Because each repair round spends one automatic repair attempt, both halves of
+the loop work on a whole defect class rather than one instance. A canonical
+Regression step that finds a defect sweeps the change for every other instance
+of the same defect class and reports all of them, with every other open
+finding, in one `review-fail` summary. The `review-fix` and `gate-fix` repair
+prompt requires closing every listed instance and every other instance of that
+class found by sweeping the same contract, without unrelated refactors, and
+listing the sites checked and changed in the repair's task output summary.
+
 Inside a base-drift recovery Run, the same validation and precedence apply,
 but the settlement is the recovery stop carrying the persisted verdict's
 reason. It does not open an automatic repair from the failed Run. The recovery

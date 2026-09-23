@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { restorePreFrozenRegressionPrompt, restorePreOptionalReviewPrompt, restorePreSolHighHazardTierPrompt, restorePreSolHighHardTierPrompt, restorePreTierRevalidationPrompt } from "./canonical-prompt-sync-fixtures.js";
+import { restorePreDefectClassSweepPrompt, restorePreFrozenRegressionPrompt, restorePreOptionalReviewPrompt, restorePreSolHighHazardTierPrompt, restorePreSolHighHardTierPrompt, restorePreTierRevalidationPrompt } from "./canonical-prompt-sync-fixtures.js";
 import { LEGACY_TEMPLATE_GENERATIONS, templatePromptGenerationDigest } from "./canonical-template-transition.js";
 import { loadAllTemplateStepSources } from "./template-sources.js";
 
@@ -49,4 +49,12 @@ test("sync fixtures reconstruct the registered pre-sol-high-hazard-tier generati
     templatePromptGenerationDigest(steps),
     LEGACY_TEMPLATE_GENERATIONS["direct-engineer-workflow"].find((generation) => generation.marker === "pre-sol-high-hazard-tier")!.promptDigest,
   );
+});
+
+test("sync fixtures reconstruct the registered pre-defect-class-sweep generation", async () => {
+  const sources = await loadAllTemplateStepSources();
+  for (const name of ["direct-engineer-workflow", "compound-engineer-workflow"] as const) {
+    const steps = sources.get(name)!.map((step) => ({ ...step, prompt: restorePreDefectClassSweepPrompt(step.prompt) }));
+    assert.equal(templatePromptGenerationDigest(steps), LEGACY_TEMPLATE_GENERATIONS[name].find((generation) => generation.marker === "pre-defect-class-sweep")!.promptDigest, name);
+  }
 });
