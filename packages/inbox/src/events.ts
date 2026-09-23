@@ -3,6 +3,7 @@ import {
   recordMergeEvidenceRefusal,
   InboxSender,
   InboxStatus,
+  RunStatus,
   Prisma,
   type MergeExecutorObservation,
   type PrismaClient,
@@ -53,8 +54,8 @@ export const processFeishuEvent = async (
   const event = envelope.event ?? {};
   const message = record(event.message);
   const action = record(event.action);
-  // An unthreaded text event can still resolve to the sole OPEN card in its
-  // chat, so every message event needs the same liveness observation as a
+  // An unthreaded text event can still resolve to the sole waiting question in
+  // its chat, so every message event needs the same liveness observation as a
   // threaded reply. The reader is only invoked before the transaction.
   const mayBeDecision = action !== null || message !== null;
   // Confirmation cards are normally action events, but a text reply to a
@@ -83,7 +84,12 @@ export const processFeishuEvent = async (
       const externalReplyId = string(message?.parent_id) ?? string(message?.root_id);
       const chatId = string(message?.chat_id) ?? string(record(event.context)?.open_chat_id);
       const candidates = explicitQuestionId || externalReplyId || !chatId ? [] : await tx.inboxMessage.findMany({
-        where: { thread: { externalChatId: chatId }, from: InboxSender.AGENT, status: InboxStatus.OPEN },
+        where: {
+          thread: { externalChatId: chatId },
+          from: InboxSender.AGENT,
+          status: InboxStatus.OPEN,
+          session: { is: { run: { is: { status: RunStatus.WAITING_INBOX } } } },
+        },
         include: { session: { include: { run: true } } },
         orderBy: { createdAt: "desc" },
         take: 2,

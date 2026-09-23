@@ -46,16 +46,46 @@ export const registerSystemRoutes = (app: RouteApp, deps: RouteDeps): (() => voi
 
   app.get("/", (context) => context.json({ name: "Anneal control plane", phase: "execution-kernel" }));
   app.get("/health", async (context) => {
+    const checkedAt = new Date().toISOString();
     try {
       await db.$queryRaw`SELECT 1`;
-      return context.json({ status: "ok", database: "connected", checkedAt: new Date().toISOString() } satisfies Health);
     } catch (error: unknown) {
       console.error("Health check failed", error);
       return context.json(
-        { status: "error", database: "disconnected", checkedAt: new Date().toISOString() } satisfies Health,
+        { status: "error", database: "disconnected", checkedAt } satisfies Health,
         503,
       );
     }
+
+    const notificationFailure = (defaultFeishuThread: "unconfigured" | "missing" | "unavailable") => context.json({
+      status: "error",
+      database: "connected",
+      defaultFeishuThread,
+      checkedAt,
+    } satisfies Health & { defaultFeishuThread: "unconfigured" | "missing" | "unavailable" }, 503);
+    const defaultChatId = process.env.FEISHU_DEFAULT_CHAT_ID?.trim();
+    if (!defaultChatId) {
+      const error = new Error("FEISHU_DEFAULT_CHAT_ID is not configured");
+      console.error("Health check failed: default Feishu notification thread is unconfigured", error);
+      return notificationFailure("unconfigured");
+    }
+
+    try {
+      const thread = await db.inboxThread.findFirst({
+        where: { channel: "FEISHU", externalChatId: defaultChatId, sessionId: null },
+        select: { id: true },
+      });
+      if (!thread) {
+        const error = new Error("No default Feishu InboxThread exists for FEISHU_DEFAULT_CHAT_ID");
+        console.error("Health check failed: default Feishu notification thread is missing", error);
+        return notificationFailure("missing");
+      }
+    } catch (error: unknown) {
+      console.error("Health check failed: default Feishu notification thread lookup failed", error);
+      return notificationFailure("unavailable");
+    }
+
+    return context.json({ status: "ok", database: "connected", checkedAt } satisfies Health);
   });
   // Provenance, not status: which commit this dist was built from (issue #140).
   // Unauthenticated and free of state so that whoever is checking whether a

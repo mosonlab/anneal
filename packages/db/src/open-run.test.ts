@@ -31,6 +31,12 @@ import { runOwnedHead } from "./run-head.js";
 import { LEASE_LOSS_REFUND_CAP, refundDecision } from "./run-refund.js";
 
 const now = new Date("2026-08-26T12:00:00.000Z");
+const priorDefaultChatId = process.env["FEISHU_DEFAULT_CHAT_ID"];
+process.env["FEISHU_DEFAULT_CHAT_ID"] = "oc_open_run_test";
+test.after(() => {
+  if (priorDefaultChatId === undefined) delete process.env["FEISHU_DEFAULT_CHAT_ID"];
+  else process.env["FEISHU_DEFAULT_CHAT_ID"] = priorDefaultChatId;
+});
 
 const agent = (overrides: Record<string, unknown> = {}) => ({
   id: "agent-1",
@@ -147,6 +153,8 @@ const fakeTx = (
     lockedAgent?: ReturnType<typeof agent> | null;
     publishedRuns?: Array<Record<string, any> & { taskId: string; repoId: string; pushedBranch: string | null }>;
     stopRows?: Array<Record<string, unknown>>;
+    existingInboxStatus?: "OPEN" | "ANSWERED" | "CLOSED";
+    existingInboxDeliveredAt?: Date | null;
     /** The task's costed Run rows, as the spend-cap basis reads them. */
     costedRuns?: Array<Record<string, unknown>>;
   } = {},
@@ -155,6 +163,9 @@ const fakeTx = (
   const activities: Array<Record<string, unknown>> = [];
   const taskUpdates: Array<Record<string, unknown>> = [];
   const inbox: Array<Record<string, unknown>> = [];
+  const inboxUpdates: Array<Record<string, unknown>> = [];
+  let existingInboxStatus = options.existingInboxStatus ?? null;
+  let existingInboxDeliveredAt = options.existingInboxDeliveredAt ?? null;
   const runFindFirstCalls: Array<Record<string, any>> = [];
   let agentLocks = 0;
   const tx = {
@@ -174,7 +185,28 @@ const fakeTx = (
         return { ...task, ...data };
       },
     },
-    inboxMessage: { upsert: async ({ create }: { create: Record<string, unknown> }) => { inbox.push(create); return {}; } },
+    inboxThread: {
+      findFirst: async () => null,
+      upsert: async ({ where, create }: { where: { id: string }; create: { externalChatId: string } }) => {
+        assert.match(where.id, /^feishu-default-[a-f0-9]{64}$/u);
+        return { id: "default-thread", externalChatId: create.externalChatId };
+      },
+    },
+    inboxMessage: {
+      findUnique: async () => existingInboxStatus ? { status: existingInboxStatus } : null,
+      updateMany: async ({ where, data }: { where: { status: string }; data: Record<string, unknown> }) => {
+        if (where.status !== existingInboxStatus) return { count: 0 };
+        inboxUpdates.push(data);
+        if ("deliveredAt" in data) existingInboxDeliveredAt = data.deliveredAt as Date | null;
+        existingInboxStatus = "OPEN";
+        return { count: 1 };
+      },
+      upsert: async ({ create, update }: { create: Record<string, unknown>; update: Record<string, unknown> }) => {
+        inbox.push(create);
+        inboxUpdates.push(update);
+        return {};
+      },
+    },
     taskActivity: {
       findMany: async () => options.stopRows ?? [],
       create: async ({ data }: { data: Record<string, unknown> }) => {
@@ -245,7 +277,11 @@ const fakeTx = (
       },
     },
   };
-  return { tx: tx as never, creates, activities, taskUpdates, inbox, runFindFirstCalls, agentLocks: () => agentLocks };
+  return {
+    tx: tx as never, creates, activities, taskUpdates, inbox, inboxUpdates, runFindFirstCalls,
+    inboxDeliveredAt: () => existingInboxDeliveredAt,
+    agentLocks: () => agentLocks,
+  };
 };
 
 const integratorStep = {
@@ -1415,6 +1451,7 @@ test("every OpenRunRefusal code comes from a real guard, carries a disposition, 
         taskId: "task-1", refusal: opened.refusal, mode: "raise", origin, now,
       }), { kind: "parked" });
       assert.equal(present.inbox.length, 1);
+      assert.equal(present.inbox[0]?.threadId, "default-thread");
       assert.match(String(present.activities[0]?.body), /predecessor.*Before.*preserved/i);
       const absent = fakeTx(fixture.task);
       const result = await settleRunBirthRefusal(absent.tx, {
@@ -2018,6 +2055,49 @@ test("the park a raising caller owes a spend-cap refusal names the cap and the t
   // through the same builder, so an operator reads the same cap and total
   // whichever intent was refused.
 
+});
+
+test("run-birth refusal rearms delivery only when a CLOSED notice reopens", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const deliveredAt = new Date("2026-08-26T11:00:00.000Z");
+  const task = taskRow({
+    repoId: repo.id,
+    repo,
+    spendCap: new Prisma.Decimal("1.00"),
+    runs: [priorRun({ repoId: repo.id })],
+  });
+
+  const closed = fakeTx(task, {
+    costedRuns: [costedRun("1.50")], existingInboxStatus: "CLOSED", existingInboxDeliveredAt: deliveredAt,
+  });
+  const closedRefusal = await openRun(closed.tx, task.id, { kind: "retry", readyAt: now });
+  assert.equal(closedRefusal.ok, false);
+  if (closedRefusal.ok) return;
+  await settleRunBirthRefusal(closed.tx, {
+    taskId: task.id, refusal: closedRefusal.refusal, mode: "raise", origin: { kind: "request" }, now,
+  });
+  assert.equal(closed.inboxUpdates.length, 1);
+  assert.equal(closed.inboxUpdates[0]?.status, "OPEN");
+  assert.equal(closed.inboxUpdates[0]?.deliveryStatus, "PENDING");
+  assert.equal(closed.inboxUpdates[0]?.nextDeliveryAt, now);
+  assert.equal(closed.inboxUpdates[0]?.deliveredAt, null);
+  assert.equal(closed.inboxDeliveredAt(), null);
+
+  const alreadyOpen = fakeTx(task, {
+    costedRuns: [costedRun("1.50")], existingInboxStatus: "OPEN", existingInboxDeliveredAt: deliveredAt,
+  });
+  const openRefusal = await openRun(alreadyOpen.tx, task.id, { kind: "retry", readyAt: now });
+  assert.equal(openRefusal.ok, false);
+  if (openRefusal.ok) return;
+  await settleRunBirthRefusal(alreadyOpen.tx, {
+    taskId: task.id, refusal: openRefusal.refusal, mode: "raise", origin: { kind: "request" }, now,
+  });
+  assert.equal(alreadyOpen.inboxUpdates.length, 1);
+  assert.equal(alreadyOpen.inboxUpdates[0]?.status, "OPEN");
+  assert.equal("deliveryStatus" in alreadyOpen.inboxUpdates[0]!, false);
+  assert.equal("nextDeliveryAt" in alreadyOpen.inboxUpdates[0]!, false);
+  assert.equal("deliveredAt" in alreadyOpen.inboxUpdates[0]!, false);
+  assert.equal(alreadyOpen.inboxDeliveredAt(), deliveredAt);
 });
 
 /**

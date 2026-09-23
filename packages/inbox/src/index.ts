@@ -5,6 +5,7 @@ import {
   isArchivedAssigneeError,
   isArchivedTaskError,
   prisma,
+  requireDefaultFeishuThread,
 } from "@anneal/db";
 import { config as loadEnvironment } from "dotenv";
 
@@ -18,6 +19,8 @@ loadEnvironment({ path: new URL("../../../.env", import.meta.url), quiet: true }
 const appId = process.env.FEISHU_APP_ID;
 const appSecret = process.env.FEISHU_APP_SECRET;
 if (!appId || !appSecret) throw new Error("FEISHU_APP_ID and FEISHU_APP_SECRET are required in the repository root .env");
+
+await prisma.$transaction(async (tx) => { await requireDefaultFeishuThread(tx); });
 
 await prisma.inboxMessage.updateMany({
   where: { deliveryStatus: "SENDING" },

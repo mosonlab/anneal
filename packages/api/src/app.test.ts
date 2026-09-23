@@ -1,4 +1,5 @@
 import "./test-workspace-root.js";
+process.env.FEISHU_DEFAULT_CHAT_ID ??= "anneal-unit-test-default-chat";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
@@ -150,7 +151,13 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
       },
       taskActivity: { findMany: async () => [], create: async () => ({}) },
       mergeLeaseEvent: { findMany: async () => [] },
-      inboxMessage: { create: async () => ({}), upsert: async () => ({}) },
+      inboxThread: { findFirst: async () => ({ id: "default-thread", externalChatId: "api-unit-test-default-chat" }) },
+      inboxMessage: {
+        findUnique: async () => null,
+        updateMany: async () => ({ count: 0 }),
+        create: async () => ({}),
+        upsert: async () => ({}),
+      },
     }),
   } as unknown as PrismaClient;
   assert.equal(await reconcileDatabaseRuns(database, now), 1);

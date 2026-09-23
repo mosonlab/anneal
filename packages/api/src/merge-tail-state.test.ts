@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
+  InboxDeliveryStatus,
+  InboxStatus,
   Prisma,
   TaskStatus,
   type MergeRecoveryAttempt,
@@ -19,6 +21,8 @@ import {
   retireLegacyRefusal,
   type RecoveryValidationIdentity,
 } from "./merge-tail-state.js";
+
+process.env.FEISHU_DEFAULT_CHAT_ID ??= "api-unit-test-default-chat";
 
 const recovery: RecoveryContext = {
   aggregateId: "aggregate-1",
@@ -49,6 +53,8 @@ const stateTx = (
   const outputDeletes: Array<Record<string, any>> = [];
   const activities: Array<Record<string, any>> = [];
   const notices: Array<Record<string, any>> = [];
+  let notice: Record<string, any> | null = null;
+  const noticeReopens: Array<Record<string, any>> = [];
   const tx = {
     mergeRecoveryAttempt: {
       findUnique: async (args: Record<string, any>) => (
@@ -82,14 +88,23 @@ const stateTx = (
         return data;
       },
     },
+    inboxThread: { findFirst: async () => ({ id: "default-thread", externalChatId: "api-unit-test-default-chat" }) },
     inboxMessage: {
+      findUnique: async () => notice,
+      updateMany: async (args: Record<string, any>) => {
+        noticeReopens.push(args);
+        if (!notice || notice.status !== args.where.status) return { count: 0 };
+        notice = { ...notice, ...args.data };
+        return { count: 1 };
+      },
       upsert: async (args: Record<string, any>) => {
         notices.push(args);
-        return {};
+        notice = notice ? { ...notice, ...args.update } : { status: InboxStatus.OPEN, deliveryStatus: InboxDeliveryStatus.PENDING, ...args.create };
+        return notice;
       },
     },
   } as unknown as Prisma.TransactionClient;
-  return { tx, recoveryUpdates, taskUpdates, outputDeletes, activities, notices };
+  return { tx, recoveryUpdates, taskUpdates, outputDeletes, activities, notices, noticeReopens, get notice() { return notice; } };
 };
 
 const legacyAttempt = (overrides: Partial<MergeRecoveryAttempt>): MergeRecoveryAttempt => ({
@@ -178,6 +193,40 @@ test("blockDownstream atomically parks all three Tasks and writes its deduped ma
     observed.notices[0]?.where.dedupeKey,
     `merge-base-drift-recovery-tail-stop:${recovery.sourceStopId}:readiness:${recovery.recoveryRunId}`,
   );
+  assert.equal(observed.notices[0]?.create.threadId, "default-thread");
+  assert.equal(observed.notices[0]?.update.threadId, "default-thread");
+});
+
+test("a later offline stop rearms a closed card but leaves an open delivered card alone", async () => {
+  const observed = stateTx(MergeRecoveryStatus.AWAITING_AUTHORIZATION);
+  const input = {
+    recovery,
+    phase: "readiness" as const,
+    reason: `${"merge-executor-offline"}: runner unavailable`,
+    at: new Date("2026-08-29T12:00:00.000Z"),
+  };
+
+  await blockDownstream(observed.tx, input);
+  const firstNotice = observed.notice as Record<string, any>;
+  firstNotice.status = InboxStatus.CLOSED;
+  firstNotice.deliveryStatus = InboxDeliveryStatus.DELIVERED;
+  firstNotice.deliveredAt = new Date("2026-08-29T12:01:00.000Z");
+
+  await blockDownstream(observed.tx, input);
+  const reopened = observed.notice as Record<string, any>;
+  assert.equal(observed.noticeReopens.at(-1)?.where.status, InboxStatus.CLOSED);
+  assert.equal(reopened.status, InboxStatus.OPEN);
+  assert.equal(reopened.deliveryStatus, InboxDeliveryStatus.PENDING);
+  assert.equal(reopened.deliveredAt, null);
+  assert.ok(reopened.nextDeliveryAt instanceof Date);
+  assert.equal(reopened.threadId, "default-thread");
+
+  reopened.deliveryStatus = InboxDeliveryStatus.DELIVERED;
+  const deliveredAt = new Date("2026-08-29T12:02:00.000Z");
+  reopened.deliveredAt = deliveredAt;
+  await blockDownstream(observed.tx, input);
+  assert.equal(reopened.deliveryStatus, InboxDeliveryStatus.DELIVERED);
+  assert.equal(reopened.deliveredAt, deliveredAt);
 });
 
 test("reopenAfterHeadAdoption takes the declared BLOCKED_DOWNSTREAM reopen edge", async () => {

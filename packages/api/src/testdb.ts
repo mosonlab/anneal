@@ -7,6 +7,11 @@ import { PrismaClient } from "@anneal/db";
 
 import { preMigratedEnvironmentVariable } from "./dbtest-plan.js";
 
+// Database tests exercise delivery routing without depending on the host's
+// Feishu credentials or destination. Production writers still require the
+// real setting through requireDefaultFeishuThread.
+process.env.FEISHU_DEFAULT_CHAT_ID ??= "anneal-dbtest-default-chat";
+
 export interface ScratchDatabaseConfig {
   sourceUrl: URL;
   maintenanceUrl: URL;

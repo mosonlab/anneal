@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
+process.env.FEISHU_DEFAULT_CHAT_ID ??= "anneal-unit-test-default-chat";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
+  DIRECT_INTEGRATOR_STEP_INDEX,
+  DIRECT_INTEGRATOR_TEMPLATE_NAME,
   LEGACY_TEMPLATE_GENERATIONS,
   CleanupStatus,
   EXTERNAL_FAILURE_REFUND_CAP,
   FailureClass,
+  INTEGRATOR_OUTPUT_KIND,
+  MERGE_TAIL_KIND,
   PushStatus,
   RunStatus,
   type PrismaClient,
@@ -180,6 +185,11 @@ test("an ordinary missing-output refusal remains non-external", () => {
 
 type RecordedActivity = { taskId: string; actorType?: string; body: string; metadata?: Record<string, unknown> };
 type MetadataClause = { metadata?: { path?: unknown; equals?: unknown } };
+type RecordedInboxUpsert = {
+  where: { dedupeKey: string };
+  create: Record<string, unknown>;
+  update: Record<string, unknown>;
+};
 type HarnessRun = Record<string, unknown> & { id: string; fencingToken: string };
 
 const statefulCompletionHarness = (
@@ -191,6 +201,9 @@ const statefulCompletionHarness = (
   const closedRuns = new Map<string, Record<string, unknown>>();
   const outputWrites: unknown[] = [];
   const taskUpdates: Record<string, unknown>[] = [];
+  const inboxCreates: Record<string, unknown>[] = [];
+  const inboxUpserts: RecordedInboxUpsert[] = [];
+  const runnerState: Record<string, unknown> = { consecutiveAuthFailures: 0, circuitOpen: false };
   const archivedAt = new Date("2026-08-16T06:00:00.000Z");
   let currentRun: HarnessRun;
 
@@ -225,8 +238,13 @@ const statefulCompletionHarness = (
     },
     agent: { findUnique: async () => task.assigneeAgent },
     session: { update: async () => ({}) },
+    mergeLeaseEvent: { findFirst: async () => null },
     task: {
-      update: async ({ data }: { data: Record<string, unknown> }) => { taskUpdates.push(data); return data; },
+      update: async ({ data }: { data: Record<string, unknown> }) => {
+        taskUpdates.push(data);
+        Object.assign(task, data);
+        return task;
+      },
       updateMany: async ({ data }: { data: Record<string, unknown> }) => {
         taskUpdates.push(data);
         Object.assign(task, data);
@@ -252,8 +270,36 @@ const statefulCompletionHarness = (
         && (where.AND ?? []).every((clause) => metadataMatches(activity.metadata, clause))).length,
       create: async ({ data }: { data: RecordedActivity }) => { activities.push(data); return data; },
     },
-    runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }), update: async () => ({}) },
-    inboxMessage: { create: async () => ({}), upsert: async () => ({}) },
+    runnerBackendState: {
+      upsert: async ({ update }: { update?: Record<string, unknown> }) => {
+        const failures = update?.consecutiveAuthFailures;
+        if (typeof failures === "number") runnerState.consecutiveAuthFailures = failures;
+        else if (failures && typeof failures === "object" && "increment" in failures) {
+          runnerState.consecutiveAuthFailures = Number(runnerState.consecutiveAuthFailures) + Number(failures.increment);
+        }
+        return { ...runnerState };
+      },
+      update: async ({ data }: { data: Record<string, unknown> }) => {
+        Object.assign(runnerState, data);
+        return { ...runnerState };
+      },
+    },
+    inboxThread: {
+      findFirst: async ({ where }: { where: { externalChatId: string } }) => ({
+        id: "thread-default",
+        externalChatId: where.externalChatId,
+      }),
+      create: async ({ data }: { data: { externalChatId: string } }) => ({
+        id: "thread-default",
+        externalChatId: data.externalChatId,
+      }),
+    },
+    inboxMessage: {
+      create: async ({ data }: { data: Record<string, unknown> }) => { inboxCreates.push(data); return {}; },
+      findUnique: async () => null,
+      updateMany: async () => ({ count: 0 }),
+      upsert: async (args: RecordedInboxUpsert) => { inboxUpserts.push(args); return {}; },
+    },
   };
   const database = {
     $transaction: async (operation: (client: unknown) => Promise<unknown>) => operation(tx),
@@ -267,6 +313,7 @@ const statefulCompletionHarness = (
     outcome,
     templateStep = null,
     headSha,
+    claimantClass = "runner",
   }: {
     runNumber: number;
     maxRunsPerTask: number;
@@ -274,6 +321,7 @@ const statefulCompletionHarness = (
     outcome: RunOutcome;
     templateStep?: Record<string, unknown> | null;
     headSha?: string;
+    claimantClass?: "runner" | "merge-executor";
   }) => {
     task.templateStep = templateStep;
     currentRun = {
@@ -288,7 +336,7 @@ const statefulCompletionHarness = (
     };
     const result = await completeRun(database, {
       runId: currentRun.id,
-      claimantClass: "runner",
+      claimantClass,
       body: {
         runnerId: "runner-1",
         fencingToken: currentRun.fencingToken,
@@ -299,13 +347,77 @@ const statefulCompletionHarness = (
         cleanupStatus: CleanupStatus.SUCCEEDED,
         workspaceRetained: false,
       },
-    });
+    }, claimantClass === "merge-executor" ? async () => ({ outcome: "not-held" }) : undefined);
     assert.ok(result && !("reason" in result));
     return closedRuns.get(currentRun.id)!;
   };
 
-  return { activities, complete, taskUpdates, queuedRuns, outputWrites };
+  return { activities, complete, task, taskUpdates, queuedRuns, outputWrites, inboxCreates, inboxUpserts, runnerState };
 };
+
+const assertThreadedNotice = (
+  upsert: RecordedInboxUpsert | undefined,
+  expected: { dedupeKey: string; sessionId: string; body: RegExp },
+) => {
+  assert.ok(upsert, `expected Inbox upsert ${expected.dedupeKey}`);
+  assert.equal(upsert.where.dedupeKey, expected.dedupeKey);
+  assert.equal(upsert.create.from, "AGENT");
+  assert.equal(upsert.create.sessionId, expected.sessionId);
+  assert.equal(upsert.create.taskId, "task-refunds");
+  assert.equal(upsert.create.threadId, "thread-default");
+  assert.equal(upsert.create.kind, "TEXT");
+  assert.equal(upsert.create.dedupeKey, expected.dedupeKey);
+  assert.match(String(upsert.create.body), expected.body);
+  assert.deepEqual(upsert.update, { threadId: "thread-default" });
+};
+
+test("a deferred mechanical mergeability review does not create an Inbox card", async () => {
+  const previousRunnerIds = process.env.MERGE_EXECUTOR_RUNNER_IDS;
+  process.env.MERGE_EXECUTOR_RUNNER_IDS = "runner-1";
+  try {
+    const harness = statefulCompletionHarness({
+      status: "DOING",
+      chainId: "chain-mechanical",
+      templateId: "template-mechanical",
+      approvalGate: false,
+    }, {
+      runId: "run-1",
+      kind: INTEGRATOR_OUTPUT_KIND,
+      body: JSON.stringify({
+        outcome: "deferred",
+        condition: "unresolved-mergeability",
+        evidence: "required checks are still pending",
+      }),
+    });
+    const closed = await harness.complete({
+      runNumber: 1,
+      maxRunsPerTask: 5,
+      budgetGrants: 0,
+      outcome: { case: "succeeded" },
+      templateStep: {
+        stepIndex: DIRECT_INTEGRATOR_STEP_INDEX,
+        outputKind: INTEGRATOR_OUTPUT_KIND,
+        taskTemplate: { name: DIRECT_INTEGRATOR_TEMPLATE_NAME },
+      },
+      claimantClass: "merge-executor",
+    });
+
+    assert.equal(closed.status, RunStatus.SUCCEEDED);
+    assert.equal(harness.task.status, "REVIEW", "the completion must really move DOING to REVIEW");
+    assert.deepEqual(harness.taskUpdates, [{
+      status: "REVIEW",
+      failureReason: "Mechanical mergeability is pending; control plane will recheck within six hours",
+    }]);
+    assert.ok(harness.activities.some(({ metadata }) => (
+      metadata?.kind === MERGE_TAIL_KIND.mergeabilityWait && metadata.state === "deferred"
+    )));
+    assert.deepEqual(harness.inboxCreates, []);
+    assert.deepEqual(harness.inboxUpserts, []);
+  } finally {
+    if (previousRunnerIds === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;
+    else process.env.MERGE_EXECUTOR_RUNNER_IDS = previousRunnerIds;
+  }
+});
 
 for (const state of ["settled", "aborted"]) {
   for (const actorType of ["agent", "control-plane"]) {
@@ -438,6 +550,25 @@ test("completeRun neither refunds nor rewrites an ordinary missing-output refusa
   });
   assert.equal(closed.budgetGrants, 0);
   assert.equal(closed.failureReason, "missing implementation task output for current Run run-1");
+});
+
+test("completeRun threads and dedupes a notice when a retryable failure exhausts the Run budget", async () => {
+  const harness = statefulCompletionHarness();
+  const closed = await harness.complete({
+    runNumber: 2,
+    maxRunsPerTask: 2,
+    budgetGrants: 0,
+    outcome: { case: "required-output-unsatisfied", reason: "finished without persisting required output" },
+  });
+
+  assert.equal(closed.failureClass, FailureClass.PROTOCOL_ERROR);
+  assert.equal(harness.queuedRuns.length, 0);
+  assert.equal(harness.inboxUpserts.length, 1);
+  assertThreadedNotice(harness.inboxUpserts[0], {
+    dedupeKey: "run-budget-exhausted:task-refunds:run-2",
+    sessionId: "session-2",
+    body: /Run budget exhausted after 2 attempts; operator action required\./u,
+  });
 });
 
 // --- Run outcome -----------------------------------------------------------
@@ -667,6 +798,37 @@ test("a retryable detached repair whose retry is refused keeps ordinary task fai
   assert.ok(harness.activities.some(({ body }) => /retry.*refused/iu.test(body)), "the archived assignee refuses the retry");
   assert.equal(harness.taskUpdates.at(-1)?.status, "REVIEW");
   assert.equal(harness.activities.some(({ metadata }) => metadata?.kind === "mergeTail.stop"), false);
+  assert.equal(harness.inboxUpserts.length, 1);
+  assertThreadedNotice(harness.inboxUpserts[0], {
+    dedupeKey: "automatic-retry-refused:task-refunds:run-1",
+    sessionId: "session-1",
+    body: /Automatic retry refused:.*archived/iu,
+  });
+});
+
+test("completeRun threads and dedupes the runner authentication circuit notice", async () => {
+  const harness = statefulCompletionHarness();
+  harness.runnerState.consecutiveAuthFailures = 1;
+  const closed = await harness.complete({
+    runNumber: 1,
+    maxRunsPerTask: 1,
+    budgetGrants: 0,
+    outcome: {
+      case: "provider-failure",
+      reason: "remote: Permission denied to repo (403)",
+      envelope: envelope({ phase: "DELIVER", stderrSummary: "remote: Permission denied to repo (403)" }),
+    },
+  });
+
+  assert.equal(closed.failureClass, FailureClass.AUTH_REQUIRED);
+  assert.equal(harness.runnerState.consecutiveAuthFailures, 2);
+  assert.equal(harness.runnerState.circuitOpen, true);
+  assert.equal(harness.inboxUpserts.length, 1);
+  assertThreadedNotice(harness.inboxUpserts[0], {
+    dedupeKey: "runner-auth-circuit-open:CODEX:run-1",
+    sessionId: "session-1",
+    body: /codex runner circuit opened after repeated authentication failures; login is required\./u,
+  });
 });
 
 for (const outcome of ["review-fail", "refresh-conflict"]) {

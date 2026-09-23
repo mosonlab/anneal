@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+process.env.FEISHU_DEFAULT_CHAT_ID ??= "anneal-unit-test-default-chat";
 import { test } from "node:test";
 
 import {
@@ -652,6 +653,7 @@ test("a fenced SESSION or merge-executor stopped result lands its question in th
       findUnique: async () => resultActivity,
       findMany: async () => [],
     },
+    inboxThread: { findFirst: async () => ({ id: "default-thread", externalChatId: "api-unit-test-default-chat" }) },
     inboxMessage: {
       findFirst: async () => null,
       create: async ({ data }: { data: Record<string, unknown> }) => {

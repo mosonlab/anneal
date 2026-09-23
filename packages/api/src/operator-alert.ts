@@ -1,4 +1,4 @@
-import { InboxStatus, Prisma } from "@anneal/db";
+import { InboxStatus, Prisma, requireDefaultFeishuThread } from "@anneal/db";
 
 export const hasOpenOperatorAlert = async (
   tx: Prisma.TransactionClient,
@@ -15,21 +15,14 @@ export const openOperatorAlert = async (
   tx: Prisma.TransactionClient,
   input: { body: string; dedupeKey: string },
 ): Promise<void> => {
-  const chatId = process.env.FEISHU_DEFAULT_CHAT_ID;
-  const thread = chatId
-    ? await tx.inboxThread.findFirst({
-      where: { channel: "FEISHU", externalChatId: chatId, sessionId: null },
-    }) ?? await tx.inboxThread.create({
-      data: { channel: "FEISHU", externalChatId: chatId },
-    })
-    : null;
+  const thread = await requireDefaultFeishuThread(tx);
   await tx.inboxMessage.create({
     data: {
       from: "AGENT",
       kind: "TEXT",
       body: input.body,
       dedupeKey: input.dedupeKey,
-      ...(thread ? { threadId: thread.id } : {}),
+      threadId: thread.id,
     },
   });
 };

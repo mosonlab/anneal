@@ -195,6 +195,10 @@ const main = async (): Promise<void> => {
   files.warnIfRunnerSharesPrincipal(filesRoot);
 
   await ownership.assertHeld();
+  // `/health` is a deployment readiness gate. Bind the configured destination
+  // before serving, even on a fresh database with no human-stop cards yet.
+  await prisma.$transaction(async (tx) => { await database.requireDefaultFeishuThread(tx); });
+  await ensureStartupActive();
   const reconciliation = await reconcileAtStartup(prisma);
   // `unavailable` rather than a number the process never read: see
   // `StartupReconciliation` in reconcile.ts.

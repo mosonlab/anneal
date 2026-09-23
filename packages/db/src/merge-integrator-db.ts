@@ -42,6 +42,7 @@ import {
   isTerminalDisposition,
   parseStopAnswerMetadata,
 } from "./merge-integrator.js";
+import { requireDefaultFeishuThread } from "./default-feishu-thread.js";
 import { revalidateAfterClassCeiling } from "./merge-recovery-revalidate.js";
 import { MERGE_TAIL_KIND } from "./merge-tail.js";
 
@@ -367,13 +368,14 @@ export const requestMergeEvidence = async (
   now = new Date(),
 ): Promise<EvidenceRequestResult> => {
   const nonce = randomUUID();
+  const threadId = input.threadId ?? (await requireDefaultFeishuThread(tx)).id;
   const card = await tx.inboxMessage.create({ data: {
     from: InboxSender.AGENT,
     agentId: input.agentId,
     sessionId: input.sessionId,
     taskId: input.gateTaskId,
     gateTaskId: input.gateTaskId,
-    threadId: input.threadId ?? null,
+    threadId,
     kind: "MULTIPLE_CHOICE",
     body: EVIDENCE_PLACEHOLDER_BODY,
     choices: [{ id: "approve", label: "批准并合并" }, { id: "reject", label: "打回上一步" }],
@@ -564,13 +566,24 @@ export const openStopQuestion = async (
     ? followUpQuestionKey(input.stopId)
     : stopQuestionKey(input.stopId, input.generation ?? 0);
   const existing = await tx.inboxMessage.findFirst({ where: { dedupeKey } });
-  if (existing) return null;
+  if (existing) {
+    if (existing.threadId === null) {
+      const thread = await requireDefaultFeishuThread(tx);
+      await tx.inboxMessage.updateMany({
+        where: { id: existing.id, threadId: null },
+        data: { threadId: thread.id },
+      });
+    }
+    return null;
+  }
+  const thread = await requireDefaultFeishuThread(tx);
   const choices = followUp ? FOLLOW_UP_CHOICES : input.choices ?? STOP_CHOICES[input.condition];
   const card = await tx.inboxMessage.create({ data: {
     from: InboxSender.AGENT,
     agentId: input.agentId,
     sessionId: input.sessionId,
     taskId: input.integratorTaskId,
+    threadId: thread.id,
     kind: "MULTIPLE_CHOICE",
     body: stopQuestionBody(input.condition, input.evidence, followUp),
     choices: stopChoicePayload(choices),

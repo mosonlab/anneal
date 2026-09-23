@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+process.env.FEISHU_DEFAULT_CHAT_ID ??= "anneal-unit-test-default-chat";
 import test from "node:test";
 
 import { FailureClass, MERGE_TAIL_KIND, type Prisma, RunStatus, TaskStatus } from "@anneal/db";
@@ -47,6 +48,7 @@ const transaction = (chainId: string | null, count = 1, absent = false, inboxErr
   const events: string[] = [];
   const writes: Record<string, unknown> = {};
   const task = { id: "task", projectId: "project", chainId };
+  const defaultFeishuChatId = "anneal-unit-test-default-chat";
   const tx = {
     run: { updateMany: async (input: unknown) => { events.push("run"); writes.run = input; return { count }; } },
     $queryRaw: async (strings: TemplateStringsArray) => {
@@ -60,10 +62,18 @@ const transaction = (chainId: string | null, count = 1, absent = false, inboxErr
     },
     taskActivity: { create: async (input: unknown) => { events.push("activity"); writes.activity = input; return { id: "activity" }; } },
     session: { findUnique: async () => ({ id: "source-session" }) },
-    inboxMessage: { upsert: async (input: unknown) => {
-      if (inboxError) throw new Error("Inbox unavailable");
-      events.push("inbox"); writes.inbox = input;
+    inboxThread: { findFirst: async (input: unknown) => {
+      events.push("thread");
+      writes.threadLookup = input;
+      return { id: "thread-1", externalChatId: defaultFeishuChatId };
     } },
+    inboxMessage: {
+      findUnique: async (input: unknown) => { writes.existingInbox = input; return null; },
+      upsert: async (input: unknown) => {
+        if (inboxError) throw new Error("Inbox unavailable");
+        events.push("inbox"); writes.inbox = input;
+      },
+    },
   };
   return { tx: tx as unknown as Prisma.TransactionClient, events, writes };
 };
@@ -74,13 +84,19 @@ for (const chainId of [null, "chain"]) {
       const { tx, events, writes } = transaction(chainId);
       const decision = await settleQueuedCandidate(tx, candidate, row.condition, now);
       assert.deepEqual(decision, queuedCandidateSettlement(row.condition).refusal ?? { outcome: chainId ? "halt" : "skip" });
-      assert.deepEqual(events, ["run", chainId ? "chain-lock" : "task-lock", "park", "activity", "inbox"]);
+      assert.deepEqual(events, ["run", chainId ? "chain-lock" : "task-lock", "park", "activity", "thread", "inbox"]);
       assert.deepEqual(writes.run, {
         where: { id: "run", status: RunStatus.QUEUED, leaseGeneration: 4 },
         data: { status: RunStatus.FAILED, failureClass: FailureClass.TASK_FAILED, failureReason: row.reason, retryable: false, endedAt: now },
       });
       assert.deepEqual(writes.task, { where: { id: "task" }, data: { status: row.parkTo === "REVIEW" ? TaskStatus.REVIEW : TaskStatus.BACKLOG, failureReason: row.reason } });
-      const inbox = writes.inbox as { create: { sessionId?: string; dedupeKey: string } };
+      const inbox = writes.inbox as { create: { sessionId?: string; dedupeKey: string; threadId: string }; update: { threadId: string } };
+      assert.deepEqual(writes.threadLookup, {
+        where: { channel: "FEISHU", externalChatId: "anneal-unit-test-default-chat", sessionId: null },
+        select: { id: true, externalChatId: true },
+      });
+      assert.equal(inbox.create.threadId, "thread-1");
+      assert.equal(inbox.update.threadId, "thread-1");
       if (row.condition.kind === "regression-repair-handoff-invalid") {
         assert.equal(inbox.create.sessionId, "source-session");
         assert.match(inbox.create.dedupeKey, /^merge-tail-stop:task:/);

@@ -1,4 +1,5 @@
 import "./test-workspace-root.js";
+process.env.FEISHU_DEFAULT_CHAT_ID ??= "anneal-unit-test-default-chat";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -561,6 +562,8 @@ test("enqueueTaskRun preserves the precise archived-assignee refusal for a compo
 test("chain advancement parks an archived successor without throwing or enqueueing", async () => {
   const updates: Array<Record<string, unknown>> = [];
   const activities: Array<Record<string, unknown>> = [];
+  const inboxWrites: Array<{ create: Record<string, unknown>; update: Record<string, unknown> }> = [];
+  let threadLookup: unknown;
   let creates = 0;
   const archivedAgent = runAgent({
     id: "agent-2",
@@ -607,7 +610,17 @@ test("chain advancement parks an archived successor without throwing or enqueuei
       findFirst: async () => null,
       create: async () => { creates += 1; return {}; },
     },
-    inboxMessage: { upsert: async () => ({}) },
+    inboxThread: { findFirst: async (input: unknown) => {
+      threadLookup = input;
+      return { id: "thread-1", externalChatId: "anneal-unit-test-default-chat" };
+    } },
+    inboxMessage: {
+      findUnique: async () => null,
+      upsert: async (input: { create: Record<string, unknown>; update: Record<string, unknown> }) => {
+        inboxWrites.push(input);
+        return {};
+      },
+    },
     taskActivity: {
       create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
     },
@@ -621,6 +634,12 @@ test("chain advancement parks an archived successor without throwing or enqueuei
   assert.equal(updates[1]?.status, "REVIEW");
   assert.match(String(updates[1]?.failureReason), /Archived Successor/);
   assert.match(String(activities[0]?.body), /Run birth was refused:.*Archived Successor/);
+  assert.deepEqual(threadLookup, {
+    where: { channel: "FEISHU", externalChatId: "anneal-unit-test-default-chat", sessionId: null },
+    select: { id: true, externalChatId: true },
+  });
+  assert.equal(inboxWrites[0]?.create.threadId, "thread-1");
+  assert.equal(inboxWrites[0]?.update.threadId, "thread-1");
 });
 
 test("an Inbox-resumed queued run for an archived agent is surfaced by the sweep", async () => {

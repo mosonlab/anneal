@@ -4,6 +4,7 @@ import {
   lockTaskRow,
   refundForLostRun,
   reopenRefundedRun,
+  requireDefaultFeishuThread,
   RunStatus,
   TaskStatus,
   type PrismaClient,
@@ -361,13 +362,19 @@ export const reconcileDatabaseRuns = async (
           where: { id: run.taskId },
           data: { status: TaskStatus.REVIEW, failureReason: `Maximum ${reopened.ceiling} runs reached after lease loss` },
         });
-        await tx.inboxMessage.create({
-          data: {
+        const thread = await requireDefaultFeishuThread(tx);
+        const dedupeKey = `lease-loss-budget-exhausted:${run.taskId}:${run.id}`;
+        await tx.inboxMessage.upsert({
+          where: { dedupeKey },
+          create: {
             from: "AGENT",
             taskId: run.taskId,
+            threadId: thread.id,
             kind: "TEXT",
             body: "Run budget exhausted after lease loss; operator action required.",
+            dedupeKey,
           },
+          update: { threadId: thread.id },
         });
       }
     }

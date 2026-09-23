@@ -4,6 +4,7 @@ import {
   InboxStatus,
   lockRunRow,
   Prisma,
+  requireDefaultFeishuThread,
   RunStatus,
   SessionExecutionStatus,
   TaskStatus,
@@ -335,6 +336,21 @@ export const terminalizeRun = async (
       actorType: "control-plane",
       body: "Inbox response window expired; run moved to review",
     } });
+    const thread = await requireDefaultFeishuThread(tx);
+    const dedupeKey = `inbox-timeout:${input.runId}`;
+    await tx.inboxMessage.upsert({
+      where: { dedupeKey },
+      create: {
+        from: "AGENT",
+        ...(input.outcome.sessionId ? { sessionId: input.outcome.sessionId } : {}),
+        taskId: input.outcome.taskId,
+        threadId: thread.id,
+        kind: "TEXT",
+        body: "Inbox response window expired; the run ended without a human reply and the task was moved to Review. Operator action required.",
+        dedupeKey,
+      },
+      update: { threadId: thread.id },
+    });
   }
   return {
     runId: input.runId,
