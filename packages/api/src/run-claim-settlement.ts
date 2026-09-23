@@ -1,4 +1,4 @@
-import { FailureClass, type Prisma, RunStatus, TaskStatus } from "@anneal/db";
+import { FailureClass, requireDefaultFeishuThread, type Prisma, RunStatus, TaskStatus } from "@anneal/db";
 import type { ClaimRefusal } from "@anneal/db/claim-contract";
 
 import { openMergeTailStopNotice } from "./merge-tail-actions.js";
@@ -132,13 +132,14 @@ export const settleQueuedCandidate = async (
     } else {
       if (!settlement.inboxBody) throw new Error(`Queued candidate ${candidate.id} has no Inbox notice body`);
       const dedupeKey = `${settlement.metadata.condition}:${candidate.id}`;
+      const thread = await requireDefaultFeishuThread(tx);
       await tx.inboxMessage.upsert({
         where: { dedupeKey },
         create: {
-          from: "AGENT", agentId: candidate.agentId, taskId: candidate.task.id,
+          from: "AGENT", agentId: candidate.agentId, taskId: candidate.task.id, threadId: thread.id,
           kind: "TEXT", body: settlement.inboxBody, dedupeKey,
         },
-        update: {},
+        update: { threadId: thread.id },
       });
     }
   }

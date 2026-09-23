@@ -652,6 +652,7 @@ test("a fenced SESSION or merge-executor stopped result lands its question in th
       findUnique: async () => resultActivity,
       findMany: async () => [],
     },
+    inboxThread: { findFirst: async () => ({ id: "default-thread", externalChatId: "api-unit-test-default-chat" }) },
     inboxMessage: {
       findFirst: async () => null,
       create: async ({ data }: { data: Record<string, unknown> }) => {

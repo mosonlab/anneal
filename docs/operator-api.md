@@ -3352,6 +3352,53 @@ curl -X POST "$BASE_URL/inbox/messages/$MESSAGE_ID/close" \
   -d '{"requestId":"close-001"}'
 ```
 
+### Feishu thread routing
+
+The `@anneal/inbox` service relays open `AGENT` Inbox messages only when they
+have a Feishu `InboxThread`. Blocking `inbox_ask` questions and approval cards
+use a thread keyed by chat and Session. An approval gate uses the supplied chat
+for its Session thread, or the shared default thread when no chat was supplied.
+Human-stop notices use the shared thread for `FEISHU_DEFAULT_CHAT_ID`: refused
+or exhausted Run births and claims, lost-Run retry refusal or budget
+exhaustion, Inbox response expiry, runner authentication or availability
+failures, merge-tail/readiness/evidence stops, and exhausted automatic
+successor resumes.
+The specification-read deadline extension notice is a queued deferral with no
+stop; it remains web-only. Stop cards show project, task and Chain context when
+available, the reason, the decision/action, and an Inbox link to
+`https://agentos.novelcatch.com/#/inbox/<messageId>`. Stable dedupe keys reuse
+the existing Inbox row when the same stop is evaluated again. Configure
+`FEISHU_APP_ID`, `FEISHU_APP_SECRET`, and `FEISHU_DEFAULT_CHAT_ID`; questions
+may override the default chat with `chatId`.
+
+A live agent session opens a blocking question through the session-only
+`POST /session/runs/:runId/inbox/questions` route. Its JSON requires
+`fencingToken`, `requestId`, and `body`; `requestId` must be 1–200 characters
+and `body` 1–8,000. `choices` defaults to `[]` and allows up to 20 `{id,label}`
+entries (`id` 1–100 characters, `label` 1–200). `chatId` and `resumableUntil`
+are optional. The request must provide `chatId` or the service's
+`FEISHU_DEFAULT_CHAT_ID` setting. For example:
+
+```json
+{"fencingToken":"$FENCING_TOKEN","requestId":"question-001","body":"Which target should I use?","choices":[{"id":"existing","label":"Use the existing target"}]}
+```
+
+`GET /health` returns `503` if the database is unavailable, or if
+`FEISHU_DEFAULT_CHAT_ID` is unset or has no shared Feishu Inbox thread. Those
+notification failures report `defaultFeishuThread` as `unconfigured`, `missing`,
+or `unavailable` while `database` remains `connected`. Health checks the
+destination binding, not the Inbox process or live Feishu socket. API startup
+creates the shared thread before serving; stop writers reuse it. The health
+probe itself is read-only. Check Inbox service logs for its connection state and inspect
+`deliveryStatus` for send failures. Feishu does not replay events missed while
+the Inbox service is offline. Existing pending messages without a thread are
+not backfilled automatically; re-trigger their source event or arrange a
+controlled repair. After launch, use disposable Runs to rehearse both
+directions: answer one blocking question in Feishu and verify that the same Run
+resumes; leave a second question unanswered with a short `resumableUntil`, then
+confirm its timeout card reaches the shared default chat. Check the Inbox
+connection logs, delivered message statuses, and `/health`.
+
 ## Sessions and runs
 
 The operator can list and inspect sessions, cancel runs, and page through run

@@ -11,6 +11,7 @@ import { ACTIVE_RUN_STATUSES } from "./board-contract.js";
 import { readChainControl } from "./chain-control.js";
 import { heldPredicate } from "./chain-hold.js";
 import { compare, layerOf } from "./chain-order.js";
+import { requireDefaultFeishuThread } from "./default-feishu-thread.js";
 import { lockAgentRepoGrant, lockChainRows } from "./locks.js";
 import { parseAuthorizationMetadata } from "./merge-integrator.js";
 import { stopStateFor } from "./merge-integrator-db.js";
@@ -453,6 +454,7 @@ const resumeParkedSuccessor = async (
         predecessorTaskId: predecessor.id,
       },
     } });
+    const thread = await requireDefaultFeishuThread(tx);
     await tx.inboxMessage.upsert({
       where: { dedupeKey: `chain-successor-auto-resume-exhausted:${successor.id}` },
       create: {
@@ -461,8 +463,9 @@ const resumeParkedSuccessor = async (
         kind: "TEXT",
         body: `Chain step ${successor.name} was automatically resumed ${String(MAX_AUTOMATIC_SUCCESSOR_RESUMES)} times and is back in REVIEW; the chain is stopped and needs an operator.`,
         dedupeKey: `chain-successor-auto-resume-exhausted:${successor.id}`,
+        threadId: thread.id,
       },
-      update: {},
+      update: { threadId: thread.id },
     });
     return false;
   }

@@ -10,6 +10,8 @@ import {
   reconcileDatabaseRuns,
 } from "./reconcile.js";
 
+process.env.FEISHU_DEFAULT_CHAT_ID ??= "api-unit-test-default-chat";
+
 test("database reconciliation active status query remains limited to three execution states", async () => {
   let statuses: unknown;
   const database = {
@@ -119,6 +121,7 @@ test("claim-time archived-run scheduler coalesces polls and sweeps again after i
 test("database reconciliation times out expired Inbox waits and makes retained workspace quota-managed", async () => {
   const now = new Date("2026-08-16T07:00:00.000Z");
   const writes: Array<{ target: string; data: Record<string, unknown> }> = [];
+  const notices: Array<Record<string, unknown>> = [];
   const database = {
     run: {
       findMany: async ({ where }: { where: {
@@ -134,7 +137,11 @@ test("database reconciliation times out expired Inbox waits and makes retained w
       $queryRaw: async () => [],
       run: { updateMany: async ({ data }: { data: Record<string, unknown> }) => { writes.push({ target: "run", data }); return { count: 1 }; } },
       session: { updateMany: async ({ data }: { data: Record<string, unknown> }) => { writes.push({ target: "session", data }); return { count: 1 }; } },
-      inboxMessage: { updateMany: async ({ data }: { data: Record<string, unknown> }) => { writes.push({ target: "message", data }); return { count: 1 }; } },
+      inboxThread: { findFirst: async () => ({ id: "default-thread", externalChatId: "api-unit-test-default-chat" }) },
+      inboxMessage: {
+        updateMany: async ({ data }: { data: Record<string, unknown> }) => { writes.push({ target: "message", data }); return { count: 1 }; },
+        upsert: async (args: Record<string, unknown>) => { notices.push(args); return {}; },
+      },
       task: { update: async ({ data }: { data: Record<string, unknown> }) => { writes.push({ target: "task", data }); return {}; } },
       taskActivity: { findMany: async () => [], create: async () => ({}) },
       mergeLeaseEvent: { findMany: async () => [] },
@@ -146,6 +153,9 @@ test("database reconciliation times out expired Inbox waits and makes retained w
   assert.equal(writes.find((write) => write.target === "session")?.data.cleanupStatus, CleanupStatus.RETAINED);
   assert.equal(writes.find((write) => write.target === "task")?.data.status, TaskStatus.REVIEW);
   assert.equal(writes.find((write) => write.target === "message")?.data.status, "CLOSED");
+  assert.equal(notices[0]?.where && (notices[0]?.where as { dedupeKey: string }).dedupeKey, "inbox-timeout:waiting-1");
+  assert.equal((notices[0]?.create as Record<string, unknown>)?.threadId, "default-thread");
+  assert.equal((notices[0]?.update as Record<string, unknown>)?.threadId, "default-thread");
 });
 
 test("startup reconciliation does not fail when archived notice persistence fails", async () => {
@@ -242,9 +252,12 @@ test("lease-loss retry refuses an archived Agent and parks the Task visibly", as
       },
       mergeLeaseEvent: { findMany: async () => [] },
       inboxMessage: {
+        findUnique: async () => null,
+        updateMany: async () => ({ count: 0 }),
         create: async ({ data }: { data: Record<string, unknown> }) => { inbox.push(data); return {}; },
         upsert: async ({ create }: { create: Record<string, unknown> }) => { inbox.push(create); return {}; },
       },
+      inboxThread: { findFirst: async () => ({ id: "default-thread", externalChatId: "api-unit-test-default-chat" }) },
     }),
     taskActivity: {
       createMany: async ({ data }: { data: Record<string, unknown>[] }) => { activities.push(...data); return { count: data.length }; },
@@ -258,6 +271,7 @@ test("lease-loss retry refuses an archived Agent and parks the Task visibly", as
   assert.match(String(taskUpdates.at(-1)?.failureReason), /Archived/i);
   assert.match(String(activities.at(-1)?.body), /automatic retry refused.*Archived/i);
   assert.match(String(inbox.at(-1)?.body), /Automatic retry refused.*Archived/i);
+  assert.equal(inbox.at(-1)?.threadId, "default-thread");
 });
 
 /* --------------------------------------------- bounded lease-loss refunds */
@@ -343,9 +357,12 @@ const lostRunDatabase = (options: {
         create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
       },
       mergeLeaseEvent: { findMany: async () => [] },
+      inboxThread: { findFirst: async () => ({ id: "default-thread", externalChatId: "api-unit-test-default-chat" }) },
       inboxMessage: {
+        findUnique: async () => null,
+        updateMany: async () => ({ count: 0 }),
         create: async ({ data }: { data: Record<string, unknown> }) => { inbox.push(data); return {}; },
-        upsert: async ({ create }: { create: Record<string, unknown> }) => { inbox.push(create); return {}; },
+        upsert: async (args: Record<string, unknown>) => { inbox.push(args.create as Record<string, unknown>); return {}; },
       },
     }),
     taskActivity: { createMany: async () => ({ count: 0 }) },
@@ -382,6 +399,8 @@ test("the fourth lease loss is refused by name, parks the Task, and grants nothi
   assert.match(String(taskUpdates.at(-1)?.failureReason), /Lease-loss refunds exhausted after 3/);
   assert.match(String(activities.at(-1)?.body), /Run 2 lost; automatic retry refused/);
   assert.match(String(inbox.at(-1)?.body), /Lease-loss refunds exhausted/);
+  assert.equal(inbox.at(-1)?.threadId, "default-thread");
+  assert.equal(inbox.at(-1)?.dedupeKey, "run-birth-refusal:task-1:lease-loss-refunds-exhausted");
   // A refund nobody may use is not recorded: the operator's own retry must not
   // inherit the attempt this reconciliation just refused.
   assert.equal(lostUpdates.at(-1)?.budgetGrants, 3);
@@ -389,7 +408,7 @@ test("the fourth lease loss is refused by name, parks the Task, and grants nothi
 });
 
 test("refund exhaustion wins when the fourth lost run also reaches the ordinary ceiling", async () => {
-  const { database, now, created, activities, taskUpdates } = lostRunDatabase({
+  const { database, now, created, activities, taskUpdates, inbox } = lostRunDatabase({
     leaseLossRefunds: 3, maxSessionsPerTask: 1, runNumber: 4,
   });
   await reconcileDatabaseRuns(database, now);
@@ -398,4 +417,6 @@ test("refund exhaustion wins when the fourth lost run also reaches the ordinary 
   assert.match(String(taskUpdates.at(-1)?.failureReason), /Lease-loss refunds exhausted/);
   assert.equal(activities.filter((activity) =>
     (activity.metadata as { refusal?: string } | undefined)?.refusal === "lease-loss-refunds-exhausted").length, 1);
+  assert.equal(inbox.at(-1)?.threadId, "default-thread");
+  assert.equal(inbox.at(-1)?.dedupeKey, "run-birth-refusal:task-1:lease-loss-refunds-exhausted");
 });

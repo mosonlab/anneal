@@ -12,6 +12,22 @@ import {
 import { waitUntil } from "./worker-tick-wait.js";
 import { createRunnerRegistry } from "./runners.js";
 
+const DEFAULT_FEISHU_THREAD = {
+  id: "default-feishu-thread",
+  externalChatId: "anneal-unit-test-default-chat",
+};
+
+const defaultFeishuInboxThread = {
+  findFirst: async ({ where }: { where: Record<string, unknown> }) => {
+    assert.deepEqual(where, {
+      channel: "FEISHU",
+      externalChatId: DEFAULT_FEISHU_THREAD.externalChatId,
+      sessionId: null,
+    });
+    return DEFAULT_FEISHU_THREAD;
+  },
+};
+
 const withExecutorAllowlist = (runnerIds: string | undefined, body: () => void): void => {
   const previous = process.env.MERGE_EXECUTOR_RUNNER_IDS;
   if (runnerIds === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;
@@ -98,6 +114,10 @@ for (const condition of ["base-advanced", "train-base-stale", "stale-head", "anc
       const updates: Array<{ where: { id: string }; data: Record<string, unknown> }> = [];
       const activities: Array<Record<string, unknown>> = [];
       const recoveryUpdates: Array<{ data: Record<string, unknown> }> = [];
+      const inboxMessageUpserts: Array<{
+        create: Record<string, unknown>;
+        update: Record<string, unknown>;
+      }> = [];
       const recovery = {
         aggregateId: "recovery-1", attempt: 1, sourceStopId: "stop-1", sourceRunId: "source-1",
         authorizationActivityId: "authorization-1", readinessTaskId: "readiness-1", regressionTaskId: "regression-1",
@@ -140,7 +160,17 @@ for (const condition of ["base-advanced", "train-base-stale", "stale-head", "anc
           } }],
           create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return data; },
         },
-        inboxMessage: { upsert: async () => ({}) },
+        inboxMessage: {
+          findUnique: async () => null,
+          upsert: async (args: {
+            create: Record<string, unknown>;
+            update: Record<string, unknown>;
+          }) => {
+            inboxMessageUpserts.push(args);
+            return {};
+          },
+        },
+        inboxThread: defaultFeishuInboxThread,
         run: { create: async () => { assert.fail("cap exhaustion must not create a Run"); } },
         mergeRecoveryAttempt: {
           findUnique: async () => aggregate,
@@ -176,6 +206,8 @@ for (const condition of ["base-advanced", "train-base-stale", "stale-head", "anc
         const metadata = activity.metadata as Record<string, unknown>;
         return baseDrift ? metadata?.state === "stopped" : metadata?.refusal === "lease-loss-refunds-exhausted";
       }));
+      assert.ok(inboxMessageUpserts.length > 0);
+      assert.ok(inboxMessageUpserts.every(({ create }) => create.threadId === DEFAULT_FEISHU_THREAD.id));
     });
 
   }

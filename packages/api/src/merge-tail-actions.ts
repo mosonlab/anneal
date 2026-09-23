@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 
 import {
   ACTIVE_RUN_STATUSES,
+  InboxDeliveryStatus,
+  InboxStatus,
   MERGE_EXECUTOR_OFFLINE_REASON,
   asJsonObject,
   errorForOpenRunRefusal,
@@ -26,6 +28,7 @@ import {
   type RegressionVerdict,
   type RecoveryContext,
   recoveryContext,
+  requireDefaultFeishuThread,
   TaskStatus,
   writeMarker,
 } from "@anneal/db";
@@ -201,15 +204,32 @@ export const openMergeTailStopNotice = async (
   input: { taskId: string; agentId: string; sessionId?: string; reason: string },
 ): Promise<void> => {
   const dedupeKey = `merge-tail-stop:${input.taskId}:${createHash("sha256").update(input.reason).digest("hex")}`;
+  const thread = await requireDefaultFeishuThread(tx);
+  const existing = await tx.inboxMessage.findUnique({ where: { dedupeKey }, select: { status: true } });
+  if (existing?.status === InboxStatus.CLOSED) {
+    const reopened = await tx.inboxMessage.updateMany({
+      where: { dedupeKey, status: InboxStatus.CLOSED },
+      data: {
+        status: InboxStatus.OPEN,
+        answeredAt: null,
+        threadId: thread.id,
+        deliveryStatus: InboxDeliveryStatus.PENDING,
+        deliveredAt: null,
+        nextDeliveryAt: new Date(),
+      },
+    });
+    if (reopened.count === 1) return;
+  }
   await tx.inboxMessage.upsert({ where: { dedupeKey }, create: {
     from: "AGENT",
     agentId: input.agentId,
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
     taskId: input.taskId,
+    threadId: thread.id,
     kind: "TEXT",
     body: `Autonomous merge tail stopped: ${input.reason}`,
     dedupeKey,
-  }, update: {} });
+  }, update: { threadId: thread.id } });
 };
 
 /**
@@ -583,15 +603,40 @@ const stopNotice = async (
   tx: DbTx,
   input: { taskId: string; body: string; dedupeKey: string; agentId?: string; sessionId?: string; reopen?: boolean },
 ): Promise<void> => {
+  const thread = await requireDefaultFeishuThread(tx);
+  if (input.reopen) {
+    const existing = await tx.inboxMessage.findUnique({
+      where: { dedupeKey: input.dedupeKey },
+      select: { status: true },
+    });
+    if (existing?.status === InboxStatus.CLOSED) {
+      const reopened = await tx.inboxMessage.updateMany({
+        where: { dedupeKey: input.dedupeKey, status: InboxStatus.CLOSED },
+        data: {
+          status: InboxStatus.OPEN,
+          answeredAt: null,
+          body: input.body,
+          threadId: thread.id,
+          deliveryStatus: InboxDeliveryStatus.PENDING,
+          deliveredAt: null,
+          nextDeliveryAt: new Date(),
+        },
+      });
+      if (reopened.count === 1) return;
+    }
+  }
   await tx.inboxMessage.upsert({ where: { dedupeKey: input.dedupeKey }, create: {
     from: "AGENT",
     ...(input.agentId ? { agentId: input.agentId } : {}),
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
     taskId: input.taskId,
+    threadId: thread.id,
     kind: "TEXT",
     body: input.body,
     dedupeKey: input.dedupeKey,
-  }, update: input.reopen ? { status: "OPEN", answeredAt: null, body: input.body } : {} });
+  }, update: input.reopen
+    ? { status: InboxStatus.OPEN, answeredAt: null, body: input.body, threadId: thread.id }
+    : { threadId: thread.id } });
 };
 
 /**

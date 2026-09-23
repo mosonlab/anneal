@@ -12,6 +12,13 @@ import {
   type IntegratorStopLandingInput,
 } from "./merge-integrator-db.js";
 
+const priorDefaultChatId = process.env["FEISHU_DEFAULT_CHAT_ID"];
+process.env["FEISHU_DEFAULT_CHAT_ID"] = "oc_merge_integrator_db_test";
+test.after(() => {
+  if (priorDefaultChatId === undefined) delete process.env["FEISHU_DEFAULT_CHAT_ID"];
+  else process.env["FEISHU_DEFAULT_CHAT_ID"] = priorDefaultChatId;
+});
+
 type Activity = {
   id: string;
   taskId: string;
@@ -29,6 +36,7 @@ type Question = {
   kind: string;
   agentId: string | null;
   sessionId: string | null;
+  threadId: string | null;
   body: string;
   choices: Prisma.JsonValue;
 };
@@ -92,12 +100,22 @@ const makeTransaction = (overrides: {
           kind: data.kind,
           agentId: data.agentId,
           sessionId: data.sessionId,
+          threadId: data.threadId ?? null,
           body: data.body,
           choices: data.choices,
         };
         questions.push(question);
         return question;
       },
+      updateMany: async ({ where, data }: { where: { id: string; threadId: null }; data: { threadId: string } }) => {
+        const question = questions.find((candidate) => candidate.id === where.id && candidate.threadId === where.threadId);
+        if (question) question.threadId = data.threadId;
+        return { count: question ? 1 : 0 };
+      },
+    },
+    inboxThread: {
+      findFirst: async () => ({ id: "default-thread", externalChatId: "oc_merge_integrator_db_test" }),
+      create: async () => ({ id: "default-thread", externalChatId: "oc_merge_integrator_db_test" }),
     },
   } as unknown as Prisma.TransactionClient;
   return { tx, task, activities, questions };
@@ -126,6 +144,7 @@ test("landing creates one result and one condition-specific question, then adopt
   assert.deepEqual((questions[0]!.choices as Array<{ id: string }>).map((choice) => choice.id), ["accept", "revert"]);
   assert.equal(questions[0]!.agentId, "run-agent");
   assert.equal(questions[0]!.sessionId, "run-session");
+  assert.equal(questions[0]!.threadId, "default-thread");
   assert.equal(task.status, "REVIEW");
   assert.equal(task.failureReason, "Mechanical merge stopped: base-drift-post-merge");
 

@@ -24,6 +24,8 @@ import {
   type StopMergeTailInput,
 } from "./merge-tail-actions.js";
 
+process.env.FEISHU_DEFAULT_CHAT_ID ??= "api-unit-test-default-chat";
+
 const recoveryContext: RecoveryContext = {
   aggregateId: "aggregate-1",
   attempt: 2,
@@ -275,7 +277,8 @@ test("an unbound repair parks the repair task, the Run and the recovery", async 
       updateMany: async (args: Record<string, any>) => { taskUpdates.push(args); return { count: 1 }; },
     },
     taskActivity: { create: async ({ data }: { data: Record<string, any> }) => { activities.push(data); return {}; } },
-    inboxMessage: { upsert: async (args: Record<string, any>) => { notices.push(args); return {}; } },
+    inboxThread: { findFirst: async () => ({ id: "default-thread", externalChatId: "api-unit-test-default-chat" }) },
+    inboxMessage: { findUnique: async () => null, upsert: async (args: Record<string, any>) => { notices.push(args); return {}; } },
   } as unknown as Prisma.TransactionClient;
   const binding = await activeRepairRecoverySourceRun(recoveryTx(recoveryRow()), {
     regressionTaskId: recoveryContext.regressionTaskId,
@@ -331,7 +334,8 @@ test("an unbound repair with no parkable recovery still stops the tail with a no
       updateMany: async () => ({ count: 1 }),
     },
     taskActivity: { create: async () => ({}) },
-    inboxMessage: { upsert: async (args: Record<string, any>) => { notices.push(args); return {}; } },
+    inboxThread: { findFirst: async () => ({ id: "default-thread", externalChatId: "api-unit-test-default-chat" }) },
+    inboxMessage: { findUnique: async () => null, upsert: async (args: Record<string, any>) => { notices.push(args); return {}; } },
   } as unknown as Prisma.TransactionClient;
   const binding = await activeRepairRecoverySourceRun(
     recoveryTx(recoveryRow({ status: MergeRecoveryStatus.SUCCEEDED })),
@@ -379,7 +383,8 @@ test("an unbound repair leaves a recovery that still has an active Run alone", a
       updateMany: async (args: Record<string, any>) => { taskUpdates.push(args); return { count: 1 }; },
     },
     taskActivity: { create: async () => ({}) },
-    inboxMessage: { upsert: async (args: Record<string, any>) => { notices.push(args); return {}; } },
+    inboxThread: { findFirst: async () => ({ id: "default-thread", externalChatId: "api-unit-test-default-chat" }) },
+    inboxMessage: { findUnique: async () => null, upsert: async (args: Record<string, any>) => { notices.push(args); return {}; } },
   } as unknown as Prisma.TransactionClient;
   const binding = await activeRepairRecoverySourceRun(recoveryTx(recoveryRow()), {
     regressionTaskId: recoveryContext.regressionTaskId,
@@ -441,7 +446,10 @@ const stopTx = (recoveryStatus: MergeRecoveryStatus) => {
         return {};
       },
     },
+    inboxThread: { findFirst: async () => ({ id: "default-thread", externalChatId: "api-unit-test-default-chat" }) },
     inboxMessage: {
+      findUnique: async () => null,
+      updateMany: async () => ({ count: 0 }),
       upsert: async (args: Record<string, any>) => {
         notices.push(args);
         return {};
@@ -491,7 +499,9 @@ const completionTx = (outputBody = "repair completed") => {
         return {};
       },
     },
+    inboxThread: { findFirst: async () => ({ id: "default-thread", externalChatId: "api-unit-test-default-chat" }) },
     inboxMessage: {
+      findUnique: async () => null,
       upsert: async (args: Record<string, any>) => {
         notices.push(args);
         return {};
@@ -521,7 +531,10 @@ const completionInput = (
 test("openMergeTailStopNotice derives its dedupe key from the task and reason", async () => {
   let upsert: Record<string, unknown> | undefined;
   const tx = {
+    inboxThread: { findFirst: async () => ({ id: "default-thread", externalChatId: "api-unit-test-default-chat" }) },
     inboxMessage: {
+      findUnique: async () => null,
+      updateMany: async () => ({ count: 0 }),
       upsert: async (args: Record<string, unknown>) => {
         upsert = args;
         return {};
@@ -544,12 +557,61 @@ test("openMergeTailStopNotice derives its dedupe key from the task and reason", 
       agentId: "regression-verifier-1",
       sessionId: "session-1",
       taskId: "regression-task-1",
+      threadId: "default-thread",
       kind: "TEXT",
       body: "Autonomous merge tail stopped: merge gate proof no longer matches exact head",
       dedupeKey,
     },
-    update: {},
+    update: { threadId: "default-thread" },
   });
+});
+
+test("openMergeTailStopNotice re-arms a closed repeated stop without re-sending an open delivered card", async () => {
+  const dedupeKey = "merge-tail-stop:regression-task-1:9f7b7769875b76f39403dda876c8cc7accdde7037d36052fd9633675f668e6e9";
+  let notice: Record<string, any> | null = null;
+  const tx = {
+    inboxThread: { findFirst: async () => ({ id: "default-thread", externalChatId: "api-unit-test-default-chat" }) },
+    inboxMessage: {
+      findUnique: async () => notice,
+      updateMany: async ({ where, data }: { where: { status: string }; data: Record<string, unknown> }) => {
+        if (!notice || notice.status !== where.status) return { count: 0 };
+        notice = { ...notice, ...data };
+        return { count: 1 };
+      },
+      upsert: async ({ create, update }: { create: Record<string, unknown>; update: Record<string, unknown> }) => {
+        notice = notice ? { ...notice, ...update } : { status: "OPEN", deliveryStatus: "PENDING", ...create };
+        return notice;
+      },
+    },
+  } as unknown as Prisma.TransactionClient;
+  const input = {
+    taskId: "regression-task-1",
+    agentId: "regression-verifier-1",
+    reason: "merge gate proof no longer matches exact head",
+  };
+  const currentNotice = (): Record<string, any> => {
+    assert.ok(notice);
+    return notice;
+  };
+
+  await openMergeTailStopNotice(tx, input);
+  assert.equal(currentNotice().threadId, "default-thread");
+  currentNotice().status = "CLOSED";
+  currentNotice().deliveryStatus = "DELIVERED";
+  currentNotice().deliveredAt = new Date();
+  await openMergeTailStopNotice(tx, input);
+  assert.equal(currentNotice().status, "OPEN");
+  assert.equal(currentNotice().deliveryStatus, "PENDING");
+  assert.equal(currentNotice().deliveredAt, null);
+  assert.ok(currentNotice().nextDeliveryAt instanceof Date);
+
+  currentNotice().deliveryStatus = "DELIVERED";
+  const deliveredAt = new Date();
+  currentNotice().deliveredAt = deliveredAt;
+  await openMergeTailStopNotice(tx, input);
+  assert.equal(currentNotice().deliveryStatus, "DELIVERED");
+  assert.equal(currentNotice().deliveredAt, deliveredAt);
+  assert.equal(currentNotice().dedupeKey, dedupeKey);
 });
 
 test("recordDefenseAudit records one control-plane activity per readiness task and head", async () => {
@@ -578,6 +640,7 @@ test("recordDefenseAudit records one control-plane activity per readiness task a
         return data;
       },
     },
+    inboxThread: { findFirst: async () => ({ id: "default-thread", externalChatId: "api-unit-test-default-chat" }) },
     inboxMessage: {
       upsert: async () => assert.fail("defense audits must not write Inbox messages"),
     },
@@ -1009,12 +1072,21 @@ for (const recovery of [null, recoveryContext]) {
   test(`a later offline ceiling reopens the same notice (recovery=${recovery !== null})`, async () => {
     const observed = stopTx(MergeRecoveryStatus.AWAITING_AUTHORIZATION);
     const notices = new Map<string, Record<string, unknown>>();
-    const tx = observed.tx as unknown as { inboxMessage: { upsert: (input: {
-      where: { dedupeKey: string }; create: Record<string, unknown>; update: Record<string, unknown>;
-    }) => Promise<unknown> } };
-    tx.inboxMessage.upsert = async ({ where, create, update }) => {
+    const inboxMessage = (observed.tx as unknown as { inboxMessage: Record<string, any> }).inboxMessage;
+    inboxMessage.findUnique = async ({ where }: { where: { dedupeKey: string } }) => notices.get(where.dedupeKey) ?? null;
+    inboxMessage.updateMany = async ({ where, data }: {
+      where: { dedupeKey: string; status: string }; data: Record<string, unknown>;
+    }) => {
       const current = notices.get(where.dedupeKey);
-      const next = current ? { ...current, ...update } : { status: "OPEN", ...create };
+      if (!current || current.status !== where.status) return { count: 0 };
+      notices.set(where.dedupeKey, { ...current, ...data });
+      return { count: 1 };
+    };
+    inboxMessage.upsert = async ({ where, create, update }: {
+      where: { dedupeKey: string }; create: Record<string, unknown>; update: Record<string, unknown>;
+    }) => {
+      const current = notices.get(where.dedupeKey);
+      const next = current ? { ...current, ...update } : { status: "OPEN", deliveryStatus: "PENDING", ...create };
       notices.set(where.dedupeKey, next);
       return next;
     };
@@ -1025,15 +1097,25 @@ for (const recovery of [null, recoveryContext]) {
     const first = [...notices.values()][0]!;
     first.status = "CLOSED";
     first.answeredAt = new Date();
+    first.deliveryStatus = "DELIVERED";
+    first.deliveredAt = new Date();
     first.body = "previous notice";
     await stopMergeTail(observed.tx, input);
     assert.equal(notices.size, 1);
     const reopened = [...notices.values()][0]!;
     assert.equal(reopened.status, "OPEN");
     assert.equal(reopened.answeredAt, null);
+    assert.equal(reopened.deliveryStatus, "PENDING");
+    assert.equal(reopened.deliveredAt, null);
+    assert.ok(reopened.nextDeliveryAt instanceof Date);
     assert.match(String(reopened.body), /merge-executor-offline/u);
+    reopened.deliveryStatus = "DELIVERED";
+    const deliveredAt = new Date();
+    reopened.deliveredAt = deliveredAt;
     await stopMergeTail(observed.tx, input);
     assert.equal(notices.size, 1, "repeated settlement within an episode stays idempotent");
+    assert.equal(reopened.deliveryStatus, "DELIVERED", "an already-open delivered notice is not re-armed");
+    assert.equal(reopened.deliveredAt, deliveredAt);
   });
 }
 

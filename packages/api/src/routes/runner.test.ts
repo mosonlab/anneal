@@ -24,6 +24,22 @@ import {
 import { createApp } from "../test-app.js";
 import { withTokens } from "./test-support.js";
 
+const DEFAULT_FEISHU_THREAD = {
+  id: "default-feishu-thread",
+  externalChatId: "anneal-unit-test-default-chat",
+};
+
+const defaultFeishuInboxThread = {
+  findFirst: async ({ where }: { where: Record<string, unknown> }) => {
+    assert.deepEqual(where, {
+      channel: "FEISHU",
+      externalChatId: DEFAULT_FEISHU_THREAD.externalChatId,
+      sessionId: null,
+    });
+    return DEFAULT_FEISHU_THREAD;
+  },
+};
+
 test("salvage publication records the stranded branch and preserves the already-started 409", async () => {
   await withTokens(async () => {
     const activities: Array<Record<string, unknown>> = [];
@@ -190,7 +206,7 @@ for (const contractVersion of [undefined, RUN_COMPLETION_CONTRACT_VERSION + 1]) 
         },
         inboxThread: {
           findFirst: async () => null,
-          create: async () => ({ id: "thread-1" }),
+          upsert: async ({ where }: { where: { id: string } }) => ({ id: where.id }),
         },
         inboxMessage: {
           findFirst: async ({ where }: { where: { status: InboxStatus; dedupeKey: { startsWith: string } } }) => (
@@ -311,8 +327,11 @@ test("a mismatch Inbox failure aborts the claim before a later candidate is cons
       },
       inboxThread: {
         findFirst: async () => null,
-        create: async ({ data }: { data: Record<string, unknown> }) => {
-          const thread = { id: `thread-${inboxThreads.length + 1}`, ...data };
+        upsert: async ({ where, create }: {
+          where: { id: string };
+          create: Record<string, unknown>;
+        }) => {
+          const thread = { id: where.id, ...create };
           inboxThreads.push(thread);
           return thread;
         },
@@ -475,7 +494,7 @@ const matchingMechanicalClaimHarness = (draining = false) => {
     },
     inboxThread: {
       findFirst: async () => null,
-      create: async () => ({ id: "thread-1" }),
+      upsert: async ({ where }: { where: { id: string } }) => ({ id: where.id }),
     },
   };
   const database = {
@@ -615,7 +634,11 @@ test("completion refunds an external failure but refuses an automatic retry for 
         create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
       },
       runnerBackendState: { upsert: async () => ({ consecutiveAuthFailures: 0 }), update: async () => ({}) },
-      inboxMessage: { create: async ({ data }: { data: Record<string, unknown> }) => { inbox.push(data); return {}; } },
+      inboxMessage: {
+        create: async ({ data }: { data: Record<string, unknown> }) => { inbox.push(data); return {}; },
+        upsert: async ({ create }: { create: Record<string, unknown> }) => { inbox.push(create); return {}; },
+      },
+      inboxThread: defaultFeishuInboxThread,
     };
     const database = {
       $transaction: async (operation: (value: unknown) => Promise<unknown>) => operation(tx),
@@ -662,6 +685,7 @@ test("completion refunds an external failure but refuses an automatic retry for 
     assert.equal(retry, undefined);
     assert.match(String(taskWrites.at(-1)?.failureReason), /Automatic retry refused.*Archived Retry Agent/);
     assert.match(String(inbox.at(-1)?.body), /Automatic retry refused.*Archived Retry Agent/);
+    assert.equal(inbox.at(-1)?.threadId, DEFAULT_FEISHU_THREAD.id);
     assert.deepEqual(await response.json(), {
       taskId: "task-1",
       succeeded: false,
@@ -836,6 +860,7 @@ test("successful completion commits output and parks an archived chain successor
       let successorUpdate: Record<string, unknown> | undefined;
       let successorActivity: Record<string, unknown> | undefined;
       let runCreates = 0;
+      const inboxMessages: Array<Record<string, unknown>> = [];
       const successor = {
         id: "task-2",
         projectId: "project-1",
@@ -911,7 +936,14 @@ test("successful completion commits output and parks an archived chain successor
             return {};
           },
         },
-        inboxMessage: { upsert: async () => ({}) },
+        inboxMessage: {
+          findUnique: async () => null,
+          upsert: async ({ create }: { create: Record<string, unknown> }) => {
+            inboxMessages.push(create);
+            return {};
+          },
+        },
+        inboxThread: defaultFeishuInboxThread,
         taskActivity: {
           findMany: async () => [],
           create: async ({ data }: { data: Record<string, unknown> }) => {
@@ -953,6 +985,8 @@ test("successful completion commits output and parks an archived chain successor
       assert.match(String(successorActivity?.body), /predecessor.*complet/i);
       assert.match(String(successorActivity?.body), /Archived Successor/);
       assert.match(String(successorActivity?.body), /archived/i);
+      assert.ok(inboxMessages.length > 0);
+      assert.ok(inboxMessages.every((message) => message.threadId === DEFAULT_FEISHU_THREAD.id));
     } finally {
       if (previousRoot === undefined) delete process.env.RUNNER_WORKSPACE_ROOT;
       else process.env.RUNNER_WORKSPACE_ROOT = previousRoot;

@@ -37,6 +37,7 @@ import {
   Prisma,
   type PrismaClient,
   PushStatus,
+  requireDefaultFeishuThread,
   recordIntegratorStop,
   stopStateFor,
   refundDecision,
@@ -1207,28 +1208,42 @@ export const completeRun = async (
         },
       });
       if (budgetExhausted) {
-        await tx.inboxMessage.create({
-          data: {
+        const thread = await requireDefaultFeishuThread(tx);
+        const dedupeKey = `run-budget-exhausted:${run.taskId}:${run.id}`;
+        await tx.inboxMessage.upsert({
+          where: { dedupeKey },
+          create: {
             from: "AGENT",
             sessionId: run.session.id,
             taskId: run.taskId,
+            goalId: run.goalId,
+            threadId: thread.id,
             kind: "TEXT",
             body: `Run budget exhausted after ${budgetCeiling} attempts; operator action required.`,
+            dedupeKey,
           },
+          update: { threadId: thread.id },
         });
       }
       // The refusal an unresolved stop raises is not news once this completion
       // has already re-queued the integrator past it; saying "retry refused"
       // there is the message that sent operators looking for a card to answer.
       if (retryRefusal && integratorFailureExit.kind !== "pending") {
-        await tx.inboxMessage.create({
-          data: {
+        const thread = await requireDefaultFeishuThread(tx);
+        const dedupeKey = `automatic-retry-refused:${run.taskId}:${run.id}`;
+        await tx.inboxMessage.upsert({
+          where: { dedupeKey },
+          create: {
             from: "AGENT",
             sessionId: run.session.id,
             taskId: run.taskId,
+            goalId: run.goalId,
+            threadId: thread.id,
             kind: "TEXT",
             body: `Automatic retry refused: ${retryRefusal.message}`,
+            dedupeKey,
           },
+          update: { threadId: thread.id },
         });
       }
     }
@@ -1238,20 +1253,26 @@ export const completeRun = async (
         create: { runner: run.runner, consecutiveAuthFailures: 1, lastPreflightOk: false },
         update: { consecutiveAuthFailures: { increment: 1 }, lastPreflightOk: false },
       });
-      if (state.consecutiveAuthFailures >= 2) {
+      if (state.consecutiveAuthFailures >= 2 && !state.circuitOpen) {
         await tx.runnerBackendState.update({
           where: { runner: run.runner },
           data: { circuitOpen: true, circuitReason: "Repeated authentication failures", circuitOpenedAt: now },
         });
-        await tx.inboxMessage.create({
-          data: {
+        const thread = await requireDefaultFeishuThread(tx);
+        const dedupeKey = `runner-auth-circuit-open:${run.runner}:${run.id}`;
+        await tx.inboxMessage.upsert({
+          where: { dedupeKey },
+          create: {
             from: "AGENT",
             sessionId: run.session.id,
             taskId: run.taskId,
             goalId: run.goalId,
+            threadId: thread.id,
             kind: "TEXT",
             body: `${run.runner.toLowerCase()} runner circuit opened after repeated authentication failures; login is required.`,
+            dedupeKey,
           },
+          update: { threadId: thread.id },
         });
       }
     } else if (succeeded) {

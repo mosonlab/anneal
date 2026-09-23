@@ -1,4 +1,6 @@
 import {
+  InboxDeliveryStatus,
+  InboxStatus,
   settleRunBirthRefusal,
   MERGE_EXECUTOR_OFFLINE_REASON,
   attemptRunBirth,
@@ -12,6 +14,7 @@ import {
   Prisma,
   TaskStatus,
   recordReadinessRequeue,
+  requireDefaultFeishuThread,
   transitionMergeRecovery,
   writeMarker,
   type MergeRecoveryAttempt,
@@ -193,13 +196,38 @@ const stopNotice = async (
   tx: DbTx,
   input: { taskId: string; body: string; dedupeKey: string; reopen?: boolean },
 ): Promise<void> => {
+  const thread = await requireDefaultFeishuThread(tx);
+  if (input.reopen) {
+    const existing = await tx.inboxMessage.findUnique({
+      where: { dedupeKey: input.dedupeKey },
+      select: { status: true },
+    });
+    if (existing?.status === InboxStatus.CLOSED) {
+      const reopened = await tx.inboxMessage.updateMany({
+        where: { dedupeKey: input.dedupeKey, status: InboxStatus.CLOSED },
+        data: {
+          status: InboxStatus.OPEN,
+          answeredAt: null,
+          body: input.body,
+          threadId: thread.id,
+          deliveryStatus: InboxDeliveryStatus.PENDING,
+          deliveredAt: null,
+          nextDeliveryAt: new Date(),
+        },
+      });
+      if (reopened.count === 1) return;
+    }
+  }
   await tx.inboxMessage.upsert({ where: { dedupeKey: input.dedupeKey }, create: {
     from: "AGENT",
     taskId: input.taskId,
+    threadId: thread.id,
     kind: "TEXT",
     body: input.body,
     dedupeKey: input.dedupeKey,
-  }, update: input.reopen ? { status: "OPEN", answeredAt: null, body: input.body } : {} });
+  }, update: input.reopen
+    ? { status: InboxStatus.OPEN, answeredAt: null, body: input.body, threadId: thread.id }
+    : { threadId: thread.id } });
 };
 
 /** Readiness checks its drift ceiling before calling; persist any Run-birth refusal. */

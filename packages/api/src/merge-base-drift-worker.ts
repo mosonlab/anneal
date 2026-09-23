@@ -1,5 +1,7 @@
 import {
   ACTIVE_RUN_STATUSES,
+  InboxDeliveryStatus,
+  InboxStatus,
   BASE_DRIFT_RETRY_BACKOFF_CAP_MS,
   BASE_DRIFT_RETRY_BACKOFF_START_MS,
   BASE_DRIFT_TRANSPORT_CEILING_MS,
@@ -27,6 +29,7 @@ import {
   parseMergeResult,
   readLatestMarker,
   recordIntegratorStop,
+  requireDefaultFeishuThread,
   openRun,
   REGRESSION_VERIFICATION_OUTPUT_KINDS,
   resolveChainTarget,
@@ -682,14 +685,33 @@ export const pendingMergeabilityTick = async (
               condition: "api-error", reason, now });
           } else {
             await db.$transaction(async (tx) => {
+              const thread = await requireDefaultFeishuThread(tx);
+              const dedupeKey = `mergeability-wait-error:${row.taskId}`;
               await tx.task.update({ where: { id: row.taskId }, data: {
                 status: TaskStatus.REVIEW, failureReason: reason,
               } });
-              await tx.inboxMessage.upsert({ where: { dedupeKey: `mergeability-wait-error:${row.taskId}` },
-                create: { from: "AGENT", taskId: row.taskId, kind: "TEXT", body: reason,
-                  dedupeKey: `mergeability-wait-error:${row.taskId}` },
-                update: { status: "OPEN", body: reason },
-              });
+              const existing = await tx.inboxMessage.findUnique({ where: { dedupeKey }, select: { status: true } });
+              const reopened = existing?.status === InboxStatus.CLOSED
+                ? await tx.inboxMessage.updateMany({
+                  where: { dedupeKey, status: InboxStatus.CLOSED },
+                  data: {
+                    status: InboxStatus.OPEN,
+                    answeredAt: null,
+                    body: reason,
+                    threadId: thread.id,
+                    deliveryStatus: InboxDeliveryStatus.PENDING,
+                    deliveredAt: null,
+                    nextDeliveryAt: now,
+                  },
+                })
+                : null;
+              if (reopened?.count !== 1) {
+                await tx.inboxMessage.upsert({
+                  where: { dedupeKey },
+                  create: { from: "AGENT", taskId: row.taskId, threadId: thread.id, kind: "TEXT", body: reason, dedupeKey },
+                  update: { status: InboxStatus.OPEN, answeredAt: null, body: reason, threadId: thread.id },
+                });
+              }
               await writeMarker(tx, row.taskId, "mergeabilityWait", "stopped", {
                 actorType: "control-plane", body: reason,
                 metadata: { condition: "api-error", sourceRunId: null, remainingMs: 0 },

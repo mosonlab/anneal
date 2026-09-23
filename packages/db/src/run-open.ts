@@ -2,6 +2,7 @@ import {
   AssigneeType,
   CodexServiceTier,
   InboxDeliveryStatus,
+  InboxStatus,
   InboxSender,
   Prisma,
   type Run,
@@ -17,6 +18,7 @@ import { sharedChainBranch } from "./chain-branch.js";
 import { readChainControl } from "./chain-control.js";
 import { heldPredicate } from "./chain-hold.js";
 import { layerOf } from "./chain-order.js";
+import { requireDefaultFeishuThread } from "./default-feishu-thread.js";
 import { lockAgentRow } from "./locks.js";
 import { INTEGRATOR_OUTPUT_KIND, INTEGRATOR_TEMPLATE_NAME, parseMergeResult } from "./merge-integrator.js";
 import {
@@ -1507,10 +1509,20 @@ export const settleRunBirthRefusal = async (
     } });
   }
   const dedupeKey = `run-birth-refusal:${taskId}:${refusal.code}`;
+  const thread = await requireDefaultFeishuThread(tx);
+  const update = { status: InboxStatus.OPEN, answeredAt: null, body: decision.inbox.body, threadId: thread.id };
+  const existing = await tx.inboxMessage.findUnique({ where: { dedupeKey }, select: { status: true } });
+  if (existing?.status === InboxStatus.CLOSED) {
+    const reopened = await tx.inboxMessage.updateMany({
+      where: { dedupeKey, status: InboxStatus.CLOSED },
+      data: { ...update, deliveryStatus: InboxDeliveryStatus.PENDING, nextDeliveryAt: now },
+    });
+    if (reopened.count === 1) return { kind: "parked" };
+  }
   await tx.inboxMessage.upsert({
     where: { dedupeKey },
-    create: { from: "AGENT", taskId, kind: "TEXT", body: decision.inbox.body, dedupeKey, createdAt: now },
-    update: { status: "OPEN", answeredAt: null, body: decision.inbox.body },
+    create: { from: "AGENT", taskId, kind: "TEXT", body: decision.inbox.body, dedupeKey, threadId: thread.id, createdAt: now },
+    update,
   });
   return { kind: "parked" };
 };
@@ -1627,7 +1639,7 @@ export const gateQuestion = async (tx: Tx, gateTaskId: string, sourceRunId: stri
     where: { channel_externalChatId_sessionId: { channel: "FEISHU", externalChatId: chatId, sessionId: run.session.id } },
     create: { channel: "FEISHU", externalChatId: chatId, sessionId: run.session.id, taskId: task.id },
     update: { taskId: task.id },
-  }) : null;
+  }) : await requireDefaultFeishuThread(tx);
   const delivery = run.pullRequestUrl
     ? `\n\nPull request: ${run.pullRequestUrl}`
     : run.deliveryInstructions ? `\n\n${run.deliveryInstructions}` : "";

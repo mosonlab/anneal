@@ -12,6 +12,14 @@ const choicesOf = (value: Prisma.JsonValue | null): Choice[] => Array.isArray(va
     return typeof item.id === "string" && typeof item.label === "string" ? [{ id: item.id, label: item.label }] : [];
   }) : [];
 
+const deliveryTaskContext = {
+  name: true,
+  chainId: true,
+  chainIndex: true,
+  project: { select: { name: true } },
+  repo: { select: { name: true } },
+} satisfies Prisma.TaskSelect;
+
 export const deliverPending = async (
   db: PrismaClient,
   client: FeishuMessageClient,
@@ -26,7 +34,14 @@ export const deliverPending = async (
       nextDeliveryAt: { lte: now },
       thread: { isNot: null },
     },
-    include: { thread: true },
+    include: {
+      thread: true,
+      task: { select: deliveryTaskContext },
+      gateTask: { select: deliveryTaskContext },
+      session: { select: { waitingOnMessageId: true, task: { select: deliveryTaskContext } } },
+      goal: { select: { project: { select: { name: true } } } },
+      agent: { select: { project: { select: { name: true } } } },
+    },
     orderBy: { createdAt: "asc" },
     take: limit,
   });
@@ -39,8 +54,17 @@ export const deliverPending = async (
     });
     if (won.count !== 1 || !message.thread) continue;
     try {
+      const task = message.task ?? message.gateTask ?? message.session?.task;
       const sent = await client.send(message.thread.externalChatId, questionCard({
-        id: message.id, body: message.body, choices: choicesOf(message.choices),
+        id: message.id,
+        body: message.body,
+        choices: choicesOf(message.choices),
+        replyRequired: message.session?.waitingOnMessageId === message.id,
+        projectName: task?.project.name ?? message.goal?.project.name ?? message.agent?.project.name ?? null,
+        repoName: task?.repo?.name ?? null,
+        taskName: task?.name ?? null,
+        chainId: task?.chainId ?? null,
+        chainIndex: task?.chainIndex ?? null,
       }));
       await db.inboxMessage.update({ where: { id: message.id }, data: {
         deliveryStatus: InboxDeliveryStatus.DELIVERED,
