@@ -1480,6 +1480,28 @@ test("a stale repair output stops the queued Regression Run before a provider se
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 1);
 });
 
+test("a repair publication with no recorded head reaches claim and stops as handoff-invalid", async () => {
+  const seeded = await exercise("review-fail", { failedSource: "salvaged" });
+  const repair = await repairFor(seeded, "review-fix");
+  await completeRepair(seeded, repair.id, "Closed MF-2.");
+  const repairRun = await db.run.findFirstOrThrow({ where: { taskId: repair.id } });
+  await db.run.update({ where: { id: repairRun.id }, data: { headSha: null } });
+  const run2 = await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id, runNumber: 2 } });
+  assert.equal(run2.targetBranch, BRANCH);
+
+  const claimed = await claimNext();
+  assert.equal(claimed.status, 204);
+  const stopped = await db.run.findUniqueOrThrow({ where: { id: run2.id } });
+  assert.equal(stopped.status, "FAILED");
+  assert.match(stopped.failureReason ?? "", /output and Run do not bind resolved head/u);
+  assert.equal(await db.session.count({ where: { runId: run2.id } }), 0);
+  const activity = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.regression.id,
+    metadata: { path: ["state"], equals: "handoff-invalid" },
+  } });
+  assert.match(activity.body, /output and Run do not bind resolved head/u);
+});
+
 test("malformed, unknown, and head-unbound resolver outputs stop loudly", async () => {
   const cases: Array<[string, string, string | null]> = [
     ["prose", "resolved it", RESOLVED],

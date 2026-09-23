@@ -459,7 +459,7 @@ test("a later indexed Chain salvage outranks a detached repair publication", asy
   assert.equal(activities.some((activity) => String(activity.body).includes("detached merge-tail repair")), false);
 });
 
-test("a detached repair shared-branch ACK without headSha fails loudly", async () => {
+test("a detached repair shared-branch ACK without headSha remains inheritable and records unknown", async () => {
   const repo = { id: "repo-1", defaultBranch: "main" };
   const chainId = "chain-missing-repair-head";
   const shared = sharedChainBranch({ projectId: "project-1", chainId });
@@ -471,7 +471,7 @@ test("a detached repair shared-branch ACK without headSha fails loudly", async (
     chainIndex: 4,
     runs: [priorRun({ repoId: repo.id, branch: shared, targetBranch: "main" })],
   });
-  const { tx } = fakeTx(task, {
+  const { tx, creates, activities } = fakeTx(task, {
     publishedRuns: [{
       id: "repair-without-head",
       taskId: "repair-task",
@@ -483,10 +483,63 @@ test("a detached repair shared-branch ACK without headSha fails loudly", async (
     }],
   });
 
-  await assert.rejects(
-    () => openRun(tx, task.id, { kind: "retry", readyAt: now }),
-    /Detached merge-tail repair Run repair-without-head updated .* without recording headSha/u,
-  );
+  const opened = await openRun(tx, task.id, { kind: "retry", readyAt: now });
+  assert.equal(opened.ok, true);
+  assert.equal(creates[0]?.targetBranch, shared);
+  assert.match(String(activities[0]?.body), /at head unknown/u);
+  assert.deepEqual(activities[0]?.metadata, {
+    kind: "chain-base-inherited",
+    source: "merge-tail-repair",
+    sourceRunId: "repair-without-head",
+    sourceTaskId: "repair-task",
+    branch: shared,
+    headSha: "unknown",
+  });
+});
+
+test("a template lease-loss requeue audits a detached repair base", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const chainId = "chain-requeue-repair";
+  const shared = sharedChainBranch({ projectId: "project-1", chainId });
+  const prior = priorRun({ repoId: repo.id, branch: shared, targetBranch: "main" });
+  const task = taskRow({
+    repoId: repo.id,
+    repo,
+    templateId: "template-1",
+    chainId,
+    chainIndex: 4,
+    targetBranch: "main",
+    runs: [prior],
+  });
+  const { tx, creates, activities } = fakeTx(task, { publishedRuns: [{
+    id: "repair-publish",
+    taskId: "repair-task",
+    repoId: repo.id,
+    pushedBranch: shared,
+    branch: shared,
+    headSha: "a".repeat(40),
+    createdAt: new Date("2026-09-23T12:01:00.000Z"),
+    task: { id: "repair-task", projectId: "project-1", repoId: repo.id, chainId: null, chainIndex: null, targetBranch: shared },
+  }] });
+
+  const opened = await openRun(tx, task.id, {
+    kind: "retry-after-lease-loss", readyAt: now,
+    sourceRunId: prior.id,
+    sourceMaxRunsPerTask: prior.maxRunsPerTask,
+    sourceBudgetGrants: prior.budgetGrants,
+  });
+
+  assert.equal(opened.ok, true);
+  assert.equal(creates[0]?.targetBranch, shared);
+  assert.equal(activities.length, 1);
+  assert.deepEqual(activities[0]?.metadata, {
+    kind: "chain-base-inherited",
+    source: "merge-tail-repair",
+    sourceRunId: "repair-publish",
+    sourceTaskId: "repair-task",
+    branch: shared,
+    headSha: "a".repeat(40),
+  });
 });
 
 test("a Run based on its own Task's prior publication does not require another commit", async () => {

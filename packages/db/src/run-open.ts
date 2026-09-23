@@ -602,9 +602,6 @@ const inheritedPublication = async (
     if (!isChainStep && !isRepair) {
       throw new Error(`Published Run ${published.id} for Chain ${task.chainId} has incomplete branch identity`);
     }
-    if (isRepair && !published.headSha) {
-      throw new Error(`Detached merge-tail repair Run ${published.id} updated '${sharedBranch}' without recording headSha`);
-    }
     return evidence(published, isRepair ? "merge-tail-repair" : "chain");
   }
   return evidence(published, "task");
@@ -625,7 +622,7 @@ const recordDetachedRepairInheritance = async (
   if (publication?.source !== "merge-tail-repair" && !additionalReason) return;
   const repairDetails = publication?.source === "merge-tail-repair"
     ? `Inherited branch '${publication.pushedBranch}' from detached merge-tail repair Run ${publication.runId}`
-      + ` at head ${publication.headSha}`
+      + ` at head ${publication.headSha ?? "unknown"}`
       + `, Task ${publication.taskId}.`
     : null;
   await tx.taskActivity.create({ data: {
@@ -638,7 +635,7 @@ const recordDetachedRepairInheritance = async (
       sourceRunId: publication.runId,
       sourceTaskId: publication.taskId,
       branch: publication.pushedBranch,
-      headSha: publication.headSha,
+      headSha: publication.headSha ?? "unknown",
     } } : {}),
   } });
 };
@@ -664,8 +661,11 @@ export const resolveRequeueBase = async (
   task: RunBranchTask,
   run: { branch: string | null; targetBranch: string | null },
 ): Promise<string | null> => {
-  const published = await inheritedBase(tx, task, { branch: run.branch });
-  if (published) return published;
+  const publication = await inheritedPublication(tx, task, { branch: run.branch });
+  if (publication) {
+    await recordDetachedRepairInheritance(tx, task, publication);
+    return publication.pushedBranch;
+  }
   if (run.branch !== null && run.targetBranch === run.branch) {
     return task.targetBranch ?? task.repo.defaultBranch;
   }
