@@ -559,7 +559,7 @@ test("openMergeTailStopNotice derives its dedupe key from the task and reason", 
       taskId: "regression-task-1",
       threadId: "default-thread",
       kind: "TEXT",
-      body: "Autonomous merge tail stopped: merge gate proof no longer matches exact head",
+      body: "推荐：需调查 —— 自动合并尾部因“merge gate proof no longer matches exact head”停止；先核对记录证据与对应 runbook。\n\nAutonomous merge tail stopped: merge gate proof no longer matches exact head",
       dedupeKey,
     },
     update: { threadId: "default-thread" },
@@ -601,6 +601,7 @@ test("openMergeTailStopNotice re-arms a closed repeated stop without re-sending 
   currentNotice().deliveredAt = new Date();
   await openMergeTailStopNotice(tx, input);
   assert.equal(currentNotice().status, "OPEN");
+  assert.match(currentNotice().body, /^推荐：需调查/u);
   assert.equal(currentNotice().deliveryStatus, "PENDING");
   assert.equal(currentNotice().deliveredAt, null);
   assert.ok(currentNotice().nextDeliveryAt instanceof Date);
@@ -1023,7 +1024,8 @@ test("a chain with no fixed-implementation step stops instead of staffing an unc
     data: { status: TaskStatus.REVIEW, failureReason: reason },
   }]);
   assert.equal(observed.notices.length, 1);
-  assert.equal(observed.notices[0]?.create.body, `Autonomous merge tail stopped: ${reason}`);
+  assert.match(observed.notices[0]?.create.body, /^推荐：需调查/u);
+  assert.match(observed.notices[0]?.create.body, new RegExp(`Autonomous merge tail stopped: ${reason}`, "u"));
   assert.equal(observed.notices[0]?.create.taskId, "regression-1");
 });
 
@@ -1067,7 +1069,8 @@ test("a fixed-implementation task with no agent stops with an accurate notice", 
     data: { status: TaskStatus.REVIEW, failureReason: reason },
   }]);
   assert.equal(observed.notices.length, 1);
-  assert.equal(observed.notices[0]?.create.body, `Autonomous merge tail stopped: ${reason}`);
+  assert.match(observed.notices[0]?.create.body, /^推荐：需调查/u);
+  assert.match(observed.notices[0]?.create.body, new RegExp(`Autonomous merge tail stopped: ${reason}`, "u"));
   assert.equal(observed.notices[0]?.create.taskId, "regression-1");
 });
 

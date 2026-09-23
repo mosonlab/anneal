@@ -262,6 +262,7 @@ test("a template approval gate persists an outbox card and leaves the task in re
   assert.equal(result.gated, true);
   assert.deepEqual(updates[0], { status: "REVIEW" });
   assert.equal(gate?.gateTaskId, task.id);
+  assert.match(String(gate?.body), /^无推荐：/u);
   // The approver decides from the card: PR link plus a truncated artifact preview.
   assert.match(String(gate?.body), /pull\/7/);
   assert.match(String(gate?.body), /产物（spec）/);

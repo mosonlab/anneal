@@ -364,14 +364,17 @@ export const launchAdapterArgv = (
   declaration: Pick<AdapterDeclaration, "runner" | "launcherEnvironmentVariables">,
   args: string[],
   env: NodeJS.ProcessEnv,
+  executableOverride?: string,
+  additionalEnvironmentVariables: readonly string[] = [],
 ): { executable: string; args: string[] } => {
-  const binary = config.binaries[declaration.runner];
+  const binary = executableOverride ?? config.binaries[declaration.runner];
   if (config.runAsPrefix.length === 0) return { executable: binary, args };
-  const names = [
+  const names = [...new Set([
     ...COMMON_LAUNCHER_ENVIRONMENT,
     ...gitConfigLauncherNames(env),
     ...declaration.launcherEnvironmentVariables,
-  ];
+    ...additionalEnvironmentVariables,
+  ])];
   const assignments = names.flatMap((name) => env[name] !== undefined ? [`${name}=${env[name]}`] : []);
   return {
     executable: config.runAsPrefix[0]!,

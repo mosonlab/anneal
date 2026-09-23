@@ -38,8 +38,9 @@ export const openSessionConfig = (
   claim: Pick<ClaimedTask, "runner" | "resume">,
   scratch: AgentScratch,
   dependencies: SessionConfigLeaseDependencies = {},
+  options: { isolate?: boolean } = {},
 ): SessionConfigLease => {
-  const isolated = RUNNER_DEFINITIONS[claim.runner].isolatesSessionConfig;
+  const isolated = options.isolate ?? RUNNER_DEFINITIONS[claim.runner].isolatesSessionConfig;
   const provision = dependencies.provisionSessionConfig ?? provisionSessionConfig;
   const cleanup = dependencies.cleanupAgentScratch ?? cleanupAgentScratch;
   const rootExists = dependencies.sessionConfigRootExists ?? sessionConfigRootExists;

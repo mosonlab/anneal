@@ -42,6 +42,7 @@ import {
   isTerminalDisposition,
   parseStopAnswerMetadata,
 } from "./merge-integrator.js";
+import { putRecommendedChoiceFirst, recommendMergeStop } from "./inbox-recommendation.js";
 import { requireDefaultFeishuThread } from "./default-feishu-thread.js";
 import { revalidateAfterClassCeiling } from "./merge-recovery-revalidate.js";
 import { MERGE_TAIL_KIND } from "./merge-tail.js";
@@ -421,6 +422,7 @@ export type PendingEvidenceRequest = {
   activityId: string;
   gateTaskId: string;
   integratorTaskId: string;
+  sourceRunId: string;
   cardId: string;
   nonce: string;
   repository: string;
@@ -434,14 +436,15 @@ export const parseEvidenceRequest = (
   const metadata = asRecord(row.metadata);
   if (metadata?.kind !== MERGE_INTEGRATOR_KIND.evidenceRequest) return null;
   if (metadata.schemaVersion !== MERGE_INTEGRATOR_SCHEMA_VERSION) return null;
-  const { nonce, cardId, repository, prNumber, purpose, integratorTaskId } = metadata;
+  const { nonce, cardId, repository, prNumber, purpose, integratorTaskId, sourceRunId } = metadata;
   if (typeof nonce !== "string" || typeof cardId !== "string" || typeof repository !== "string") return null;
-  if (typeof prNumber !== "number" || typeof integratorTaskId !== "string") return null;
+  if (typeof prNumber !== "number" || typeof integratorTaskId !== "string" || typeof sourceRunId !== "string") return null;
   if (purpose !== "gate" && purpose !== "confirmation") return null;
   return {
     activityId: row.id,
     gateTaskId: row.taskId,
     integratorTaskId,
+    sourceRunId,
     cardId,
     nonce,
     repository,
@@ -542,7 +545,13 @@ export const parseStopQuestionKey = (dedupeKey: string | null | undefined): Stop
   return null;
 };
 
-const stopQuestionBody = (condition: StopCondition, evidence: string, followUp: boolean): string => [
+const stopQuestionBody = (
+  condition: StopCondition,
+  evidence: string,
+  followUp: boolean,
+  recommendation: string,
+): string => [
+  recommendation,
   followUp ? `合并事故待结案：${condition}` : `机械合并已停止：${condition}`,
   "",
   evidence.trim() || "（执行器未记录额外证据）",
@@ -588,6 +597,7 @@ export const openStopQuestion = async (
   }
   const thread = await requireDefaultFeishuThread(tx);
   const choices = followUp ? FOLLOW_UP_CHOICES : input.choices ?? STOP_CHOICES[input.condition];
+  const recommendation = recommendMergeStop(input.condition, input.evidence);
   const card = await tx.inboxMessage.create({ data: {
     from: InboxSender.AGENT,
     agentId: input.agentId,
@@ -595,8 +605,8 @@ export const openStopQuestion = async (
     taskId: input.integratorTaskId,
     threadId: thread.id,
     kind: "MULTIPLE_CHOICE",
-    body: stopQuestionBody(input.condition, input.evidence, followUp),
-    choices: stopChoicePayload(choices),
+    body: stopQuestionBody(input.condition, input.evidence, followUp, recommendation.line),
+    choices: putRecommendedChoiceFirst(stopChoicePayload(choices), recommendation.choiceId),
     dedupeKey,
   } });
   return { id: card.id };

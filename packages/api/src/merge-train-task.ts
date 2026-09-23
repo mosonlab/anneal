@@ -35,8 +35,7 @@ const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\"'\"'
 /**
  * Render the detached card's complete runtime instruction. The JSON is
  * repeated in a bounded code block so the board remains useful after the
- * Run settles, while the command remains executable by the Runner exactly as
- * the task contract requires.
+ * Run settles. The Runner executes from claim metadata, never this text.
  */
 export const mergeTrainTaskDescription = (input: {
   baseSha: string;
@@ -52,7 +51,7 @@ export const mergeTrainTaskDescription = (input: {
   const encoded = JSON.stringify(payload);
   return [
     "This is a detached merge-train task.",
-    "Run only the exact command below, then finish. Do not edit files or perform any other work.",
+    "The Runner executes this command directly from the claim metadata and records its result after the process exits.",
     `printf '%s' ${shellQuote(encoded)} | \"\${AGENTOS_TOOLS}/merge-train.sh\"`,
     "",
     "Merge-train input:",

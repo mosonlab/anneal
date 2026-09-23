@@ -2108,7 +2108,8 @@ test("exception requeues are bounded and the stop past the limit counts them", a
   assert.equal(regression.failureReason, reason);
   assert.equal((await exceptionRequeueMarkers(seeded.regression.id)).length, READINESS_EXCEPTION_REQUEUE_LIMIT);
   const notice = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
-  assert.equal(notice.body, `Autonomous merge readiness stopped: ${reason}`);
+  assert.match(notice.body, /^推荐：需调查/u);
+  assert.ok(notice.body.includes(`Autonomous merge readiness stopped: ${reason}`));
 });
 
 test("a live skip tick closes outage A before a held Step resumes into outage B", async () => {
