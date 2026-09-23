@@ -673,6 +673,7 @@ test("unrequired failed check on UNSTABLE head queues Regression with log findin
 
 test("required check failure uses the same CI repair path", async () => {
   const seeded = await seedStopped("canonical-direct", "ci-required", "check-failure-or-absence");
+  await addRepairTailFixtures(seeded, false);
   assert.equal((await baseDriftRecoveryTick(db, ciReader())).recovered, 1);
   const run = await db.run.findFirstOrThrow({ where: { taskId: seeded.gateTask.id, status: "QUEUED" },
     orderBy: { runNumber: "desc" } });
@@ -1316,6 +1317,7 @@ test("the durable reader selects the direct and compound recovery facts", async 
     assert.deepEqual(classifyCandidate(facts), {
       kind: "inspect",
       candidate: {
+        recoveryKind: "base-drift",
         integratorTaskId: seeded.integratorTask!.id,
         readinessTaskId: seeded.readinessTask!.id,
         regressionTaskId: seeded.gateTask.id,
