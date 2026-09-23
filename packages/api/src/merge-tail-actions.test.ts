@@ -772,8 +772,11 @@ const recoveredRegressionTx = () => {
   };
   const tx = observed.tx as unknown as {
     mergeRecoveryAttempt: { findFirst: (args: unknown) => Promise<typeof aggregate> };
+    taskActivity: { findMany: () => Promise<unknown[]>; findFirst: () => Promise<null> };
   };
   tx.mergeRecoveryAttempt.findFirst = async () => aggregate;
+  tx.taskActivity.findMany = async () => [];
+  tx.taskActivity.findFirst = async () => null;
   return observed;
 };
 

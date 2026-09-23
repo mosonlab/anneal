@@ -1,4 +1,4 @@
-import { parseRecoverableMergeEvidence } from "@anneal/db";
+import { isCiFailureRecoveryStop, parseRecoverableMergeEvidence } from "@anneal/db";
 
 export type RecoveryIdentity = {
   repository: string;
@@ -10,6 +10,7 @@ export type RecoveryIdentity = {
 };
 
 export type RecoveryCandidate = RecoveryIdentity & {
+  recoveryKind: "base-drift" | "ci-failure";
   integratorTaskId: string;
   readinessTaskId: string;
   regressionTaskId: string;
@@ -207,7 +208,7 @@ const refusalReason = (code: CandidateRefusalCode, detail?: string): string => {
  */
 export const classifyCandidate = (facts: DurableCandidateFacts): CandidateDecision => {
   const { task, stop } = facts;
-  if (!task?.isIntegratorStep || !stop || !["base-drift", "non-clean-mergeability"].includes(stop.condition)) return { kind: "skip" };
+  if (!task?.isIntegratorStep || !stop || !["base-drift", "non-clean-mergeability", "check-failure-or-absence"].includes(stop.condition)) return { kind: "skip" };
   if (facts.existingAttempt
     && facts.existingAttempt.status !== "VALIDATING"
     && !facts.existingAttempt.reopenableLegacyRefusal) return { kind: "skip" };
@@ -223,7 +224,8 @@ export const classifyCandidate = (facts: DurableCandidateFacts): CandidateDecisi
   }
   if (!stop.sourceRunId) return refuse("source-run-unbound");
   const evidence = parseRecoverableMergeEvidence(stop.condition, stop.evidence);
-  if (!evidence) return refuse("evidence-invalid");
+  const ciFailure = isCiFailureRecoveryStop(stop.condition, stop.evidence);
+  if (!evidence && !ciFailure) return refuse("evidence-invalid");
   const sourceRun = facts.sourceRun;
   if (!sourceRun || sourceRun.taskId !== task.id || sourceRun.status !== "SUCCEEDED" || !sourceRun.hasSession) {
     return refuse("source-run-mismatch");
@@ -257,7 +259,7 @@ export const classifyCandidate = (facts: DurableCandidateFacts): CandidateDecisi
     || intent.prNumber !== authorization.prNumber || intent.headSha !== authorization.headSha)) {
     return refuse("intent-mismatch");
   }
-  if (evidence.authorized !== authorization.baseSha) return refuse("authorized-base-mismatch");
+  if (evidence && evidence.authorized !== authorization.baseSha) return refuse("authorized-base-mismatch");
   if (readiness.outputCommitSha !== authorization.headSha) return refuse("readiness-head-mismatch");
 
   if (!facts.target) throw new Error(`Candidate facts for ${task.id} omit the resolved target`);
@@ -267,6 +269,7 @@ export const classifyCandidate = (facts: DurableCandidateFacts): CandidateDecisi
   }
   if (facts.firstRunTargetRef !== authorization.baseRef) return refuse("target-branch-mismatch");
   return { kind: "inspect", candidate: {
+    recoveryKind: ciFailure ? "ci-failure" : "base-drift",
     integratorTaskId: task.id,
     readinessTaskId: readiness.id,
     regressionTaskId: regression.id,
@@ -278,12 +281,13 @@ export const classifyCandidate = (facts: DurableCandidateFacts): CandidateDecisi
     targetBranch: authorization.baseRef,
     authorizedHeadSha: authorization.headSha,
     authorizedBaseSha: authorization.baseSha,
-    observedBaseSha: evidence.observed,
+    observedBaseSha: evidence?.observed ?? authorization.baseSha,
   } };
 };
 
 const candidatesMatch = (left: RecoveryCandidate, right: RecoveryCandidate): boolean => {
   const fields: Array<keyof RecoveryCandidate> = [
+    "recoveryKind",
     "integratorTaskId", "readinessTaskId", "regressionTaskId", "sourceRunId", "stopId",
     "authorizationActivityId", "repository", "prNumber", "targetBranch", "authorizedHeadSha",
     "authorizedBaseSha", "observedBaseSha",

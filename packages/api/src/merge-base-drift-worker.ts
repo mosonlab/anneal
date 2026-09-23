@@ -10,6 +10,7 @@ import {
   INTEGRATOR_OUTPUT_KIND,
   MAX_BASE_DRIFT_VALIDATION_ATTEMPTS,
   MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
+  MAX_AUTOMATIC_CI_FAILURE_RECOVERIES,
   MERGE_RECOVERY_CLASS_REFUSAL_CODE,
   MERGE_RECOVERY_RETRY_CLASS_ENUM,
   MergeRecoveryStatus,
@@ -23,6 +24,7 @@ import {
   openDeferredBaseDriftQuestion,
   pendingIntegratorAuthorization,
   parseRecoverableMergeEvidence,
+  isCiFailureRecoveryStop,
   replayHeldIntegratorAuthorization,
   recordLeaseHandoff,
   writeMarker,
@@ -61,6 +63,7 @@ import {
   type RetryClass,
 } from "./base-drift-recovery-decision.js";
 import { stopMergeTail } from "./merge-tail-actions.js";
+import { classifyHeadCheckFailures, type FailedHeadCheck } from "./ci-failure-recovery.js";
 import {
   ensureRecoveryValidation,
   enterRepair,
@@ -161,8 +164,8 @@ export const readCandidateFacts = async (
     sourceRunId: stop.sourceRunId,
   };
   if (stop.condition !== "base-drift"
-    && (stop.condition !== "non-clean-mergeability"
-      || !parseRecoverableMergeEvidence(stop.condition, stop.evidence))) return facts;
+    && !parseRecoverableMergeEvidence(stop.condition, stop.evidence)
+    && !isCiFailureRecoveryStop(stop.condition, stop.evidence)) return facts;
   const existingAttempt = await recoveryAttemptFor(db, task.id, stop.stopId);
   facts.existingAttempt = existingAttempt ? {
     status: existingAttempt.status,
@@ -321,6 +324,7 @@ const settleIneligibleLocked = async (
   await openRecoveryQuestion(tx, integratorTaskId, stopId, {
     revalidations: attempt.revalidations,
     ceiling: ceiling !== undefined,
+    reason,
   });
 };
 
@@ -348,6 +352,7 @@ const settleIneligible = async (
     await openRecoveryQuestion(tx, integratorTaskId, stopId, {
       revalidations: existing.revalidations,
       ceiling: false,
+      reason,
     });
     return true;
   }
@@ -421,11 +426,39 @@ type QueueRecoveryResult =
   | { kind: "ineligible"; reason: string }
   | Retry;
 
+type CiFailureEvidence = {
+  fingerprint: string;
+  failures: Array<{ name: string; conclusion: string; log: string }>;
+};
+
+const readCiFailureEvidence = async (
+  reader: PullRequestReader,
+  snapshot: PullRequestSnapshot,
+  candidate: RecoveryCandidate,
+): Promise<CiFailureEvidence> => {
+  const classified = classifyHeadCheckFailures(snapshot, candidate.authorizedHeadSha);
+  if (classified.kind !== "failed") {
+    throw new Error(classified.kind === "none"
+      ? "no terminal failed check remains on the authorized PR head"
+      : classified.reason);
+  }
+  if (classified.checks.length > 8) throw new Error("more than eight failed checks require unavailable bounded log evidence");
+  if (!reader.readActionsFailureLog) throw new Error("GitHub Actions job log reader is unavailable");
+  const failures = await Promise.all(classified.checks.map(async (check: FailedHeadCheck) => {
+    if (check.kind !== "CheckRun") throw new Error(`status context ${check.name} has no GitHub Actions job log`);
+    const log = await reader.readActionsFailureLog!(candidate.repository, candidate.authorizedHeadSha,
+      { name: check.name, detailsUrl: check.detailsUrl }, AbortSignal.timeout(8_000));
+    return { name: check.name, conclusion: check.conclusion, log };
+  }));
+  return { fingerprint: classified.fingerprint, failures };
+};
+
 const queueRecovery = async (
   db: PrismaClient,
   expected: RecoveryCandidate,
   currentBaseSha: string,
   now: Date,
+  ciEvidence?: CiFailureEvidence,
 ): Promise<QueueRecoveryResult> => db.$transaction(async (tx) => {
   if (!await lockRecoveryChain(tx, expected.integratorTaskId)) return { kind: "skip" };
   const aggregate = await ensureRecoveryValidation(tx, {
@@ -434,6 +467,10 @@ const queueRecovery = async (
     identity: expected,
   });
   const candidateFacts = await readCandidateFacts(tx, expected.integratorTaskId);
+  if (candidateFacts.task?.chainId && await tx.chainControl.count({ where: {
+    projectId: (await tx.task.findUniqueOrThrow({ where: { id: expected.integratorTaskId }, select: { projectId: true } })).projectId,
+    chainId: candidateFacts.task.chainId, state: "HELD",
+  } })) return { kind: "skip" };
 
   // A recovery spends an attempt only once it owns a fresh regression Run.
   // Validation refusals remain visible aggregate rows but do not consume the
@@ -448,15 +485,22 @@ const queueRecovery = async (
   // External integrator replays are separate execution charges, so keep those
   // in the shared allowance while collapsing operator-rerun rows to one
   // automatic recovery charge per prior source stop.
-  const attempts = await recoveryAllowanceSpent(tx, aggregate, {
-    excludeSourceStopId: expected.stopId,
-  });
+  const ciHistory = expected.recoveryKind === "ci-failure"
+    ? await tx.taskActivity.findMany({ where: {
+      taskId: expected.integratorTaskId,
+      actorType: "control-plane",
+      metadata: { path: ["kind"], equals: "mergeTail.ciFailureRecovery" },
+    }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], select: { metadata: true } })
+    : [];
+  const attempts = expected.recoveryKind === "ci-failure" ? ciHistory.length
+    : await recoveryAllowanceSpent(tx, aggregate, { excludeSourceStopId: expected.stopId });
   const decision = classifyDurable({
     expected,
     candidateDecision: classifyCandidate(candidateFacts),
     aggregateValidating: aggregate.status === MergeRecoveryStatus.VALIDATING,
     recoveryCount: attempts,
-    maxRecoveries: MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
+    maxRecoveries: expected.recoveryKind === "ci-failure"
+      ? MAX_AUTOMATIC_CI_FAILURE_RECOVERIES : MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
     currentBaseSha,
   });
   switch (decision.kind) {
@@ -488,6 +532,33 @@ const queueRecovery = async (
     readinessTaskId: expected.readinessTaskId,
     regressionTaskId: expected.regressionTaskId,
   };
+  if (expected.recoveryKind === "ci-failure" && decision.kind === "queue") {
+    if (!ciEvidence || ciEvidence.failures.length === 0) {
+      return { kind: "ineligible", reason: "CI failure evidence or job logs are unavailable" };
+    }
+    const previous = asJsonObject(ciHistory[0]?.metadata);
+    if (previous?.headSha === expected.authorizedHeadSha
+      && previous.fingerprint === ciEvidence.fingerprint) {
+      await stopMergeTail(tx, {
+        phase: "recovery-exhausted", aggregateId: aggregate.id,
+        integratorTaskId: expected.integratorTaskId, sourceStopId: expected.stopId,
+        reason: `CI checks ${ciEvidence.failures.map((failure) => failure.name).join(", ")} are unchanged and the Chain head has no code change`,
+        at: now, attempt, revalidations: aggregate.revalidations,
+        recoveryData: { boundSourceRunId: expected.sourceRunId,
+          authorizationActivityId: expected.authorizationActivityId,
+          readinessTaskId: expected.readinessTaskId, regressionTaskId: expected.regressionTaskId,
+          repository: expected.repository, prNumber: expected.prNumber, targetBranch: expected.targetBranch,
+          authorizedHeadSha: expected.authorizedHeadSha, authorizedBaseSha: expected.authorizedBaseSha,
+          observedBaseSha: expected.observedBaseSha, currentBaseSha },
+        markerMetadata: { ...common, reason: "ci-no-progress", fingerprint: ciEvidence.fingerprint },
+      });
+      await openRecoveryQuestion(tx, expected.integratorTaskId, expected.stopId, {
+        revalidations: aggregate.revalidations, ceiling: false,
+        reason: "CI checks are unchanged and the Chain head has no code change",
+      });
+      return { kind: "exhausted" };
+    }
+  }
   switch (decision.kind) {
     case "exhausted":
       await stopMergeTail(tx, {
@@ -517,15 +588,31 @@ const queueRecovery = async (
       await openRecoveryQuestion(tx, expected.integratorTaskId, expected.stopId, {
         revalidations: aggregate.revalidations,
         ceiling: false,
+        reason: decision.reason,
       });
       return { kind: "exhausted" };
     case "queue":
       break;
   }
 
-  await enterRepair(tx, { aggregateId: aggregate.id, currentBaseSha, now,
+  const queued = await enterRepair(tx, { aggregateId: aggregate.id, currentBaseSha, now,
     automaticDisposition: { condition: candidateFacts.stop?.condition ?? "base-drift",
-      ordinal: attempts + 1, remaining: MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES - attempts - 1 } });
+      ordinal: attempts + 1,
+      remaining: (expected.recoveryKind === "ci-failure"
+        ? MAX_AUTOMATIC_CI_FAILURE_RECOVERIES : MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES) - attempts - 1,
+      ...(ciEvidence ? { ciFailures: ciEvidence.failures } : {}) } });
+  if (!queued) return { kind: "ineligible", reason: "CI recovery Regression Run birth was refused" };
+  if (ciEvidence) {
+    await tx.taskActivity.create({ data: {
+      taskId: expected.integratorTaskId, actorType: "control-plane",
+      body: `Automatic CI failure recovery for ${candidateFacts.stop?.condition}: ${ciEvidence.failures.map((failure) => failure.name).join(", ")}; attempt ${attempts + 1}/${MAX_AUTOMATIC_CI_FAILURE_RECOVERIES}, remaining ${MAX_AUTOMATIC_CI_FAILURE_RECOVERIES - attempts - 1}`,
+      metadata: { kind: "mergeTail.ciFailureRecovery", condition: candidateFacts.stop?.condition ?? null,
+        stopId: expected.stopId, headSha: expected.authorizedHeadSha,
+        fingerprint: ciEvidence.fingerprint, checkNames: ciEvidence.failures.map((failure) => failure.name),
+        ordinal: attempts + 1, remaining: MAX_AUTOMATIC_CI_FAILURE_RECOVERIES - attempts - 1,
+        recoveryRunId: queued.recoveryRunId },
+    } });
+  }
   return { kind: "recovered" };
 });
 
@@ -828,13 +915,21 @@ export const recoveryAllowanceSpent = async (
   identity: MergeRecoveryAttempt,
   options: { excludeSourceStopId?: string } = {},
 ): Promise<number> => {
+  const ciRows = await tx.taskActivity.findMany({ where: {
+    taskId: identity.integratorTaskId,
+    actorType: "control-plane",
+    metadata: { path: ["kind"], equals: "mergeTail.ciFailureRecovery" },
+  }, select: { metadata: true } });
+  const ciStopIds = new Set(ciRows.map((row) => asJsonObject(row.metadata)?.stopId)
+    .filter((value): value is string => typeof value === "string"));
   const rows = await tx.mergeRecoveryAttempt.findMany({ where: {
     integratorTaskId: identity.integratorTaskId, repository: identity.repository,
     prNumber: identity.prNumber, targetBranch: identity.targetBranch,
     ...(options.excludeSourceStopId ? { sourceStopId: { not: options.excludeSourceStopId } } : {}),
   }, select: { sourceStopId: true, recoveryRunId: true, externalReplayCount: true } });
-  const spentStops = new Set(rows.filter((row) => row.recoveryRunId !== null).map((row) => row.sourceStopId));
-  return spentStops.size + rows.reduce((total, row) => total + row.externalReplayCount, 0);
+  const baseRows = rows.filter((row) => !ciStopIds.has(row.sourceStopId));
+  const spentStops = new Set(baseRows.filter((row) => row.recoveryRunId !== null).map((row) => row.sourceStopId));
+  return spentStops.size + baseRows.reduce((total, row) => total + row.externalReplayCount, 0);
 };
 
 /** Resume releases the Hold; this worker consumes the aggregate intent under a
@@ -887,6 +982,8 @@ export const replayRecoveryAuthorizations = async (
                 : null;
               baseRecovery = classifyFresh({ kind: "snapshot", snapshot,
                 candidate: {
+                  recoveryKind: facts.stop && isCiFailureRecoveryStop(facts.stop.condition, facts.stop.evidence)
+                    ? "ci-failure" : "base-drift",
                   integratorTaskId: row.integratorTaskId, stopId: row.sourceStopId,
                   sourceRunId: row.boundSourceRunId, readinessTaskId: row.readinessTaskId,
                   regressionTaskId: row.regressionTaskId, authorizationActivityId: auth.activityId,
@@ -1017,6 +1114,12 @@ export const baseDriftRecoveryTick = async (
       cursor = task.id;
       if (result.examined >= limit) break;
       const candidateFacts = await readCandidateFacts(db, task.id);
+      if (candidateFacts.task?.chainId) {
+        const identity = await db.task.findUniqueOrThrow({ where: { id: task.id }, select: { projectId: true } });
+        if (await db.chainControl.count({ where: {
+          projectId: identity.projectId, chainId: candidateFacts.task.chainId, state: "HELD",
+        } })) continue;
+      }
       // A held backoff costs one durable read and nothing else: no GitHub call,
       // no spent attempt, and no place in this tick's examined budget.
       if (recoveryDeferred(candidateFacts, now)) continue;
@@ -1092,9 +1195,21 @@ export const baseDriftRecoveryTick = async (
         case "queue":
           break;
       }
+      let ciEvidence: CiFailureEvidence | undefined;
+      if (candidate.recoveryKind === "ci-failure") {
+        try {
+          ciEvidence = await readCiFailureEvidence(reader, snapshot, candidate);
+        } catch (error: unknown) {
+          addTickDelta(result, await settleRecovery(db, settlementTask, candidate.stopId, {
+            kind: "ineligible",
+            reason: `CI failure evidence or logs unavailable: ${error instanceof Error ? error.message : String(error)}`,
+          }, now));
+          continue;
+        }
+      }
       let outcome: QueueRecoveryResult;
       try {
-        outcome = await queueRecovery(db, candidate, fresh.currentBaseSha, now);
+        outcome = await queueRecovery(db, candidate, fresh.currentBaseSha, now, ciEvidence);
       } catch (error: unknown) {
         outcome = { kind: "ineligible",
           reason: `automatic merge recovery failed: ${error instanceof Error ? error.message : String(error)}` };

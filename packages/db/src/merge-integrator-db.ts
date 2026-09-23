@@ -78,6 +78,16 @@ export const parseRecoverableMergeEvidence = (
   return { observed: evidence.observed, authorized: evidence.authorized };
 };
 
+/** Stops whose fresh PR-head checks can prove a bounded CI repair candidate. */
+export const isCiFailureRecoveryStop = (condition: string, value: string): boolean => {
+  if (condition === "check-failure-or-absence") return true;
+  if (condition !== "non-clean-mergeability") return false;
+  try {
+    const evidence = asRecord(JSON.parse(value));
+    return evidence?.mergeStateStatus === "UNSTABLE";
+  } catch { return false; }
+};
+
 // ---------------------------------------------------------------------------
 // Locating the integrator step of a chain
 // ---------------------------------------------------------------------------
@@ -662,17 +672,19 @@ export const openDeferredBaseDriftQuestion = async (
   tx: Tx,
   integratorTaskId: string,
   stopId: string,
-  card: { revalidations: number; ceiling: boolean },
+  card: { revalidations: number; ceiling: boolean; reason?: string },
 ) => {
   const task = await loadIntegratorTask(tx, integratorTaskId);
   const stop = await latestRecordedStop(tx, integratorTaskId);
   if (!task || stop?.stopId !== stopId
-    || (stop.condition !== "base-drift" && stop.condition !== "non-clean-mergeability")) {
+    || (stop.condition !== "base-drift" && stop.condition !== "non-clean-mergeability"
+      && stop.condition !== "check-failure-or-absence")) {
     throw new Error(`Cannot open the settled base-drift question for unresolved stop ${stopId}`);
   }
   const identity = await stopQuestionIdentity(tx, task, stop);
   return openStopQuestion(tx, {
-    integratorTaskId, stopId, condition: stop.condition, evidence: stop.evidence,
+    integratorTaskId, stopId, condition: stop.condition,
+    evidence: card.reason ? `${stop.evidence}\nAutomatic recovery stopped: ${card.reason}` : stop.evidence,
     ...identity, generation: card.revalidations,
     ...(card.ceiling ? { choices: BASE_DRIFT_CLASS_CEILING_CHOICES } : {}),
   });
@@ -794,12 +806,14 @@ export const landIntegratorStop = async (
       resultCreated,
       questionDeferred: isCanonicalIntegratorStep(task.templateStep)
         && (stopped.condition === "base-drift"
-          || parseRecoverableMergeEvidence(stopped.condition, stopped.evidence) !== null),
+          || parseRecoverableMergeEvidence(stopped.condition, stopped.evidence) !== null
+          || isCiFailureRecoveryStop(stopped.condition, stopped.evidence)),
     };
   }
   const questionDeferred = isCanonicalIntegratorStep(task.templateStep)
     && (stopped.condition === "base-drift"
-      || parseRecoverableMergeEvidence(stopped.condition, stopped.evidence) !== null);
+      || parseRecoverableMergeEvidence(stopped.condition, stopped.evidence) !== null
+      || isCiFailureRecoveryStop(stopped.condition, stopped.evidence));
   const sourceRunIsActive = questionDeferred && stopped.sourceRunId
     ? await tx.run.findUnique({ where: { id: stopped.sourceRunId }, select: { taskId: true, status: true } })
       .then((sourceRun) => {

@@ -326,6 +326,18 @@ test("a recovery prepare falls back to semantic review when the pre-refresh head
   assert.equal(verdict.semanticSourceRunId, undefined);
 });
 
+test("a CI failure recovery does not reuse an exact-head semantic PASS", () => {
+  const seeded = fixture();
+  seeded.env.AGENTOS_REGRESSION_RECOVERY_CONTEXT = JSON.stringify({
+    ...JSON.parse(recoveryContext(seeded)) as Record<string, unknown>,
+    ciFailures: [{ name: "typecheck", conclusion: "FAILURE", log: "error TS2322" }],
+  });
+  const prepared = run(seeded, "prepare");
+  assert.equal(prepared.status, 0, prepared.stderr);
+  assert.match(prepared.stdout, /^REGRESSION PREPARE: ready /u);
+  assert.doesNotMatch(prepared.stdout, /semantic-reused/u);
+});
+
 test("a recovery prepare refuses to reuse a non-pass semantic verdict", () => {
   for (const priorOutcome of ["review-fail", "refresh-conflict"] as const) {
     const seeded = fixture();

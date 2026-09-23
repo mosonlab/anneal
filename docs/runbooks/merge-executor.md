@@ -145,7 +145,19 @@ automatic recovery allowance is two; waiting, transport, and validation class
 ceilings remain six hours, 30 minutes, and 30 attempts spanning 30 minutes.
 Ineligible candidates or exhausted budgets open the existing stop question.
 
-Real failed checks, `UNSTABLE` with a terminal failure, `BLOCKED`, draft or
+For a `check-failure-or-absence` stop or `UNSTABLE` state, the control plane
+inspects every terminal PR-head CheckRun and StatusContext, including checks
+that branch protection does not require. A failed Actions check with a readable
+job log becomes a blocking Regression finding and enters the existing
+`review-fix` or `gate-fix` repair path. The same Chain branch then returns
+through Regression and Merge readiness. Two CI recovery births per Chain are
+allowed across head changes, separate from base-drift recovery. Each birth
+records check names, attempt and remaining budget in TaskActivity. An unchanged
+head with the same failed checks stops as no progress.
+
+If the PR-head rollup is incomplete, the failed job or its log cannot be read,
+the CI budget is exhausted, or no terminal failure remains, the existing stop
+question states the reason on the default Feishu thread. `BLOCKED`, draft or
 non-OPEN pull requests, unverified ancestry, uncertain merge outcomes, and
 automatic-operation failures still require an operator. Exact-head merge and
 authorization bindings are unchanged. Each deferral, requeue, ceiling, or

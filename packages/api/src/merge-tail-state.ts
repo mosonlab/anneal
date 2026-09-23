@@ -252,7 +252,8 @@ export const enterRepair = async (
     aggregateId: string;
     currentBaseSha: string;
     now: Date;
-    automaticDisposition?: { condition: string; ordinal: number; remaining: number };
+    automaticDisposition?: { condition: string; ordinal: number; remaining: number;
+      ciFailures?: Array<{ name: string; conclusion: string; log: string }> };
     readinessRequeue?: { staleBaseSha: string; reason: string; baseDrift: boolean };
     evidenceSweep?: true;
     /**

@@ -212,3 +212,40 @@ test("branch head reads encode the Chain branch and reject non-commit or malform
     else await assert.rejects(read, /branch response has no exact commit head/u);
   }
 });
+
+test("Actions failure log is bound to the check job and head, with token kept off the redirect", async () => {
+  const calls: Array<{ url: string; headers: Headers }> = [];
+  const head = "a".repeat(40);
+  const reader = createGitHubReader("read-token", async (url, init) => {
+    calls.push({ url: String(url), headers: new Headers(init?.headers) });
+    if (String(url).endsWith("/actions/jobs/22")) return Response.json({
+      id: 22, run_id: 11, head_sha: head, name: "typecheck", status: "completed",
+      steps: [{ name: "Run typecheck", conclusion: "failure" }],
+    });
+    if (String(url).endsWith("/actions/jobs/22/logs")) return new Response(null, {
+      status: 302, headers: { Location: "https://logs.example.test/signed" },
+    });
+    return new Response("step output\nerror TS2322\n", { status: 200 });
+  });
+  const log = await reader.readActionsFailureLog("acme/widgets", head, {
+    name: "typecheck", detailsUrl: "https://github.com/acme/widgets/actions/runs/11/job/22",
+  }, new AbortController().signal);
+  assert.match(log, /Run typecheck/u);
+  assert.match(log, /TS2322/u);
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0]?.headers.get("authorization"), "Bearer read-token");
+  assert.equal(calls[2]?.headers.get("authorization"), null);
+});
+
+test("Actions job identity mismatch and non-Actions check URL refuse log recovery", async () => {
+  const head = "a".repeat(40);
+  const reader = createGitHubReader("read-token", async () => Response.json({
+    id: 22, run_id: 11, head_sha: "b".repeat(40), name: "typecheck", status: "completed",
+  }));
+  await assert.rejects(reader.readActionsFailureLog("acme/widgets", head, {
+    name: "typecheck", detailsUrl: "https://github.com/acme/widgets/actions/runs/11/job/22",
+  }, new AbortController().signal), /identity does not match/u);
+  await assert.rejects(reader.readActionsFailureLog("acme/widgets", head, {
+    name: "typecheck", detailsUrl: "https://elsewhere.test/22",
+  }, new AbortController().signal), /no GitHub Actions job URL/u);
+});

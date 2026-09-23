@@ -255,6 +255,21 @@ test("a recovery Regression claim carries the pinned context and skip instructio
   }
 });
 
+test("CI recovery prompt carries failed check logs and requires a blocking finding", () => {
+  const prompt = buildPrompt({
+    ...claim,
+    regressionRecoveryContext: {
+      state: "queued", currentBaseSha: "b".repeat(40), authorizedHeadSha: "a".repeat(40),
+      recoveryRunId: "run-ci", priorOutput: null,
+      ciFailures: [{ name: "typecheck", conclusion: "FAILURE", log: "error TS2322" }],
+    },
+  });
+  assert.match(prompt, /typecheck \(FAILURE\)[\s\S]*TS2322/u);
+  assert.match(prompt, /review-fail/u);
+  assert.match(prompt, /Do not hide environment differences/u);
+  assert.doesNotMatch(prompt, /semantic-reused/u);
+});
+
 test("buildPrompt injects runner-owned worktree containment into every session", () => {
   for (const runner of ["CLAUDE", "CODEX", "PI"] as const) {
     const prompt = buildPrompt({

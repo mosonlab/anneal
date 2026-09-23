@@ -23,6 +23,7 @@ const BASE = "b".repeat(40);
 const CURRENT = "c".repeat(40);
 
 const candidate: RecoveryCandidate = {
+  recoveryKind: "base-drift",
   integratorTaskId: "integrator-1",
   readinessTaskId: "readiness-1",
   regressionTaskId: "regression-1",

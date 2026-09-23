@@ -11,6 +11,8 @@ import {
   findCanonicalAgent,
   githubRepositoryFromRemote,
   isIntegratorStep,
+  isCiFailureRecoveryStop,
+  latestRecordedStop,
   latestMarker,
   MAX_MERGE_TAIL_REPAIR_ATTEMPTS,
   MERGE_TAIL_KIND,
@@ -37,6 +39,7 @@ import { terminalFailureStopsLease } from "./merge-tail-settlement.js";
 import type { BranchAncestryReader } from "./github-read.js";
 import { READINESS_READ_BUDGET_MS } from "./readiness-decision.js";
 import { FAILURE_REASON_LIMIT, truncateFailureReason } from "./failure-reason.js";
+import { regressionRecoveryContextForClaim } from "./regression-recovery-context.js";
 import { canonicalOutputRefusal } from "./canonical-task-output.js";
 import type { LeaseOutcome } from "./merge-lease.js";
 import type { RetryClass } from "./base-drift-recovery-decision.js";
@@ -1234,6 +1237,11 @@ export const handleRegressionCompletion = async (
   const recovery = input.mergeTrainFailure
     ? null
     : await baseDriftRecoveryContext(tx, input.task.id, input.run.id);
+  const sourceStop = recovery ? await latestRecordedStop(tx, recovery.integratorTaskId) : null;
+  const ciRecovery = !!recovery && sourceStop?.stopId === recovery.sourceStopId
+    && isCiFailureRecoveryStop(sourceStop.condition, sourceStop.evidence);
+  const ciContext = ciRecovery
+    ? await regressionRecoveryContextForClaim(tx, { taskId: input.task.id, runId: input.run.id }) : null;
   if (input.mergeTrainFailure && (!input.qualifiedVerdict
     || input.qualifiedVerdict.outcome !== "gate-fail"
     || input.qualifiedVerdict.baseHeadSha !== input.mergeTrainFailure.predecessorOid)) {
@@ -1267,6 +1275,7 @@ export const handleRegressionCompletion = async (
     metadata: { ...verdict },
   });
   if (verdict.outcome === "pass") {
+    if (ciContext?.ciFailures?.length) return stop("CI failure recovery reported PASS without routing the blocking checks to repair");
     await recordVerdict();
     if (recovery) {
       await awaitAuthorization(tx, recovery);
@@ -1274,7 +1283,7 @@ export const handleRegressionCompletion = async (
     return "advance";
   }
 
-  if (recovery && verdict.outcome !== "refresh-conflict") {
+  if (recovery && !ciRecovery && verdict.outcome !== "refresh-conflict") {
     await recordVerdict();
     await stopMergeTail(tx, {
       phase: "regression",
@@ -1339,7 +1348,12 @@ export const handleRegressionCompletion = async (
     repairKind,
     headSha: verdict.headSha,
     baseHeadSha: verdict.baseHeadSha,
-    summary: verdict.summary,
+    summary: ciContext?.ciFailures?.length
+      ? ["Blocking CI findings from the authorized PR head:",
+        ...ciContext.ciFailures.map((failure) => `${failure.name} (${failure.conclusion})\n${failure.log}`),
+        "The failure occurred in CI. Diagnose from these logs. Do not hide environment differences by skipping or relaxing tests; if a real environment limit requires a skip, make it explicit and print the reason.",
+        `Regression finding: ${verdict.summary}`].join("\n\n")
+      : verdict.summary,
     ...(verdict.outcome === "gate-fail"
       && "gateFailureExcerpt" in verdict
       && typeof verdict.gateFailureExcerpt === "string"

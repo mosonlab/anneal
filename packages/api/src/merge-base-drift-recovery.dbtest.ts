@@ -25,6 +25,8 @@ import {
 import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
 import { classifyCandidate } from "./base-drift-recovery-decision.js";
+import { classifyHeadCheckFailures } from "./ci-failure-recovery.js";
+import { regressionRecoveryContextForClaim } from "./regression-recovery-context.js";
 import {
   baseDriftRecoveryTick,
   pendingMergeabilityTick,
@@ -87,6 +89,7 @@ const snapshot = (
   mergeCommit: null,
   requiredCheckNames: [],
   checkContexts: [],
+  checksComplete: true,
   readAt: new Date("2026-08-22T01:00:00.000Z").toISOString(),
   ...overrides,
 });
@@ -137,7 +140,7 @@ const authorize = async (readinessTaskId: string, baseSha: string) => {
 const mechanicalStop = async (
   seeded: Awaited<ReturnType<typeof seedIntegratorChain>>,
   authorizationActivityId: string,
-  condition: "base-drift" | "non-clean-mergeability" = "base-drift",
+  condition: "base-drift" | "non-clean-mergeability" | "check-failure-or-absence" = "base-drift",
   conflictShape: "CONFLICTING" | "DIRTY" | "BLOCKED" | "UNSTABLE" = "CONFLICTING",
 ) => {
   const previous = await db.run.findFirst({
@@ -183,9 +186,11 @@ const mechanicalStop = async (
       authorizationActivityId,
     },
   } });
-  const evidence = JSON.stringify({ observed: condition === "non-clean-mergeability" ? BASE : BASE_2, authorized: BASE,
-    ...(condition !== "non-clean-mergeability" ? {}
-      : conflictShape === "CONFLICTING" ? { mergeable: "CONFLICTING" } : { mergeStateStatus: conflictShape }) });
+  const evidence = condition === "check-failure-or-absence"
+    ? JSON.stringify({ reason: "required check typecheck concluded FAILURE" })
+    : JSON.stringify({ observed: condition === "non-clean-mergeability" ? BASE : BASE_2, authorized: BASE,
+      ...(condition !== "non-clean-mergeability" ? {}
+        : conflictShape === "CONFLICTING" ? { mergeable: "CONFLICTING" } : { mergeStateStatus: conflictShape }) });
   const outputBody = JSON.stringify({ outcome: "stopped", condition, evidence });
   await db.taskStepOutput.upsert({
     where: { taskId: seeded.integratorTask!.id },
@@ -209,7 +214,7 @@ const mechanicalStop = async (
 const seedStopped = async (
   shape: "canonical-direct" | "canonical-compound-readiness",
   label: string,
-  condition: "base-drift" | "non-clean-mergeability" = "base-drift",
+  condition: "base-drift" | "non-clean-mergeability" | "check-failure-or-absence" = "base-drift",
   conflictShape: "CONFLICTING" | "DIRTY" | "BLOCKED" | "UNSTABLE" = "CONFLICTING",
 ) => {
   const seeded = await seedIntegratorChain(db, { label, shape });
@@ -638,6 +643,84 @@ test("BLOCKED and UNSTABLE without a failed check retain the human stop card", a
       status: "OPEN", kind: "MULTIPLE_CHOICE" } }), 1);
     await resetTestDb(db);
   }
+});
+
+const failedCiSnapshot = (state: "UNSTABLE" | "BLOCKED" = "UNSTABLE") => snapshot(BASE, {
+  mergeStateStatus: state,
+  checkContexts: [{ __typename: "CheckRun", name: "optional typecheck",
+    status: "COMPLETED", conclusion: "FAILURE",
+    detailsUrl: "https://github.com/acme/widgets/actions/runs/11/job/22" }],
+});
+const ciReader = (current = failedCiSnapshot()): PullRequestReader => ({
+  ...reader(current),
+  readActionsFailureLog: async () => "Failed steps: typecheck\nerror TS2322 in packages/miniprogram",
+});
+
+test("unrequired failed check on UNSTABLE head queues Regression with log finding and no card", async () => {
+  const seeded = await seedStopped("canonical-direct", "ci-unstable", "non-clean-mergeability", "UNSTABLE");
+  assert.equal((await baseDriftRecoveryTick(db, ciReader())).recovered, 1);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.integratorTask!.id, status: "OPEN" } }), 0);
+  const run = await db.run.findFirstOrThrow({ where: { taskId: seeded.gateTask.id, status: "QUEUED" },
+    orderBy: { runNumber: "desc" } });
+  const context = await db.$transaction((tx) => regressionRecoveryContextForClaim(tx,
+    { taskId: seeded.gateTask.id, runId: run.id }));
+  assert.equal(context?.ciFailures?.[0]?.name, "optional typecheck");
+  assert.match(context?.ciFailures?.[0]?.log ?? "", /TS2322/u);
+  const activity = await db.taskActivity.findFirstOrThrow({ where: { taskId: seeded.integratorTask!.id,
+    metadata: { path: ["kind"], equals: "mergeTail.ciFailureRecovery" } } });
+  assert.match(activity.body, /attempt 1\/2, remaining 1/u);
+});
+
+test("required check failure uses the same CI repair path", async () => {
+  const seeded = await seedStopped("canonical-direct", "ci-required", "check-failure-or-absence");
+  assert.equal((await baseDriftRecoveryTick(db, ciReader())).recovered, 1);
+  const run = await db.run.findFirstOrThrow({ where: { taskId: seeded.gateTask.id, status: "QUEUED" },
+    orderBy: { runNumber: "desc" } });
+  const handled = await db.$transaction((tx) => handleRegressionCompletion(tx, {
+    task: seeded.gateTask,
+    run: { id: run.id, agentId: seeded.agent.id, branch: "agentos/chain/recovery", headSha: HEAD,
+      sessionId: seeded.gateSession.id },
+    qualifiedVerdict: { schemaVersion: 1, outcome: "review-fail", headSha: HEAD, baseHeadSha: BASE,
+      summary: "optional typecheck fails in CI" }, now: new Date(),
+  }));
+  assert.equal(handled, "handled");
+  const repair = await db.task.findFirstOrThrow({ where: { projectId: seeded.project.id,
+    name: "Autonomous merge tail: review-fix" } });
+  assert.match(repair.description, /optional typecheck/u);
+  assert.match(repair.description, /TS2322/u);
+  assert.match(repair.description, /Do not hide environment differences/u);
+});
+
+test("CI recovery budget and no-progress stop on the default thread", async () => {
+  for (const count of [1, 2]) {
+    const seeded = await seedStopped("canonical-direct", `ci-ceiling-${count}`,
+      "non-clean-mergeability", "UNSTABLE");
+    const failed = classifyHeadCheckFailures(failedCiSnapshot(), HEAD);
+    assert.equal(failed.kind, "failed");
+    for (let ordinal = 1; ordinal <= count; ordinal += 1) {
+      await db.taskActivity.create({ data: { taskId: seeded.integratorTask!.id,
+        actorType: "control-plane", body: "prior automatic CI disposition",
+        metadata: { kind: "mergeTail.ciFailureRecovery", stopId: `prior-${ordinal}`,
+          headSha: HEAD, fingerprint: failed.kind === "failed" ? failed.fingerprint : "", ordinal } } });
+    }
+    const tick = await baseDriftRecoveryTick(db, ciReader());
+    assert.equal(tick.exhausted, 1);
+    const card = await db.inboxMessage.findFirstOrThrow({ where: {
+      taskId: seeded.integratorTask!.id, status: "OPEN", kind: "MULTIPLE_CHOICE",
+    } });
+    assert.ok(card.threadId);
+    assert.match(card.body, count === 1 ? /no code change/u : /limit 2 reached/u);
+    await resetTestDb(db);
+  }
+});
+
+test("held Chain does not spend CI recovery or open a card", async () => {
+  const seeded = await seedStopped("canonical-direct", "ci-held", "non-clean-mergeability", "UNSTABLE");
+  await db.chainControl.create({ data: { projectId: seeded.project.id, chainId: seeded.chainId,
+    state: "HELD", heldLayer: seeded.integratorTask!.chainLayer ?? 0, heldAt: new Date() } });
+  assert.equal((await baseDriftRecoveryTick(db, ciReader())).recovered, 0);
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 0);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.integratorTask!.id, status: "OPEN" } }), 0);
 });
 
 test("conflict recovery runs refresh-conflict repair and presents fresh approval evidence", async () => {
