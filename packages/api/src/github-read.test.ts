@@ -228,7 +228,7 @@ test("Actions failure log is bound to the check job and head, with token kept of
     return new Response("step output\nerror TS2322\n", { status: 200 });
   });
   const log = await reader.readActionsFailureLog("acme/widgets", head, {
-    name: "typecheck", detailsUrl: "https://github.com/acme/widgets/actions/runs/11/job/22",
+    name: "typecheck", detailsUrl: "https://github.com/ACME/WIDGETS/actions/runs/11/job/22?check_suite_focus=true",
   }, new AbortController().signal);
   assert.match(log, /Run typecheck/u);
   assert.match(log, /TS2322/u);
@@ -237,15 +237,68 @@ test("Actions failure log is bound to the check job and head, with token kept of
   assert.equal(calls[2]?.headers.get("authorization"), null);
 });
 
+test("Actions log falls back to the bounded job tail when failed-step timestamps do not match", async () => {
+  const head = "a".repeat(40);
+  const largeTail = "x".repeat(5_000);
+  const reader = createGitHubReader("read-token", async (url) => {
+    if (String(url).endsWith("/actions/jobs/22")) return Response.json({
+      id: 22, run_id: 11, head_sha: head, name: "typecheck", status: "completed",
+      steps: [{ name: "Run typecheck", conclusion: "failure",
+        started_at: "2026-09-23T10:00:00Z", completed_at: "2026-09-23T10:01:00Z" }],
+    });
+    if (String(url).endsWith("/actions/jobs/22/logs")) return new Response(null, {
+      status: 302, headers: { Location: "https://logs.example.test/signed" },
+    });
+    return new Response(`2026-09-23T09:00:00Z ${largeTail}\n2026-09-23T09:00:01Z error TS2322`, { status: 200 });
+  });
+  const log = await reader.readActionsFailureLog("acme/widgets", head, {
+    name: "typecheck", detailsUrl: "https://github.com/acme/widgets/actions/runs/11/job/22",
+  }, new AbortController().signal);
+  assert.match(log, /error TS2322/u);
+  assert.ok(Buffer.byteLength(log) <= 4_100);
+});
+
+test("signed Actions log download retries a transient server error without forwarding the token", async () => {
+  const head = "a".repeat(40);
+  let downloads = 0;
+  const waits: number[] = [];
+  const reader = createGitHubReader("read-token", async (url, init) => {
+    if (String(url).endsWith("/actions/jobs/22")) return Response.json({
+      id: 22, run_id: 11, head_sha: head, name: "typecheck", status: "completed", steps: [],
+    });
+    if (String(url).endsWith("/actions/jobs/22/logs")) return new Response(null, {
+      status: 302, headers: { Location: "https://logs.example.test/signed" },
+    });
+    downloads += 1;
+    assert.equal(new Headers(init?.headers).get("authorization"), null);
+    return new Response(downloads === 1 ? "unavailable" : "error TS2322", { status: downloads === 1 ? 503 : 200 });
+  }, { wait: async (delayMs) => { waits.push(delayMs); } });
+  const log = await reader.readActionsFailureLog("acme/widgets", head, {
+    name: "typecheck", detailsUrl: "https://github.com/acme/widgets/actions/runs/11/job/22",
+  }, new AbortController().signal);
+  assert.match(log, /TS2322/u);
+  assert.equal(downloads, 2);
+  assert.deepEqual(waits, [250]);
+});
+
 test("Actions job identity mismatch and non-Actions check URL refuse log recovery", async () => {
   const head = "a".repeat(40);
-  const reader = createGitHubReader("read-token", async () => Response.json({
-    id: 22, run_id: 11, head_sha: "b".repeat(40), name: "typecheck", status: "completed",
-  }));
-  await assert.rejects(reader.readActionsFailureLog("acme/widgets", head, {
-    name: "typecheck", detailsUrl: "https://github.com/acme/widgets/actions/runs/11/job/22",
-  }, new AbortController().signal), /identity does not match/u);
+  for (const changed of [
+    { head_sha: "b".repeat(40) }, { run_id: 12 }, { id: 23 },
+    { name: "other job" }, { status: "in_progress" },
+  ]) {
+    const reader = createGitHubReader("read-token", async () => Response.json({
+      id: 22, run_id: 11, head_sha: head, name: "typecheck", status: "completed", ...changed,
+    }));
+    await assert.rejects(reader.readActionsFailureLog("acme/widgets", head, {
+      name: "typecheck", detailsUrl: "https://github.com/acme/widgets/actions/runs/11/job/22",
+    }, new AbortController().signal), /identity does not match/u);
+  }
+  const reader = createGitHubReader("read-token", async () => Response.json({}));
   await assert.rejects(reader.readActionsFailureLog("acme/widgets", head, {
     name: "typecheck", detailsUrl: "https://elsewhere.test/22",
+  }, new AbortController().signal), /no GitHub Actions job URL/u);
+  await assert.rejects(reader.readActionsFailureLog("acme/widgets", head, {
+    name: "typecheck", detailsUrl: "https://github.com/acme/widgets/actions/runs/11/job/22#fragment",
   }, new AbortController().signal), /no GitHub Actions job URL/u);
 });

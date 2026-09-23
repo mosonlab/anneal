@@ -32,6 +32,11 @@ Merge readiness and Merge execution. The repair instruction names the CI
 environment and requires diagnosis from the logs. A real environment limit may
 be skipped only explicitly, with its reason printed; skipping or relaxing tests
 to mask a difference is prohibited.
+Before those excerpts enter TaskActivity metadata or an Agent prompt, common
+credential shapes are redacted and the excerpts are marked as untrusted
+evidence. A missing failed-step time-window match falls back to the bounded job
+tail. Transient log transport failures use the recovery transport retry ceiling;
+permanent evidence failures open the stop question.
 
 The CI recovery allowance is two successful Regression births per Chain,
 cumulative across heads and separate from the base-drift allowance. Each birth

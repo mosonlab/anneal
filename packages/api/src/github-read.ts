@@ -166,10 +166,11 @@ const actionsJobId = (repository: string, detailsUrl: string | null): { runId: s
   if (!detailsUrl) return null;
   let url: URL;
   try { url = new URL(detailsUrl); } catch { return null; }
-  if (url.protocol !== "https:" || url.hostname !== "github.com" || url.search || url.hash) return null;
+  if (url.protocol !== "https:" || url.hostname !== "github.com" || url.hash) return null;
   const parts = url.pathname.split("/").filter(Boolean);
   const [owner, name] = repository.split("/");
-  if (parts.length !== 7 || parts[0] !== owner || parts[1] !== name
+  if (parts.length !== 7 || parts[0]?.toLowerCase() !== owner?.toLowerCase()
+    || parts[1]?.toLowerCase() !== name?.toLowerCase()
     || parts[2] !== "actions" || parts[3] !== "runs" || parts[5] !== "job"
     || !/^[0-9]+$/u.test(parts[4]!) || !/^[0-9]+$/u.test(parts[6]!)) return null;
   return { runId: parts[4]!, jobId: parts[6]! };
@@ -191,6 +192,12 @@ const boundedJobLogTail = async (
       if (total > 16 * 1024 * 1024) throw new GitHubReadError("Actions job log exceeds 16 MiB", "response");
       tail = Buffer.concat([tail, Buffer.from(part.value)]).subarray(-64 * 1024);
     }
+  } catch (error: unknown) {
+    if (error instanceof GitHubReadError) throw error;
+    if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+      throw new GitHubReadError("Actions job log stream timed out", "timeout");
+    }
+    throw new GitHubReadError("Actions job log stream failed", "transport");
   } finally {
     reader.releaseLock();
   }
@@ -208,7 +215,7 @@ const boundedJobLogTail = async (
       return windows.some(({ start, end }) => Number.isFinite(time) && time >= start - 1_000 && time <= end + 1_000);
     })
     : lines;
-  const excerpt = selected.slice(-80).join("\n");
+  const excerpt = (selected.length ? selected : lines).slice(-80).join("\n");
   if (!excerpt) throw new GitHubReadError("Actions job log is empty", "response");
   return Buffer.from(excerpt).subarray(-4_000).toString("utf8");
 };
@@ -364,7 +371,7 @@ export const createGitHubReader = (
       try {
         response = await fetchImpl(url, init);
       } catch (error: unknown) {
-        if (error instanceof Error && error.name === "AbortError") {
+        if (init.signal?.aborted || (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"))) {
           throw new GitHubReadError("GitHub read aborted at its deadline", "timeout");
         }
         const message = error instanceof Error ? error.message : "unknown";
@@ -452,7 +459,7 @@ export const createGitHubReader = (
         throw new GitHubReadError("Actions job log URL is not safe HTTPS", "response");
       }
       // The short-lived redirect is a signed storage URL. Never forward the GitHub token.
-      const logResponse = await fetchImpl(download, { method: "GET", signal });
+      const logResponse = await request(download.toString(), { method: "GET", signal });
       const tail = await boundedJobLogTail(logResponse, failedSteps);
       return `Failed steps: ${failedSteps.length ? failedSteps.map((step) => step.name).join(", ") : "job-level failure"}\n${tail}`;
     },

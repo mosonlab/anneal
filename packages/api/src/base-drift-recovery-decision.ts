@@ -114,6 +114,7 @@ export type RecoveryPullRequestFacts = {
   state: string | null;
   isDraft: boolean | null;
   merged: boolean | null;
+  mergeStateStatus: string | null;
   baseRefName: string | null;
   baseSha: string | null;
   headRefOid: string | null;
@@ -319,6 +320,9 @@ export function classifyFresh(facts: FreshRecoveryFacts): FreshDecision {
   }
   if (snapshot.isDraft !== false) {
     return { kind: "ineligible", reason: "pull request draft state changed after authorization" };
+  }
+  if (snapshot.mergeStateStatus === "BLOCKED") {
+    return { kind: "ineligible", reason: "fresh pull request merge state is BLOCKED" };
   }
   if (snapshot.autoMergeRequest !== null || snapshot.mergeQueueEntry !== null) {
     return { kind: "ineligible", reason: "pull request entered foreign automatic merge machinery" };

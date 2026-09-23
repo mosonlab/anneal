@@ -46,7 +46,8 @@ import {
 
 import { withMergeLease, type WithMergeLease } from "./merge-lease.js";
 
-import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
+import { GitHubReadError, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";
+import { redactCiLog } from "./ci-log-redaction.js";
 import {
   classifyCandidate,
   classifyDurable,
@@ -338,6 +339,8 @@ const settleIneligible = async (
   if (!await lockRecoveryChain(tx, integratorTaskId)) return false;
   const currentStop = await latestRecordedStop(tx, integratorTaskId);
   if (currentStop?.stopId !== stopId) return false;
+  const currentTask = await tx.task.findUnique({ where: { id: integratorTaskId }, select: { status: true } });
+  if (currentTask?.status !== TaskStatus.REVIEW) return false;
   const existing = await recoveryAttemptFor(tx, integratorTaskId, stopId);
   if (existing && existing.status !== MergeRecoveryStatus.VALIDATING) {
     if (!recoveryIsReopenableLegacyRefusal(existing)) return false;
@@ -448,10 +451,15 @@ const readCiFailureEvidence = async (
     if (check.kind !== "CheckRun") throw new Error(`status context ${check.name} has no GitHub Actions job log`);
     const log = await reader.readActionsFailureLog!(candidate.repository, candidate.authorizedHeadSha,
       { name: check.name, detailsUrl: check.detailsUrl }, AbortSignal.timeout(8_000));
-    return { name: check.name, conclusion: check.conclusion, log };
+    return { name: check.name, conclusion: check.conclusion, log: redactCiLog(log) };
   }));
   return { fingerprint: classified.fingerprint, failures };
 };
+
+const retryableCiLogError = (error: unknown): boolean =>
+  (error instanceof GitHubReadError && (error.kind === "transport" || error.kind === "timeout"))
+  || error instanceof TypeError
+  || (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"));
 
 const queueRecovery = async (
   db: PrismaClient,
@@ -1026,7 +1034,8 @@ export const replayRecoveryAuthorizations = async (
             && (snapshot.baseSha === auth.baseSha || baseRecovery?.kind === "queue")
             && snapshot.repository === auth.repository && snapshot.number === auth.prNumber
             && snapshot.baseRefName === auth.baseRef && snapshot.headRefOid === auth.headSha
-            && snapshot.state === "OPEN" && !snapshot.merged && !snapshot.isDraft && snapshot.baseSha;
+            && snapshot.state === "OPEN" && !snapshot.merged && !snapshot.isDraft
+            && snapshot.mergeStateStatus !== "BLOCKED" && snapshot.baseSha;
           const spent = await recoveryAllowanceSpent(tx, pending);
           const moved = valid && snapshot!.baseSha !== auth!.baseSha;
           const exhausted = (pending.pendingFailureRunId !== null || moved)
@@ -1200,10 +1209,11 @@ export const baseDriftRecoveryTick = async (
         try {
           ciEvidence = await readCiFailureEvidence(reader, snapshot, candidate);
         } catch (error: unknown) {
-          addTickDelta(result, await settleRecovery(db, settlementTask, candidate.stopId, {
-            kind: "ineligible",
-            reason: `CI failure evidence or logs unavailable: ${error instanceof Error ? error.message : String(error)}`,
-          }, now));
+          const reason = `CI failure evidence or logs unavailable: ${redactCiLog(error instanceof Error ? error.message : String(error))}`;
+          const decision: Retry | Ineligible = retryableCiLogError(error)
+            ? { kind: "retry", retryClass: "transport", reason }
+            : { kind: "ineligible", reason };
+          addTickDelta(result, await settleRecovery(db, settlementTask, candidate.stopId, decision, now));
           continue;
         }
       }
