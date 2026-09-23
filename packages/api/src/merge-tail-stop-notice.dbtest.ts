@@ -180,7 +180,8 @@ const assertStopSettled = async (
     notices[0]!.dedupeKey,
     `${STOP_DEDUPE_PREFIX}${seeded.regression.id}:${createHash("sha256").update(STOP_REASON).digest("hex")}`,
   );
-  assert.equal(notices[0]!.body, `Autonomous merge tail stopped: ${STOP_REASON}`);
+  assert.match(notices[0]!.body, /^推荐：需调查/u);
+  assert.ok(notices[0]!.body.includes(`Autonomous merge tail stopped: ${STOP_REASON}`));
 };
 
 test("a repeated same-reason merge-tail stop settles its run and leaves the queue claimable", async () => {
