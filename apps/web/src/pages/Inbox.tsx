@@ -305,7 +305,7 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
           {message.deliveryAttempts > 0 ? <span className={STAT_PILL}>{t("inbox.stat.attempts", { n: message.deliveryAttempts })}</span> : null}
         </div>
 
-        {message.project !== undefined && message.project !== null && message.project.id !== projectId ? (
+        {projectId !== "" && message.project !== undefined && message.project !== null && message.project.id !== projectId ? (
           <div className="rounded-lg border border-border bg-secondary px-[14px] py-[11px] text-[12px] text-muted-foreground">
             {t("inbox.projectHint", { project: message.project.name })}
           </div>

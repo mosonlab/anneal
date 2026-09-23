@@ -218,7 +218,6 @@ export const registerInboxRoutes = (app: RouteApp, { db, runners }: RouteDeps): 
         agent: { select: { project: { select: inboxProjectSelect } } },
         task: { select: { project: { select: inboxProjectSelect } } },
         goal: { select: { project: { select: inboxProjectSelect } } },
-        gateTask: { select: { project: { select: inboxProjectSelect } } },
         session: { select: { taskId: true, agent: { select: { project: { select: inboxProjectSelect } } } } },
       },
     });
@@ -227,9 +226,8 @@ export const registerInboxRoutes = (app: RouteApp, { db, runners }: RouteDeps): 
       ?? message.task?.project
       ?? message.goal?.project
       ?? message.session?.agent.project
-      ?? message.gateTask?.project
       ?? null;
-    const { agent, task, goal, gateTask, ...readModel } = message;
+    const { agent, task, goal, ...readModel } = message;
     return context.json({
       ...withInboxReadModel(readModel, await blockedMessageIds(db, [message.id])),
       project,

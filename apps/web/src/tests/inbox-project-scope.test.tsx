@@ -86,6 +86,24 @@ test("InboxThreadPage loads a cross-project message by id without changing the s
   }
 });
 
+test("InboxThreadPage hides the Project hint when the message belongs to the selected Project", async () => {
+  const [{ InboxThreadPage }] = await Promise.all([import("../pages/Inbox")]);
+  const selectedProjectMessage = { ...plainMessage, project: PROJECT };
+  const page = await mountPage(
+    <ProjectProvider><InboxThreadPage messageId="message-1" /></ProjectProvider>,
+    { ...selectedProjectRoutes(), "/inbox/messages/message-1": selectedProjectMessage },
+    "http://127.0.0.1:5173/inbox/message-1",
+    prepareSelection("p-selected"),
+  );
+  try {
+    assert.match(page.container.textContent ?? "", /A project-scoped message/);
+    assert.doesNotMatch(page.container.textContent ?? "", /belongs to project/u);
+  } finally {
+    await page.dispose();
+    storage.remove("agentos.projectId");
+  }
+});
+
 test("Shell scopes the Inbox summary request to the selected project", async () => {
   const [{ Shell }] = await Promise.all([import("../components/Shell")]);
   const page = await mountPage(
@@ -183,6 +201,23 @@ test("a project-level alert with no project relation opens from its id", async (
   }
 });
 
+test("the Project hint stays hidden in the all-project view", async () => {
+  const [{ InboxThreadPage }] = await Promise.all([import("../pages/Inbox")]);
+  const page = await mountPage(
+    <ProjectProvider><InboxThreadPage messageId="message-1" /></ProjectProvider>,
+    { ...emptyProjectRoutes(), "/inbox/messages/message-1": plainMessage },
+    "http://127.0.0.1:5173/inbox/message-1",
+    prepareSelection(null),
+  );
+  try {
+    assert.match(page.container.textContent ?? "", /A project-scoped message/);
+    assert.doesNotMatch(page.container.textContent ?? "", /belongs to project/u);
+  } finally {
+    await page.dispose();
+    storage.remove("agentos.projectId");
+  }
+});
+
 test("a true 404 shows the new not-found message in both locales", async () => {
   const [{ InboxThreadPage }, { ProjectProvider }, { LocaleProvider }] = await Promise.all([
     import("../pages/Inbox"),
@@ -207,5 +242,29 @@ test("a true 404 shows the new not-found message in both locales", async () => {
       await page.dispose();
       storage.remove("agentos.projectId");
     }
+  }
+});
+
+test("a non-404 Inbox detail error renders ErrorNotice", async () => {
+  const [{ InboxThreadPage }, { ProjectProvider }] = await Promise.all([
+    import("../pages/Inbox"),
+    import("../lib/project"),
+  ]);
+  const page = await mountPage(
+    <ProjectProvider><InboxThreadPage messageId="broken" /></ProjectProvider>,
+    {
+      ...emptyProjectRoutes(),
+      "/inbox/messages/broken": new Response(JSON.stringify({ error: "Internal server error" }), { status: 500 }),
+    },
+    "http://127.0.0.1:5173/inbox/broken",
+    prepareSelection(null),
+  );
+  try {
+    assert.match(page.container.textContent ?? "", /500 Internal server error/u);
+    assert.doesNotMatch(page.container.textContent ?? "", /Message not found/u);
+    assert.ok([...page.container.querySelectorAll("div")].some((element) => element.className.includes("destructive-line")));
+  } finally {
+    await page.dispose();
+    storage.remove("agentos.projectId");
   }
 });

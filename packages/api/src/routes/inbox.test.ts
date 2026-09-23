@@ -94,14 +94,14 @@ test("Inbox read models expose the server-owned free-text capability", async () 
     const project = { id: "project-1", name: "Project One", slug: "project-one" };
     const singleMessage = {
       ...messages[0],
-      agent: { project }, task: null, goal: null, gateTask: null,
+      agent: { project }, task: null, goal: null,
       decisions: [{ id: "decision-1", decision: "continue", actorOpenId: "operator", createdAt: new Date("2026-09-01T00:00:00Z") }],
       replies: [{ id: "reply-1", body: "More context", createdAt: new Date("2026-09-01T00:01:00Z") }],
     };
     const globalNotice = {
       id: "global-notice", status: "OPEN", from: "AGENT", kind: "TEXT", choices: null,
       gateTaskId: null, dedupeKey: "notification:global", replyToMessageId: null,
-      agent: null, task: null, goal: null, gateTask: null, session: null,
+      agent: null, task: null, goal: null, session: null,
       decisions: [], replies: [],
     };
     const database = {
@@ -152,6 +152,19 @@ test("Inbox read models expose the server-owned free-text capability", async () 
     });
     assert.equal(global.status, 200);
     assert.equal((await global.json() as { project: unknown }).project, null);
+  });
+});
+
+test("GET Inbox detail returns 404 when the message id does not exist", async () => {
+  await withTokens(async () => {
+    const database = {
+      inboxMessage: { findUnique: async () => null },
+    } as unknown as PrismaClient;
+    const response = await createApp(database).request("/inbox/messages/missing-message", {
+      headers: { Authorization: "Bearer operator-unit-token" },
+    });
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: "Inbox message not found" });
   });
 });
 
