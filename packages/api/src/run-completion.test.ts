@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+process.env.FEISHU_DEFAULT_CHAT_ID ??= "anneal-unit-test-default-chat";
 import { createHash } from "node:crypto";
 import test from "node:test";
 

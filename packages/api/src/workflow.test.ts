@@ -1,4 +1,5 @@
 import "./test-workspace-root.js";
+process.env.FEISHU_DEFAULT_CHAT_ID ??= "anneal-unit-test-default-chat";
 import assert from "node:assert/strict";
 import test from "node:test";
 

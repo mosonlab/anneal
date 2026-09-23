@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+process.env.FEISHU_DEFAULT_CHAT_ID ??= "anneal-unit-test-default-chat";
 import test from "node:test";
 import { MERGE_TAIL_KIND, type Prisma } from "@anneal/db";
 import { observeEpisode, type EpisodeObservation } from "./merge-tail-episode.js";
