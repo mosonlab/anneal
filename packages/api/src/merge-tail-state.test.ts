@@ -194,6 +194,7 @@ test("blockDownstream atomically parks all three Tasks and writes its deduped ma
     `merge-base-drift-recovery-tail-stop:${recovery.sourceStopId}:readiness:${recovery.recoveryRunId}`,
   );
   assert.equal(observed.notices[0]?.create.threadId, "default-thread");
+  assert.match(String(observed.notices[0]?.create.body), /^推荐：需调查/u);
   assert.equal(observed.notices[0]?.update.threadId, "default-thread");
 });
 

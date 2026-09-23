@@ -161,8 +161,8 @@ test("revalidation cancellation requires the durable cancel-chain decision and p
       requestId: "premise-cancel-question",
       body: "The implementation premise is already delivered at current HEAD.",
       choices: [
+        { id: "operator-rewrite", label: "operator rewrites the brief, then continue（推荐）" },
         { id: "cancel-chain", label: "cancel this chain" },
-        { id: "operator-rewrite", label: "operator rewrites the brief, then continue" },
         { id: "proceed-reading", label: "proceed with the step's proposed reading" },
       ],
       chatId: "premise-cancel-chat",

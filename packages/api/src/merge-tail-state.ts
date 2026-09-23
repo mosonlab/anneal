@@ -17,6 +17,7 @@ import {
   requireDefaultFeishuThread,
   transitionMergeRecovery,
   writeMarker,
+  mergeTailNoticeRecommendation,
   type MergeRecoveryAttempt,
   type MergeRecoveryClassSettleState,
   type MergeRecoveryTransitionData,
@@ -472,7 +473,8 @@ export const blockDownstream = async (
   for (const taskId of [recovery.integratorTaskId, recovery.regressionTaskId]) {
     await writeMarker(tx, taskId, "baseDriftRecovery", "tail-stopped", { actorType: "control-plane", body, metadata });
   }
-  await stopNotice(tx, { taskId: recovery.regressionTaskId, body, dedupeKey,
+  const noticeBody = `${mergeTailNoticeRecommendation(input.reason)}\n\n${body}`;
+  await stopNotice(tx, { taskId: recovery.regressionTaskId, body: noticeBody, dedupeKey,
     reopen: input.phase === "readiness" && input.reason.startsWith(`${MERGE_EXECUTOR_OFFLINE_REASON}:`) });
 };
 
@@ -591,7 +593,7 @@ export const exhaust = async (
   const dedupeKey = `merge-base-drift-recovery:${input.state}:${input.sourceStopId}${generation}`;
   await stopNotice(tx, {
     taskId: input.integratorTaskId,
-    body: `Automatic pre-merge base-drift recovery ${input.state} for stop ${input.sourceStopId}: ${input.reason}. No regression run or re-authorization was created.`,
+    body: `${mergeTailNoticeRecommendation(input.reason)}\n\nAutomatic pre-merge base-drift recovery ${input.state} for stop ${input.sourceStopId}: ${input.reason}. No regression run or re-authorization was created.`,
     dedupeKey,
   });
 };

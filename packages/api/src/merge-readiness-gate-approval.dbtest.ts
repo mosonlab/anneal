@@ -542,7 +542,11 @@ test("active recovery aggregate refresh stops at its own two-requeue ceiling", a
     }
   });
   assert.equal((await refreshStaleMergeCardsTick(db, reader({ baseSha: NEW_BASE }), testTime(70))).exhausted, 1);
-  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: card.id } })).status, "OPEN");
+  const staleCard = await db.inboxMessage.findUniqueOrThrow({ where: { id: card.id } });
+  assert.equal(staleCard.status, "OPEN");
+  assert.match(staleCard.body.split("\n")[0] ?? "", /^无推荐：/u);
+  assert.ok(Array.isArray(staleCard.choices));
+  assert.ok((staleCard.choices as Array<{ label: string }>).every(({ label }) => !label.endsWith("（推荐）")));
   assert.equal(await db.run.count({ where: { taskId: chain.gateTask.id, status: "QUEUED" } }), 0);
 });
 

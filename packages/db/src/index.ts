@@ -21,6 +21,7 @@ export * from "./gate-attestation.js";
 export * from "./default-feishu-thread.js";
 export * from "./merge-integrator.js";
 export * from "./merge-integrator-db.js";
+export * from "./inbox-recommendation.js";
 export * from "./merge-tail.js";
 export * from "./gate-slot.js";
 export * from "./merge-gate.js";
