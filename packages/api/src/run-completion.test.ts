@@ -4,10 +4,14 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
+  DIRECT_INTEGRATOR_STEP_INDEX,
+  DIRECT_INTEGRATOR_TEMPLATE_NAME,
   LEGACY_TEMPLATE_GENERATIONS,
   CleanupStatus,
   EXTERNAL_FAILURE_REFUND_CAP,
   FailureClass,
+  INTEGRATOR_OUTPUT_KIND,
+  MERGE_TAIL_KIND,
   PushStatus,
   RunStatus,
   type PrismaClient,
@@ -197,6 +201,7 @@ const statefulCompletionHarness = (
   const closedRuns = new Map<string, Record<string, unknown>>();
   const outputWrites: unknown[] = [];
   const taskUpdates: Record<string, unknown>[] = [];
+  const inboxCreates: Record<string, unknown>[] = [];
   const inboxUpserts: RecordedInboxUpsert[] = [];
   const runnerState: Record<string, unknown> = { consecutiveAuthFailures: 0, circuitOpen: false };
   const archivedAt = new Date("2026-08-16T06:00:00.000Z");
@@ -233,8 +238,13 @@ const statefulCompletionHarness = (
     },
     agent: { findUnique: async () => task.assigneeAgent },
     session: { update: async () => ({}) },
+    mergeLeaseEvent: { findFirst: async () => null },
     task: {
-      update: async ({ data }: { data: Record<string, unknown> }) => { taskUpdates.push(data); return data; },
+      update: async ({ data }: { data: Record<string, unknown> }) => {
+        taskUpdates.push(data);
+        Object.assign(task, data);
+        return task;
+      },
       updateMany: async ({ data }: { data: Record<string, unknown> }) => {
         taskUpdates.push(data);
         Object.assign(task, data);
@@ -285,7 +295,7 @@ const statefulCompletionHarness = (
       }),
     },
     inboxMessage: {
-      create: async () => ({}),
+      create: async ({ data }: { data: Record<string, unknown> }) => { inboxCreates.push(data); return {}; },
       findUnique: async () => null,
       updateMany: async () => ({ count: 0 }),
       upsert: async (args: RecordedInboxUpsert) => { inboxUpserts.push(args); return {}; },
@@ -303,6 +313,7 @@ const statefulCompletionHarness = (
     outcome,
     templateStep = null,
     headSha,
+    claimantClass = "runner",
   }: {
     runNumber: number;
     maxRunsPerTask: number;
@@ -310,6 +321,7 @@ const statefulCompletionHarness = (
     outcome: RunOutcome;
     templateStep?: Record<string, unknown> | null;
     headSha?: string;
+    claimantClass?: "runner" | "merge-executor";
   }) => {
     task.templateStep = templateStep;
     currentRun = {
@@ -324,7 +336,7 @@ const statefulCompletionHarness = (
     };
     const result = await completeRun(database, {
       runId: currentRun.id,
-      claimantClass: "runner",
+      claimantClass,
       body: {
         runnerId: "runner-1",
         fencingToken: currentRun.fencingToken,
@@ -335,12 +347,12 @@ const statefulCompletionHarness = (
         cleanupStatus: CleanupStatus.SUCCEEDED,
         workspaceRetained: false,
       },
-    });
+    }, claimantClass === "merge-executor" ? async () => ({ outcome: "not-held" }) : undefined);
     assert.ok(result && !("reason" in result));
     return closedRuns.get(currentRun.id)!;
   };
 
-  return { activities, complete, taskUpdates, queuedRuns, outputWrites, inboxUpserts, runnerState };
+  return { activities, complete, task, taskUpdates, queuedRuns, outputWrites, inboxCreates, inboxUpserts, runnerState };
 };
 
 const assertThreadedNotice = (
@@ -358,6 +370,54 @@ const assertThreadedNotice = (
   assert.match(String(upsert.create.body), expected.body);
   assert.deepEqual(upsert.update, { threadId: "thread-default" });
 };
+
+test("a deferred mechanical mergeability review does not create an Inbox card", async () => {
+  const previousRunnerIds = process.env.MERGE_EXECUTOR_RUNNER_IDS;
+  process.env.MERGE_EXECUTOR_RUNNER_IDS = "runner-1";
+  try {
+    const harness = statefulCompletionHarness({
+      status: "DOING",
+      chainId: "chain-mechanical",
+      templateId: "template-mechanical",
+      approvalGate: false,
+    }, {
+      runId: "run-1",
+      kind: INTEGRATOR_OUTPUT_KIND,
+      body: JSON.stringify({
+        outcome: "deferred",
+        condition: "unresolved-mergeability",
+        evidence: "required checks are still pending",
+      }),
+    });
+    const closed = await harness.complete({
+      runNumber: 1,
+      maxRunsPerTask: 5,
+      budgetGrants: 0,
+      outcome: { case: "succeeded" },
+      templateStep: {
+        stepIndex: DIRECT_INTEGRATOR_STEP_INDEX,
+        outputKind: INTEGRATOR_OUTPUT_KIND,
+        taskTemplate: { name: DIRECT_INTEGRATOR_TEMPLATE_NAME },
+      },
+      claimantClass: "merge-executor",
+    });
+
+    assert.equal(closed.status, RunStatus.SUCCEEDED);
+    assert.equal(harness.task.status, "REVIEW", "the completion must really move DOING to REVIEW");
+    assert.deepEqual(harness.taskUpdates, [{
+      status: "REVIEW",
+      failureReason: "Mechanical mergeability is pending; control plane will recheck within six hours",
+    }]);
+    assert.ok(harness.activities.some(({ metadata }) => (
+      metadata?.kind === MERGE_TAIL_KIND.mergeabilityWait && metadata.state === "deferred"
+    )));
+    assert.deepEqual(harness.inboxCreates, []);
+    assert.deepEqual(harness.inboxUpserts, []);
+  } finally {
+    if (previousRunnerIds === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;
+    else process.env.MERGE_EXECUTOR_RUNNER_IDS = previousRunnerIds;
+  }
+});
 
 for (const state of ["settled", "aborted"]) {
   for (const actorType of ["agent", "control-plane"]) {

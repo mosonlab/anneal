@@ -1615,7 +1615,7 @@ export const settleRunBirthRefusal = async (
   if (existing?.status === InboxStatus.CLOSED) {
     const reopened = await tx.inboxMessage.updateMany({
       where: { dedupeKey, status: InboxStatus.CLOSED },
-      data: { ...update, deliveryStatus: InboxDeliveryStatus.PENDING, nextDeliveryAt: now },
+      data: { ...update, deliveryStatus: InboxDeliveryStatus.PENDING, nextDeliveryAt: now, deliveredAt: null },
     });
     if (reopened.count === 1) return { kind: "parked" };
   }
@@ -1760,7 +1760,7 @@ export const gateQuestion = async (tx: Tx, gateTaskId: string, sourceRunId: stri
         sourceRunId,
         agentId: run.agentId,
         sessionId: run.session.id,
-        threadId: thread?.id ?? null,
+        threadId: thread.id,
         purpose: "gate",
         repository: target.repository,
         prNumber: target.prNumber,
@@ -1782,7 +1782,7 @@ export const gateQuestion = async (tx: Tx, gateTaskId: string, sourceRunId: stri
     sessionId: run.session.id,
     taskId: task.id,
     gateTaskId: task.id,
-    threadId: thread?.id ?? null,
+    threadId: thread.id,
     kind: "MULTIPLE_CHOICE",
     body: `审批闸门：${task.name}\n\n请确认本步骤产出。批准后继续；打回后重新执行产出步骤。${delivery}${preview}`,
     choices: [{ id: "approve", label: "批准并继续" }, { id: "reject", label: "打回上一步" }],

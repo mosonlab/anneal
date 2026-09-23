@@ -3382,8 +3382,9 @@ stop; it remains web-only. Stop cards show project, task and Chain context when
 available, the reason, the decision/action, and an Inbox link to
 `https://agentos.novelcatch.com/#/inbox/<messageId>`. Stable dedupe keys reuse
 the existing Inbox row when the same stop is evaluated again. Configure
-`FEISHU_APP_ID`, `FEISHU_APP_SECRET`, and `FEISHU_DEFAULT_CHAT_ID`; questions
-may override the default chat with `chatId`.
+`FEISHU_APP_ID`, `FEISHU_APP_SECRET`, and `FEISHU_DEFAULT_CHAT_ID`; both API and
+Inbox refuse startup without `FEISHU_DEFAULT_CHAT_ID`. Questions may override
+the default chat with `chatId`.
 
 A live agent session opens a blocking question through the session-only
 `POST /session/runs/:runId/inbox/questions` route. Its JSON requires
@@ -3401,13 +3402,17 @@ are optional. The request must provide `chatId` or the service's
 `FEISHU_DEFAULT_CHAT_ID` is unset or has no shared Feishu Inbox thread. Those
 notification failures report `defaultFeishuThread` as `unconfigured`, `missing`,
 or `unavailable` while `database` remains `connected`. Health checks the
-destination binding, not the Inbox process or live Feishu socket. API startup
-creates the shared thread before serving; stop writers reuse it. The health
-probe itself is read-only. Check Inbox service logs for its connection state and inspect
-`deliveryStatus` for send failures. Feishu does not replay events missed while
-the Inbox service is offline. Existing pending messages without a thread are
-not backfilled automatically; re-trigger their source event or arrange a
-controlled repair. After launch, use disposable Runs to rehearse both
+destination binding, not the Inbox process or live Feishu socket. API and Inbox
+startup create the shared thread before serving; stop writers reuse it. The
+health probe itself is read-only. Check Inbox service logs for its connection
+state and inspect `deliveryStatus` for send failures. Feishu does not replay
+events missed while
+the Inbox service is offline. Re-evaluating an existing OPEN stop attaches a
+thread to its old unthreaded card and queues delivery; there is no background
+sweep of legacy pending cards, so a stop that is no longer evaluated needs a
+controlled repair. Direct text in the default chat answers only a waiting
+`inbox_ask` question; use the stop card's action or reply to that card for a
+stop decision. After launch, use disposable Runs to rehearse both
 directions: answer one blocking question in Feishu and verify that the same Run
 resumes; leave a second question unanswered with a short `resumableUntil`, then
 confirm its timeout card reaches the shared default chat. Check the Inbox

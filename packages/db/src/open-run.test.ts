@@ -154,6 +154,7 @@ const fakeTx = (
     publishedRuns?: Array<Record<string, any> & { taskId: string; repoId: string; pushedBranch: string | null }>;
     stopRows?: Array<Record<string, unknown>>;
     existingInboxStatus?: "OPEN" | "ANSWERED" | "CLOSED";
+    existingInboxDeliveredAt?: Date | null;
     /** The task's costed Run rows, as the spend-cap basis reads them. */
     costedRuns?: Array<Record<string, unknown>>;
   } = {},
@@ -164,6 +165,7 @@ const fakeTx = (
   const inbox: Array<Record<string, unknown>> = [];
   const inboxUpdates: Array<Record<string, unknown>> = [];
   let existingInboxStatus = options.existingInboxStatus ?? null;
+  let existingInboxDeliveredAt = options.existingInboxDeliveredAt ?? null;
   const runFindFirstCalls: Array<Record<string, any>> = [];
   let agentLocks = 0;
   const tx = {
@@ -195,6 +197,7 @@ const fakeTx = (
       updateMany: async ({ where, data }: { where: { status: string }; data: Record<string, unknown> }) => {
         if (where.status !== existingInboxStatus) return { count: 0 };
         inboxUpdates.push(data);
+        if ("deliveredAt" in data) existingInboxDeliveredAt = data.deliveredAt as Date | null;
         existingInboxStatus = "OPEN";
         return { count: 1 };
       },
@@ -274,7 +277,11 @@ const fakeTx = (
       },
     },
   };
-  return { tx: tx as never, creates, activities, taskUpdates, inbox, inboxUpdates, runFindFirstCalls, agentLocks: () => agentLocks };
+  return {
+    tx: tx as never, creates, activities, taskUpdates, inbox, inboxUpdates, runFindFirstCalls,
+    inboxDeliveredAt: () => existingInboxDeliveredAt,
+    agentLocks: () => agentLocks,
+  };
 };
 
 const integratorStep = {
@@ -2052,6 +2059,7 @@ test("the park a raising caller owes a spend-cap refusal names the cap and the t
 
 test("run-birth refusal rearms delivery only when a CLOSED notice reopens", async () => {
   const repo = { id: "repo-1", defaultBranch: "main" };
+  const deliveredAt = new Date("2026-08-26T11:00:00.000Z");
   const task = taskRow({
     repoId: repo.id,
     repo,
@@ -2059,7 +2067,9 @@ test("run-birth refusal rearms delivery only when a CLOSED notice reopens", asyn
     runs: [priorRun({ repoId: repo.id })],
   });
 
-  const closed = fakeTx(task, { costedRuns: [costedRun("1.50")], existingInboxStatus: "CLOSED" });
+  const closed = fakeTx(task, {
+    costedRuns: [costedRun("1.50")], existingInboxStatus: "CLOSED", existingInboxDeliveredAt: deliveredAt,
+  });
   const closedRefusal = await openRun(closed.tx, task.id, { kind: "retry", readyAt: now });
   assert.equal(closedRefusal.ok, false);
   if (closedRefusal.ok) return;
@@ -2070,8 +2080,12 @@ test("run-birth refusal rearms delivery only when a CLOSED notice reopens", asyn
   assert.equal(closed.inboxUpdates[0]?.status, "OPEN");
   assert.equal(closed.inboxUpdates[0]?.deliveryStatus, "PENDING");
   assert.equal(closed.inboxUpdates[0]?.nextDeliveryAt, now);
+  assert.equal(closed.inboxUpdates[0]?.deliveredAt, null);
+  assert.equal(closed.inboxDeliveredAt(), null);
 
-  const alreadyOpen = fakeTx(task, { costedRuns: [costedRun("1.50")], existingInboxStatus: "OPEN" });
+  const alreadyOpen = fakeTx(task, {
+    costedRuns: [costedRun("1.50")], existingInboxStatus: "OPEN", existingInboxDeliveredAt: deliveredAt,
+  });
   const openRefusal = await openRun(alreadyOpen.tx, task.id, { kind: "retry", readyAt: now });
   assert.equal(openRefusal.ok, false);
   if (openRefusal.ok) return;
@@ -2082,6 +2096,8 @@ test("run-birth refusal rearms delivery only when a CLOSED notice reopens", asyn
   assert.equal(alreadyOpen.inboxUpdates[0]?.status, "OPEN");
   assert.equal("deliveryStatus" in alreadyOpen.inboxUpdates[0]!, false);
   assert.equal("nextDeliveryAt" in alreadyOpen.inboxUpdates[0]!, false);
+  assert.equal("deliveredAt" in alreadyOpen.inboxUpdates[0]!, false);
+  assert.equal(alreadyOpen.inboxDeliveredAt(), deliveredAt);
 });
 
 /**
