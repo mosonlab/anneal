@@ -3,7 +3,7 @@ import { type ReactNode, useState } from "react";
 import { api } from "../lib/api";
 import { firstLine, formatDateTime, formatT, restLines, timeAgo } from "../lib/format";
 import { useAction, usePoll } from "../lib/hooks";
-import { useT, useTNodes } from "../lib/i18n";
+import { useT } from "../lib/i18n";
 import { projectScopedPath, useProjectScope } from "../lib/project";
 import { Link, navigate } from "../lib/router";
 import { cn } from "../lib/utils";
@@ -191,31 +191,36 @@ export const InboxPage = (): ReactNode => {
 
 export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode => {
   const { projectId } = useProjectScope();
-  const messagesPath = projectScopedPath("/inbox/messages", projectId);
-  const { data, error, reload } = usePoll<InboxMessage[]>(messagesPath);
+  const messagePath = `/inbox/messages/${encodeURIComponent(messageId)}`;
+  const { data: message, error, loading, reload } = usePoll<InboxMessage>(messagePath);
   const agents = useAgentsById();
   const [reply, setReply] = useState("");
   const { pending, error: actionError, run } = useAction();
   const t = useT();
-  const tn = useTNodes();
-  // Resolved before the early returns below because it feeds a hook: `usePoll`
-  // must be called on every render, and it takes `null` while the card (or its
-  // artifact) is unknown.
-  const message = (data ?? []).find((candidate) => candidate.id === messageId) ?? null;
+  // The artifact poll stays mounted across early returns and remains idle until
+  // the message read supplies its producing task id.
   // The card body carries only a truncated preview — it has to fit in a Feishu
   // card. The board is not bound by that, so an approval gate shows the
   // producing step's output in full, from the same endpoint the Tasks page uses.
   const artifactTaskId = message?.artifactTaskId ?? null;
   const artifact = usePoll<TaskStepOutput>(artifactTaskId === null ? null : `/tasks/${artifactTaskId}/output`, 10_000);
 
-  if (error !== null && data === null) {
-    return <Page><ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /></Page>;
-  }
-  if (!message) {
+  if (error?.status === 404) {
     return (
       <Page>
         <div className={DETAIL_HEAD}><Link to="/inbox" className={BACK_LINK}><IconArrowLeft />{t("inbox.back")}</Link></div>
-        <EmptyState>{tn("inbox.notFound", { route: <code>GET /inbox/messages</code> })}</EmptyState>
+        <EmptyState>{t("inbox.notFound")}</EmptyState>
+      </Page>
+    );
+  }
+  if (error !== null && message === null) {
+    return <Page><ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} /></Page>;
+  }
+  if (message === null) {
+    return (
+      <Page>
+        <div className={DETAIL_HEAD}><Link to="/inbox" className={BACK_LINK}><IconArrowLeft />{t("inbox.back")}</Link></div>
+        <EmptyState>{t(loading ? "common.loading" : "inbox.notFound")}</EmptyState>
       </Page>
     );
   }
@@ -280,6 +285,7 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
       </div>
 
       <div className={STACK}>
+        {error === null ? null : <ErrorNotice message={`${error.status} ${error.message}`} onRetry={reload} />}
         {/* The subject is the first line of a message body, so it is arbitrary
             text: an auto-deploy notice carries two 40-character shas, which in a
             non-wrapping row pushed the status pill off the right of a phone and
@@ -298,6 +304,12 @@ export const InboxThreadPage = ({ messageId }: { messageId: string }): ReactNode
           <span className={STAT_PILL}>{message.channel.toLowerCase()} · {message.deliveryStatus.toLowerCase()}</span>
           {message.deliveryAttempts > 0 ? <span className={STAT_PILL}>{t("inbox.stat.attempts", { n: message.deliveryAttempts })}</span> : null}
         </div>
+
+        {projectId !== "" && message.project !== undefined && message.project !== null && message.project.id !== projectId ? (
+          <div className="rounded-lg border border-border bg-secondary px-[14px] py-[11px] text-[12px] text-muted-foreground">
+            {t("inbox.projectHint", { project: message.project.name })}
+          </div>
+        ) : null}
 
         {message.lastDeliveryError === null ? null : <ErrorNotice message={t("inbox.deliveryError", { error: message.lastDeliveryError })} />}
 

@@ -27,12 +27,14 @@ const plainMessage: InboxMessage = {
   body: "A project-scoped message",
   status: "OPEN",
   answeredAt: null,
+  project: { id: "p-other", name: "Other project", slug: "other-project" },
 };
 
 const selectedProjectRoutes = (messages: InboxMessage[] = [plainMessage]): PageRoutes => ({
   "/projects": PROJECTS,
   "/projects/p-selected/agents": [],
   "/inbox/messages?projectId=p-selected": messages,
+  "/inbox/messages/message-1": plainMessage,
   "/inbox/messages/summary?projectId=p-selected": { needsReply: 1 },
 });
 
@@ -64,7 +66,7 @@ test("InboxPage scopes its messages request and still renders a global deploy no
   }
 });
 
-test("InboxThreadPage scopes its messages request to the selected project", async () => {
+test("InboxThreadPage loads a cross-project message by id without changing the selected project", async () => {
   const [{ InboxThreadPage }] = await Promise.all([import("../pages/Inbox")]);
   const page = await mountPage(
     <ProjectProvider><InboxThreadPage messageId="message-1" /></ProjectProvider>,
@@ -73,8 +75,29 @@ test("InboxThreadPage scopes its messages request to the selected project", asyn
     prepareSelection("p-selected"),
   );
   try {
-    assert.ok(page.requests.some(({ path }) => path === "/inbox/messages?projectId=p-selected"));
+    assert.ok(page.requests.some(({ path }) => path === "/inbox/messages/message-1"));
+    assert.equal(page.requests.some(({ path }) => path.includes("/inbox/messages?")), false);
     assert.match(page.container.textContent ?? "", /A project-scoped message/);
+    assert.match(page.container.textContent ?? "", /Other project/);
+    assert.equal(storage.get("agentos.projectId"), "p-selected");
+  } finally {
+    await page.dispose();
+    storage.remove("agentos.projectId");
+  }
+});
+
+test("InboxThreadPage hides the Project hint when the message belongs to the selected Project", async () => {
+  const [{ InboxThreadPage }] = await Promise.all([import("../pages/Inbox")]);
+  const selectedProjectMessage = { ...plainMessage, project: PROJECT };
+  const page = await mountPage(
+    <ProjectProvider><InboxThreadPage messageId="message-1" /></ProjectProvider>,
+    { ...selectedProjectRoutes(), "/inbox/messages/message-1": selectedProjectMessage },
+    "http://127.0.0.1:5173/inbox/message-1",
+    prepareSelection("p-selected"),
+  );
+  try {
+    assert.match(page.container.textContent ?? "", /A project-scoped message/);
+    assert.doesNotMatch(page.container.textContent ?? "", /belongs to project/u);
   } finally {
     await page.dispose();
     storage.remove("agentos.projectId");
@@ -118,13 +141,17 @@ test("InboxPage, InboxThreadPage, and Shell retain unfiltered paths without a pr
 
   const thread = await mountPage(
     <ProjectProvider><InboxThreadPage messageId="missing" /></ProjectProvider>,
-    emptyProjectRoutes(),
+    {
+      ...emptyProjectRoutes(),
+      "/inbox/messages/missing": new Response(JSON.stringify({ error: "Inbox message not found" }), { status: 404 }),
+    },
     "http://127.0.0.1:5173/inbox/missing",
     prepareSelection(null),
   );
   try {
-    assert.ok(thread.requests.some(({ path }) => path === "/inbox/messages"));
+    assert.ok(thread.requests.some(({ path }) => path === "/inbox/messages/missing"));
     assert.equal(thread.requests.some(({ path }) => path.includes("projectId=")), false);
+    assert.match(thread.container.textContent ?? "", /Message not found/);
   } finally {
     await thread.dispose();
   }
@@ -140,6 +167,104 @@ test("InboxPage, InboxThreadPage, and Shell retain unfiltered paths without a pr
     assert.equal(shell.requests.some(({ path }) => path.includes("projectId=")), false);
   } finally {
     await shell.dispose();
+    storage.remove("agentos.projectId");
+  }
+});
+
+test("a project-level alert with no project relation opens from its id", async () => {
+  const [{ InboxThreadPage }] = await Promise.all([import("../pages/Inbox")]);
+  const alert: InboxMessage = {
+    ...deployNotice,
+    id: "global-alert-1",
+    body: "A global project-level alert",
+    status: "OPEN",
+    answeredAt: null,
+    project: null,
+  };
+  const page = await mountPage(
+    <ProjectProvider><InboxThreadPage messageId="global-alert-1" /></ProjectProvider>,
+    {
+      ...emptyProjectRoutes(),
+      "/projects/p-selected/agents": [],
+      "/inbox/messages/global-alert-1": alert,
+    },
+    "http://127.0.0.1:5173/inbox/global-alert-1",
+    prepareSelection("p-selected"),
+  );
+  try {
+    assert.ok(page.requests.some(({ path }) => path === "/inbox/messages/global-alert-1"));
+    assert.match(page.container.textContent ?? "", /A global project-level alert/);
+    assert.doesNotMatch(page.container.textContent ?? "", /belongs to project/u);
+  } finally {
+    await page.dispose();
+    storage.remove("agentos.projectId");
+  }
+});
+
+test("the Project hint stays hidden in the all-project view", async () => {
+  const [{ InboxThreadPage }] = await Promise.all([import("../pages/Inbox")]);
+  const page = await mountPage(
+    <ProjectProvider><InboxThreadPage messageId="message-1" /></ProjectProvider>,
+    { ...emptyProjectRoutes(), "/inbox/messages/message-1": plainMessage },
+    "http://127.0.0.1:5173/inbox/message-1",
+    prepareSelection(null),
+  );
+  try {
+    assert.match(page.container.textContent ?? "", /A project-scoped message/);
+    assert.doesNotMatch(page.container.textContent ?? "", /belongs to project/u);
+  } finally {
+    await page.dispose();
+    storage.remove("agentos.projectId");
+  }
+});
+
+test("a true 404 shows the new not-found message in both locales", async () => {
+  const [{ InboxThreadPage }, { ProjectProvider }, { LocaleProvider }] = await Promise.all([
+    import("../pages/Inbox"),
+    import("../lib/project"),
+    import("../lib/i18n"),
+  ]);
+  for (const [locale, expected] of [["en", "Message not found."], ["zh", "找不到该消息。"]] as const) {
+    const page = await mountPage(
+      <LocaleProvider initialLocale={locale}><ProjectProvider><InboxThreadPage messageId="gone" /></ProjectProvider></LocaleProvider>,
+      {
+        ...emptyProjectRoutes(),
+        "/inbox/messages/gone": new Response(JSON.stringify({ error: "Inbox message not found" }), { status: 404 }),
+      },
+      "http://127.0.0.1:5173/inbox/gone",
+      prepareSelection(null),
+    );
+    try {
+      assert.ok(page.requests.some(({ path }) => path === "/inbox/messages/gone"));
+      assert.match(page.container.textContent ?? "", new RegExp(expected, "u"));
+      assert.doesNotMatch(page.container.textContent ?? "", /control plane|控制面/u);
+    } finally {
+      await page.dispose();
+      storage.remove("agentos.projectId");
+    }
+  }
+});
+
+test("a non-404 Inbox detail error renders ErrorNotice", async () => {
+  const [{ InboxThreadPage }, { ProjectProvider }] = await Promise.all([
+    import("../pages/Inbox"),
+    import("../lib/project"),
+  ]);
+  const page = await mountPage(
+    <ProjectProvider><InboxThreadPage messageId="broken" /></ProjectProvider>,
+    {
+      ...emptyProjectRoutes(),
+      "/inbox/messages/broken": new Response(JSON.stringify({ error: "Internal server error" }), { status: 500 }),
+    },
+    "http://127.0.0.1:5173/inbox/broken",
+    prepareSelection(null),
+  );
+  try {
+    assert.match(page.container.textContent ?? "", /500 Internal server error/u);
+    assert.doesNotMatch(page.container.textContent ?? "", /Message not found/u);
+    assert.ok([...page.container.querySelectorAll("div")].some((element) => element.className.includes("destructive-line")));
+  } finally {
+    await page.dispose();
     storage.remove("agentos.projectId");
   }
 });
