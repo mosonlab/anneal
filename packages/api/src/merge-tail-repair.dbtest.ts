@@ -25,6 +25,7 @@ import {
   latestMarker,
   readMarkerHistory,
   readMarkers,
+  runOwnedHead,
 } from "@anneal/db";
 
 import {
@@ -262,9 +263,17 @@ type RegressionOutcome = "refresh-conflict" | "review-fail" | "gate-fail";
 
 const exercise = async (
   outcome: RegressionOutcome,
-  options: RegressionSeedOptions & { branch?: string } = {},
+  options: RegressionSeedOptions & { branch?: string; failedSource?: "salvaged" | "unpublished" } = {},
 ) => {
   const seeded = await seedRegression(options);
+  if (options.failedSource) {
+    await db.run.update({ where: { id: seeded.run.id }, data: {
+      status: "FAILED", failureClass: "PROTOCOL_ERROR", retryable: true,
+      pushedBranch: options.failedSource === "salvaged" ? runOwnedHead(seeded.regression.id, 1) : null,
+      pushStatus: options.failedSource === "salvaged" ? PushStatus.SUCCEEDED : PushStatus.FAILED,
+      endedAt: new Date(),
+    } });
+  }
   await db.taskStepOutput.create({ data: {
     taskId: seeded.regression.id, runId: seeded.run.id, kind: "regression-verification",
     body: verdict(outcome, HEAD, options.gateFailureExcerpt), commitSha: HEAD,
@@ -1293,6 +1302,77 @@ test("a fresh Regression claim carries the prior verdict and exact published rep
   });
 });
 
+test("a refreshed Regression salvage yields to a later review-fix or gate-fix shared head", async () => {
+  for (const outcome of ["review-fail", "gate-fail"] as const) {
+    const seeded = await exercise(outcome, { failedSource: "salvaged" });
+    const repair = await repairFor(seeded, outcome === "review-fail" ? "review-fix" : "gate-fix");
+    await completeRepair(seeded, repair.id, "Fixed the reported failure.");
+    const run2 = await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id, runNumber: 2 } });
+    assert.equal(run2.targetBranch, BRANCH, outcome);
+    const publishedRepair = await db.run.findFirstOrThrow({ where: { taskId: repair.id } });
+    assert.equal(publishedRepair.headSha, RESOLVED, outcome);
+    assert.equal(publishedRepair.pushedBranch, run2.targetBranch, outcome);
+
+    const claimed = await claimNext();
+    assert.equal(claimed.status, 200, outcome);
+    const body = claimed.body as {
+      run: { id: string; targetBranch: string; targetBranchPublished: boolean };
+      regressionRepairHandoff: { repair: { resolvedHeadSha: string }; retry?: unknown };
+    };
+    assert.equal(body.run.id, run2.id, outcome);
+    assert.equal(body.run.targetBranch, BRANCH, outcome);
+    assert.equal(body.run.targetBranchPublished, true, outcome);
+    assert.equal(body.regressionRepairHandoff.repair.resolvedHeadSha, publishedRepair.headSha, outcome);
+    assert.equal(body.regressionRepairHandoff.retry, undefined, outcome);
+    await resetTestDb(db);
+  }
+});
+
+test("a Regression failure without refresh has no salvage and still starts from the repaired shared head", async () => {
+  const seeded = await exercise("review-fail", { failedSource: "unpublished" });
+  const repair = await repairFor(seeded, "review-fix");
+  await completeRepair(seeded, repair.id, "Fixed the reported failure.");
+  const run2 = await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id, runNumber: 2 } });
+  assert.equal(run2.targetBranch, BRANCH);
+  const claimed = await claimNext();
+  assert.equal(claimed.status, 200);
+  const body = claimed.body as { regressionRepairHandoff: { retry?: unknown } };
+  assert.equal(body.regressionRepairHandoff.retry, undefined);
+});
+
+test("claim stops a repaired Regression whose selected per-Run ref disagrees with the handoff", async () => {
+  const seeded = await exercise("review-fail", { failedSource: "salvaged" });
+  const salvageRef = runOwnedHead(seeded.regression.id, 1);
+  const repair = await repairFor(seeded, "review-fix");
+  await completeRepair(seeded, repair.id, "Fixed the reported failure.");
+  const run2 = await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id, runNumber: 2 } });
+  // Model a stale queued target left by an older base-selection decision.
+  await db.run.update({ where: { id: run2.id }, data: { targetBranch: salvageRef } });
+  const runCount = await db.run.count({ where: { taskId: seeded.regression.id } });
+
+  const claimed = await claimNext();
+  assert.equal(claimed.status, 204);
+  const stopped = await db.run.findUniqueOrThrow({ where: { id: run2.id } });
+  assert.equal(stopped.status, "FAILED");
+  assert.equal(stopped.retryable, false);
+  assert.match(stopped.failureReason ?? "", new RegExp(salvageRef, "u"));
+  assert.match(stopped.failureReason ?? "", new RegExp(HEAD, "u"));
+  assert.match(stopped.failureReason ?? "", new RegExp(RESOLVED, "u"));
+  assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), runCount);
+  assert.equal(await db.session.count({ where: { runId: run2.id } }), 0);
+  const activity = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.regression.id,
+    metadata: { path: ["state"], equals: "handoff-invalid" },
+  }, orderBy: { createdAt: "desc" } });
+  assert.equal((activity.metadata as Record<string, unknown>).targetBranch, salvageRef);
+  assert.equal((activity.metadata as Record<string, unknown>).observedHeadSha, HEAD);
+  assert.deepEqual((activity.metadata as Record<string, unknown>).expectedHeadShas, [RESOLVED]);
+  const stop = await db.inboxMessage.findFirstOrThrow({ where: { taskId: seeded.regression.id } });
+  assert.match(stop.body, new RegExp(salvageRef, "u"));
+  assert.match(stop.body, new RegExp(HEAD, "u"));
+  assert.match(stop.body, new RegExp(RESOLVED, "u"));
+});
+
 test("a repaired Regression claim keeps the handoff from a failed durable source Run", async () => {
   const seeded = await exercise("review-fail");
   await db.run.update({
@@ -1337,7 +1417,7 @@ test("a repaired Regression retry pins a failed prior Run's published head witho
   assert.equal(firstBody.regressionRepairHandoff.retry, undefined);
 
   const continuationHead = "d".repeat(40);
-  const retryBranch = "agentos/regression/retry-run-2";
+  const retryBranch = runOwnedHead(seeded.regression.id, 2);
   await db.run.update({
     where: { id: firstBody.run.id },
     data: {
@@ -1398,6 +1478,28 @@ test("a stale repair output stops the queued Regression Run before a provider se
   assert.equal(task.status, TaskStatus.REVIEW);
   assert.equal(await db.session.count({ where: { runId: run2.id } }), 0);
   assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.regression.id } }), 1);
+});
+
+test("a repair publication with no recorded head reaches claim and stops as handoff-invalid", async () => {
+  const seeded = await exercise("review-fail", { failedSource: "salvaged" });
+  const repair = await repairFor(seeded, "review-fix");
+  await completeRepair(seeded, repair.id, "Closed MF-2.");
+  const repairRun = await db.run.findFirstOrThrow({ where: { taskId: repair.id } });
+  await db.run.update({ where: { id: repairRun.id }, data: { headSha: null } });
+  const run2 = await db.run.findFirstOrThrow({ where: { taskId: seeded.regression.id, runNumber: 2 } });
+  assert.equal(run2.targetBranch, BRANCH);
+
+  const claimed = await claimNext();
+  assert.equal(claimed.status, 204);
+  const stopped = await db.run.findUniqueOrThrow({ where: { id: run2.id } });
+  assert.equal(stopped.status, "FAILED");
+  assert.match(stopped.failureReason ?? "", /output and Run do not bind resolved head/u);
+  assert.equal(await db.session.count({ where: { runId: run2.id } }), 0);
+  const activity = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: seeded.regression.id,
+    metadata: { path: ["state"], equals: "handoff-invalid" },
+  } });
+  assert.match(activity.body, /output and Run do not bind resolved head/u);
 });
 
 test("malformed, unknown, and head-unbound resolver outputs stop loudly", async () => {

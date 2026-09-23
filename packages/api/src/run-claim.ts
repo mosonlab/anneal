@@ -588,6 +588,7 @@ export const claimRun = async (
             runId: candidate.id,
             previousRunId: regressionRepairHandoff.previousRunId,
             reason: regressionRepairHandoff.reason,
+            ...regressionRepairHandoff.metadata,
           },
         }, now);
       }
