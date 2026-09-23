@@ -22,6 +22,8 @@ export const putRecommendedChoiceFirst = <T extends InboxChoice>(
 
 export type MergeApprovalRecommendationInput = {
   checks: Array<{ name: string; conclusion: string }>;
+  additionalChecks?: Array<{ name: string; conclusion: string }>;
+  checkRollupMatchesHead?: boolean;
   mergeStateStatus: string | null;
   pullRequestBaseRef: string | null;
   regressionBaseSha: string | null;
@@ -42,6 +44,10 @@ const isPendingConclusion = (conclusion: string): boolean => {
     || ["PENDING", "EXPECTED", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "STARTING"].includes(normalized);
 };
 
+const isSuccessfulConclusion = (conclusion: string): boolean => (
+  ["SUCCESS", "NEUTRAL", "SKIPPED"].includes(conclusion.toUpperCase())
+);
+
 const displayChecks = (checks: Array<{ name: string; conclusion: string }>): string => checks
   .map(({ name, conclusion }) => `${name}（${conclusion}）`)
   .join("、");
@@ -54,10 +60,19 @@ const displayChecks = (checks: Array<{ name: string; conclusion: string }>): str
 export const recommendMergeApproval = (
   input: MergeApprovalRecommendationInput,
 ): MergeApprovalRecommendation => {
-  const failedChecks = input.checks.filter(({ conclusion }) => (
-    conclusion !== "SUCCESS" && conclusion !== "ABSENT" && !isPendingConclusion(conclusion)
+  if (input.checkRollupMatchesHead === false) {
+    return {
+      kind: "none",
+      choiceId: null,
+      line: "无推荐：检查状态不属于当前 PR head，需重新读取证据。",
+    };
+  }
+
+  const allChecks = [...input.checks, ...(input.additionalChecks ?? [])];
+  const failedChecks = allChecks.filter(({ conclusion }) => (
+    !isSuccessfulConclusion(conclusion) && conclusion.toUpperCase() !== "ABSENT" && !isPendingConclusion(conclusion)
   ));
-  const absentChecks = input.checks.filter(({ conclusion }) => conclusion === "ABSENT");
+  const absentChecks = input.checks.filter(({ conclusion }) => conclusion.toUpperCase() === "ABSENT");
   if (failedChecks.length > 0 || absentChecks.length > 0) {
     const checks = [...failedChecks, ...absentChecks];
     return {
@@ -88,12 +103,12 @@ export const recommendMergeApproval = (
     };
   }
 
-  const pendingChecks = input.checks.filter(({ conclusion }) => isPendingConclusion(conclusion));
+  const pendingChecks = allChecks.filter(({ conclusion }) => isPendingConclusion(conclusion));
   if (pendingChecks.length > 0) {
     return {
       kind: "wait",
       choiceId: null,
-      line: `推荐：等待 CI，先不操作 —— 尚有检查在运行：${pendingChecks.map(({ name }) => name).join("、")}。`,
+      line: `推荐：等待 CI，先不操作 —— 尚有检查在运行：${pendingChecks.map(({ name }) => name).join("、")}；以 GitHub 当前状态为准。`,
     };
   }
 
@@ -112,10 +127,13 @@ export const recommendMergeApproval = (
     && input.currentDefaultBranchSha !== null
     && input.regressionBaseSha === input.currentDefaultBranchSha;
   if (input.mergeStateStatus === "CLEAN" && baseIsCurrent) {
+    const passingChecks = input.checks.length === 0
+      ? "检查全部通过（本仓库无必需检查）"
+      : "必需检查全部通过";
     return {
       kind: "choice",
       choiceId: "approve",
-      line: "推荐：批准并合并 —— 必需检查全部通过、合并状态为 CLEAN，base 与当前默认分支一致。",
+      line: `推荐：批准并合并 —— ${passingChecks}、合并状态为 CLEAN，base 与当前默认分支一致。`,
     };
   }
 

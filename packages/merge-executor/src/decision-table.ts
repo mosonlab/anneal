@@ -147,6 +147,10 @@ export type CheckVerdict =
   | { status: "pending"; pending: string[] }
   | { status: "stop"; reason: string };
 
+const isSuccessfulCheckConclusion = (conclusion: string | null): boolean => (
+  conclusion !== null && ["SUCCESS", "NEUTRAL", "SKIPPED"].includes(conclusion.toUpperCase())
+);
+
 export const verifyRequiredChecks = (
   snapshot: RepositorySnapshot,
   authorizedHead: string,
@@ -188,7 +192,9 @@ export const verifyRequiredChecks = (
     if (!entry) return { status: "stop", reason: `required check ${name} is absent from the rollup for ${authorizedHead}` };
     if (entry.kind === "CheckRun") {
       if (entry.status !== "COMPLETED") { pending.push(name); continue; }
-      if (entry.conclusion !== "SUCCESS") return { status: "stop", reason: `required check ${name} concluded ${describe(entry.conclusion)}` };
+      if (!isSuccessfulCheckConclusion(entry.conclusion)) {
+        return { status: "stop", reason: `required check ${name} concluded ${describe(entry.conclusion)}` };
+      }
       observed.push({ name, conclusion: "SUCCESS" });
     } else {
       if (entry.state === "PENDING" || entry.state === "EXPECTED") { pending.push(name); continue; }
@@ -674,7 +680,7 @@ type PreMergeVerdict =
 const terminalFailedCheckNames = (snapshot: RepositorySnapshot): string[] => [...new Set(
   snapshot.pullRequest.checks.flatMap((check) => {
     if (check.kind === "CheckRun") {
-      return check.status === "COMPLETED" && check.conclusion !== "SUCCESS" ? [check.name] : [];
+      return check.status === "COMPLETED" && !isSuccessfulCheckConclusion(check.conclusion) ? [check.name] : [];
     }
     return check.state !== null
       && check.state !== "SUCCESS"

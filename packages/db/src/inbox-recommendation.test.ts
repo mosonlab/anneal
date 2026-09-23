@@ -25,6 +25,64 @@ test("merge approval recommends approve only for passing checks, CLEAN state, an
   assert.match(result.line, /^推荐：批准/u);
 });
 
+test("an UNSTABLE approval rejects on a failed optional check when there are no required checks", () => {
+  const result = recommendMergeApproval({
+    ...currentApproval(),
+    checks: [],
+    additionalChecks: [{ name: "ci/optional", conclusion: "FAILURE" }],
+    mergeStateStatus: "UNSTABLE",
+  });
+
+  assert.equal(result.choiceId, "reject");
+  assert.match(result.line, /ci\/optional（FAILURE）/u);
+});
+
+test("a pending optional check prevents approval when there are no required checks", () => {
+  const result = recommendMergeApproval({
+    ...currentApproval(),
+    checks: [],
+    additionalChecks: [{ name: "ci/optional", conclusion: "PENDING:IN_PROGRESS" }],
+  });
+
+  assert.equal(result.kind, "wait");
+  assert.notEqual(result.choiceId, "approve");
+  assert.match(result.line, /以 GitHub 当前状态为准/u);
+});
+
+test("an empty required-check set uses accurate approval wording", () => {
+  const result = recommendMergeApproval({
+    ...currentApproval(),
+    checks: [],
+    additionalChecks: [{ name: "ci/optional", conclusion: "SUCCESS" }],
+  });
+
+  assert.equal(result.choiceId, "approve");
+  assert.match(result.line, /检查全部通过（本仓库无必需检查）/u);
+  assert.doesNotMatch(result.line, /必需检查全部通过/u);
+});
+
+test("NEUTRAL and SKIPPED conclusions are successful checks", () => {
+  for (const conclusion of ["NEUTRAL", "SKIPPED"]) {
+    const result = recommendMergeApproval({
+      ...currentApproval(),
+      checks: [],
+      additionalChecks: [{ name: "ci/optional", conclusion }],
+    });
+    assert.equal(result.choiceId, "approve", conclusion);
+  }
+});
+
+test("approval is not recommended when the rollup does not match the current head", () => {
+  const result = recommendMergeApproval({
+    ...currentApproval(),
+    checkRollupMatchesHead: false,
+  });
+
+  assert.equal(result.kind, "none");
+  assert.equal(result.choiceId, null);
+  assert.match(result.line, /不属于当前 PR head/u);
+});
+
 test("merge approval recommends reject and names every failed or missing check", () => {
   const result = recommendMergeApproval({
     ...currentApproval(),

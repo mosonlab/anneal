@@ -666,6 +666,36 @@ test("a protection rule that does exist keeps its own required-check verdicts", 
   );
 });
 
+test("NEUTRAL and SKIPPED CheckRuns pass required checks and are omitted from stop failures", async () => {
+  for (const conclusion of ["NEUTRAL", "SKIPPED"]) {
+    const required = cleanSnapshot({
+      pullRequest: {
+        checks: [{ kind: "CheckRun", name: "ci", conclusion, status: "COMPLETED" }],
+      },
+    });
+    assert.deepEqual(
+      verifyRequiredChecks(required, AUTHORIZED_HEAD, "master"),
+      { status: "ok", observed: [{ name: "ci", conclusion: "SUCCESS" }] },
+      conclusion,
+    );
+
+    const unprotected = cleanSnapshot({
+      repository: { branchProtectionRules: [] },
+      pullRequest: {
+        checks: [{ kind: "CheckRun", name: "optional", conclusion, status: "COMPLETED" }],
+        mergeStateStatus: "UNSTABLE",
+      },
+    });
+    const fake = makeFake({ reads: [{ status: "ok", snapshot: unprotected }] });
+    const outcome = stopped(await execute(fake.deps));
+    assert.equal(outcome.condition, "non-clean-mergeability", conclusion);
+    assert.deepEqual(JSON.parse(outcome.evidence), {
+      mergeStateStatus: "UNSTABLE",
+      failedChecks: [],
+    }, conclusion);
+  }
+});
+
 test("an unprotected repository whose checks finish mid-poll merges without asking a human", async () => {
   const running = cleanSnapshot({
     repository: { branchProtectionRules: [] },

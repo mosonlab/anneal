@@ -5,6 +5,7 @@ import {
   lockRunRow,
   InboxStatus,
   Prisma,
+  RECOMMENDED_LABEL_SUFFIX,
   TaskStatus,
   type PrismaClient,
 } from "@anneal/db";
@@ -361,11 +362,21 @@ const premiseCollapseChoices = [
 const hasPremiseCollapseChoices = (value: Prisma.JsonValue): boolean => (
   Array.isArray(value)
   && value.length === premiseCollapseChoices.length
-  && premiseCollapseChoices.every((expected, index) => {
-    const actual = value[index];
-    return typeof actual === "object" && actual !== null && !Array.isArray(actual)
-      && actual.id === expected.id && actual.label === expected.label;
-  })
+  && (() => {
+    const expectedById = new Map<string, string>(premiseCollapseChoices.map((choice) => [choice.id, choice.label]));
+    const actualById = new Map<string, string>();
+    for (const actual of value) {
+      if (typeof actual !== "object" || actual === null || Array.isArray(actual)
+        || typeof actual.id !== "string" || typeof actual.label !== "string"
+        || !expectedById.has(actual.id) || actualById.has(actual.id)) return false;
+      const label = actual.label.endsWith(RECOMMENDED_LABEL_SUFFIX)
+        ? actual.label.slice(0, -RECOMMENDED_LABEL_SUFFIX.length)
+        : actual.label;
+      if (label !== expectedById.get(actual.id)) return false;
+      actualById.set(actual.id, label);
+    }
+    return actualById.size === expectedById.size;
+  })()
 );
 
 /**

@@ -25,6 +25,7 @@ import {
   MERGE_INTEGRATOR_SCHEMA_VERSION,
   MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
   MergeRecoveryStatus,
+  RECOMMENDED_LABEL_SUFFIX,
   READINESS_BASE_DRIFT_REQUEUE_LIMIT,
   Prisma,
   TaskStatus,
@@ -122,8 +123,30 @@ export const renderMergeEvidenceCard = (
   const checks = evidence.requiredChecks.length === 0
     ? "（无必需检查）"
     : evidence.requiredChecks.map((check) => `  - ${check.name}: ${check.conclusion}`).join("\n");
+  const requiredCheckNames = new Set(evidence.requiredChecks.map(({ name }) => name));
+  const checkRollupMatchesHead = snapshot.headCommitOid === snapshot.headRefOid;
+  const additionalChecks = checkRollupMatchesHead
+    ? snapshot.checkContexts.flatMap((context) => {
+      if (context.__typename === "CheckRun" && "name" in context) {
+        if (requiredCheckNames.has(context.name)) return [];
+        return [{
+          name: context.name,
+          conclusion: context.status === "COMPLETED"
+            ? context.conclusion ?? "UNKNOWN"
+            : `PENDING:${context.status ?? "UNKNOWN"}`,
+        }];
+      }
+      if (context.__typename === "StatusContext" && "context" in context) {
+        if (requiredCheckNames.has(context.context)) return [];
+        return [{ name: context.context, conclusion: context.state ?? "UNKNOWN" }];
+      }
+      return [];
+    })
+    : [];
   const recommendation = recommendMergeApproval({
     checks: evidence.requiredChecks,
+    additionalChecks,
+    checkRollupMatchesHead,
     mergeStateStatus: snapshot.mergeStateStatus,
     pullRequestBaseRef: snapshot.baseRefName,
     regressionBaseSha,
@@ -158,6 +181,22 @@ export const renderMergeEvidenceCard = (
       { id: "reject", label: "打回上一步" },
     ], recommendation.choiceId),
   };
+};
+
+const removeRecommendedChoiceLabels = (choices: Prisma.JsonValue): Prisma.InputJsonValue => {
+  if (!Array.isArray(choices)) throw new Error("merge approval card choices are not an array");
+  const unmarked = choices.map((entry) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new Error("merge approval card has a malformed choice");
+    }
+    const choice = entry as Prisma.JsonObject;
+    if (typeof choice.label !== "string") throw new Error("merge approval card choice has no label");
+    const label = choice.label.endsWith(RECOMMENDED_LABEL_SUFFIX)
+      ? choice.label.slice(0, -RECOMMENDED_LABEL_SUFFIX.length)
+      : choice.label;
+    return { ...choice, label };
+  });
+  return unmarked as unknown as Prisma.InputJsonValue;
 };
 
 const unavailableBody = (request: PendingEvidenceRequest, reason: string): string => [
@@ -281,7 +320,7 @@ export const refreshStaleMergeCardsTick = async (
   const result = { checked: 0, refreshed: 0, exhausted: 0 };
   const cards = await db.inboxMessage.findMany({
     where: { status: InboxStatus.OPEN, gateTaskId: { not: null } },
-    select: { id: true, gateTaskId: true, body: true },
+    select: { id: true, gateTaskId: true, body: true, choices: true },
     orderBy: [{ createdAt: "asc" }, { id: "asc" }],
   });
   const openCardIds = new Set(cards.map((card) => card.id));
@@ -398,7 +437,10 @@ export const refreshStaleMergeCardsTick = async (
     try {
       changed = await db.$transaction(async (tx) => {
       await lockChainRows(tx, { projectId: gate.projectId, chainId: gate.chainId! });
-      const current = await tx.inboxMessage.findUnique({ where: { id: card.id }, select: { status: true, body: true } });
+      const current = await tx.inboxMessage.findUnique({
+        where: { id: card.id },
+        select: { status: true, body: true, choices: true },
+      });
       if (current?.status !== InboxStatus.OPEN || current.body !== card.body) return "lost" as const;
       if (await tx.chainControl.count({ where: { projectId: gate.projectId, chainId: gate.chainId!, state: "HELD" } })) return "busy" as const;
       if (await tx.run.count({ where: { task: { projectId: gate.projectId, chainId: gate.chainId! },
@@ -415,9 +457,17 @@ export const refreshStaleMergeCardsTick = async (
       })).readinessRequeues;
       const allowance = aggregate ? MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES : READINESS_BASE_DRIFT_REQUEUE_LIMIT;
       if (spent >= allowance) {
-        await tx.inboxMessage.update({ where: { id: card.id }, data: {
-          body: `${card.body}\n\n目标分支已前进；自动刷新已达 ${allowance} 次上限，请人工处理。`,
-        } });
+        const staleBody = [
+          `无推荐：自动刷新已达 ${allowance} 次上限，原审批证据已过期；请人工处理。`,
+          ...current.body.split("\n").slice(1),
+          "",
+          `目标分支已前进；自动刷新已达 ${allowance} 次上限，请人工处理。`,
+        ].join("\n");
+        const updated = await tx.inboxMessage.updateMany({
+          where: { id: card.id, status: InboxStatus.OPEN, body: card.body },
+          data: { body: staleBody, choices: removeRecommendedChoiceLabels(current.choices) },
+        });
+        if (updated.count !== 1) return "lost" as const;
         await writeMarker(tx, gate.id, "evidenceRefresh", "ceiling", {
           actorType: "control-plane",
           body: `Stale merge card retained: automatic refresh budget ${spent}/${allowance} exhausted`,

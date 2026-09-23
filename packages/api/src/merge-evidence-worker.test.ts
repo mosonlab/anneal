@@ -77,6 +77,52 @@ test("a failed merge approval card puts reject first and names the failed check"
   ]);
 });
 
+test("a merge approval with no required checks rejects a failed optional check", () => {
+  const evidence = { ...gateEvidence, requiredChecks: [] };
+  const snapshot = mergeSnapshot({
+    mergeStateStatus: "UNSTABLE",
+    requiredCheckNames: [],
+    checkContexts: [
+      { __typename: "CheckRun", name: "ci/optional", status: "COMPLETED", conclusion: "FAILURE" },
+    ],
+  });
+  const card = renderMergeEvidenceCard(evidence, snapshot, "main", "main", "b".repeat(40));
+
+  assert.match(card.body, /^推荐：打回/u);
+  assert.match(card.body, /ci\/optional（FAILURE）/u);
+  assert.equal(card.choices[0]?.id, "reject");
+});
+
+test("a merge approval with no required checks waits on an optional pending check", () => {
+  const evidence = { ...gateEvidence, requiredChecks: [] };
+  const snapshot = mergeSnapshot({
+    requiredCheckNames: [],
+    checkContexts: [
+      { __typename: "CheckRun", name: "ci/optional", status: "IN_PROGRESS", conclusion: null },
+    ],
+  });
+  const card = renderMergeEvidenceCard(evidence, snapshot, "main", "main", "b".repeat(40));
+
+  assert.match(card.body, /^推荐：等待 CI，先不操作/u);
+  assert.match(card.body.split("\n")[0] ?? "", /以 GitHub 当前状态为准/u);
+  assert.ok(card.choices.every(({ label }) => !label.endsWith("（推荐）")));
+});
+
+test("a merge approval with no required checks describes the passing-check evidence accurately", () => {
+  const evidence = { ...gateEvidence, requiredChecks: [] };
+  const snapshot = mergeSnapshot({
+    requiredCheckNames: [],
+    checkContexts: [
+      { __typename: "CheckRun", name: "ci/optional", status: "COMPLETED", conclusion: "SUCCESS" },
+    ],
+  });
+  const card = renderMergeEvidenceCard(evidence, snapshot, "main", "main", "b".repeat(40));
+
+  assert.match(card.body, /^推荐：批准并合并/u);
+  assert.match(card.body, /检查全部通过（本仓库无必需检查）/u);
+  assert.doesNotMatch(card.body.split("\n")[0] ?? "", /必需检查全部通过/u);
+});
+
 test("a merge approval card recommends reject when Regression's base is stale", () => {
   const card = renderMergeEvidenceCard(gateEvidence, mergeSnapshot(), "main", "main", "c".repeat(40));
 
