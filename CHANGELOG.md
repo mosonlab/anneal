@@ -91,8 +91,16 @@ written.
   each defect class it finds and reports all of them, with every other open
   finding, in one `review-fail`. The `review-fix` and `gate-fix` repair prompt
   asks the repair to close every listed instance and every other instance of
-  the same class, and to list the sites it checked and changed. Canonical sync
-  retires the `pre-defect-class-sweep` prompt generation on deploy.
+  the same class, and to list the sites it checked and changed.
+- **Widened shared contracts are checked before the merge tail.** When a change
+  widens or adds a shared contract, invariant, or cross-cutting rule, the
+  canonical Implementation step enumerates and updates every existing consumer,
+  call site, and endpoint it now governs and lists them in its summary. The
+  code review and blind code review steps check each one and report every
+  inconsistent one as its own finding. The review prompts are shared with the
+  pull-request workflow, so it gets the review rule too. Canonical sync retires
+  the `pre-defect-class-sweep` prompt generation of all three templates on
+  deploy.
 
 ## v0.9.0 — Developer Preview 9
 

@@ -2357,6 +2357,10 @@ finding, in one `review-fail` summary. The `review-fix` and `gate-fix` repair
 prompt requires closing every listed instance and every other instance of that
 class found by sweeping the same contract, without unrelated refactors, and
 listing the sites checked and changed in the repair's task output summary.
+Earlier in the chain, the canonical Implementation and review steps enumerate
+every existing consumer of a shared contract, invariant, or cross-cutting rule
+the change widens or adds, so such a defect should be caught before the merge
+tail.
 
 Inside a base-drift recovery Run, the same validation and precedence apply,
 but the settlement is the recovery stop carrying the persisted verdict's

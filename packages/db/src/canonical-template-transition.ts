@@ -388,7 +388,8 @@ const legacyTemplateGenerations = {
     {
       // Prompt-only rollover: Regression verification sweeps the change for every
       // instance of a found defect class and reports all open findings in one
-      // review-fail. The graph is unchanged.
+      // review-fail, and Implementation and review enumerate every consumer of
+      // a widened shared contract. The graph is unchanged.
       marker: "pre-defect-class-sweep",
       promptDigest: "57c1f304441e38bf4a0dd63bb7a9f031dbcbc55acf52ac0ff16d416a885d5ceb",
       shape: [
@@ -668,7 +669,8 @@ const legacyTemplateGenerations = {
     {
       // Prompt-only rollover: Regression verification sweeps the change for every
       // instance of a found defect class and reports all open findings in one
-      // review-fail. The graph is unchanged.
+      // review-fail, and Implementation and review enumerate every consumer of
+      // a widened shared contract. The graph is unchanged.
       marker: "pre-defect-class-sweep",
       promptDigest: "2a3634bc7c7f74a066ab8fce78c4e0f02f2f9ac65acdcf37e07c993c445bed2c",
       shape: [
@@ -761,6 +763,19 @@ const legacyTemplateGenerations = {
         { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
       ],
     },
+    {
+      // Prompt-only rollover: both review prompts, shared with the Direct
+      // workflow, enumerate every consumer of a widened shared contract. The
+      // graph is unchanged.
+      marker: "pre-defect-class-sweep",
+      promptDigest: "93a909a5d88b6aa158f9f86155853d7aed7762b61bd56dc9a1b17b6e7051281f",
+      shape: [
+        { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Code review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "review-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null, provisionDependencies: false },
+        { name: "Blind code review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 1, layer: 2, spawnPolicy: null, provisionDependencies: false },
+        { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 3, spawnPolicy: null },
+      ],
+    },
   ],
 } as const satisfies Readonly<Record<string, readonly LegacyTemplateGeneration[]>>;
 
@@ -795,9 +810,9 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<
  * `agents/templates/` and fails on a mismatch.
  */
 export const CANONICAL_SOURCE_PROMPT_GENERATIONS = {
-  [DIRECT_TEMPLATE_NAME]: "26d992eca6f771a9d7bdff5e515de7905185cf830e81d388a1eddd0388e9c9c2",
-  "compound-engineer-workflow": "e2cc63158da51175e3cd61dcc3dbb06894634b6408ebb71c36b332fdc68fe4bf",
-  [PR_TEMPLATE_NAME]: "93a909a5d88b6aa158f9f86155853d7aed7762b61bd56dc9a1b17b6e7051281f",
+  [DIRECT_TEMPLATE_NAME]: "a47afe8c86d047f684792706aebec58a87379443531ca41ec2a2daad2e5d1ca2",
+  "compound-engineer-workflow": "97f7f07c267b0226a8d799dd59e28b5a6d32bba3bf028e091d6a687208fdb810",
+  [PR_TEMPLATE_NAME]: "95fdc85e4f0fda6943fd22929de1ab322b82f83d69cea0ab7aa12c5993d333bb",
 } as const satisfies Readonly<Record<CanonicalTemplateRegistryName, string>>;
 
 export type CanonicalTemplateIdentity = Readonly<{

@@ -889,11 +889,11 @@ test("canonical unbound direct instantiation retains the seven-task prompt snaps
     name: row.name,
     descriptionSha256: createHash("sha256").update(String(row.description)).digest("hex"),
   })), [
-    { name: "snapshot chain: Implementation", descriptionSha256: "45327aeb86fc7e98a76ef4052278cee29ceb38a601aeb65225024b87708225d0" },
-    { name: "snapshot chain: Code review", descriptionSha256: "9b6d28537d11423006f897eb0661e6120ff8ea96f8857cfa6b4cfe06ad3c3c27" },
-    { name: "snapshot chain: Blind code review", descriptionSha256: "af02f099a6e2b6b10f3ea2b31b8bcfd06a057cd91b134c16a3df552690fc979b" },
+    { name: "snapshot chain: Implementation", descriptionSha256: "8bd931801042469de5629b1c44d0b82a1816dcb85b830b61a43e7c2df1896092" },
+    { name: "snapshot chain: Code review", descriptionSha256: "1e558576791ac343ace6ac0dd18ff4e8e3bc1586d2befef4930ca0a7c1fd052d" },
+    { name: "snapshot chain: Blind code review", descriptionSha256: "7069546432756ec7b98f667f796b7c22611d11ef0c386ff1c112a597baea0d42" },
     { name: "snapshot chain: Apply review fixes", descriptionSha256: "89607144c06f5ee42b01f9d3e3ae1513d5d5232f8b0541d736b505b312408a8e" },
-    { name: "snapshot chain: Regression verification", descriptionSha256: "c677b18dca75aa1958145cc1dec93236e03f2ba27a8ad2151eda18c92d1d9629" },
+    { name: "snapshot chain: Regression verification", descriptionSha256: "c72974f3593e69d6f0299ee2de151f24b2dae91d203b76f64295108f59ab62aa" },
     { name: "snapshot chain: Merge authorization", descriptionSha256: "6cc850c691d3334a0ba8e4b26b24acdc3c7ab70c4b8cbac1fccb65ee708a7da7" },
     { name: "snapshot chain: Merge execution", descriptionSha256: "6f3ee10eef0967fec9bfdb09a73ab8b9f5e07aa3e4548e48d1174e2a90602a53" },
   ]);

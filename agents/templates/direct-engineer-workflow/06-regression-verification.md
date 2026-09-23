@@ -33,7 +33,7 @@ a failure.
 If an adopted finding remains open, a rejection is unsupported, or a new defect exists, do not stop at the first:
 account for every open finding and sweep the change for every other instance of each defect class (the same rule,
 contract, or invariant broken at another call site, endpoint, or code path reachable from the diff or a contract it
-widened). Report all of them in one call, one line each as `file:line — what breaks`, within 40 lines and 4000 bytes:
+widened). Report all of them in one call, one line each as `file:line — what breaks`:
 `"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh" review-fail '<concise finding IDs or defect>'`
 and finish. Otherwise run `"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh" finalize`.
 

@@ -1,12 +1,26 @@
 /**
- * Restore the Regression review-fail handoff retired by the defect-class sweep
- * rollover (2026-09-22). Every registered generation predates it, so the older
- * fixtures apply it before reconstructing their earlier prompt bytes.
+ * Restore the prompt bytes retired by the defect-class sweep rollover
+ * (2026-09-23): the Regression review-fail handoff and the shared-contract
+ * consumer sentence in the Implementation and review prompts. Every registered
+ * generation predates it, so the older fixtures apply it before reconstructing
+ * their earlier prompt bytes.
  */
 export const restorePreDefectClassSweepPrompt = (prompt: string): string => prompt
   .replace(
-    "If an adopted finding remains open, a rejection is unsupported, or a new defect exists, do not stop at the first:\naccount for every open finding and sweep the change for every other instance of each defect class (the same rule,\ncontract, or invariant broken at another call site, endpoint, or code path reachable from the diff or a contract it\nwidened). Report all of them in one call, one line each as `file:line — what breaks`, within 40 lines and 4000 bytes:",
+    "If an adopted finding remains open, a rejection is unsupported, or a new defect exists, do not stop at the first:\naccount for every open finding and sweep the change for every other instance of each defect class (the same rule,\ncontract, or invariant broken at another call site, endpoint, or code path reachable from the diff or a contract it\nwidened). Report all of them in one call, one line each as `file:line — what breaks`:",
     "If an adopted finding remains open, a rejection is unsupported, or a new\ndefect exists, run",
+  )
+  .replace(
+    " When the change widens or adds a shared contract, invariant, or cross-cutting rule (such as a new policy field, enum member, or required parameter), enumerate every existing consumer, call site, and endpoint it now governs, update each one, and list them in the summary.",
+    "",
+  )
+  .replace(
+    " When the change widens or adds a shared contract, invariant, or cross-cutting rule, enumerate every existing consumer, call site, and endpoint it now governs and check each one; report every one left inconsistent as its own finding.",
+    "",
+  )
+  .replace(
+    "report. When the change widens or adds a shared contract, invariant, or\ncross-cutting rule, enumerate every existing consumer, call site, and endpoint\nit now governs and check each one; report every one left inconsistent as its\nown finding. Persist exactly one",
+    "report. Persist exactly one",
   );
 
 /**

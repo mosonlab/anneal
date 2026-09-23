@@ -10,7 +10,7 @@ for (const marker of ["pre-runner-provided-regression-tooling", "pre-optional-re
     const sources = await loadAllTemplateStepSources();
     for (const name of ["direct-engineer-workflow", "compound-engineer-workflow"] as const) {
       const steps = sources.get(name)!.map((step) => {
-        let prompt = step.prompt.replaceAll("review-findings", "sol-findings").replaceAll("the code review report", "the Sol report");
+        let prompt = restorePreDefectClassSweepPrompt(step.prompt).replaceAll("review-findings", "sol-findings").replaceAll("the code review report", "the Sol report");
         if (step.outputKind === "revalidation") prompt = restorePreTierRevalidationPrompt(prompt);
         if (["fixed-implementation", "regression-verification-v2"].includes(step.outputKind)) {
           prompt = restorePreOptionalReviewPrompt(prompt);
@@ -53,7 +53,7 @@ test("sync fixtures reconstruct the registered pre-sol-high-hazard-tier generati
 
 test("sync fixtures reconstruct the registered pre-defect-class-sweep generation", async () => {
   const sources = await loadAllTemplateStepSources();
-  for (const name of ["direct-engineer-workflow", "compound-engineer-workflow"] as const) {
+  for (const name of ["direct-engineer-workflow", "compound-engineer-workflow", "pr-engineer-workflow"] as const) {
     const steps = sources.get(name)!.map((step) => ({ ...step, prompt: restorePreDefectClassSweepPrompt(step.prompt) }));
     assert.equal(templatePromptGenerationDigest(steps), LEGACY_TEMPLATE_GENERATIONS[name].find((generation) => generation.marker === "pre-defect-class-sweep")!.promptDigest, name);
   }
