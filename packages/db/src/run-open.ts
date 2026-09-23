@@ -487,62 +487,159 @@ const templateChainBranch = async (tx: Tx, task: RunBranchTask): Promise<string 
   return sibling?.targetBranch ?? null;
 };
 
-/**
- * The base a retry may inherit from its prior run, or null when nothing that run
- * left behind is known to exist on the remote.
- *
- * `prior.branch` is the *workspace* branch: the runner writes it back before any
- * push happens (workspace.ts, runner.ts), so a run whose push failed leaves a
- * `branch` that exists in no remote. Non-chain and template retries used to
- * inherit it as their base unconditionally, and `provisionWorkspace` clones the
- * base by name — so those retries died in `git clone` about two minutes in,
- * burning the whole run budget without ever starting the agent (issue #118: runs
- * cmsy9kg5j0001mp76wb95xiyu, cmsya108b00eqmp767igidbmb, cmsyaa0nk00oqmp760jc7693a).
- *
- * Only `pushedBranch` is evidence, for exactly the reasons spelled out on the
- * chain branch in `resolveRunBranches`: it is written from the ref actually
- * handed to `git push`, and `branch`/`pushStatus`/`status` each lie about it in
- * one direction or the other.
- */
+type InheritedPublication = {
+  runId: string;
+  taskId: string;
+  pushedBranch: string;
+  headSha: string | null;
+  source: "task" | "chain" | "merge-tail-repair";
+};
+
+const inheritedPublication = async (
+  tx: Tx,
+  task: RunBranchTask,
+  prior: { branch: string | null } | null,
+): Promise<InheritedPublication | null> => {
+  if (!task.repoId) return null;
+
+  // A chain step's branch is either the derived manual-chain ref or the
+  // template's declared branch. A template's first task can still carry the
+  // actual shared head only on its prior Run, so use that after checking the
+  // sibling Task declarations.
+  const indexedChain = task.chainId != null && task.chainIndex != null;
+  if (task.chainIndex != null && task.chainId == null) {
+    throw new Error(`Task ${task.id} has chainIndex ${task.chainIndex} but no chainId`);
+  }
+  const sharedBranch = indexedChain
+    ? task.templateId
+      ? (await templateChainBranch(tx, task)) ?? prior?.branch ?? null
+      : sharedChainBranch({ projectId: task.projectId, chainId: task.chainId! })
+    : null;
+
+  // Template steps of one chain share a branch, so a Run this retry wants may
+  // have been published by a sibling. A detached merge-tail repair also
+  // publishes onto that branch, but its Run is chain-detached; include it only
+  // when both its declared Run head and its Task target name this exact shared
+  // ref. A detached repair's own salvage is intentionally excluded: only an
+  // ACK that updated the shared ref can advance the Chain. A later indexed
+  // Chain Run may still contribute its acknowledged per-Run salvage ref.
+  const chainScope = indexedChain;
+  if (!prior && !chainScope) return null;
+  const publicationSelect = {
+    id: true,
+    taskId: true,
+    branch: true,
+    pushedBranch: true,
+    headSha: true,
+    task: { select: { id: true, projectId: true, repoId: true, chainId: true, chainIndex: true, targetBranch: true } },
+  } satisfies Prisma.RunSelect;
+
+  const evidence = (row: {
+    id: string;
+    taskId: string | null;
+    branch: string | null;
+    pushedBranch: string | null;
+    headSha: string | null;
+    task: { id: string; projectId: string; repoId: string | null; chainId: string | null; chainIndex: number | null; targetBranch: string | null } | null;
+  }, source: InheritedPublication["source"]): InheritedPublication => {
+    if (!row.pushedBranch || !row.taskId || !row.task || row.task.id !== row.taskId) {
+      throw new Error(`Published Run ${row.id} for Task ${task.id} is missing its task or pushedBranch evidence`);
+    }
+    return { runId: row.id, taskId: row.taskId, pushedBranch: row.pushedBranch, headSha: row.headSha, source };
+  };
+
+  // A non-chain retry first asks the narrow historical question: did this task
+  // publish the workspace branch it is trying to continue? Chain retries skip
+  // this shortcut because a newer sibling or repair publication must outrank
+  // an older head.
+  if (!chainScope && prior?.branch) {
+    const exact = await tx.run.findFirst({
+      where: { repoId: task.repoId, pushedBranch: prior.branch, task: { id: task.id } },
+      select: publicationSelect,
+    });
+    if (exact) return evidence(exact, "task");
+  }
+  // `createdAt`, not a per-task runNumber, orders publications across sibling
+  // steps and detached repair cards. `updatedAt` can move later for cleanup.
+  // Repo and project are both included because the same branch spelling on a
+  // different remote or project is not evidence for this Chain.
+  const published = await tx.run.findFirst({
+    where: {
+      repoId: task.repoId,
+      pushedBranch: { not: null },
+      ...(chainScope
+        ? {
+          OR: [
+            { task: { projectId: task.projectId, repoId: task.repoId, chainId: task.chainId, chainIndex: { not: null } } },
+            ...(sharedBranch === null ? [] : [{
+              branch: sharedBranch,
+              pushedBranch: sharedBranch,
+              task: {
+                projectId: task.projectId,
+                repoId: task.repoId,
+                chainId: null,
+                chainIndex: null,
+                targetBranch: sharedBranch,
+              },
+            }]),
+          ],
+        }
+        : { task: { id: task.id } }),
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: publicationSelect,
+  });
+  if (!published) return null;
+  if (chainScope) {
+    if (!published.task || published.task.projectId !== task.projectId || published.task.repoId !== task.repoId) {
+      throw new Error(`Published Run ${published.id} for Chain ${task.chainId} is outside its project or Repo`);
+    }
+    const isChainStep = published.task.chainId === task.chainId && published.task.chainIndex !== null;
+    const isRepair = published.task.chainId === null
+      && published.task.chainIndex === null
+      && sharedBranch !== null
+      && published.task.targetBranch === sharedBranch
+      && published.branch === sharedBranch
+      && published.pushedBranch === sharedBranch;
+    if (!isChainStep && !isRepair) {
+      throw new Error(`Published Run ${published.id} for Chain ${task.chainId} has incomplete branch identity`);
+    }
+    return evidence(published, isRepair ? "merge-tail-repair" : "chain");
+  }
+  return evidence(published, "task");
+};
+
 const inheritedBase = async (
   tx: Tx,
   task: RunBranchTask,
   prior: { branch: string | null } | null,
-): Promise<string | null> => {
-  if (!task.repoId) return null;
-  // Template steps of one chain share a branch, so the ref this retry wants may
-  // have been published by a *sibling* step. This also applies to a successor's
-  // first run: `prior` is null there, but the predecessor's salvage ref is the
-  // newest durable tree the chain owns. Everything else asks about itself only.
-  // A chainIndex-null row stays isolated from indexed siblings carrying the
-  // same chainId (see resolveRunBranches).
-  const chainScope = task.chainId && task.chainIndex !== null
-    ? { projectId: task.projectId, chainId: task.chainId, chainIndex: { not: null } }
+): Promise<string | null> => (await inheritedPublication(tx, task, prior))?.pushedBranch ?? null;
+
+const recordDetachedRepairInheritance = async (
+  tx: Tx,
+  task: RunBranchTask,
+  publication: InheritedPublication | null,
+  additionalReason?: string,
+): Promise<void> => {
+  if (publication?.source !== "merge-tail-repair" && !additionalReason) return;
+  const repairDetails = publication?.source === "merge-tail-repair"
+    ? `Inherited branch '${publication.pushedBranch}' from detached merge-tail repair Run ${publication.runId}`
+      + ` at head ${publication.headSha ?? "unknown"}`
+      + `, Task ${publication.taskId}.`
     : null;
-  if (!prior && !chainScope) return null;
-  const scope = chainScope
-    ? chainScope
-    : { id: task.id };
-  // A non-chain retry first asks the narrow historical question: did this task
-  // publish the workspace branch it is trying to continue? Chain retries skip
-  // this shortcut because a newer sibling salvage must outrank an older head.
-  if (!chainScope && prior?.branch) {
-    const exact = await tx.run.findFirst({
-      where: { repoId: task.repoId, pushedBranch: prior.branch, task: scope },
-      select: { pushedBranch: true },
-    });
-    if (exact?.pushedBranch) return exact.pushedBranch;
-  }
-  // `createdAt`, not a per-task runNumber, orders publications across sibling
-  // steps. Run rows are created serially along a chain; their updatedAt can move
-  // later for cleanup bookkeeping and is therefore not publication ordering.
-  // Scoped by repo: the same branch name on two remotes is two unrelated refs.
-  const published = await tx.run.findFirst({
-    where: { repoId: task.repoId, pushedBranch: { not: null }, task: scope },
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    select: { pushedBranch: true },
-  });
-  return published?.pushedBranch ?? null;
+  await tx.taskActivity.create({ data: {
+    taskId: task.id,
+    actorType: "control-plane",
+    body: [repairDetails, additionalReason].filter(Boolean).join(" "),
+    ...(publication?.source === "merge-tail-repair" ? { metadata: {
+      kind: "chain-base-inherited",
+      source: "merge-tail-repair",
+      sourceRunId: publication.runId,
+      sourceTaskId: publication.taskId,
+      branch: publication.pushedBranch,
+      headSha: publication.headSha ?? "unknown",
+    } } : {}),
+  } });
 };
 
 /**
@@ -566,8 +663,11 @@ export const resolveRequeueBase = async (
   task: RunBranchTask,
   run: { branch: string | null; targetBranch: string | null },
 ): Promise<string | null> => {
-  const published = await inheritedBase(tx, task, { branch: run.branch });
-  if (published) return published;
+  const publication = await inheritedPublication(tx, task, { branch: run.branch });
+  if (publication) {
+    await recordDetachedRepairInheritance(tx, task, publication);
+    return publication.pushedBranch;
+  }
   if (run.branch !== null && run.targetBranch === run.branch) {
     return task.targetBranch ?? task.repo.defaultBranch;
   }
@@ -624,13 +724,16 @@ const chainDeclaredBranches = async (
   // materializes an inert chain whose first Run is created only by POST /start.
   if (task.templateId) {
     const chainBranch = await templateChainBranch(tx, task);
+    const publication = await inheritedPublication(tx, task, prior);
+    const targetBranch = publication?.pushedBranch ?? task.targetBranch ?? task.repo.defaultBranch;
+    await recordDetachedRepairInheritance(tx, task, publication);
     return {
       // A prior Run carries the workspace branch the runner actually used. An
       // upgrade-state retry may therefore carry a per-run fallback here; when
       // the logical template head is recoverable, it must win so successors
       // clone the ref this retry publishes.
       branch: chainBranch ?? prior?.branch ?? null,
-      targetBranch: (await inheritedBase(tx, task, prior)) ?? task.targetBranch ?? task.repo.defaultBranch,
+      targetBranch,
     };
   }
   // A chainId with no index is a malformed one-row "chain" in the public API
@@ -672,21 +775,18 @@ const chainDeclaredBranches = async (
   // refs) and restricted to indexed tasks. A chainIndex-null row is the API's
   // isolated 1/1 malformed-chain case and must neither contribute nor consume
   // publication evidence for an indexed chain with the same chainId.
-  const published = await inheritedBase(tx, task, prior);
+  const publication = await inheritedPublication(tx, task, prior);
   // `prior?.branch` is deliberately not consulted as publication evidence.
   // Only pushedBranch proves that a cloneable remote ref exists.
-  const targetBranch = published ?? task.targetBranch ?? task.repo.defaultBranch;
+  const targetBranch = publication?.pushedBranch ?? task.targetBranch ?? task.repo.defaultBranch;
 
   // targetBranch stays writable for chain steps but no longer routes them.
   // Silently ignoring an operator's value is a footgun, so say so once per run —
   // this is how the operator learns hand-repointing is unnecessary.
-  if (task.targetBranch && task.targetBranch !== targetBranch) {
-    await tx.taskActivity.create({ data: {
-      taskId: task.id,
-      actorType: "control-plane",
-      body: `targetBranch '${task.targetBranch}' is not used for chain steps; this run is based on '${targetBranch}' and pushes to '${shared}'`,
-    } });
-  }
+  const ignoredTargetBranch = task.targetBranch && task.targetBranch !== targetBranch
+    ? `targetBranch '${task.targetBranch}' is not used for chain steps; this run is based on '${targetBranch}' and pushes to '${shared}'.`
+    : undefined;
+  await recordDetachedRepairInheritance(tx, task, publication, ignoredTargetBranch);
   return { branch: shared, targetBranch };
 };
 

@@ -334,7 +334,13 @@ const rejectionTx = (options: { redoArchivedAt?: Date | null; agentArchivedAt?: 
       // the remote before reusing it as the redo's base. A gate exists because
       // it did, so this answers yes for that ref and no for anything else.
       findFirst: async ({ where }: { where: { pushedBranch?: unknown } }) =>
-        (where.pushedBranch === "feature/x" ? { id: "run-1", pushedBranch: "feature/x" } : null),
+        (where.pushedBranch === "feature/x" ? {
+          id: "run-1", taskId: executable.id, branch: "feature/x", pushedBranch: "feature/x", headSha: null,
+          task: {
+            id: executable.id, projectId: executable.projectId, repoId: executable.repoId,
+            chainId: null, chainIndex: null, targetBranch: executable.targetBranch,
+          },
+        } : null),
       create: async ({ data }: { data: Record<string, unknown> }) => { queued.push(data); return { id: "run-2", ...data }; },
     },
   } as any;
@@ -678,15 +684,42 @@ const branchTx = (rows: Array<{
 }>, templateBranch: string | null = null) => ({
   run: {
     findFirst: async ({ where, orderBy }: any) => {
+      const taskFor = (row: typeof rows[number]) => ({
+        id: row.taskId,
+        projectId: "project-1",
+        repoId: row.repoId,
+        chainId: row.chainId,
+        chainIndex: row.chainId === null ? null : 0,
+        targetBranch: templateBranch,
+      });
+      const matchesTask = (row: typeof rows[number], scope: Record<string, any>) => Object.entries(scope).every(([key, value]) => (
+        key === "chainIndex" && value?.not === null
+          ? taskFor(row).chainIndex !== null
+          : (taskFor(row) as Record<string, any>)[key] === value
+      ));
       const scoped = rows.filter((row) => row.repoId === where.repoId
         && (where.taskId === undefined || row.taskId === where.taskId)
-        && (where.task?.id === undefined || row.taskId === where.task.id)
-        && (where.task?.chainId === undefined || row.chainId === where.task.chainId));
+        && (where.task === undefined || matchesTask(row, where.task))
+        && (where.OR === undefined || where.OR.some((scope: Record<string, any>) => (
+          (scope.branch === undefined || scope.branch === (templateBranch ?? row.pushedBranch))
+          && (scope.pushedBranch === undefined || scope.pushedBranch === row.pushedBranch)
+          && (scope.task === undefined || matchesTask(row, scope.task))
+        ))));
+      const shape = (row: typeof rows[number]) => ({
+        id: `run-${row.taskId}-${row.runNumber}`,
+        taskId: row.taskId,
+        branch: templateBranch ?? row.pushedBranch,
+        pushedBranch: row.pushedBranch,
+        headSha: null,
+        task: taskFor(row),
+      });
       if (typeof where.pushedBranch === "string") {
-        return scoped.find((row) => row.pushedBranch === where.pushedBranch) ?? null;
+        const exact = scoped.find((row) => row.pushedBranch === where.pushedBranch);
+        return exact ? shape(exact) : null;
       }
       assert.deepEqual(orderBy, [{ createdAt: "desc" }, { id: "desc" }]);
-      return [...scoped].sort((a, b) => b.runNumber - a.runNumber)[0] ?? null;
+      const latest = [...scoped].sort((a, b) => b.runNumber - a.runNumber)[0];
+      return latest ? shape(latest) : null;
     },
   },
   task: { findFirst: async () => templateBranch === null ? null : { targetBranch: templateBranch } },

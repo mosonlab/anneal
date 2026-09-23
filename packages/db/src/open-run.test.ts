@@ -26,6 +26,7 @@ import {
   settleRunBirthRefusal,
   runBirthRefusalDecision,
 } from "./run-open.js";
+import { sharedChainBranch } from "./chain-branch.js";
 import { runOwnedHead } from "./run-head.js";
 import { LEASE_LOSS_REFUND_CAP, refundDecision } from "./run-refund.js";
 
@@ -150,7 +151,7 @@ const fakeTx = (
   options: {
     chainControlRows?: Array<Record<string, unknown>>;
     lockedAgent?: ReturnType<typeof agent> | null;
-    publishedRuns?: Array<{ taskId: string; repoId: string; pushedBranch: string | null }>;
+    publishedRuns?: Array<Record<string, any> & { taskId: string; repoId: string; pushedBranch: string | null }>;
     stopRows?: Array<Record<string, unknown>>;
     existingInboxStatus?: "OPEN" | "ANSWERED" | "CLOSED";
     /** The task's costed Run rows, as the spend-cap basis reads them. */
@@ -163,6 +164,7 @@ const fakeTx = (
   const inbox: Array<Record<string, unknown>> = [];
   const inboxUpdates: Array<Record<string, unknown>> = [];
   let existingInboxStatus = options.existingInboxStatus ?? null;
+  const runFindFirstCalls: Array<Record<string, any>> = [];
   let agentLocks = 0;
   const tx = {
     $queryRaw: async () => {
@@ -214,14 +216,56 @@ const fakeTx = (
     },
     taskTemplateStep: { findUnique: async () => null },
     run: {
-      findFirst: async ({ where }: { where: Record<string, any> }) => {
-        const rows = options.publishedRuns ?? [];
-        return rows.find((row) => (
-          (typeof where.taskId !== "string" || row.taskId === where.taskId)
-          && (typeof where.repoId !== "string" || row.repoId === where.repoId)
-          && (typeof where.pushedBranch !== "string" || row.pushedBranch === where.pushedBranch)
-          && (typeof where.task?.id !== "string" || row.taskId === where.task.id)
-        )) ?? null;
+      findFirst: async (args: { where: Record<string, any>; orderBy?: unknown }) => {
+        runFindFirstCalls.push(args);
+        const taskFor = (row: Record<string, any>) => row.task ?? {
+          id: row.taskId,
+          projectId: row.projectId ?? task?.projectId,
+          repoId: row.taskRepoId ?? row.repoId,
+          chainId: row.chainId ?? (row.taskId === task?.id ? task?.chainId : null),
+          chainIndex: row.chainIndex ?? (row.taskId === task?.id ? task?.chainIndex : null),
+          targetBranch: row.targetBranch ?? (row.taskId === task?.id ? task?.targetBranch : null),
+        };
+        const matchesTask = (row: Record<string, any>, filter: Record<string, any>) => {
+          const linked = taskFor(row);
+          return Object.entries(filter).every(([key, value]) => {
+            if (key === "chainIndex" && typeof value === "object" && value !== null && "not" in value) {
+              return linked.chainIndex !== value.not;
+            }
+            return linked[key] === value;
+          });
+        };
+        const matches = (row: Record<string, any>, where: Record<string, any>): boolean => {
+          if (typeof where.taskId === "string" && row.taskId !== where.taskId) return false;
+          if (typeof where.repoId === "string" && row.repoId !== where.repoId) return false;
+          if (typeof where.pushedBranch === "string" && row.pushedBranch !== where.pushedBranch) return false;
+          if (where.pushedBranch?.not === null && row.pushedBranch === null) return false;
+          if (where.task && !matchesTask(row, where.task)) return false;
+          if (where.OR && !where.OR.some((branch: Record<string, any>) => (
+            (branch.branch === undefined || row.branch === branch.branch)
+            && (branch.pushedBranch === undefined || row.pushedBranch === branch.pushedBranch)
+            && (branch.task === undefined || matchesTask(row, branch.task))
+          ))) return false;
+          return true;
+        };
+        const rows = [...(options.publishedRuns ?? [])].filter((row) => matches(row, args.where));
+        if (Array.isArray(args.orderBy)) {
+          rows.sort((left, right) => {
+            const leftAt = left.createdAt instanceof Date ? left.createdAt.getTime() : 0;
+            const rightAt = right.createdAt instanceof Date ? right.createdAt.getTime() : 0;
+            if (leftAt !== rightAt) return rightAt - leftAt;
+            return String(right.id ?? "").localeCompare(String(left.id ?? ""));
+          });
+        }
+        const row = rows[0];
+        return row ? {
+          id: row.id ?? `published-${row.taskId}`,
+          taskId: row.taskId,
+          branch: row.branch ?? row.pushedBranch,
+          pushedBranch: row.pushedBranch,
+          headSha: row.headSha ?? null,
+          task: taskFor(row),
+        } : null;
       },
       findMany: async () => options.costedRuns ?? [],
       create: async ({ data }: { data: Record<string, unknown> }) => {
@@ -230,7 +274,7 @@ const fakeTx = (
       },
     },
   };
-  return { tx: tx as never, creates, activities, taskUpdates, inbox, inboxUpdates, agentLocks: () => agentLocks };
+  return { tx: tx as never, creates, activities, taskUpdates, inbox, inboxUpdates, runFindFirstCalls, agentLocks: () => agentLocks };
 };
 
 const integratorStep = {
@@ -297,6 +341,234 @@ test("a retry snapshots the current Step commit contract instead of inheriting i
 
   assert.equal(opened.ok, true);
   assert.equal(creates[0]?.requiresCommit, false);
+});
+
+test("a template Chain retry inherits the latest acknowledged detached repair push to its shared branch", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const chainId = "chain-repair-inheritance";
+  const shared = sharedChainBranch({ projectId: "project-1", chainId });
+  const salvage = "agentos/repair-task/run-2";
+  const task = taskRow({
+    repoId: repo.id,
+    repo,
+    templateId: "template-1",
+    chainId,
+    chainIndex: 4,
+    targetBranch: "main",
+    runs: [priorRun({ repoId: repo.id, branch: shared, targetBranch: "main" })],
+  });
+  const createdAt = (minute: number) => new Date(`2026-09-23T12:${String(minute).padStart(2, "0")}:00.000Z`);
+  const { tx, creates, activities, runFindFirstCalls } = fakeTx(task, {
+    publishedRuns: [
+      {
+        id: "chain-publish",
+        taskId: "chain-step-1",
+        repoId: repo.id,
+        pushedBranch: shared,
+        branch: shared,
+        createdAt: createdAt(1),
+        task: { id: "chain-step-1", projectId: "project-1", repoId: repo.id, chainId, chainIndex: 1, targetBranch: "main" },
+      },
+      {
+        id: "foreign-repair",
+        taskId: "other-project-repair",
+        repoId: repo.id,
+        pushedBranch: "agentos/foreign/run-1",
+        branch: shared,
+        createdAt: createdAt(9),
+        task: { id: "other-project-repair", projectId: "project-2", repoId: repo.id, chainId: null, chainIndex: null, targetBranch: shared },
+      },
+      {
+        id: "ordinary-task",
+        taskId: "ordinary-task",
+        repoId: repo.id,
+        pushedBranch: "agentos/ordinary-task/run-1",
+        branch: "agentos/ordinary-task/run-1",
+        createdAt: createdAt(8),
+        task: { id: "ordinary-task", projectId: "project-1", repoId: repo.id, chainId: null, chainIndex: null, targetBranch: shared },
+      },
+      {
+        id: "repair-publish",
+        taskId: "repair-task",
+        repoId: repo.id,
+        pushedBranch: shared,
+        branch: shared,
+        headSha: "a".repeat(40),
+        createdAt: createdAt(7),
+        task: { id: "repair-task", projectId: "project-1", repoId: repo.id, chainId: null, chainIndex: null, targetBranch: shared },
+      },
+      {
+        id: "repair-salvage",
+        taskId: "repair-task",
+        repoId: repo.id,
+        pushedBranch: salvage,
+        branch: shared,
+        headSha: "b".repeat(40),
+        createdAt: createdAt(8),
+        task: { id: "repair-task", projectId: "project-1", repoId: repo.id, chainId: null, chainIndex: null, targetBranch: shared },
+      },
+    ],
+  });
+
+  const opened = await openRun(tx, task.id, { kind: "retry", readyAt: now });
+
+  assert.equal(opened.ok, true);
+  assert.equal(creates[0]?.branch, shared);
+  assert.equal(creates[0]?.targetBranch, shared, "only an acknowledged update to the repair's shared ref is inherited");
+  const publicationQuery = runFindFirstCalls.find((call) => Array.isArray(call.orderBy))!;
+  assert.deepEqual(publicationQuery.orderBy, [{ createdAt: "desc" }, { id: "desc" }]);
+  assert.equal(publicationQuery.where.repoId, repo.id);
+  assert.ok(publicationQuery.where.OR.some((scope: Record<string, any>) => (
+    scope.task?.projectId === task.projectId && scope.task?.chainId === chainId
+  )));
+  assert.ok(publicationQuery.where.OR.some((scope: Record<string, any>) => (
+    scope.branch === shared
+      && scope.pushedBranch === shared
+      && scope.task?.projectId === task.projectId
+      && scope.task?.repoId === repo.id
+      && scope.task?.chainId === null
+      && scope.task?.targetBranch === shared
+  )));
+  assert.equal(activities.length, 1);
+  assert.match(String(activities[0]?.body), new RegExp(shared.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
+  assert.match(String(activities[0]?.body), /head a{40}/u);
+  assert.deepEqual(activities[0]?.metadata, {
+    kind: "chain-base-inherited",
+    source: "merge-tail-repair",
+    sourceRunId: "repair-publish",
+    sourceTaskId: "repair-task",
+    branch: shared,
+    headSha: "a".repeat(40),
+  });
+});
+
+test("a later indexed Chain salvage outranks a detached repair publication", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const chainId = "chain-late-salvage";
+  const shared = sharedChainBranch({ projectId: "project-1", chainId });
+  const salvage = "agentos/chain-step/run-2";
+  const task = taskRow({
+    repoId: repo.id,
+    repo,
+    chainId,
+    chainIndex: 3,
+    targetBranch: salvage,
+    runs: [priorRun({ repoId: repo.id, branch: shared, targetBranch: shared })],
+  });
+  const { tx, creates, activities } = fakeTx(task, {
+    publishedRuns: [
+      {
+        id: "repair-publish",
+        taskId: "repair-task",
+        repoId: repo.id,
+        pushedBranch: shared,
+        branch: shared,
+        headSha: "a".repeat(40),
+        createdAt: new Date("2026-09-23T12:01:00.000Z"),
+        task: { id: "repair-task", projectId: "project-1", repoId: repo.id, chainId: null, chainIndex: null, targetBranch: shared },
+      },
+      {
+        id: "chain-salvage",
+        taskId: "chain-step-2",
+        repoId: repo.id,
+        pushedBranch: salvage,
+        branch: shared,
+        headSha: "b".repeat(40),
+        createdAt: new Date("2026-09-23T12:02:00.000Z"),
+        task: { id: "chain-step-2", projectId: "project-1", repoId: repo.id, chainId, chainIndex: 2, targetBranch: shared },
+      },
+    ],
+  });
+
+  const opened = await openRun(tx, task.id, { kind: "retry", readyAt: now });
+
+  assert.equal(opened.ok, true);
+  assert.equal(creates[0]?.branch, shared);
+  assert.equal(creates[0]?.targetBranch, salvage);
+  assert.equal(activities.some((activity) => String(activity.body).includes("detached merge-tail repair")), false);
+});
+
+test("a detached repair shared-branch ACK without headSha remains inheritable and records unknown", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const chainId = "chain-missing-repair-head";
+  const shared = sharedChainBranch({ projectId: "project-1", chainId });
+  const task = taskRow({
+    repoId: repo.id,
+    repo,
+    templateId: "template-1",
+    chainId,
+    chainIndex: 4,
+    runs: [priorRun({ repoId: repo.id, branch: shared, targetBranch: "main" })],
+  });
+  const { tx, creates, activities } = fakeTx(task, {
+    publishedRuns: [{
+      id: "repair-without-head",
+      taskId: "repair-task",
+      repoId: repo.id,
+      pushedBranch: shared,
+      branch: shared,
+      createdAt: new Date("2026-09-23T12:01:00.000Z"),
+      task: { id: "repair-task", projectId: "project-1", repoId: repo.id, chainId: null, chainIndex: null, targetBranch: shared },
+    }],
+  });
+
+  const opened = await openRun(tx, task.id, { kind: "retry", readyAt: now });
+  assert.equal(opened.ok, true);
+  assert.equal(creates[0]?.targetBranch, shared);
+  assert.match(String(activities[0]?.body), /at head unknown/u);
+  assert.deepEqual(activities[0]?.metadata, {
+    kind: "chain-base-inherited",
+    source: "merge-tail-repair",
+    sourceRunId: "repair-without-head",
+    sourceTaskId: "repair-task",
+    branch: shared,
+    headSha: "unknown",
+  });
+});
+
+test("a template lease-loss requeue audits a detached repair base", async () => {
+  const repo = { id: "repo-1", defaultBranch: "main" };
+  const chainId = "chain-requeue-repair";
+  const shared = sharedChainBranch({ projectId: "project-1", chainId });
+  const prior = priorRun({ repoId: repo.id, branch: shared, targetBranch: "main" });
+  const task = taskRow({
+    repoId: repo.id,
+    repo,
+    templateId: "template-1",
+    chainId,
+    chainIndex: 4,
+    targetBranch: "main",
+    runs: [prior],
+  });
+  const { tx, creates, activities } = fakeTx(task, { publishedRuns: [{
+    id: "repair-publish",
+    taskId: "repair-task",
+    repoId: repo.id,
+    pushedBranch: shared,
+    branch: shared,
+    headSha: "a".repeat(40),
+    createdAt: new Date("2026-09-23T12:01:00.000Z"),
+    task: { id: "repair-task", projectId: "project-1", repoId: repo.id, chainId: null, chainIndex: null, targetBranch: shared },
+  }] });
+
+  const opened = await openRun(tx, task.id, {
+    kind: "retry-after-lease-loss", readyAt: now,
+    sourceRunId: prior.id,
+    sourceMaxRunsPerTask: prior.maxRunsPerTask,
+    sourceBudgetGrants: prior.budgetGrants,
+  });
+
+  assert.equal(opened.ok, true);
+  assert.equal(creates[0]?.targetBranch, shared);
+  assert.equal(activities.length, 1);
+  assert.deepEqual(activities[0]?.metadata, {
+    kind: "chain-base-inherited",
+    source: "merge-tail-repair",
+    sourceRunId: "repair-publish",
+    sourceTaskId: "repair-task",
+    branch: shared,
+    headSha: "a".repeat(40),
+  });
 });
 
 test("a Run based on its own Task's prior publication does not require another commit", async () => {
