@@ -3481,6 +3481,13 @@ not an operator read route. Its `task.outputEvidence` is the server's decided
 answer about this Run's deliverables, and the runner reads it rather than
 re-deciding anything. It has two parts.
 
+When load is above the runner's claim threshold, the machine-only
+`POST /runner/presence` request reports `runnerId` and the same daemon telemetry
+used by a claim (`daemonVersion`, optional `diskFreeBytes`, `pollIntervalMs`,
+and `workspaceRoot`). It refreshes the daemon's presence in `GET /runners`
+without asking for work or creating a Run. It shares the `/runner/...`
+authentication boundary; the runner uses its runner bearer credential.
+
 `outputEvidence.satisfaction` names whether the deliverable this Run's Step
 requires exists: `delivered` (this Run persisted it; carries the output `kind`
 and `commitSha`), `not-required`, `satisfied-by-prior-run` (an immutable

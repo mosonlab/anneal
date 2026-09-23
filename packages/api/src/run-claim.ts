@@ -83,8 +83,15 @@ export const runnerTelemetryFields = {
   workspaceRoot: telemetry(z.string().trim().max(500)),
 };
 
+const runnerIdInput = z.string().trim().min(1).max(120);
+
+export const runnerPresenceInput = z.object({
+  runnerId: runnerIdInput,
+  ...runnerTelemetryFields,
+});
+
 export const claimInput = z.object({
-  runnerId: z.string().trim().min(1).max(120),
+  runnerId: runnerIdInput,
   leaseSeconds: z.number().int().min(15).max(3600).default(60),
   contractVersion: z.number().int().optional(),
   servedKinds: z.array(z.nativeEnum(RunnerKind)).min(1).max(Object.values(RunnerKind).length).optional(),
