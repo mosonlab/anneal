@@ -18,7 +18,7 @@ import { readChainControl } from "./chain-control.js";
 import { heldPredicate } from "./chain-hold.js";
 import { layerOf } from "./chain-order.js";
 import { lockAgentRow } from "./locks.js";
-import { INTEGRATOR_TEMPLATE_NAME } from "./merge-integrator.js";
+import { INTEGRATOR_OUTPUT_KIND, INTEGRATOR_TEMPLATE_NAME, parseMergeResult } from "./merge-integrator.js";
 import {
   ensureRefreshRequestedConfirmationCard,
   gateFeedsIntegratorStep,
@@ -779,6 +779,7 @@ const declaredPublishTarget = async (
     // here instead of inheriting this rule by accident.
     case "enqueue":
     case "merge-tail-requeue":
+    case "integrator-deferred":
     case "claim-invalidated":
     case "task-created":
     case "retry":
@@ -795,6 +796,7 @@ export type IntegratorStopBypass = { integratorTaskId: string; sourceStopId: str
 export type OpenRunIntent =
   | { kind: "enqueue"; readyAt: Date; stopBypass?: IntegratorStopBypass | null }
   | { kind: "merge-tail-requeue"; readyAt: Date; budgetGrant: 1; repairCompleted?: true; readinessBaseDrift?: true }
+  | { kind: "integrator-deferred"; readyAt: Date; sourceRunId: string; sourceStopId: string | null }
   /** The replacement for a claim a late salvage invalidated before it started.
    *  Its budget arithmetic is an ordinary enqueue's — the revoked claim already
    *  carries the refund — but it is a platform-caused refund, so it is named
@@ -976,6 +978,7 @@ export const openRun = async (
   }
   if (!task.repo && (intent.kind === "enqueue"
     || intent.kind === "merge-tail-requeue"
+    || intent.kind === "integrator-deferred"
     || intent.kind === "claim-invalidated"
     || intent.kind === "merge-tail-repair"
     || intent.kind === "task-created"
@@ -1003,7 +1006,9 @@ export const openRun = async (
   // from this unresolved stop. Its named intent is the only path that may open
   // the renewed mechanical Run while the original stop remains in history.
   const humanReauthorization = intent.kind === "integrator-authorized";
-  if (stopped && !humanReauthorization
+  const deferredStopBypass = intent.kind === "integrator-deferred"
+    && stopped?.stop.stopId === intent.sourceStopId;
+  if (stopped && !humanReauthorization && !deferredStopBypass
     && (stopBypass?.integratorTaskId !== task.id || stopBypass.sourceStopId !== stopped.stop.stopId)) {
     return openRunRefusal(
       "integrator-stopped",
@@ -1068,11 +1073,20 @@ export const openRun = async (
     || sourceRetryIntent(intent)) && !prior) {
     return openRunRefusal("prior-run-required", "conflict", `Task ${task.name} has no Run to continue`);
   }
-  if ((sourceRetryIntent(intent) || intent.kind === "claim-invalidated") && prior?.id !== intent.sourceRunId) {
+  if ((sourceRetryIntent(intent) || intent.kind === "claim-invalidated" || intent.kind === "integrator-deferred")
+    && prior?.id !== intent.sourceRunId) {
     return openRunRefusal("source-run-stale", "conflict", `Run ${intent.sourceRunId} is no longer the latest Run for task ${task.name}`);
   }
   if (intent.kind === "integrator-authorized" && (!task.templateStep || stepRole(task.templateStep) !== "integrator")) {
     return openRunRefusal("task-not-integrator", "invalid-request", `Task ${task.name} is not an integrator Step`);
+  }
+  if (intent.kind === "integrator-deferred") {
+    const output = await tx.taskStepOutput.findUnique({ where: { taskId: task.id }, select: { runId: true, kind: true, body: true } });
+    if (!prior || prior.status !== RunStatus.SUCCEEDED || output?.runId !== prior.id
+      || output.kind !== INTEGRATOR_OUTPUT_KIND || parseMergeResult(output).outcome !== "deferred"
+      || (stopped?.stop.stopId ?? null) !== intent.sourceStopId) {
+      return openRunRefusal("source-run-stale", "conflict", "Deferred mergeability source Run or stop binding changed");
+    }
   }
 
   const runNumber = (prior?.runNumber ?? 0) + 1;
@@ -1100,12 +1114,12 @@ export const openRun = async (
   if (intent.kind === "integrator-authorized") {
     budgetGrants = Math.max(budgetGrants, runNumber - task.maxSessionsPerTask);
     maxRunsPerTask = runBudgetCeiling(task.maxSessionsPerTask, budgetGrants);
-  } else if (intent.kind === "merge-tail-requeue") {
+  } else if (intent.kind === "merge-tail-requeue" || intent.kind === "integrator-deferred") {
     // A control-plane merge-tail refresh is not an agent failure. Carry the
     // grants already earned by the task and refund exactly this one requeue;
     // the running ceiling therefore follows the same derivation as every
     // other budget grant without introducing a merge-tail-specific cap.
-    budgetGrants += intent.budgetGrant;
+    budgetGrants += 1;
     maxRunsPerTask = runBudgetCeiling(task.maxSessionsPerTask, budgetGrants);
   } else if (intent.kind === "retry-after-completion") {
     budgetGrants = intent.sourceBudgetGrants + intent.budgetGrant;

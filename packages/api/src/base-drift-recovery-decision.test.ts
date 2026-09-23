@@ -167,6 +167,21 @@ test("durable candidate classification narrows skip and inspect outcomes", () =>
   assert.deepEqual(classifyCandidate(durableFacts()), { kind: "inspect", candidate });
 });
 
+test("terminal merge conflicts can recover only with executor-bound evidence", () => {
+  for (const conflict of [{ mergeable: "CONFLICTING" }, { mergeStateStatus: "DIRTY" }]) {
+    const facts = durableFacts();
+    const evidence = JSON.stringify({ ...conflict, observed: BASE, authorized: BASE });
+    facts.stop = { ...facts.stop!, condition: "non-clean-mergeability", evidence };
+    facts.output = { ...facts.output!, condition: "non-clean-mergeability", evidence };
+    assert.deepEqual(classifyCandidate(facts), {
+      kind: "inspect",
+      candidate: { ...candidate, observedBaseSha: BASE },
+    });
+    facts.output.evidence = JSON.stringify({ mergeStateStatus: "BLOCKED" });
+    assert.equal(classifyCandidate(facts).kind, "ineligible");
+  }
+});
+
 test("all fresh pull-request refusal paths decide without a database", () => {
   const cases: Array<[string, Partial<RecoveryPullRequestFacts>, RegExp]> = [
     ["identity", { number: 124 }, /identity mismatches/u],

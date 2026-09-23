@@ -282,7 +282,13 @@ export const applyInboxDecisionTx = async (
     where: { id: question.id, status: InboxStatus.OPEN },
     data: { status: InboxStatus.ANSWERED, selectedChoiceId: input.decision, answeredAt: now },
   });
-  if (claimed.count !== 1) return { duplicate: true, resumed: false };
+  if (claimed.count !== 1) {
+    const current = await tx.inboxMessage.findUnique({ where: { id: question.id }, select: { status: true } });
+    if (gateDecision && current?.status === InboxStatus.CLOSED) {
+      throw new WorkflowRefusalError("conflict", "Merge evidence was refreshed; this approval card is closed");
+    }
+    return { duplicate: true, resumed: false };
+  }
   if (gateDecision) {
     // gateTaskId, not an individual card id, is the decision identity. Old or
     // duplicated cards are allowed by the schema, so the winning card consumes

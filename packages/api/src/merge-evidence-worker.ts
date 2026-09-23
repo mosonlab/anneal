@@ -15,10 +15,21 @@
 
 import type { PrismaClient } from "@anneal/db";
 import {
+  ACTIVE_RUN_STATUSES,
   EVIDENCE_PLACEHOLDER_BODY,
   EVIDENCE_UNAVAILABLE_MARKER,
   InboxStatus,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
+  READINESS_BASE_DRIFT_REQUEUE_LIMIT,
+  Prisma,
+  TaskStatus,
+  isMergeReadinessStep,
+  lockChainRows,
+  parseEvidence,
+  readinessRequeueActivityWhere,
+  readinessRequeueTotals,
+  recordReadinessRequeue,
+  writeMarker,
   type MergeEvidence,
   type PendingEvidenceRequest,
   parseEvidenceRequest,
@@ -26,6 +37,8 @@ import {
 } from "@anneal/db";
 
 import { checkConclusionFor, GitHubReadError, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";
+import { stopMergeTail } from "./merge-tail-actions.js";
+import { requeueMergeTailRun } from "./merge-tail-state.js";
 
 export const evidenceReadTimeoutMs = (): number => {
   const raw = Number(process.env.MERGE_EVIDENCE_READ_TIMEOUT_MS);
@@ -199,6 +212,165 @@ export const evidenceTick = async (
   return result;
 };
 
+export const refreshStaleMergeCardsTick = async (
+  db: PrismaClient,
+  reader: PullRequestReader,
+  now = new Date(),
+  limit = 5,
+): Promise<{ checked: number; refreshed: number; exhausted: number }> => {
+  const result = { checked: 0, refreshed: 0, exhausted: 0 };
+  const cards = await db.inboxMessage.findMany({
+    where: { status: InboxStatus.OPEN, gateTaskId: { not: null } },
+    select: { id: true, gateTaskId: true, body: true },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+  });
+  for (const card of cards) {
+    if (result.checked >= limit) break;
+    if (!card.gateTaskId) continue;
+    const parsed = parseEvidence(card.body);
+    if (parsed.status !== "ok") continue;
+    const evidence = parsed.evidence;
+    const request = await db.taskActivity.findFirst({ where: {
+      taskId: card.gateTaskId,
+      AND: [
+        { metadata: { path: ["kind"], equals: "mergeIntegrator.evidenceRequest" } },
+        { metadata: { path: ["cardId"], equals: card.id } },
+      ],
+    }, select: { metadata: true } });
+    const requestMetadata = request?.metadata && typeof request.metadata === "object"
+      && !Array.isArray(request.metadata) ? request.metadata as Record<string, unknown> : null;
+    if (requestMetadata?.nonce !== evidence.nonce) continue;
+    const previous = await db.taskActivity.findFirst({ where: {
+      taskId: card.gateTaskId,
+      actorType: "control-plane",
+      AND: [
+        { metadata: { path: ["kind"], equals: "mergeTail.evidenceRefresh" } },
+        { metadata: { path: ["cardId"], equals: card.id } },
+      ],
+    }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], select: { createdAt: true, metadata: true } });
+    const prior = previous?.metadata && typeof previous.metadata === "object"
+      && !Array.isArray(previous.metadata) ? previous.metadata as Record<string, unknown> : null;
+    if (prior?.state === "queued" || prior?.state === "ceiling" || prior?.state === "stopped") continue;
+    if (previous && now.getTime() - previous.createdAt.getTime() < 60_000) continue;
+    result.checked += 1;
+    const gate = await db.task.findUnique({ where: { id: card.gateTaskId },
+      include: { templateStep: { include: { taskTemplate: { select: { name: true } } } } } });
+    if (!gate?.chainId || gate.chainIndex === null || !isMergeReadinessStep(gate.templateStep)) continue;
+    const regression = await db.task.findFirst({ where: {
+      projectId: gate.projectId, chainId: gate.chainId,
+      chainIndex: gate.chainIndex - 1,
+    }, select: { id: true } });
+    if (!regression) continue;
+    let snapshot: PullRequestSnapshot;
+    try {
+      snapshot = await reader.readPullRequest(evidence.repository, evidence.prNumber,
+        evidence.baseRef, AbortSignal.timeout(evidenceReadTimeoutMs()));
+      if (snapshot.repository !== evidence.repository || snapshot.number !== evidence.prNumber
+        || snapshot.baseRefName !== evidence.baseRef || snapshot.headRefOid !== evidence.headSha
+        || snapshot.state !== "OPEN" || snapshot.merged || snapshot.isDraft || !snapshot.baseSha) {
+        throw new Error("approval evidence no longer identifies the same OPEN pull request and exact head");
+      }
+      if (snapshot.baseSha !== evidence.baseSha) {
+        const ancestry = await reader.compareCommits?.(evidence.repository, evidence.baseSha,
+          snapshot.baseSha, AbortSignal.timeout(evidenceReadTimeoutMs()));
+        if (!ancestry || ancestry.status !== "ahead" || ancestry.behindBy !== 0) {
+          throw new Error("target base changed without a verified forward advancement");
+        }
+      }
+    } catch (error: unknown) {
+      const reason = `approval evidence refresh failed: ${error instanceof Error ? error.message : String(error)}`;
+      await db.$transaction(async (tx) => {
+        await lockChainRows(tx, { projectId: gate.projectId, chainId: gate.chainId! });
+        const current = await tx.inboxMessage.findUnique({ where: { id: card.id }, select: { status: true } });
+        if (current?.status !== InboxStatus.OPEN) return;
+        await stopMergeTail(tx, { phase: "readiness", readinessTaskId: gate.id,
+          regressionTaskId: regression.id, recovery: null, reason, at: now });
+        await writeMarker(tx, gate.id, "evidenceRefresh", "stopped", {
+          actorType: "control-plane", body: reason,
+          metadata: { cardId: card.id, condition: "evidence-refresh-failed",
+            staleBaseSha: evidence.baseSha, observedBaseSha: null },
+        });
+      });
+      continue;
+    }
+    if (snapshot.baseSha === evidence.baseSha) {
+      await db.taskActivity.create({ data: { taskId: gate.id, actorType: "control-plane",
+        body: `OPEN merge card ${card.id} still matches target base ${evidence.baseSha}`,
+        metadata: { kind: "mergeTail.evidenceRefresh", state: "checked", schemaVersion: 1,
+          cardId: card.id, condition: "base-current", observedBaseSha: snapshot.baseSha } } });
+      continue;
+    }
+    const currentBaseSha = snapshot.baseSha;
+    let changed: "lost" | "busy" | "exhausted" | "refreshed";
+    try {
+      changed = await db.$transaction(async (tx) => {
+      await lockChainRows(tx, { projectId: gate.projectId, chainId: gate.chainId! });
+      const current = await tx.inboxMessage.findUnique({ where: { id: card.id }, select: { status: true, body: true } });
+      if (current?.status !== InboxStatus.OPEN || current.body !== card.body) return "lost" as const;
+      if (await tx.run.count({ where: { task: { projectId: gate.projectId, chainId: gate.chainId! },
+        status: { in: ACTIVE_RUN_STATUSES } } })) return "busy" as const;
+      const rows = await tx.taskActivity.findMany({
+        where: readinessRequeueActivityWhere(gate.id), select: { metadata: true },
+      });
+      const spent = readinessRequeueTotals(rows.filter((row) => {
+        const metadata = row.metadata as Record<string, unknown> | null;
+        return metadata?.baseDrift === true && metadata.recoveryAggregateId === undefined;
+      })).readinessRequeues;
+      if (spent >= READINESS_BASE_DRIFT_REQUEUE_LIMIT) {
+        await tx.inboxMessage.update({ where: { id: card.id }, data: {
+          body: `${card.body}\n\n目标分支已前进；自动刷新已达 ${READINESS_BASE_DRIFT_REQUEUE_LIMIT} 次上限，请人工处理。`,
+        } });
+        await writeMarker(tx, gate.id, "evidenceRefresh", "ceiling", {
+          actorType: "control-plane",
+          body: `Stale merge card retained: automatic refresh budget ${spent}/${READINESS_BASE_DRIFT_REQUEUE_LIMIT} exhausted`,
+          metadata: { cardId: card.id, condition: "base-drift", staleBaseSha: evidence.baseSha,
+            currentBaseSha, ordinal: spent, remaining: 0 },
+        });
+        return "exhausted" as const;
+      }
+      await tx.task.update({ where: { id: regression.id }, data: { status: TaskStatus.TODO, failureReason: null } });
+      await tx.task.update({ where: { id: gate.id }, data: { status: TaskStatus.TODO, failureReason: null } });
+      const opened = await requeueMergeTailRun(tx, regression.id, now, true);
+      if (opened.outcome !== "opened") throw new Error("stale approval evidence Regression Run birth refused");
+      const closed = await tx.inboxMessage.updateMany({ where: { id: card.id, status: InboxStatus.OPEN },
+        data: { status: InboxStatus.CLOSED,
+          body: `${card.body}\n\n目标分支已前进，证据已刷新；新 Regression 将产生新审批卡。` } });
+      if (closed.count !== 1) throw new Error("stale approval card changed during refresh");
+      const requeue = await recordReadinessRequeue(tx, { readinessTaskId: gate.id,
+        regressionTaskId: regression.id, staleBaseSha: evidence.baseSha, currentBaseSha: currentBaseSha!,
+        budgetGrant: 1, baseDrift: true, reason: "OPEN approval evidence base became stale" });
+      await writeMarker(tx, gate.id, "evidenceRefresh", "queued", {
+        actorType: "control-plane",
+        body: `Stale merge card ${card.id} closed; Regression Run ${opened.run.id} requeued`,
+        metadata: { cardId: card.id, condition: "base-drift", staleBaseSha: evidence.baseSha,
+          currentBaseSha, ordinal: requeue.ordinal,
+          remaining: READINESS_BASE_DRIFT_REQUEUE_LIMIT - spent - 1,
+          regressionRunId: opened.run.id },
+      });
+      return "refreshed" as const;
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.ReadCommitted });
+    } catch (error: unknown) {
+      const reason = `approval evidence refresh failed: ${error instanceof Error ? error.message : String(error)}`;
+      await db.$transaction(async (tx) => {
+        await lockChainRows(tx, { projectId: gate.projectId, chainId: gate.chainId! });
+        const current = await tx.inboxMessage.findUnique({ where: { id: card.id }, select: { status: true } });
+        if (current?.status !== InboxStatus.OPEN) return;
+        await stopMergeTail(tx, { phase: "readiness", readinessTaskId: gate.id,
+          regressionTaskId: regression.id, recovery: null, reason, at: now });
+        await writeMarker(tx, gate.id, "evidenceRefresh", "stopped", {
+          actorType: "control-plane", body: reason,
+          metadata: { cardId: card.id, condition: "evidence-refresh-failed",
+            staleBaseSha: evidence.baseSha, observedBaseSha: currentBaseSha },
+        });
+      });
+      continue;
+    }
+    if (changed === "refreshed") result.refreshed += 1;
+    if (changed === "exhausted") result.exhausted += 1;
+  }
+  return result;
+};
+
 /**
  * The chain's integration line, resolved from durable rows rather than guessed:
  * the earliest run of the earliest chain step recorded the base the chain's PR
@@ -235,6 +407,7 @@ export const startEvidenceWorker = (
     if (inFlight) return;
     inFlight = true;
     void evidenceTick(db, reader)
+      .then(() => refreshStaleMergeCardsTick(db, reader))
       .catch((error: unknown) => {
         console.error("Merge evidence tick failed", error);
       })

@@ -3203,6 +3203,24 @@ records the named stop reason
 Only base-drift requeues outside a recovery spend this standalone ceiling;
 other requeue classes and requeues belonging to past recovery attempts do not.
 
+An evidence-backed OPEN Merge readiness Approval gate or post-stop confirmation
+card is also checked against the current target base. On verified forward
+advancement, the control plane closes the stale card with “目标分支已前进，证据已刷新”,
+requeues Regression, and lets its ordinary successor open a new evidence card.
+No human decision or approval is synthesized. This refresh shares the
+three-requeue ceiling outside recovery; at the ceiling the old card stays OPEN
+with an explanation. A failed read, unsafe identity/ancestry, or failed
+requeue enters the existing stop path with a recorded reason. A human answer
+and automatic refresh race on the same OPEN card under the Chain lock: the
+first transaction wins, and the late answer receives `409 conflict`.
+`approvalGate: true` still requires approval of the replacement card.
+
+An initial Merge readiness Approval gate `reject` abandons the Chain. A
+post-stop confirmation card has evidence-request purpose `confirmation`;
+rejecting it instead resets the preceding executable Step (normally
+Regression) to `TODO` and queues a replacement Run. Automatic stale-evidence
+refresh uses neither Inbox decision route and does not abandon the Chain.
+
 Inside a base-drift recovery, the requeues use the recovery aggregate's
 existing `MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES` ceiling of two instead of the
 per-readiness-task ceiling. Once it is reached, readiness parks the recovery

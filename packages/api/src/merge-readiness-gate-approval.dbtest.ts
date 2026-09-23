@@ -12,6 +12,8 @@ import {
   applyInboxDecisionTx,
   advanceTemplateTask,
   gateQuestion,
+  recordReadinessRequeue,
+  requestMergeEvidence,
 } from "@anneal/db";
 import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
@@ -22,7 +24,7 @@ import {
   type ReleaseMergeLease,
   type WithMergeLease,
 } from "./merge-lease.js";
-import { evidenceTick } from "./merge-evidence-worker.js";
+import { evidenceTick, refreshStaleMergeCardsTick } from "./merge-evidence-worker.js";
 import { executorsOnline } from "./merge-executor-daemon-fixture.js";
 import { readinessTick } from "./merge-readiness-worker.js";
 import { claimRun } from "./run-claim.js";
@@ -323,6 +325,124 @@ test("Inbox approval releases gated readiness only after exact-head authorizatio
     if (priorExecutors === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;
     else process.env.MERGE_EXECUTOR_RUNNER_IDS = priorExecutors;
   }
+});
+
+test("stale OPEN gate evidence closes without a human answer and requeues Regression", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-gate-stale-auto-refresh", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask);
+  await attestRegression(chain);
+  const oldCard = await fillGate(chain);
+  const refreshed = await refreshStaleMergeCardsTick(db, reader({ baseSha: NEW_BASE }), testTime(70));
+  assert.deepEqual(refreshed, { checked: 1, refreshed: 1, exhausted: 0 });
+  const closed = await db.inboxMessage.findUniqueOrThrow({ where: { id: oldCard.id } });
+  assert.equal(closed.status, "CLOSED");
+  assert.match(closed.body, /目标分支已前进，证据已刷新/u);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.gateTask.id } })).status, TaskStatus.TODO);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: chain.readinessTask.id } })).status, TaskStatus.TODO);
+  assert.equal(await db.run.count({ where: { taskId: chain.gateTask.id, status: "QUEUED" } }), 1);
+  await assert.rejects(() => approveInbox(oldCard.id, "stale-card-approval"),
+    /Merge evidence was refreshed/u);
+  const newRegression = await recordRegressionRetry(chain, HEAD, NEW_BASE);
+  await db.$transaction((tx) => advanceTemplateTask(tx, chain.gateTask.id, newRegression.id, null, testTime(71)));
+  await evidenceTick(db, reader({ baseSha: NEW_BASE }), testTime(72));
+  const newCard = await db.inboxMessage.findFirstOrThrow({ where: {
+    gateTaskId: chain.readinessTask.id, status: "OPEN",
+  } });
+  assert.notEqual(newCard.id, oldCard.id);
+  assert.match(newCard.body, new RegExp(NEW_BASE, "u"));
+});
+
+test("stale post-stop confirmation evidence refreshes without rejecting the Chain", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-confirmation-stale-auto-refresh", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask && chain.integratorTask);
+  await attestRegression(chain);
+  const requested = await db.$transaction((tx) => requestMergeEvidence(tx, {
+    gateTaskId: chain.readinessTask!.id, integratorTaskId: chain.integratorTask!.id,
+    sourceRunId: chain.gateRun.id, agentId: chain.agent.id, sessionId: chain.gateSession.id,
+    purpose: "confirmation", repository: "acme/widgets", prNumber: 123,
+    dedupeKey: `confirmation:${chain.chainId}`,
+  }, testTime(1)));
+  await evidenceTick(db, reader(), testTime(2));
+  assert.deepEqual(await refreshStaleMergeCardsTick(db, reader({ baseSha: NEW_BASE }), testTime(70)),
+    { checked: 1, refreshed: 1, exhausted: 0 });
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: requested.cardId } })).status, "CLOSED");
+  assert.equal(await db.run.count({ where: { taskId: chain.gateTask.id, status: "QUEUED" } }), 1);
+  assert.equal(await db.inboxDecision.count({ where: { inboxMessageId: requested.cardId } }), 0);
+});
+
+test("stale-card refresh and a human decision have one winner", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-gate-stale-race", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask);
+  await attestRegression(chain);
+  const card = await fillGate(chain);
+  let releaseRead!: () => void;
+  const blockedRead = new Promise<void>((resolve) => { releaseRead = () => resolve(); });
+  let readStarted!: () => void;
+  const started = new Promise<void>((resolve) => { readStarted = () => resolve(); });
+  const pending = refreshStaleMergeCardsTick(db, {
+    ...reader({ baseSha: NEW_BASE }),
+    readPullRequest: async () => { readStarted(); await blockedRead; return snapshot({ baseSha: NEW_BASE }); },
+  }, testTime(70));
+  await started;
+  const approved = await approveInbox(card.id, "stale-race-human-wins");
+  assert.equal(approved.gateAction, "approved");
+  releaseRead();
+  assert.deepEqual(await pending, { checked: 1, refreshed: 0, exhausted: 0 });
+  assert.equal(await db.run.count({ where: { taskId: chain.gateTask.id, status: "QUEUED" } }), 0);
+});
+
+test("human gate rejection wins a stale-card refresh race without a second requeue", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-gate-stale-reject-race", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask);
+  await attestRegression(chain);
+  const card = await fillGate(chain);
+  let releaseRead!: () => void;
+  const blockedRead = new Promise<void>((resolve) => { releaseRead = resolve; });
+  let readStarted!: () => void;
+  const started = new Promise<void>((resolve) => { readStarted = resolve; });
+  const pending = refreshStaleMergeCardsTick(db, {
+    ...reader({ baseSha: NEW_BASE }),
+    readPullRequest: async () => { readStarted(); await blockedRead; return snapshot({ baseSha: NEW_BASE }); },
+  }, testTime(70));
+  await started;
+  const rejected = await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: card.id, externalEventId: "stale-race-reject-wins",
+    decision: "reject", actorOpenId: "operator-1",
+  }));
+  assert.equal(rejected.gateAction, "rejected");
+  releaseRead();
+  assert.deepEqual(await pending, { checked: 1, refreshed: 0, exhausted: 0 });
+  assert.equal(await db.run.count({ where: { taskId: chain.gateTask.id, status: "QUEUED" } }), 0);
+});
+
+test("stale-card refresh budget retains the OPEN card with an explanation", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "merge-gate-stale-budget", shape: "canonical-compound-readiness", gatedReadiness: true,
+  });
+  assert.ok(chain.readinessTask);
+  await attestRegression(chain);
+  const card = await fillGate(chain);
+  await db.$transaction(async (tx) => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await recordReadinessRequeue(tx, { readinessTaskId: chain.readinessTask!.id,
+        regressionTaskId: chain.gateTask.id, staleBaseSha: BASE, currentBaseSha: NEW_BASE,
+        budgetGrant: 1, baseDrift: true, reason: "prior base advancement" });
+    }
+  });
+  assert.deepEqual(await refreshStaleMergeCardsTick(db, reader({ baseSha: NEW_BASE }), testTime(70)),
+    { checked: 1, refreshed: 0, exhausted: 1 });
+  const retained = await db.inboxMessage.findUniqueOrThrow({ where: { id: card.id } });
+  assert.equal(retained.status, "OPEN");
+  assert.match(retained.body, /自动刷新已达 3 次上限/u);
+  assert.equal(await db.run.count({ where: { taskId: chain.gateTask.id, status: "QUEUED" } }), 0);
 });
 
 test("task PATCH approval shares the Inbox disposition and leaves readiness worker-owned", async () => {

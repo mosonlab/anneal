@@ -121,6 +121,30 @@ ref update. Before re-authorizing, read the base ref: if it is a two-parent
 merge commit whose parents are the authorized base and head, the merge landed
 and the stop is a reporting failure, not a merge failure.
 
+### Mechanical waits and recoverable conflicts
+
+Pending required checks or `UNKNOWN` mergeability at the executor's poll limit
+now produce a deferred `merge-result`, not a stop card. The control plane
+releases the Merge Lease and retries the same mechanical decision after a
+2–60-second doubling backoff. Repeated deferrals share one six-hour wait
+ceiling; the eventual `unresolved-mergeability` stop card names the elapsed
+wait. A new head or base is still classified by the existing drift guards.
+
+When terminal checks are acceptable but GitHub reports `CONFLICTING` or
+`DIRTY`, the stop is handed to the existing base-drift recovery worker. It
+verifies forward target advancement, requeues Regression on the current base,
+and leaves conflict repair to Regression's `refresh-conflict` path. The shared
+automatic recovery allowance is two; waiting, transport, and validation class
+ceilings remain six hours, 30 minutes, and 30 attempts spanning 30 minutes.
+Ineligible candidates or exhausted budgets open the existing stop question.
+
+Real failed checks, `UNSTABLE` with a terminal failure, `BLOCKED`, draft or
+non-OPEN pull requests, unverified ancestry, uncertain merge outcomes, and
+automatic-operation failures still require an operator. Exact-head merge and
+authorization bindings are unchanged. Each deferral, requeue, ceiling, or
+failure is recorded in control-plane TaskActivity markers, not as an operator
+answer.
+
 Automatic pre-merge base-drift recovery reuses the latest persisted regression
 semantic PASS only when the incoming head before target refresh is identical
 to that output's head. The recovery Run skips the model semantic recheck and still runs the

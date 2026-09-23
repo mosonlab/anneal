@@ -1,3 +1,5 @@
+import { parseRecoverableMergeEvidence } from "@anneal/db";
+
 export type RecoveryIdentity = {
   repository: string;
   prNumber: number;
@@ -199,25 +201,13 @@ const refusalReason = (code: CandidateRefusalCode, detail?: string): string => {
   }
 };
 
-const parseBaseDriftEvidence = (value: string): { observed: string; authorized: string } | null => {
-  let parsed: unknown;
-  try { parsed = JSON.parse(value); } catch { return null; }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
-  const evidence = parsed as Record<string, unknown>;
-  if (Object.keys(evidence).sort().join(",") !== "authorized,observed") return null;
-  if (typeof evidence.observed !== "string" || !/^[0-9a-f]{40}$/u.test(evidence.observed)) return null;
-  if (typeof evidence.authorized !== "string" || !/^[0-9a-f]{40}$/u.test(evidence.authorized)) return null;
-  if (evidence.observed === evidence.authorized) return null;
-  return { observed: evidence.observed, authorized: evidence.authorized };
-};
-
 /**
  * Owns all durable candidate eligibility policy. The reader supplies database
  * facts only; this decider turns those facts into the one recovery ruling.
  */
 export const classifyCandidate = (facts: DurableCandidateFacts): CandidateDecision => {
   const { task, stop } = facts;
-  if (!task?.isIntegratorStep || !stop || stop.condition !== "base-drift") return { kind: "skip" };
+  if (!task?.isIntegratorStep || !stop || !["base-drift", "non-clean-mergeability"].includes(stop.condition)) return { kind: "skip" };
   if (facts.existingAttempt
     && facts.existingAttempt.status !== "VALIDATING"
     && !facts.existingAttempt.reopenableLegacyRefusal) return { kind: "skip" };
@@ -232,7 +222,7 @@ export const classifyCandidate = (facts: DurableCandidateFacts): CandidateDecisi
     return refuse("identity-incomplete");
   }
   if (!stop.sourceRunId) return refuse("source-run-unbound");
-  const evidence = parseBaseDriftEvidence(stop.evidence);
+  const evidence = parseRecoverableMergeEvidence(stop.condition, stop.evidence);
   if (!evidence) return refuse("evidence-invalid");
   const sourceRun = facts.sourceRun;
   if (!sourceRun || sourceRun.taskId !== task.id || sourceRun.status !== "SUCCEEDED" || !sourceRun.hasSession) {
@@ -243,7 +233,7 @@ export const classifyCandidate = (facts: DurableCandidateFacts): CandidateDecisi
 
   const output = facts.output;
   if (output?.runId !== sourceRun.id || output?.kind !== "merge-result"
-    || output.outcome !== "stopped" || output.condition !== "base-drift"
+    || output.outcome !== "stopped" || output.condition !== stop.condition
     || output.evidence !== stop.evidence) {
     return refuse("output-mismatch");
   }

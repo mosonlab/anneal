@@ -241,6 +241,14 @@ test("N3 — a failing check and an absent check both stop; absence is never a p
   assert.match(verdict.evidence, /absent from the rollup/u);
 });
 
+test("UNSTABLE with a terminal failed check still stops rather than deferring", async () => {
+  const fake = makeFake({ reads: [{ status: "ok", snapshot: cleanSnapshot({ pullRequest: {
+    mergeStateStatus: "UNSTABLE",
+    checks: [{ kind: "CheckRun", name: "ci", conclusion: "FAILURE", status: "COMPLETED" }],
+  } }) }] });
+  assert.equal(stopped(await execute(fake.deps)).condition, "check-failure-or-absence");
+});
+
 test("N3 — a check that succeeded for a different head is not credited to the authorized one", async () => {
   const fake = makeFake({
     reads: [{ status: "ok", snapshot: cleanSnapshot({ pullRequest: { rollupCommitOid: "9".repeat(40) } }) }],
@@ -260,6 +268,20 @@ test("N4 — CONFLICTING, BEHIND, DRAFT and CLOSED all stop non-clean", async ()
   ]) {
     const fake = makeFake({ reads: [{ status: "ok", snapshot: cleanSnapshot({ pullRequest: overrides }) }] });
     assert.equal(stopped(await execute(fake.deps)).condition, "non-clean-mergeability", JSON.stringify(overrides));
+    assert.equal(fake.calls().includes("merge"), false);
+  }
+});
+
+test("terminal CONFLICTING and DIRTY expose bounded recovery evidence, not a merge", async () => {
+  for (const overrides of [{ mergeable: "CONFLICTING" }, { mergeStateStatus: "DIRTY" }]) {
+    const fake = makeFake({ reads: [{ status: "ok", snapshot: cleanSnapshot({ pullRequest: overrides }) }] });
+    const result = stopped(await execute(fake.deps));
+    assert.equal(result.condition, "non-clean-mergeability");
+    assert.deepEqual(JSON.parse(result.evidence), {
+      ...overrides,
+      observed: AUTHORIZED_BASE,
+      authorized: AUTHORIZED_BASE,
+    });
     assert.equal(fake.calls().includes("merge"), false);
   }
 });
@@ -346,12 +368,13 @@ test("N11 — a foreign merge stops changed-underneath-me in each of its four sh
   }
 });
 
-test("N12 — an UNKNOWN mergeability polls to its bound and then stops unresolved", async () => {
+test("N12 — an UNKNOWN mergeability polls to its bound and then defers without a stop", async () => {
   const fake = makeFake({
     reads: [{ status: "ok", snapshot: cleanSnapshot({ pullRequest: { mergeable: "UNKNOWN" } }) }],
     pollAttempts: 2,
   });
-  const verdict = stopped(await execute(fake.deps));
+  const verdict = await execute(fake.deps);
+  assert.equal(verdict.outcome, "deferred");
   assert.equal(verdict.condition, "unresolved-mergeability");
   assert.equal(fake.trace.filter((entry) => entry.call === "sleep").length, 2);
   assert.equal(fake.calls().includes("merge"), false);
@@ -369,12 +392,13 @@ test("N12 — an UNKNOWN that resolves inside the bound proceeds to the merge", 
   assert.deepEqual(await execute(fake.deps), { outcome: "merged", mergeCommitSha: MERGE_COMMIT });
 });
 
-test("N12 — a check still running is a poll, not a failure", async () => {
+test("N12 — a check still running defers, not fails", async () => {
   const fake = makeFake({
     reads: [{ status: "ok", snapshot: cleanSnapshot({ pullRequest: { checks: [{ kind: "CheckRun", name: "ci", conclusion: null, status: "IN_PROGRESS" }] } }) }],
     pollAttempts: 1,
   });
-  const verdict = stopped(await execute(fake.deps));
+  const verdict = await execute(fake.deps);
+  assert.equal(verdict.outcome, "deferred");
   assert.equal(verdict.condition, "unresolved-mergeability");
   assert.match(verdict.evidence, /pendingChecks/u);
 });

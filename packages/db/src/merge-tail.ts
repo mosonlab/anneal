@@ -24,10 +24,12 @@ export const MERGE_READINESS_OUTPUT_KIND = "merge-authorization";
 export const MERGE_TAIL_KIND = {
   baseDriftRecovery: "mergeTail.baseDriftRecovery",
   executorOffline: "mergeTail.executorOffline",
+  evidenceRefresh: "mergeTail.evidenceRefresh",
   leaseContention: "mergeTail.leaseContention",
   leaseHandoff: "mergeTail.leaseHandoff",
   leaseHold: "mergeTail.leaseHold",
   leaseRelease: "mergeTail.leaseRelease",
+  mergeabilityWait: "mergeTail.mergeabilityWait",
   regression: "mergeTail.regression",
   repairAttempt: "mergeTail.repairAttempt",
   repairResult: "mergeTail.repairResult",
@@ -53,6 +55,7 @@ export const MAX_MERGE_TAIL_REPAIR_ATTEMPTS = 3;
 export const MAX_MERGE_TAIL_OPERATOR_RERUNS = 2;
 
 export const MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES = 2;
+export const READINESS_BASE_DRIFT_REQUEUE_LIMIT = 3;
 
 /**
  * The base-drift classification budget, and the three retry classes it is

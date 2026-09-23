@@ -402,11 +402,11 @@ export const execute = async (deps: Deps): Promise<MergeOutcome> => {
     attempt += 1;
     const elapsed = deps.now().getTime() - pollStartedAt;
     if (attempt > deps.pollAttempts || elapsed >= deps.pollBudgetMs) {
-      return stop("unresolved-mergeability", JSON.stringify({
+      return { outcome: "deferred", condition: "unresolved-mergeability", evidence: JSON.stringify({
         observed: pending.observed,
         pollAttempts: attempt - 1,
         elapsedMs: elapsed,
-      }));
+      }) };
     }
     await deps.sleep(deps.pollIntervalMs);
   }
@@ -719,10 +719,16 @@ export const classifyPreMerge = (
     };
   }
   if (pr.mergeable !== "MERGEABLE") {
-    return { kind: "stop", outcome: stop("non-clean-mergeability", JSON.stringify({ mergeable: describe(pr.mergeable) })) };
+    return { kind: "stop", outcome: stop("non-clean-mergeability", JSON.stringify({
+      mergeable: describe(pr.mergeable),
+      ...(pr.mergeable === "CONFLICTING" ? { observed: snapshot.baseRefOid, authorized: authorization.baseSha } : {}),
+    })) };
   }
   if (pr.mergeStateStatus !== "CLEAN") {
-    return { kind: "stop", outcome: stop("non-clean-mergeability", JSON.stringify({ mergeStateStatus: describe(pr.mergeStateStatus) })) };
+    return { kind: "stop", outcome: stop("non-clean-mergeability", JSON.stringify({
+      mergeStateStatus: describe(pr.mergeStateStatus),
+      ...(pr.mergeStateStatus === "DIRTY" ? { observed: snapshot.baseRefOid, authorized: authorization.baseSha } : {}),
+    })) };
   }
   return { kind: "ok" };
 };

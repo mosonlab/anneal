@@ -6,6 +6,7 @@ import {
   AssigneeType,
   AUTHORIZED_MERGE_METHOD,
   activateRecoveryIntegratorSuccessor,
+  advanceTemplateTask,
   applyInboxDecisionTx,
   authorizationMetadata,
   MERGE_INTEGRATOR_KIND,
@@ -17,16 +18,19 @@ import {
   latestMarker,
   recordIntegratorStop,
   TaskStatus,
+  writeMarker,
 } from "@anneal/db";
 import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
 import { classifyCandidate } from "./base-drift-recovery-decision.js";
 import {
   baseDriftRecoveryTick,
+  pendingMergeabilityTick,
   readCandidateFacts,
   recordRecoveryClassificationRetry,
 } from "./merge-base-drift-worker.js";
 import { handleRegressionCompletion } from "./merge-tail-actions.js";
+import { evidenceTick } from "./merge-evidence-worker.js";
 import { seedIntegratorChain } from "./merge-integrator-fixture.js";
 import { claimRun } from "./run-claim.js";
 import {
@@ -131,6 +135,8 @@ const authorize = async (readinessTaskId: string, baseSha: string) => {
 const mechanicalStop = async (
   seeded: Awaited<ReturnType<typeof seedIntegratorChain>>,
   authorizationActivityId: string,
+  condition: "base-drift" | "non-clean-mergeability" = "base-drift",
+  conflictShape: "CONFLICTING" | "DIRTY" = "CONFLICTING",
 ) => {
   const previous = await db.run.findFirst({
     where: { taskId: seeded.integratorTask!.id },
@@ -175,8 +181,10 @@ const mechanicalStop = async (
       authorizationActivityId,
     },
   } });
-  const evidence = JSON.stringify({ observed: BASE_2, authorized: BASE });
-  const outputBody = JSON.stringify({ outcome: "stopped", condition: "base-drift", evidence });
+  const evidence = JSON.stringify({ observed: BASE_2, authorized: BASE,
+    ...(condition !== "non-clean-mergeability" ? {}
+      : conflictShape === "CONFLICTING" ? { mergeable: "CONFLICTING" } : { mergeStateStatus: "DIRTY" }) });
+  const outputBody = JSON.stringify({ outcome: "stopped", condition, evidence });
   await db.taskStepOutput.upsert({
     where: { taskId: seeded.integratorTask!.id },
     create: {
@@ -189,7 +197,7 @@ const mechanicalStop = async (
   });
   await db.$transaction((tx) => recordIntegratorStop(tx, {
     integratorTaskId: seeded.integratorTask!.id,
-    condition: "base-drift",
+    condition,
     evidence,
     sourceRunId: run.id,
   }));
@@ -199,10 +207,12 @@ const mechanicalStop = async (
 const seedStopped = async (
   shape: "canonical-direct" | "canonical-compound-readiness",
   label: string,
+  condition: "base-drift" | "non-clean-mergeability" = "base-drift",
+  conflictShape: "CONFLICTING" | "DIRTY" = "CONFLICTING",
 ) => {
   const seeded = await seedIntegratorChain(db, { label, shape });
   const authorization = await authorize(seeded.readinessTask!.id, BASE);
-  const sourceRun = await mechanicalStop(seeded, authorization.id);
+  const sourceRun = await mechanicalStop(seeded, authorization.id, condition, conflictShape);
   return { ...seeded, authorization, sourceRun };
 };
 
@@ -596,6 +606,129 @@ test("operator recovery repair reentry carries a direct Regression rerun through
   assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({
     where: { id: seeded.aggregateId },
   })).status, "AWAITING_AUTHORIZATION");
+});
+
+test("CONFLICTING and DIRTY enter the existing bounded Regression recovery", async () => {
+  for (const conflictShape of ["CONFLICTING", "DIRTY"] as const) {
+    const seeded = await seedStopped("canonical-direct", `conflicting-merge-recovery-${conflictShape}`,
+      "non-clean-mergeability", conflictShape);
+    assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2,
+      { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" })))).recovered, 1);
+    const attempt = await db.mergeRecoveryAttempt.findFirstOrThrow({
+      where: { integratorTaskId: seeded.integratorTask!.id },
+    });
+    assert.equal(attempt.observedBaseSha, BASE_2);
+    assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 1);
+    assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.integratorTask!.id, status: "OPEN" } }), 0);
+    await resetTestDb(db);
+  }
+});
+
+test("conflict recovery runs refresh-conflict repair and presents fresh approval evidence", async () => {
+  const seeded = await seedStopped("canonical-direct", "conflicting-merge-refresh", "non-clean-mergeability");
+  await db.task.update({ where: { id: seeded.readinessTask!.id }, data: { approvalGate: true } });
+  await db.taskTemplateStep.update({ where: { id: seeded.readinessStep!.id }, data: { approvalGate: true } });
+  const resolver = await db.agent.create({ data: {
+    projectId: seeded.project.id, environmentId: seeded.environment.id,
+    name: "merge-resolver-luna-max", title: "Merge resolver", model: "gpt-6-luna:max",
+    foundationalPrompt: "foundation", rolePrompt: "resolve",
+  } });
+  await db.agentRepoAccess.create({ data: { projectId: seeded.project.id,
+    agentId: resolver.id, repoId: seeded.repo.id, mountPath: "/repo", permissions: "GIT_WRITE" } });
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2,
+    { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" })))).recovered, 1);
+  const recoveryRun = await db.run.findFirstOrThrow({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } });
+  await db.run.update({ where: { id: recoveryRun.id }, data: { status: "SUCCEEDED", headSha: HEAD,
+    branch: "agentos/chain/recovery", pushedBranch: "agentos/chain/recovery" } });
+  await db.session.create({ data: { runId: recoveryRun.id, projectId: seeded.project.id,
+    taskId: seeded.gateTask.id, agentId: seeded.agent.id, runner: "CLAUDE", executionStatus: "SUCCEEDED" } });
+  await db.taskStepOutput.upsert({ where: { taskId: seeded.gateTask.id },
+    create: { taskId: seeded.gateTask.id, runId: recoveryRun.id, kind: "regression-verification",
+      body: JSON.stringify({ schemaVersion: 1, outcome: "refresh-conflict", headSha: HEAD,
+        baseHeadSha: BASE_2, summary: "target moved into conflicting edits" }), commitSha: HEAD },
+    update: { runId: recoveryRun.id, body: JSON.stringify({ schemaVersion: 1, outcome: "refresh-conflict",
+      headSha: HEAD, baseHeadSha: BASE_2, summary: "target moved into conflicting edits" }), commitSha: HEAD },
+  });
+  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, {
+    task: seeded.gateTask, run: { id: recoveryRun.id, agentId: seeded.agent.id,
+      branch: "agentos/chain/recovery", headSha: HEAD, sessionId: seeded.gateSession.id }, now: new Date(),
+  })), "handled");
+  const repair = await db.task.findFirstOrThrow({ where: { projectId: seeded.project.id,
+    name: "Autonomous merge tail: refresh-conflict" } });
+  await completeQueuedTask(repair.id, HEAD_2, { kind: "result", body: JSON.stringify({
+    schemaVersion: 1, outcome: "resolved", startHeadSha: HEAD, targetHeadSha: BASE_2,
+    resolvedHeadSha: HEAD_2, tradeOffs: [], changedTestExpectations: [],
+  }) });
+  await recordRecoveryPass(seeded, BASE_2, HEAD_2);
+  const rerun = await db.run.findFirstOrThrow({ where: { taskId: seeded.gateTask.id },
+    orderBy: { runNumber: "desc" } });
+  await db.session.create({ data: { runId: rerun.id, projectId: seeded.project.id,
+    taskId: seeded.gateTask.id, agentId: seeded.agent.id, runner: "CLAUDE", executionStatus: "SUCCEEDED" } });
+  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, {
+    task: seeded.gateTask, run: { id: rerun.id, agentId: seeded.agent.id,
+      branch: "agentos/chain/recovery", headSha: HEAD_2, sessionId: seeded.gateSession.id }, now: new Date(),
+  })), "advance");
+  await db.$transaction((tx) => advanceTemplateTask(tx, seeded.gateTask.id, rerun.id, null, new Date()));
+  await evidenceTick(db, reader(snapshot(BASE_2, { headRefOid: HEAD_2, headCommitOid: HEAD_2 })));
+  const card = await db.inboxMessage.findFirstOrThrow({ where: {
+    gateTaskId: seeded.readinessTask!.id, status: "OPEN",
+  } });
+  assert.match(card.body, new RegExp(BASE_2, "u"));
+  assert.match(card.body, new RegExp(HEAD_2, "u"));
+});
+
+test("conflict recovery exhaustion opens the existing stop question", async () => {
+  const seeded = await seedStopped("canonical-direct", "conflicting-merge-budget", "non-clean-mergeability");
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    await db.mergeRecoveryAttempt.create({ data: {
+      integratorTaskId: seeded.integratorTask!.id, sourceStopId: `prior-conflict-${attempt}`,
+      attempt, recoveryRunId: seeded.gateRun.id, repository: "acme/widgets",
+      prNumber: 123, targetBranch: "master",
+    } });
+  }
+  const tick = await baseDriftRecoveryTick(db, reader(snapshot(BASE_2,
+    { mergeable: "CONFLICTING", mergeStateStatus: "DIRTY" })));
+  assert.equal(tick.exhausted, 1);
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 0);
+  assert.ok(await db.inboxMessage.count({ where: { taskId: seeded.integratorTask!.id, status: "OPEN" } }) >= 1);
+});
+
+test("pending mergeability rechecks once, then stops with elapsed wait at six hours", async () => {
+  const seeded = await seedStopped("canonical-direct", "pending-mergeability-recheck");
+  const taskId = seeded.integratorTask!.id;
+  const started = new Date("2026-09-23T00:00:00.000Z");
+  await db.taskStepOutput.update({ where: { taskId }, data: { body: JSON.stringify({
+    outcome: "deferred", condition: "unresolved-mergeability", evidence: "pending checks",
+  }) } });
+  await db.$transaction((tx) => writeMarker(tx, taskId, "mergeabilityWait", "deferred", {
+    actorType: "control-plane", body: "pending checks",
+    metadata: { condition: "unresolved-mergeability", observed: "pending checks",
+      sourceRunId: seeded.sourceRun.id, ordinal: 1, firstDeferredAt: started.toISOString(),
+      nextEligibleAt: new Date(started.getTime() + 2_000).toISOString(), remainingMs: 6 * 60 * 60_000 },
+  }));
+  const leased: WithMergeLease = (target, fn, database) => withMergeLease(target, fn, database, {
+    acquire: acquireChainLease, release: releaseLeaseAdapter,
+  });
+  assert.equal(await pendingMergeabilityTick(db, new Date(started.getTime() + 1_000), 5, leased), 0);
+  assert.equal(await pendingMergeabilityTick(db, new Date(started.getTime() + 2_000), 5, leased), 1);
+  assert.equal(await pendingMergeabilityTick(db, new Date(started.getTime() + 2_000), 5, leased), 0);
+  assert.equal(await db.run.count({ where: { taskId, status: "QUEUED" } }), 1);
+  await db.run.updateMany({ where: { taskId, status: "QUEUED" }, data: { status: "SUCCEEDED" } });
+  const next = await db.run.findFirstOrThrow({ where: { taskId }, orderBy: { runNumber: "desc" } });
+  await db.session.create({ data: { runId: next.id, projectId: seeded.project.id,
+    taskId, agentId: seeded.integratorAgent.id, runner: "CLAUDE", executionStatus: "SUCCEEDED" } });
+  await db.taskStepOutput.update({ where: { taskId }, data: { runId: next.id } });
+  await db.task.update({ where: { id: taskId }, data: { status: TaskStatus.REVIEW } });
+  await db.$transaction((tx) => writeMarker(tx, taskId, "mergeabilityWait", "deferred", {
+    actorType: "control-plane", body: "pending checks again",
+    metadata: { condition: "unresolved-mergeability", observed: "pending checks",
+      sourceRunId: next.id, ordinal: 2, firstDeferredAt: started.toISOString(),
+      nextEligibleAt: new Date(started.getTime() + 4_000).toISOString(), remainingMs: 0 },
+  }));
+  assert.equal(await pendingMergeabilityTick(db, new Date(started.getTime() + 6 * 60 * 60_000), 5, leased), 0);
+  const notice = await db.inboxMessage.findFirst({ where: { taskId, status: "OPEN" }, orderBy: { createdAt: "desc" } });
+  assert.ok(notice);
+  assert.match(notice.body, /21600000/u);
 });
 
 test("a fresh base-drift recovery claim carries its pre-recovery Regression output snapshot", async () => {

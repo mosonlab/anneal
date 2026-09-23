@@ -5,6 +5,7 @@ import {
   AUTHORIZED_MERGE_METHOD,
   asJsonObject,
   MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
+  READINESS_BASE_DRIFT_REQUEUE_LIMIT,
   readinessRequeueActivityWhere,
   readinessRequeueTotals,
   MergeRecoveryRefusalCode,
@@ -92,7 +93,7 @@ export const readinessPollIntervalMs = (): number => {
 
 // Separate from lease-loss compensation: a valid exact-base PASS earns a
 // replacement, but a task continually outrun by main must still stop.
-export const READINESS_BASE_DRIFT_REQUEUE_LIMIT = 3;
+export { READINESS_BASE_DRIFT_REQUEUE_LIMIT } from "@anneal/db";
 export const READINESS_EXCEPTION_REQUEUE_LIMIT = 3;
 
 /**

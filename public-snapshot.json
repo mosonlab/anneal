@@ -80,6 +80,7 @@
     { "glob": "docs/adr/0008-templates-are-immutable-once-used.md", "purpose": "accepted template immutability and generation rollover rules" },
     { "glob": "docs/adr/0009-review-and-repair-shape.md", "purpose": "accepted review disposition and merge-tail repair boundaries" },
     { "glob": "docs/adr/0010-cross-family-review-before-dispatch.md", "purpose": "accepted cross-family review requirement before dispatch" },
+    { "glob": "docs/adr/0011-automate-mechanical-merge-stops.md", "purpose": "accepted bounded control-plane recovery of mechanical merge stops and stale approval evidence" },
     { "glob": "docs/out-of-scope/README.md", "purpose": "standing-record directory guide for refused design areas" },
     { "glob": "docs/out-of-scope/data-model.md", "purpose": "refused data-model design additions and revisit conditions" },
     { "glob": "docs/out-of-scope/deployment.md", "purpose": "refused deployment-governance designs and fallback condition" },

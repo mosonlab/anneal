@@ -224,6 +224,7 @@ export const enterRepair = async (
     aggregateId: string;
     currentBaseSha: string;
     now: Date;
+    automaticDisposition?: { condition: string; ordinal: number; remaining: number };
     readinessRequeue?: { staleBaseSha: string; reason: string; baseDrift: boolean };
     /**
      * A one-shot grant for a re-run the branch did not earn. An operator rerun
@@ -340,6 +341,7 @@ export const enterRepair = async (
     ...context,
     currentBaseSha: input.currentBaseSha,
     recoveryRunId: run.id,
+    ...(input.automaticDisposition ?? {}),
     ...(!requeue ? { priorOutput } : {}),
   };
   if (requeue) {

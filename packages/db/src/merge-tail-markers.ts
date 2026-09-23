@@ -22,7 +22,9 @@ export const MERGE_TAIL_MARKER_SCAN = 20;
 export type MarkerKind = keyof typeof MERGE_TAIL_KIND;
 
 /** Marker families whose state is a control-plane fact, never agent input. */
-const TRUSTED_MARKER_KINDS = new Set<MarkerKind>(["train", "leaseContention", "executorOffline"]);
+const TRUSTED_MARKER_KINDS = new Set<MarkerKind>([
+  "train", "leaseContention", "executorOffline", "evidenceRefresh", "mergeabilityWait",
+]);
 
 /**
  * Every state each kind may carry, declared once. `state` is the field readers
@@ -43,10 +45,12 @@ export const MARKER_STATES = {
     "validation-budget", "waiting-ceiling",
   ],
   executorOffline: ["requeued-executor-offline"],
+  evidenceRefresh: ["checked", "queued", "ceiling", "stopped"],
   leaseContention: ["alerted", "contended", "resolved", "unreachable"],
   leaseHandoff: ["invalid", "pending", "released"],
   leaseHold: [],
   leaseRelease: ["invalid", "release-deferred", "released"],
+  mergeabilityWait: ["deferred", "queued", "stopped"],
   readiness: [
     "authorized", "executor-offline-closed", "executor-offline-rearmed",
     "lease-transport-deferred", "queued", "requeued-executor-offline",
