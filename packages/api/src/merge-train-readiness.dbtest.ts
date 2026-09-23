@@ -980,7 +980,7 @@ test("candidate-tip-mismatch stops the second candidate named by the tool stderr
       stopped ? TaskStatus.REVIEW : TaskStatus.DONE);
     const notices = await db.inboxMessage.findMany({ where: {
       taskId: candidate.regression.id,
-      dedupeKey: { startsWith: "merge-tail-stop:" },
+      dedupeKey: { startsWith: `merge-readiness-stop:${candidate.readiness.id}:` },
     } });
     assert.equal(notices.length, stopped ? 1 : 0);
     if (stopped) assert.match(notices[0]!.body, new RegExp(second.readiness.id, "u"));
@@ -1004,7 +1004,7 @@ test("an unbound mismatch signal falls back to stopping the first candidate", as
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seed.candidates[1]!.readiness.id } })).status, TaskStatus.TODO);
   assert.equal(await db.inboxMessage.count({ where: {
     taskId: seed.candidates[0]!.regression.id,
-    dedupeKey: { startsWith: "merge-tail-stop:" },
+    dedupeKey: { startsWith: `merge-readiness-stop:${seed.candidates[0]!.readiness.id}:` },
   } }), 1);
 });
 
