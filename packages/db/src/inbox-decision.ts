@@ -296,6 +296,20 @@ export const applyInboxDecisionTx = async (
     if (refreshed) {
       throw new WorkflowRefusalError("conflict", "Merge evidence was refreshed; this approval card is closed");
     }
+    const superseded = current?.status === InboxStatus.CLOSED
+      ? await tx.taskActivity.findFirst({ where: {
+        actorType: "control-plane",
+        AND: [
+          { metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.stopSuperseded } },
+          { metadata: { path: ["closedInboxMessageIds"], array_contains: [question.id] } },
+        ],
+      }, select: { id: true } }) : null;
+    if (superseded) {
+      throw new WorkflowRefusalError(
+        "conflict",
+        "Merge stop was superseded by a fresh mechanical authorization; this card is closed",
+      );
+    }
     return { duplicate: true, resumed: false };
   }
   if (gateDecision) {

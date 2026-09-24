@@ -3285,6 +3285,21 @@ rejecting it instead resets the preceding executable Step (normally
 Regression) to `TODO` and queues a replacement Run. Automatic stale-evidence
 refresh uses neither Inbox decision route and does not abandon the Chain.
 
+When that replacement Regression passes and Merge readiness writes a fresh
+mechanical authorization while the integrator's latest stop was answered
+`re-authorize`, the authorization supersedes the stop: merge execution is
+queued without a next-generation confirmation card, OPEN confirmation cards
+and the `integrator-stopped` Run-birth notice for that stop close, and the
+integrator Task records a control-plane `mergeIntegrator.stopSuperseded`
+activity naming the stop, authorization, head, base and Run. No stop answer is
+written. The same applies when a held Chain resumes after that authorization,
+and platform retries of the queued Run (lease loss, claim invalidation) are
+admitted. Answering a card closed this way returns `409 conflict` explaining
+that the stop was superseded. An unanswered stop still refuses the Run birth,
+and a Chain returning to the integrator without a mechanical authorization
+written after the `re-authorize` answer still receives the next confirmation
+card. See [ADR-0011](adr/0011-automate-mechanical-merge-stops.md).
+
 Inside a base-drift recovery, the requeues use the recovery aggregate's
 existing `MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES` ceiling of two instead of the
 per-readiness-task ceiling. Once it is reached, readiness parks the recovery

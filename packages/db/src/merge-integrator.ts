@@ -23,6 +23,7 @@ export const MERGE_INTEGRATOR_KIND = {
   targetCorrection: "mergeIntegrator.targetCorrection",
   intent: "mergeIntegrator.intent",
   result: "mergeIntegrator.result",
+  stopSuperseded: "mergeIntegrator.stopSuperseded",
 } as const;
 
 export const MERGE_INTEGRATOR_SCHEMA_VERSION = 1;

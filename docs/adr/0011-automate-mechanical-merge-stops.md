@@ -69,3 +69,36 @@ control-plane-owned action, not either human rejection.
 Train post-publication read-back cannot defer: publication may already have
 landed, so it must settle the observed merge or stop for operator investigation.
 Same-base conflict recovery does not reread mergeability before its bounded Regression replay; a redundant replay can consume one of two attempts but cannot bypass merge checks. Non-train resends have no separate send-count cap: every resend locks the exact head, rechecks all merge conditions, and remains within the six-hour wait ceiling.
+
+## Amendment: supersession of a re-authorized stop
+
+After a human answers a stop `re-authorize` (`refresh-requested`), a Merge
+readiness re-verification that completes after that answer and binds a
+control-plane `mechanical` authorization to its exact head supersedes the stop.
+`activateChainSuccessor`, reached from readiness settlement and from Chain
+resume, opens the integrator Run through the Run-birth `stopBypass`, closes the
+stop's confirmation cards and `integrator-stopped` refusal notice, and writes a
+`mergeIntegrator.stopSuperseded` activity. Platform retries of that Run
+(lease loss, claim invalidation) inherit the same admission. A click on a card
+closed this way is refused with an explanation.
+
+This does not reopen the "uncertain merge outcomes still stop for an operator"
+boundary:
+
+- The human already made the decision. `re-authorize` is the operator's answer
+  that the stop may resume on fresh evidence; supersession writes no operator
+  answer or stop disposition and only replaces the confirmation card that would
+  have shown that same evidence.
+- Readiness re-reads the pull request, head, base and checks under the Merge
+  Lease, so no other merge path acts on the same target in between.
+- Only a readiness `mechanical` authorization created after the `re-authorize`
+  answer qualifies; the authorization the stopped Run consumed is older and
+  never does. Readiness issues it only when the pull request's current head and
+  base equal the head-bound Regression PASS evidence and the head is ahead of
+  or identical to that base.
+- The backstop for a merge that actually landed is the merge executor: it reads
+  the pull request before merging and settles an already-`MERGED` one instead
+  of merging again. A landed merge therefore cannot be re-merged.
+
+Stops without a `re-authorize` answer, and stops whose answer postdates the
+latest mechanical authorization, keep the human confirmation path unchanged.

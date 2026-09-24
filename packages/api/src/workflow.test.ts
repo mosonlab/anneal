@@ -204,7 +204,7 @@ test("layer activation refuses a missing chain row instead of following a linked
   const activities: string[] = [];
   const tx = {
     $queryRaw: async () => [],
-    task: { findMany: async () => [] },
+    task: { findMany: async () => [], findUnique: async () => null },
     taskActivity: { create: async ({ data }: { data: { body: string } }) => { activities.push(data.body); return {}; } },
   } as any;
   const result = await activateChainSuccessor(tx, {
