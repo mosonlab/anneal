@@ -209,6 +209,7 @@ const fakeTx = (
     },
     taskActivity: {
       findMany: async () => options.stopRows ?? [],
+      findFirst: async () => null,
       create: async ({ data }: { data: Record<string, unknown> }) => {
         activities.push(data);
         return { id: "activity-1" };
