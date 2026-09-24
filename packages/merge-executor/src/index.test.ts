@@ -13,6 +13,7 @@ import { RUN_COMPLETION_CONTRACT_VERSION, type MechanicalClaim } from "@anneal/d
 import { makeAgentOsClient } from "./agentos.js";
 import type { ExecutorConfig } from "./config.js";
 import { mintInstallationToken } from "./github-app-auth.js";
+import { makeGitHubClient, NETWORK_READ_ATTEMPTS, type PullRequestRef, type ReadResult } from "./github.js";
 import { claimOnce, pollClaims, runClaim, type ClaimOnceResult } from "./index.js";
 import { makeLog, makeRedactor } from "./redaction.js";
 
@@ -690,3 +691,56 @@ for (const httpStatus of [undefined, 503, 403, 404, 422]) {
     if (completion.outcome.case === "provider-failure") assert.equal(completion.outcome.envelope.transient, true);
   });
 }
+
+test("GitHub transport failures reach stop evidence as a credential-free timeout or connection failure, after bounded replay", async () => {
+  const installationToken = `installation_${"T".repeat(32)}`;
+  const readThrough = async (
+    githubFetch: (init: RequestInit | undefined, call: number) => Promise<Response>,
+    overrideConfig: Partial<ExecutorConfig> = {},
+  ): Promise<{ read: ReadResult; githubCalls: number }> => {
+    let githubCalls = 0;
+    let read: ReadResult | undefined;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      if (String(input).startsWith("https://api.github.test")) {
+        githubCalls += 1;
+        return githubFetch(init, githubCalls);
+      }
+      return compatibleAgentOsResponse(input);
+    };
+    await runClaim({ ...config, ...overrideConfig }, "/private/app.pem", claimed(`transport-${githubCalls}`), log, fetchImpl, {
+      mintToken: async () => ({ ok: true, token: installationToken, expiresAt: new Date(Date.now() + 60 * 60_000) }),
+      makeGitHub: ((options: Parameters<typeof makeGitHubClient>[0]) => makeGitHubClient({ ...options, sleep: async () => {} })) as never,
+      executeDecision: (async (deps: { readPullRequest: (reference: PullRequestRef) => Promise<ReadResult> }) => {
+        read = await deps.readPullRequest({ owner: "owner", name: "name", number: 7, baseRef: "main" });
+        throw new Error("captured");
+      }) as never,
+    });
+    assert.ok(read);
+    return { read, githubCalls };
+  };
+
+  const refused = await readThrough(async () => {
+    throw new TypeError(`fetch failed for Bearer ${installationToken}`, { cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }) });
+  });
+  assert.equal(refused.githubCalls, NETWORK_READ_ATTEMPTS);
+  assert.deepEqual(refused.read, {
+    status: "api-error",
+    reason: `network: GitHub connection failed (ECONNRESET) (after ${NETWORK_READ_ATTEMPTS} attempts)`,
+  });
+
+  const stalled = await readThrough((init) => new Promise((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => { reject(new DOMException(`aborted ${installationToken}`, "AbortError")); }, { once: true });
+  }), { githubTimeoutMs: 5 });
+  assert.deepEqual(stalled.read, {
+    status: "api-error",
+    reason: `network: GitHub request timed out (after ${NETWORK_READ_ATTEMPTS} attempts)`,
+  });
+
+  // One dropped connection, then an answer: the read proceeds on the answer.
+  const recovered = await readThrough(async (_init, call) => {
+    if (call === 1) throw new TypeError("fetch failed");
+    return new Response(JSON.stringify({ data: { repository: null } }), { status: 200 });
+  });
+  assert.equal(recovered.githubCalls, 2);
+  assert.deepEqual(recovered.read, { status: "api-error", reason: "repository resolved to null" });
+});

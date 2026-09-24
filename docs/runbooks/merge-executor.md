@@ -121,6 +121,19 @@ ref update. Before re-authorizing, read the base ref: if it is a two-parent
 merge commit whose parents are the authorized base and head, the merge landed
 and the stop is a reporting failure, not a merge failure.
 
+### Transport failures on GitHub reads
+
+A GitHub read that gets no response at all — a dropped connection or the
+per-request timeout — is replayed up to three attempts in total, waiting about
+2 and then 5 seconds (±20% jitter). Reads are every REST `GET` and the GraphQL
+pull-request read. Writes (`POST`/`PATCH`/`DELETE` and GraphQL mutations) are
+sent once; a lost write keeps the read-back handling above. An HTTP answer,
+including 401/403, 404, 409, 422, 429 and 5xx, is never replayed here. When the
+replays are exhausted the run still stops `api-error`, and its reason names the
+failure kind and the attempt count, for example
+`network: GitHub request timed out (after 3 attempts)` or
+`network: GitHub connection failed (ECONNRESET) (after 3 attempts)`.
+
 ### Mechanical waits and recoverable conflicts
 
 Pending required checks or `UNKNOWN` mergeability at the executor's poll limit
