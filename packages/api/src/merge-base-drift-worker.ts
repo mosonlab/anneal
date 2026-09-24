@@ -456,10 +456,32 @@ const readCiFailureEvidence = async (
   return { fingerprint: classified.fingerprint, failures };
 };
 
+// Node fetch wraps both socket failures and invalid-port failures as
+// TypeError("fetch failed"); only recognized network/Undici causes are retryable.
+const retryableFetchErrorCodes = new Set([
+  "ECONNABORTED", "ECONNREFUSED", "ECONNRESET", "EAI_AGAIN", "EHOSTDOWN", "EHOSTUNREACH",
+  "ENETDOWN", "ENETUNREACH", "ENOTFOUND", "EPIPE", "ETIMEDOUT",
+  "UND_ERR_BODY_TIMEOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_SOCKET",
+]);
+
+const hasRetryableFetchCause = (error: TypeError): boolean => {
+  let cause: unknown = (error as TypeError & { cause?: unknown }).cause;
+  for (let depth = 0; depth < 5 && typeof cause === "object" && cause !== null; depth += 1) {
+    const causeError = cause as { code?: unknown; cause?: unknown };
+    if (typeof causeError.code === "string" && retryableFetchErrorCodes.has(causeError.code)) return true;
+    cause = causeError.cause;
+  }
+  return false;
+};
+
 const retryableCiLogError = (error: unknown): boolean =>
   (error instanceof GitHubReadError && (error.kind === "transport" || error.kind === "timeout"))
-  || error instanceof TypeError
+  || (error instanceof TypeError && hasRetryableFetchCause(error))
   || (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError"));
+
+const describeCiLogError = (error: unknown): string => error instanceof TypeError
+  ? `${error.name}: ${error.message}`
+  : error instanceof Error ? error.message : String(error);
 
 const queueRecovery = async (
   db: PrismaClient,
@@ -1209,7 +1231,7 @@ export const baseDriftRecoveryTick = async (
         try {
           ciEvidence = await readCiFailureEvidence(reader, snapshot, candidate);
         } catch (error: unknown) {
-          const reason = `CI failure evidence or logs unavailable: ${redactCiLog(error instanceof Error ? error.message : String(error))}`;
+          const reason = `CI failure evidence or logs unavailable: ${redactCiLog(describeCiLogError(error))}`;
           const decision: Retry | Ineligible = retryableCiLogError(error)
             ? { kind: "retry", retryClass: "transport", reason }
             : { kind: "ineligible", reason };
