@@ -186,13 +186,21 @@ const boundedJobLogTail = async (
   const reader = response.body.getReader();
   let total = 0;
   let tail = Buffer.alloc(0);
+  let tailStartsAtLineBoundary = true;
   try {
     for (;;) {
       const part = await reader.read();
       if (part.done) break;
       total += part.value.byteLength;
       if (total > 16 * 1024 * 1024) throw new GitHubReadError("Actions job log exceeds 16 MiB", "response");
-      tail = Buffer.concat([tail, Buffer.from(part.value)]).subarray(-64 * 1024);
+      const combined = Buffer.concat([tail, Buffer.from(part.value)]);
+      if (combined.byteLength > 64 * 1024) {
+        const start = combined.byteLength - 64 * 1024;
+        tailStartsAtLineBoundary = combined[start - 1] === 0x0a;
+        tail = combined.subarray(start);
+      } else {
+        tail = combined;
+      }
     }
   } catch (error: unknown) {
     if (error instanceof GitHubReadError) throw error;
@@ -203,7 +211,12 @@ const boundedJobLogTail = async (
   } finally {
     reader.releaseLock();
   }
-  const lines = redactCiLog(tail.toString("utf8")).split(/\r?\n/u).filter((line) => line.trim() !== "");
+  let tailText = tail.toString("utf8");
+  if (!tailStartsAtLineBoundary) {
+    const firstLineEnd = tailText.indexOf("\n");
+    tailText = firstLineEnd >= 0 ? tailText.slice(firstLineEnd + 1) : "";
+  }
+  const lines = redactCiLog(tailText).split(/\r?\n/u).filter((line) => line.trim() !== "");
   const windows = failedSteps.flatMap((step) => {
     const start = Date.parse(step.startedAt ?? "");
     const end = Date.parse(step.completedAt ?? "");

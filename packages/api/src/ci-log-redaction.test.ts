@@ -35,6 +35,14 @@ test("CI log redaction removes an unterminated PEM block through the excerpt end
   assert.doesNotMatch(redacted, /private-material/u);
 });
 
+test("CI log redaction removes content through an END marker whose BEGIN was truncated", () => {
+  const pemEnd = "-----END " + "PRIVATE KEY-----";
+  const redacted = redactCiLog(`private-material\nmore-private-material\n${pemEnd}\nafter key`);
+  assert.match(redacted, /^\[REDACTED TRUNCATED PEM\]/u);
+  assert.match(redacted, /after key/u);
+  assert.doesNotMatch(redacted, /private-material/u);
+});
+
 test("CI log truncation removes an unmatched PEM block at the retained boundary", () => {
   const pemStart = "-----BEGIN " + "PRIVATE KEY-----";
   const truncated = truncateRedactedCiLog(
@@ -43,4 +51,11 @@ test("CI log truncation removes an unmatched PEM block at the retained boundary"
   assert.match(truncated, /\[REDACTED TRUNCATED PEM\]/u);
   assert.doesNotMatch(truncated, /private-material/u);
   assert.ok(Buffer.byteLength(truncated) <= 50);
+});
+
+test("CI log truncation skips a continuation byte at the retained UTF-8 boundary", () => {
+  const truncated = truncateRedactedCiLog(`A${"雪".repeat(100)}`, 299);
+  assert.doesNotMatch(truncated, /\uFFFD/u);
+  assert.match(truncated, /^雪/u);
+  assert.ok(Buffer.byteLength(truncated, "utf8") <= 299);
 });

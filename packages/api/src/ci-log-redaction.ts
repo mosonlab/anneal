@@ -1,9 +1,17 @@
 const UNMATCHED_PEM_BEGIN = /-----BEGIN ([A-Z][A-Z0-9 ]+)-----[\s\S]*$/u;
 
+const redactUnmatchedPemEnd = (value: string): string => {
+  const end = /-----END ([A-Z][A-Z0-9 ]+)-----/u.exec(value);
+  if (!end || end.index === undefined) return value;
+  const matchingBegin = `-----BEGIN ${end[1]}-----`;
+  if (value.slice(0, end.index).includes(matchingBegin)) return value;
+  return `[REDACTED TRUNCATED PEM]${value.slice(end.index + end[0].length)}`;
+};
+
 /** Remove common credential shapes before CI evidence reaches durable or Agent-facing text. */
-export const redactCiLog = (value: string): string => value
+export const redactCiLog = (value: string): string => redactUnmatchedPemEnd(value
   .replace(/-----BEGIN ([A-Z][A-Z0-9 ]+)-----[\s\S]*?-----END \1-----/gu, "[REDACTED PEM BLOCK]")
-  .replace(UNMATCHED_PEM_BEGIN, "[REDACTED TRUNCATED PEM]")
+  .replace(UNMATCHED_PEM_BEGIN, "[REDACTED TRUNCATED PEM]"))
   .replace(/\bBearer[ \t]+[^\s"']+/giu, "Bearer [REDACTED]")
   .replace(/(["']?(?:api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password|passwd|client[_-]?secret|private[_-]?key)["']?\s*[:=]\s*)(["'])(.*?)\2/giu,
     "$1$2[REDACTED]$2")
@@ -24,9 +32,11 @@ export const truncateRedactedCiLog = (
   const requestedPrefixBytes = firstLineEnd >= 0 ? Buffer.byteLength(value.slice(0, firstLineEnd + 1)) : 0;
   const prefixBytes = Math.min(requestedPrefixBytes, maxBytes);
   const tailBytes = maxBytes - prefixBytes;
+  let tailStart = bytes.byteLength - tailBytes;
+  while (tailStart < bytes.byteLength && (bytes[tailStart]! & 0xc0) === 0x80) tailStart += 1;
   const truncated = Buffer.concat([
     bytes.subarray(0, prefixBytes),
-    tailBytes > 0 ? bytes.subarray(-tailBytes) : Buffer.alloc(0),
+    tailBytes > 0 ? bytes.subarray(tailStart) : Buffer.alloc(0),
   ]).toString("utf8");
 
   // The byte boundary can cut through a PEM marker or its body. Fail closed on
