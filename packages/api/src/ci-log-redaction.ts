@@ -5,11 +5,11 @@ export const redactCiLog = (value: string): string => value
   .replace(/-----BEGIN ([A-Z][A-Z0-9 ]+)-----[\s\S]*?-----END \1-----/gu, "[REDACTED PEM BLOCK]")
   .replace(UNMATCHED_PEM_BEGIN, "[REDACTED TRUNCATED PEM]")
   .replace(/\bBearer[ \t]+[^\s"']+/giu, "Bearer [REDACTED]")
-  .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,})\b/gu, "[REDACTED GITHUB TOKEN]")
   .replace(/(["']?(?:api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password|passwd|client[_-]?secret|private[_-]?key)["']?\s*[:=]\s*)(["'])(.*?)\2/giu,
     "$1$2[REDACTED]$2")
   .replace(/(["']?(?:api[_-]?key|access[_-]?token|auth[_-]?token|token|secret|password|passwd|client[_-]?secret|private[_-]?key)["']?\s*[:=]\s*)([^\s,;"']+)/giu,
-    "$1[REDACTED]");
+    "$1[REDACTED]")
+  .replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{10,}|github_pat_[A-Za-z0-9_]{10,})\b/gu, "[REDACTED GITHUB TOKEN]");
 
 /** Truncate an already-redacted excerpt, optionally retaining its first line. */
 export const truncateRedactedCiLog = (

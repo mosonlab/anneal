@@ -786,7 +786,7 @@ test("native fetch TypeErrors retry only when undici supplies a network error co
 
 test("ordinary CI log TypeErrors are ineligible immediately and carry redacted details", async () => {
   for (const [label, thrown, reason] of [
-    ["code-error", new TypeError(`Cannot read property of undefined; token=${"ghp_" + "x".repeat(36)}`), /TypeError: Cannot read property of undefined; token=\[REDACTED GITHUB TOKEN\]/u],
+    ["code-error", new TypeError(`Cannot read property of undefined; token=${"ghp_" + "x".repeat(36)}`), /TypeError: Cannot read property of undefined; token=\[REDACTED\]/u],
     ["bad-port", new TypeError("fetch failed", { cause: new Error("bad port") }), /TypeError: fetch failed/u],
   ] as const) {
     const seeded = await seedStopped("canonical-direct", `ci-typeerror-${label}`, "check-failure-or-absence");

@@ -18,6 +18,7 @@ test("CI log redaction removes common credentials and preserves useful failure t
   ].join("\n");
   const redacted = redactCiLog(input);
   assert.match(redacted, /error TS2322/u);
+  assert.match(redacted, /token=\[REDACTED\]/u);
   for (const secret of ["ghp_", "github_pat_", "abc.def-123", "key-value-123",
     "quoted secret value", "json-secret", "private-material"]) {
     assert.ok(!redacted.includes(secret), `redaction leaked ${secret}`);
