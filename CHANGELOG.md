@@ -140,6 +140,16 @@ written.
 - Canonical sync retires the `pre-defect-class-sweep` prompt generation of all
   three templates on deploy. Agent prompts update in place as before. Steps of
   already-instantiated chains keep the prompts they were created with.
+- **Regression no longer fails a chain for its own `.chain/` directory.** A
+  Direct Regression run reported the platform-materialized
+  `.chain/<branch>/spec.md` as a diff-scope violation after six earlier runs
+  had accepted it, and opened an unneeded review-fix round. The Direct and Full
+  Assurance Regression steps now state that the tracked Chain workspace, which
+  merge execution strips from the merge commit tree, never counts toward
+  diff-scope, forbidden-surface, or changed-file acceptance checks and is never
+  reported or modified. Canonical sync retires the
+  `pre-chain-workspace-scope-exemption` prompt generation of both templates on
+  deploy; the PR workflow has no Regression step and is unchanged.
 
 ## v0.9.0 — Developer Preview 9
 
