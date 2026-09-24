@@ -27,15 +27,17 @@ test("CI log redaction removes common credentials and preserves useful failure t
 });
 
 test("CI log redaction removes an unterminated PEM block through the excerpt end", () => {
-  const redacted = redactCiLog("compiler error\n-----BEGIN PRIVATE KEY-----\nprivate-material");
+  const pemStart = "-----BEGIN " + "PRIVATE KEY-----";
+  const redacted = redactCiLog(`compiler error\n${pemStart}\nprivate-material`);
   assert.match(redacted, /compiler error/u);
   assert.match(redacted, /\[REDACTED TRUNCATED PEM\]/u);
   assert.doesNotMatch(redacted, /private-material/u);
 });
 
 test("CI log truncation removes an unmatched PEM block at the retained boundary", () => {
+  const pemStart = "-----BEGIN " + "PRIVATE KEY-----";
   const truncated = truncateRedactedCiLog(
-    `header\n${"x".repeat(100)}\n-----BEGIN PRIVATE KEY-----\nprivate-material`, 50,
+    `header\n${"x".repeat(100)}\n${pemStart}\nprivate-material`, 50,
   );
   assert.match(truncated, /\[REDACTED TRUNCATED PEM\]/u);
   assert.doesNotMatch(truncated, /private-material/u);

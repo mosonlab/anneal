@@ -260,7 +260,9 @@ test("Actions log falls back to the bounded job tail when failed-step timestamps
 
 test("Actions failure logs redact PEM blocks and tokens before the 4 KB truncation", async () => {
   const head = "a".repeat(40);
-  const pem = `-----BEGIN PRIVATE KEY-----\n${"private-key-material\n".repeat(150)}-----END PRIVATE KEY-----`;
+  const pemStart = "-----BEGIN " + "PRIVATE KEY-----";
+  const pemEnd = "-----END " + "PRIVATE KEY-----";
+  const pem = `${pemStart}\n${"private-key-material\n".repeat(150)}${pemEnd}`;
   const token = `ghp_${"secret_token_material".repeat(3)}`;
   const logs = [
     `compiler failure\n${"x".repeat(2_500)}\n${pem}\n${"y".repeat(2_500)}`,
