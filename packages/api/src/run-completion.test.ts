@@ -315,6 +315,7 @@ const statefulCompletionHarness = (
     templateStep = null,
     headSha,
     claimantClass = "runner",
+    pushedBranch,
   }: {
     runNumber: number;
     maxRunsPerTask: number;
@@ -323,6 +324,7 @@ const statefulCompletionHarness = (
     templateStep?: Record<string, unknown> | null;
     headSha?: string;
     claimantClass?: "runner" | "merge-executor";
+    pushedBranch?: string;
   }) => {
     task.templateStep = templateStep;
     currentRun = {
@@ -343,6 +345,7 @@ const statefulCompletionHarness = (
         fencingToken: currentRun.fencingToken,
         outcome,
         headSha,
+        pushedBranch,
         exitCode: outcome.case === "succeeded" ? 0 : 1,
         pushStatus: PushStatus.NOT_REQUESTED,
         cleanupStatus: CleanupStatus.SUCCEEDED,
@@ -721,8 +724,10 @@ const outcomeRows: ReadonlyArray<{
       }),
     },
     succeeded: false,
-    failureClass: FailureClass.TOOL_FAILED,
-    retryable: false, externalFailure: false, timedOut: false,
+    // Retried so provisioning merges the moved tip, but paid for: a branch
+    // that keeps moving is bounded by the Task's attempt ceiling.
+    failureClass: FailureClass.TRANSIENT_PROVIDER,
+    retryable: true, externalFailure: false, timedOut: false,
   },
   {
     name: "a provisioning merge of the moved remote branch that conflicted",
@@ -759,24 +764,80 @@ for (const row of outcomeRows) {
   });
 }
 
-test("completeRun stops a push the moved chain branch rejected instead of refunding replays of it", async () => {
-  // Compass "Fix F3": a foreign commit landed on the chain branch mid-run, and
-  // four refunded retries replayed the same non-fast-forward rejection.
-  const harness = statefulCompletionHarness();
-  const reason = "git push rejected: remote branch 'agentos/chain/shared' is at 324e1666, which this Run's head"
-    + " abc does not contain (1 foreign commit(s): 324e1666 Someone <someone@example.test>: hotfix)";
+const divergedPushReason = "git push rejected: remote branch 'agentos/chain/shared' is at 324e1666, which this Run's"
+  + " head abc does not contain (1 foreign commit(s): 324e1666 Someone <someone@example.test>: hotfix)";
+const divergedPushOutcome: RunOutcome = {
+  case: "provider-failure",
+  reason: divergedPushReason,
+  envelope: envelope({
+    phase: "DELIVER",
+    runnerClass: FailureClass.TOOL_FAILED,
+    exitCode: 0,
+    terminalSuccess: true,
+    remoteBranchDiverged: true,
+    stderrSummary: divergedPushReason,
+  }),
+};
+
+test("completeRun retries a push the moved chain branch rejected on the Task's own budget", async () => {
+  // An operator pushed to the chain branch while the agent ran. The retry's
+  // provisioning merges that tip, so no human is needed — but Compass "Fix F3"
+  // replayed such a rejection four times on refunded budget, so the retry is
+  // paid for and the attempt ceiling bounds a branch that keeps moving.
+  const harness = statefulCompletionHarness({
+    maxSessionsPerTask: 3, repo: { defaultBranch: "main" },
+    assigneeAgent: { id: "agent-1", name: "Active agent", archivedAt: null },
+  });
+  // The failed Run's work reached the remote as a WIP salvage ref; the retry
+  // clones it and merges the moved chain tip on top.
+  const salvage = "agentos/salvage/task-refunds/run-1";
   const closed = await harness.complete({
-    runNumber: 1,
+    runNumber: 1, maxRunsPerTask: 3, budgetGrants: 0, outcome: divergedPushOutcome, pushedBranch: salvage,
+  });
+  assert.equal(closed.failureClass, FailureClass.TRANSIENT_PROVIDER);
+  assert.equal(closed.retryable, true);
+  assert.equal(closed.budgetGrants, 0);
+  assert.equal(closed.maxRunsPerTask, 3);
+  assert.equal(closed.failureReason, divergedPushReason);
+  assert.equal(harness.queuedRuns.length, 1);
+  assert.equal(harness.queuedRuns[0]!.runNumber, 2);
+  assert.equal(harness.queuedRuns[0]!.targetBranch, salvage);
+  assert.equal(harness.queuedRuns[0]!.maxRunsPerTask, 3);
+  assert.equal(harness.queuedRuns[0]!.budgetGrants, 0);
+  assert.equal(harness.activities.some(({ metadata }) => metadata?.kind === "externalFailureRefund.granted"), false);
+  assert.equal(harness.taskUpdates.some((update) => update.status === "REVIEW"), false);
+});
+
+test("completeRun stops a moved-branch push retry once the Run budget is exhausted", async () => {
+  const harness = statefulCompletionHarness();
+  const closed = await harness.complete({ runNumber: 3, maxRunsPerTask: 3, budgetGrants: 0, outcome: divergedPushOutcome });
+  assert.equal(closed.failureClass, FailureClass.TRANSIENT_PROVIDER);
+  assert.equal(closed.budgetGrants, 0);
+  assert.equal(closed.maxRunsPerTask, 3);
+  assert.deepEqual(harness.queuedRuns, []);
+  assert.equal(harness.activities.some(({ metadata }) => metadata?.kind === "externalFailureRefund.granted"), false);
+  assertThreadedNotice(harness.inboxUpserts[0], {
+    dedupeKey: "run-budget-exhausted:task-refunds:run-3",
+    sessionId: "session-3",
+    body: /Run budget exhausted after 3 attempts; operator action required\./u,
+  });
+});
+
+test("completeRun parks a provisioning merge of the moved chain branch that conflicted", async () => {
+  const harness = statefulCompletionHarness();
+  const reason = "Remote branch 'agentos/chain/shared' is at 324e1666, which the published base abc does not contain"
+    + " (1 foreign commit(s): 324e1666 Someone <someone@example.test>: hotfix), and merging it conflicts in tree.txt.";
+  const closed = await harness.complete({
+    runNumber: 2,
     maxRunsPerTask: 3,
     budgetGrants: 0,
     outcome: {
       case: "provider-failure",
       reason,
       envelope: envelope({
-        phase: "DELIVER",
-        runnerClass: FailureClass.TOOL_FAILED,
-        exitCode: 0,
-        terminalSuccess: true,
+        phase: "PROVISION",
+        agentExited: false,
+        terminationReason: "runner exception",
         remoteBranchDiverged: true,
         stderrSummary: reason,
       }),
@@ -786,7 +847,6 @@ test("completeRun stops a push the moved chain branch rejected instead of refund
   assert.equal(closed.retryable, false);
   assert.equal(closed.budgetGrants, 0);
   assert.equal(closed.maxRunsPerTask, 3);
-  assert.equal(closed.failureReason, reason);
   assert.deepEqual(harness.queuedRuns, []);
   assert.equal(harness.activities.some(({ metadata }) => metadata?.kind === "externalFailureRefund.granted"), false);
   assert.deepEqual(harness.taskUpdates.at(-1), { status: "REVIEW", failureReason: reason });
