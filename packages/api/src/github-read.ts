@@ -26,6 +26,7 @@ import type { ChangedFile } from "@anneal/db";
 
 import { abortableDelay } from "./abortable-delay.js";
 import { decodeStrictBase64 } from "./base64.js";
+import { redactCiLog, truncateRedactedCiLog } from "./ci-log-redaction.js";
 
 export const GITHUB_GRAPHQL_URL = "https://api.github.com/graphql";
 
@@ -144,6 +145,7 @@ type GitHubReadRetryOptions = {
 };
 
 const GITHUB_READ_RETRY_DELAYS_MS = [250, 1_000] as const;
+const MAX_ACTIONS_FAILURE_LOG_BYTES = 4_000;
 const asArray = (value: unknown): unknown[] => (Array.isArray(value) ? value : []);
 const asObject = (value: unknown): Record<string, unknown> | null =>
   typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -201,7 +203,7 @@ const boundedJobLogTail = async (
   } finally {
     reader.releaseLock();
   }
-  const lines = tail.toString("utf8").split(/\r?\n/u).filter((line) => line.trim() !== "");
+  const lines = redactCiLog(tail.toString("utf8")).split(/\r?\n/u).filter((line) => line.trim() !== "");
   const windows = failedSteps.flatMap((step) => {
     const start = Date.parse(step.startedAt ?? "");
     const end = Date.parse(step.completedAt ?? "");
@@ -217,7 +219,7 @@ const boundedJobLogTail = async (
     : lines;
   const excerpt = (selected.length ? selected : lines).slice(-80).join("\n");
   if (!excerpt) throw new GitHubReadError("Actions job log is empty", "response");
-  return Buffer.from(excerpt).subarray(-4_000).toString("utf8");
+  return excerpt;
 };
 
 /**
@@ -461,7 +463,10 @@ export const createGitHubReader = (
       // The short-lived redirect is a signed storage URL. Never forward the GitHub token.
       const logResponse = await request(download.toString(), { method: "GET", signal });
       const tail = await boundedJobLogTail(logResponse, failedSteps);
-      return `Failed steps: ${failedSteps.length ? failedSteps.map((step) => step.name).join(", ") : "job-level failure"}\n${tail}`;
+      const fullExcerpt = redactCiLog(
+        `Failed steps: ${failedSteps.length ? failedSteps.map((step) => step.name).join(", ") : "job-level failure"}\n${tail}`,
+      );
+      return truncateRedactedCiLog(fullExcerpt, MAX_ACTIONS_FAILURE_LOG_BYTES, true);
     },
     compareCommits: async (repository, baseSha, headSha, signal) => {
       const [owner, name, ...rest] = repository.split("/");

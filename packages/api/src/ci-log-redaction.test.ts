@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { redactCiLog } from "./ci-log-redaction.js";
+import { redactCiLog, truncateRedactedCiLog } from "./ci-log-redaction.js";
 
 test("CI log redaction removes common credentials and preserves useful failure text", () => {
   const pemStart = "-----BEGIN " + "PRIVATE KEY-----";
@@ -24,4 +24,20 @@ test("CI log redaction removes common credentials and preserves useful failure t
   }
   assert.match(redacted, /Bearer \[REDACTED\]/u);
   assert.match(redacted, /\[REDACTED PEM BLOCK\]/u);
+});
+
+test("CI log redaction removes an unterminated PEM block through the excerpt end", () => {
+  const redacted = redactCiLog("compiler error\n-----BEGIN PRIVATE KEY-----\nprivate-material");
+  assert.match(redacted, /compiler error/u);
+  assert.match(redacted, /\[REDACTED TRUNCATED PEM\]/u);
+  assert.doesNotMatch(redacted, /private-material/u);
+});
+
+test("CI log truncation removes an unmatched PEM block at the retained boundary", () => {
+  const truncated = truncateRedactedCiLog(
+    `header\n${"x".repeat(100)}\n-----BEGIN PRIVATE KEY-----\nprivate-material`, 50,
+  );
+  assert.match(truncated, /\[REDACTED TRUNCATED PEM\]/u);
+  assert.doesNotMatch(truncated, /private-material/u);
+  assert.ok(Buffer.byteLength(truncated) <= 50);
 });

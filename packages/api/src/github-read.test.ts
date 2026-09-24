@@ -255,7 +255,35 @@ test("Actions log falls back to the bounded job tail when failed-step timestamps
     name: "typecheck", detailsUrl: "https://github.com/acme/widgets/actions/runs/11/job/22",
   }, new AbortController().signal);
   assert.match(log, /error TS2322/u);
-  assert.ok(Buffer.byteLength(log) <= 4_100);
+  assert.ok(Buffer.byteLength(log) <= 4_000);
+});
+
+test("Actions failure logs redact PEM blocks and tokens before the 4 KB truncation", async () => {
+  const head = "a".repeat(40);
+  const pem = `-----BEGIN PRIVATE KEY-----\n${"private-key-material\n".repeat(150)}-----END PRIVATE KEY-----`;
+  const token = `ghp_${"secret_token_material".repeat(3)}`;
+  const logs = [
+    `compiler failure\n${"x".repeat(2_500)}\n${pem}\n${"y".repeat(2_500)}`,
+    `compiler failure\n${"x".repeat(4_990)}${token}${"y".repeat(3_980)}`,
+    `compiler failure\n${"ordinary log line\n".repeat(400)}`,
+  ];
+
+  for (const source of logs) {
+    const reader = createGitHubReader("read-token", async (url) => {
+      if (String(url).endsWith("/actions/jobs/22")) return Response.json({
+        id: 22, run_id: 11, head_sha: head, name: "typecheck", status: "completed", steps: [],
+      });
+      if (String(url).endsWith("/actions/jobs/22/logs")) return new Response(null, {
+        status: 302, headers: { Location: "https://logs.example.test/signed" },
+      });
+      return new Response(source, { status: 200 });
+    });
+    const output = await reader.readActionsFailureLog("acme/widgets", head, {
+      name: "typecheck", detailsUrl: "https://github.com/acme/widgets/actions/runs/11/job/22",
+    }, new AbortController().signal);
+    assert.ok(Buffer.byteLength(output) <= 4_000, "the complete excerpt stays within its byte limit");
+    assert.doesNotMatch(output, /private-key-material|ghp_|secret_token_material/u);
+  }
 });
 
 test("signed Actions log download retries a transient server error without forwarding the token", async () => {

@@ -767,6 +767,45 @@ test("transient CI log failures retry under the transport ceiling before opening
   assert.match(card.body, /transport-ceiling reached/u);
 });
 
+test("native fetch TypeErrors retry only when undici supplies a network error code", async () => {
+  const seeded = await seedStopped("canonical-direct", "ci-fetch-typeerror", "check-failure-or-absence");
+  const failed = { ...ciReader(), readActionsFailureLog: async () => {
+    throw new TypeError("fetch failed", {
+      cause: Object.assign(new Error("connect ECONNRESET"), { code: "ECONNRESET" }),
+    });
+  } };
+  const started = new Date("2026-09-23T02:00:00.000Z");
+  assert.equal((await baseDriftRecoveryTick(db, failed, started)).ineligible, 0);
+  const validating = await db.mergeRecoveryAttempt.findFirstOrThrow({ where: {
+    integratorTaskId: seeded.integratorTask!.id,
+  } });
+  assert.equal(validating.status, "VALIDATING");
+  assert.equal(validating.transportAttempts, 1);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.integratorTask!.id, status: "OPEN" } }), 0);
+});
+
+test("ordinary CI log TypeErrors are ineligible immediately and carry redacted details", async () => {
+  for (const [label, thrown, reason] of [
+    ["code-error", new TypeError(`Cannot read property of undefined; token=${"ghp_" + "x".repeat(36)}`), /TypeError: Cannot read property of undefined; token=\[REDACTED GITHUB TOKEN\]/u],
+    ["bad-port", new TypeError("fetch failed", { cause: new Error("bad port") }), /TypeError: fetch failed/u],
+  ] as const) {
+    const seeded = await seedStopped("canonical-direct", `ci-typeerror-${label}`, "check-failure-or-absence");
+    const failed = { ...ciReader(), readActionsFailureLog: async () => { throw thrown; } };
+    assert.equal((await baseDriftRecoveryTick(db, failed)).ineligible, 1);
+    const attempt = await db.mergeRecoveryAttempt.findFirstOrThrow({ where: {
+      integratorTaskId: seeded.integratorTask!.id,
+    } });
+    assert.equal(attempt.transportAttempts, 0, "no transport retry is recorded");
+    assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 0);
+    const card = await db.inboxMessage.findFirstOrThrow({ where: {
+      taskId: seeded.integratorTask!.id, status: "OPEN", kind: "MULTIPLE_CHOICE",
+    } });
+    assert.match(card.body, reason);
+    assert.doesNotMatch(card.body, /ghp_x{36}/u);
+    await resetTestDb(db);
+  }
+});
+
 const nextCiStop = async (seeded: Awaited<ReturnType<typeof seedStopped>>, headSha: string) => {
   const recoveryRun = await db.run.findFirstOrThrow({ where: {
     taskId: seeded.gateTask.id, status: "QUEUED",
