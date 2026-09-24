@@ -4,6 +4,7 @@ import {
   MergeRecoveryRefusalCode,
   MergeRecoveryStatus,
   Prisma,
+  RunStatus,
   TaskStatus,
 } from "@prisma/client";
 
@@ -13,8 +14,12 @@ import { heldPredicate } from "./chain-hold.js";
 import { compare, layerOf } from "./chain-order.js";
 import { requireDefaultFeishuThread } from "./default-feishu-thread.js";
 import { lockAgentRepoGrant, lockChainRows } from "./locks.js";
-import { parseAuthorizationMetadata } from "./merge-integrator.js";
-import { stopStateFor } from "./merge-integrator-db.js";
+import {
+  MERGE_INTEGRATOR_KIND,
+  MERGE_INTEGRATOR_SCHEMA_VERSION,
+  parseAuthorizationMetadata,
+} from "./merge-integrator.js";
+import { confirmationCardKey, gateFeedsIntegratorStep, stopStateFor } from "./merge-integrator-db.js";
 import {
   carryMergeRecoveryRun,
   isMergeReadinessStep,
@@ -993,6 +998,138 @@ export const activateRecoveryIntegratorSuccessor = async (
     endedAt: now,
   });
   return { outcome: "activated", ...activated };
+};
+
+/**
+ * Ordinary readiness activation after a fresh mechanical authorization.
+ *
+ * When the operator answered the integrator's latest stop with `re-authorize`
+ * (`refresh-requested`), the chain has since gone back through Regression, and
+ * readiness has just re-verified and mechanically authorized an exact head,
+ * that authorization is the fresh evidence the re-authorization asked for. The
+ * old stop is superseded: its Run-birth guard is bypassed for this one stop,
+ * stale confirmation cards and refusal notices close, and a control-plane
+ * activity records the supersession. No stop answer or disposition is written
+ * (ADR-0011). Without a `refresh-requested` stop this is plain activation, so
+ * an unanswered stop still refuses the birth and the confirmation path of
+ * `settleRunBirthRefusal` still serves chains with no mechanical authorization.
+ */
+export const activateAuthorizedIntegratorSuccessor = async (
+  tx: Tx,
+  input: { readinessTaskId: string; authorizationActivityId: string },
+  now = new Date(),
+): Promise<{ nextTaskId: string | null; gated: boolean }> => {
+  const identity = await tx.task.findUnique({
+    where: { id: input.readinessTaskId },
+    select: { projectId: true, chainId: true },
+  });
+  if (!identity?.chainId) {
+    throw new Error("Authorized activation requires a chained merge-readiness step");
+  }
+  await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
+  const readiness = await tx.task.findUniqueOrThrow({
+    where: { id: input.readinessTaskId },
+    include: { templateStep: { include: { taskTemplate: { select: { name: true } } } } },
+  });
+  const integrator = await gateFeedsIntegratorStep(tx, readiness);
+  const stopped = integrator ? await stopStateFor(tx, integrator.id) : null;
+  if (!integrator || !stopped || !stopped.dispositions.includes("refresh-requested")) {
+    return activateChainSuccessorInternal(tx, readiness, {}, now, null, true);
+  }
+
+  const [authorization, output] = await Promise.all([
+    tx.taskActivity.findUnique({
+      where: { id: input.authorizationActivityId },
+      select: { id: true, taskId: true, actorType: true, createdAt: true, metadata: true },
+    }),
+    tx.taskStepOutput.findUnique({
+      where: { taskId: input.readinessTaskId },
+      select: { kind: true, body: true, commitSha: true },
+    }),
+  ]);
+  const parsed = parseAuthorizationMetadata(authorization?.metadata);
+  if (readiness.status !== TaskStatus.DONE || !isMergeReadinessStep(readiness.templateStep)
+    || !authorization || authorization.taskId !== readiness.id
+    || authorization.actorType !== "control-plane"
+    || parsed.status !== "ok" || parsed.payload.decision.channel !== "mechanical") {
+    throw new Error("Stop supersession requires a completed readiness step and its control-plane mechanical authorization");
+  }
+  let binding: Record<string, unknown> | null = null;
+  try {
+    const value = JSON.parse(output?.body ?? "null") as unknown;
+    binding = typeof value === "object" && value !== null && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : null;
+  } catch {
+    binding = null;
+  }
+  if (output?.kind !== "merge-authorization" || output.commitSha !== parsed.payload.headSha
+    || binding?.authorizationActivityId !== authorization.id) {
+    throw new Error("Stop supersession readiness output does not select the fresh authorization");
+  }
+  if (authorization.createdAt < stopped.stop.createdAt) {
+    // An authorization older than the stop is the one the stop already
+    // refused; it cannot be fresh evidence for the re-authorization.
+    return activateChainSuccessorInternal(tx, readiness, {}, now, null, true);
+  }
+
+  const priorRun = await tx.run.findFirst({
+    where: { taskId: integrator.id },
+    orderBy: { runNumber: "desc" },
+    select: { id: true },
+  });
+  const activated = await activateChainSuccessorInternal(
+    tx,
+    readiness,
+    {},
+    now,
+    { integratorTaskId: integrator.id, sourceStopId: stopped.stop.stopId },
+    true,
+  );
+  const queued = await tx.run.findFirst({
+    where: { taskId: integrator.id, status: RunStatus.QUEUED },
+    orderBy: { runNumber: "desc" },
+    select: { id: true },
+  });
+  // A Hold or an unrelated refusal leaves the Run unborn; the stop then stands
+  // exactly as before and is not recorded as superseded.
+  if (activated.nextTaskId !== integrator.id || !queued || queued.id === priorRun?.id) return activated;
+
+  const stale = await tx.inboxMessage.findMany({
+    where: {
+      status: InboxStatus.OPEN,
+      OR: [
+        { dedupeKey: confirmationCardKey(integrator.id, stopped.stop.stopId) },
+        { dedupeKey: { startsWith: `${confirmationCardKey(integrator.id, stopped.stop.stopId)}:r` } },
+        { dedupeKey: `run-birth-refusal:${integrator.id}:integrator-stopped` },
+      ],
+    },
+    select: { id: true },
+  });
+  if (stale.length > 0) {
+    await tx.inboxMessage.updateMany({
+      where: { id: { in: stale.map((row) => row.id) }, status: InboxStatus.OPEN },
+      data: { status: InboxStatus.CLOSED },
+    });
+  }
+  await tx.taskActivity.create({ data: {
+    taskId: integrator.id,
+    actorType: "control-plane",
+    body: `Merge stop ${stopped.stop.condition} superseded by mechanical authorization for PR #${String(parsed.payload.prNumber)} at ${parsed.payload.headSha}; merge execution queued without a confirmation card`,
+    metadata: {
+      kind: MERGE_INTEGRATOR_KIND.stopSuperseded,
+      schemaVersion: MERGE_INTEGRATOR_SCHEMA_VERSION,
+      stopId: stopped.stop.stopId,
+      condition: stopped.stop.condition,
+      readinessTaskId: readiness.id,
+      authorizationActivityId: authorization.id,
+      headSha: parsed.payload.headSha,
+      baseSha: parsed.payload.baseSha,
+      runId: queued.id,
+      closedInboxMessageIds: stale.map((row) => row.id),
+    },
+  } });
+  return activated;
 };
 
 /** Marks a completed template task done and activates exactly one successor or gate. */

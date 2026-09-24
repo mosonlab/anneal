@@ -124,6 +124,7 @@ export {
   CHAIN_AUTO_RESUME_KIND,
   LIVE_TASK_STATUSES,
   MAX_AUTOMATIC_SUCCESSOR_RESUMES,
+  activateAuthorizedIntegratorSuccessor,
   activateChainSuccessor,
   activateRecoveryIntegratorSuccessor,
   advanceTemplateTask,
