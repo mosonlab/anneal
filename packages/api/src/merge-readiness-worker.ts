@@ -13,7 +13,7 @@ import {
   Prisma,
   RunStatus,
   TaskStatus,
-  activateAuthorizedIntegratorSuccessor,
+  activateChainSuccessor,
   activateRecoveryIntegratorSuccessor,
   authorizationMetadata,
   isGatedMergeReadinessTask,
@@ -1061,12 +1061,7 @@ const authorizeReadinessSettlement = (
           ? { nextTaskId: null, gated: false }
           : recoveryActivation;
       } else {
-        // A fresh mechanical authorization supersedes a re-authorized stop on
-        // the integrator; without one this is ordinary successor activation.
-        activated = await activateAuthorizedIntegratorSuccessor(tx, {
-          readinessTaskId: readiness.id,
-          authorizationActivityId: activity.id,
-        }, read.input.now);
+        activated = await activateChainSuccessor(tx, readiness, {}, read.input.now);
       }
       const handoff = activated.nextTaskId
         ? await tx.run.findFirst({

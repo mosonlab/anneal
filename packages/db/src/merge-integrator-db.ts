@@ -936,7 +936,9 @@ export const applyStopAnswer = async (
 
   if (disposition === "refresh-requested") {
     // Evidence precedes judgment (C2): this creates no run and writes no
-    // authorization. It asks for a card the human will read and then approve.
+    // authorization. It asks for a card the human will read and then approve,
+    // unless a Merge readiness re-verification completed after this answer
+    // supersedes the stop first (`activateChainSuccessor`, ADR-0011).
     outcome.confirmationCardId = await requestConfirmationCard(tx, task, binding.stopId, now);
     return outcome;
   }

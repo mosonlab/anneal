@@ -3292,9 +3292,13 @@ queued without a next-generation confirmation card, OPEN confirmation cards
 and the `integrator-stopped` Run-birth notice for that stop close, and the
 integrator Task records a control-plane `mergeIntegrator.stopSuperseded`
 activity naming the stop, authorization, head, base and Run. No stop answer is
-written. An unanswered stop still refuses the Run birth, and a Chain returning
-to the integrator without a fresh mechanical authorization still receives the
-next confirmation card.
+written. The same applies when a held Chain resumes after that authorization,
+and platform retries of the queued Run (lease loss, claim invalidation) are
+admitted. Answering a card closed this way returns `409 conflict` explaining
+that the stop was superseded. An unanswered stop still refuses the Run birth,
+and a Chain returning to the integrator without a mechanical authorization
+written after the `re-authorize` answer still receives the next confirmation
+card. See [ADR-0011](adr/0011-automate-mechanical-merge-stops.md).
 
 Inside a base-drift recovery, the requeues use the recovery aggregate's
 existing `MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES` ceiling of two instead of the

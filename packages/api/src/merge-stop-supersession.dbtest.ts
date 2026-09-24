@@ -16,6 +16,7 @@ import { after, before, beforeEach, test } from "node:test";
 
 import {
   AUTHORIZED_MERGE_METHOD,
+  ChainControlState,
   MERGE_INTEGRATOR_KIND,
   Prisma,
   PrismaClient,
@@ -24,7 +25,9 @@ import {
   advanceTemplateTask,
   applyInboxDecisionTx,
   authorizationMetadata,
+  openRun,
   recordIntegratorStop,
+  resumeChain,
 } from "@anneal/db";
 import { RUN_COMPLETION_CONTRACT_VERSION } from "@anneal/db/claim-contract";
 
@@ -166,6 +169,52 @@ const regressionPasses = async (seeded: Seeded) => {
   await db.$transaction((tx) => advanceTemplateTask(tx, seeded.gateTask.id, run.id, null, new Date()));
 };
 
+/** Regression reruns without a rejected card: a Run is queued and readiness returns to TODO. */
+const redoRegression = async (seeded: Seeded) => {
+  const regression = await db.run.findFirstOrThrow({ where: { taskId: seeded.gateTask.id }, orderBy: { runNumber: "desc" } });
+  await db.run.create({ data: {
+    projectId: seeded.project.id, taskId: seeded.gateTask.id, agentId: regression.agentId, repoId: seeded.repo.id,
+    runNumber: regression.runNumber + 1, dedupeKey: `task:${seeded.gateTask.id}:run:${String(regression.runNumber + 1)}`,
+    runner: "CLAUDE", model: regression.model, promptHash: "hash", status: RunStatus.QUEUED,
+    opensPullRequest: false, maxRunsPerTask: 5, targetBranch: "master",
+  } });
+  await db.task.update({ where: { id: seeded.readinessTask!.id }, data: { status: TaskStatus.TODO } });
+  await regressionPasses(seeded);
+};
+
+const supersessions = (integratorTaskId: string) => db.taskActivity.findMany({
+  where: { taskId: integratorTaskId, metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.stopSuperseded } },
+});
+
+/** Run 1 stops on `api-error` and the operator answers `re-authorize`; G0 is requested. */
+const reauthorize = async (seeded: Seeded, eventId: string) => {
+  const integratorTaskId = seeded.integratorTask!.id;
+  await authorize(seeded.readinessTask!.id);
+  const stop = await apiErrorStop(seeded);
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: stop.questionId!, externalEventId: eventId, decision: "re-authorize",
+  }));
+  const g0 = await db.inboxMessage.findUniqueOrThrow({ where: { dedupeKey: `confirmation:${integratorTaskId}:${stop.stopId}` } });
+  return { stop, g0 };
+};
+
+/** Readiness layer held, so the integrator's Run birth is withheld. */
+const holdAtReadinessLayer = async (seeded: Seeded) => {
+  const rows = await db.task.findMany({
+    where: { projectId: seeded.project.id, chainId: seeded.chainId },
+    select: { chainLayer: true, chainIndex: true },
+  });
+  const layers = [...new Set(rows.map((row) => row.chainLayer ?? row.chainIndex))]
+    .filter((layer): layer is number => layer !== null)
+    .sort((left, right) => left - right);
+  const heldExecutionLayer = seeded.readinessStep!.layer!;
+  await db.chainControl.create({ data: {
+    projectId: seeded.project.id, chainId: seeded.chainId, state: ChainControlState.HELD,
+    heldLayer: layers.indexOf(heldExecutionLayer) + 1, heldExecutionLayer, heldAt: new Date(),
+    holdRequestId: "hold-before-merge", holdReason: "inspect before merge", holdGeneration: 1,
+  } });
+};
+
 const readinessAuthorizes = () => readinessTick(
   db, reader(snapshot(HEAD_2, BASE_2)), new Date(), 5, releaseChainLease, leased, executorsOnline,
 );
@@ -253,15 +302,7 @@ test("an unanswered stop still refuses the birth after a mechanical authorizatio
   const stop = await apiErrorStop(seeded);
 
   // Readiness runs again without anyone answering the stop question.
-  const regression = await db.run.findFirstOrThrow({ where: { taskId: seeded.gateTask.id }, orderBy: { runNumber: "desc" } });
-  await db.run.create({ data: {
-    projectId: seeded.project.id, taskId: seeded.gateTask.id, agentId: regression.agentId, repoId: seeded.repo.id,
-    runNumber: regression.runNumber + 1, dedupeKey: `task:${seeded.gateTask.id}:run:${String(regression.runNumber + 1)}`,
-    runner: "CLAUDE", model: regression.model, promptHash: "hash", status: RunStatus.QUEUED,
-    opensPullRequest: false, maxRunsPerTask: 5, targetBranch: "master",
-  } });
-  await db.task.update({ where: { id: readinessTaskId }, data: { status: TaskStatus.TODO } });
-  await regressionPasses(seeded);
+  await redoRegression(seeded);
   assert.deepEqual(await readinessAuthorizes(), { claimed: 1, authorized: 1, requeued: 0, stopped: 0 });
 
   assert.equal(await db.run.count({ where: { taskId: integratorTaskId } }), 1, "the unanswered stop still guards");
@@ -276,4 +317,116 @@ test("an unanswered stop still refuses the birth after a mechanical authorizatio
     "the operator's stop question remains the exit",
   );
   assert.equal(await db.inboxMessage.count({ where: { dedupeKey: { startsWith: `confirmation:${integratorTaskId}:` } } }), 0);
+});
+
+/** Re-authorize, reject the drifted G0, and let Regression pass on the new head. */
+const rejectedAndRegressed = async (seeded: Seeded, label: string) => {
+  const { stop, g0 } = await reauthorize(seeded, `evt-${label}-reauthorize`);
+  await evidenceTick(db, { readPullRequest: async () => snapshot(HEAD, BASE_2) }, new Date());
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: g0.id, externalEventId: `evt-${label}-reject`, decision: "reject",
+  }));
+  await regressionPasses(seeded);
+  return stop;
+};
+
+test("a Chain held across the fresh authorization supersedes the stop on resume", async () => {
+  const seeded = await seedIntegratorChain(db, { label: "stop-held", shape: "canonical-compound-readiness" });
+  const integratorTaskId = seeded.integratorTask!.id;
+  const stop = await rejectedAndRegressed(seeded, "held");
+  await holdAtReadinessLayer(seeded);
+
+  assert.deepEqual(await readinessAuthorizes(), { claimed: 1, authorized: 1, requeued: 0, stopped: 0 });
+  assert.equal(await db.run.count({ where: { taskId: integratorTaskId } }), 1, "the Hold withholds the birth");
+  assert.equal((await supersessions(integratorTaskId)).length, 0, "nothing is superseded while held");
+
+  const resumed = await db.$transaction((tx) => resumeChain(tx, {
+    projectId: seeded.project.id, chainId: seeded.chainId, taskId: integratorTaskId, requestId: "resume-held",
+  }, new Date()));
+  if ("message" in resumed) assert.fail(resumed.message);
+  const runs = await db.run.findMany({ where: { taskId: integratorTaskId }, orderBy: { runNumber: "asc" } });
+  assert.equal(runs.length, 2, "resume opens the superseding Run");
+  assert.equal(runs[1]!.status, RunStatus.QUEUED);
+  const recorded = await supersessions(integratorTaskId);
+  assert.equal(recorded.length, 1);
+  assert.equal((recorded[0]!.metadata as Record<string, unknown>).stopId, stop.stopId);
+  assert.equal(
+    await db.inboxMessage.count({ where: { dedupeKey: { startsWith: `confirmation:${integratorTaskId}:${stop.stopId}:r` } } }), 0,
+    "resume does not fall back to a next-generation confirmation card",
+  );
+  assert.equal(
+    await db.inboxMessage.count({ where: { dedupeKey: `run-birth-refusal:${integratorTaskId}:integrator-stopped` } }), 0,
+  );
+});
+
+test("platform retries of the superseding Run are admitted", async () => {
+  const seeded = await seedIntegratorChain(db, { label: "stop-retry", shape: "canonical-compound-readiness" });
+  const integratorTaskId = seeded.integratorTask!.id;
+  await rejectedAndRegressed(seeded, "retry");
+  await readinessAuthorizes();
+  const superseding = await db.run.findFirstOrThrow({ where: { taskId: integratorTaskId }, orderBy: { runNumber: "desc" } });
+  assert.equal(superseding.runNumber, 2);
+
+  await db.run.update({ where: { id: superseding.id }, data: { status: RunStatus.FAILED } });
+  const leaseLoss = await db.$transaction((tx) => openRun(tx, integratorTaskId, {
+    kind: "retry-after-lease-loss", readyAt: new Date(), sourceRunId: superseding.id,
+    sourceMaxRunsPerTask: superseding.maxRunsPerTask, sourceBudgetGrants: superseding.budgetGrants,
+  }));
+  if (!leaseLoss.ok) assert.fail(`lease-loss retry refused: ${leaseLoss.refusal.code}`);
+  const retried = await db.run.findFirstOrThrow({ where: { taskId: integratorTaskId }, orderBy: { runNumber: "desc" } });
+  assert.equal(retried.runNumber, 3);
+
+  await db.run.update({ where: { id: retried.id }, data: { status: RunStatus.FAILED } });
+  const invalidated = await db.$transaction((tx) => openRun(tx, integratorTaskId, {
+    kind: "claim-invalidated", sourceRunId: retried.id, readyAt: new Date(),
+  }));
+  if (!invalidated.ok) assert.fail(`claim-invalidated retry refused: ${invalidated.refusal.code}`);
+  assert.equal(await db.run.count({ where: { taskId: integratorTaskId } }), 4);
+});
+
+/** A re-authorized stop whose G0 card is OPEN with evidence while readiness re-verifies. */
+const openCardAndFreshReadiness = async (label: string) => {
+  const seeded = await seedIntegratorChain(db, {
+    label, shape: "canonical-compound-readiness", gateAttestation: { headSha: HEAD_2, baseHeadSha: BASE_2 },
+  });
+  const { stop, g0 } = await reauthorize(seeded, `evt-${label}-reauthorize`);
+  await redoRegression(seeded);
+  await evidenceTick(db, { readPullRequest: async () => snapshot(HEAD_2, BASE_2) }, new Date());
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: g0.id } })).status, "OPEN");
+  return { seeded, stop, g0 };
+};
+
+test("a human answering a card closed by supersession gets an explanatory refusal", async () => {
+  const { seeded, g0 } = await openCardAndFreshReadiness("stop-closed-card");
+  const integratorTaskId = seeded.integratorTask!.id;
+  assert.deepEqual(await readinessAuthorizes(), { claimed: 1, authorized: 1, requeued: 0, stopped: 0 });
+  assert.equal((await supersessions(integratorTaskId)).length, 1);
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: g0.id } })).status, "CLOSED");
+
+  const answered = await call("POST", `/inbox/messages/${g0.id}/decision`, { decision: "approve", requestId: "late-approve" });
+  assert.equal(answered.status, 409, JSON.stringify(answered.body));
+  assert.match(JSON.stringify(answered.body), /superseded by a fresh mechanical authorization/u);
+  assert.equal(await db.run.count({ where: { taskId: integratorTaskId } }), 2);
+});
+
+test("a human approval racing the readiness supersession opens exactly one Run", async () => {
+  const { seeded, g0 } = await openCardAndFreshReadiness("stop-race");
+  const integratorTaskId = seeded.integratorTask!.id;
+  const [approved, ticked] = await Promise.allSettled([
+    db.$transaction((tx) => applyInboxDecisionTx(tx, {
+      inboxMessageId: g0.id, externalEventId: "evt-race-approve", decision: "approve",
+    })),
+    readinessAuthorizes(),
+  ]);
+  const runs = await db.run.findMany({ where: { taskId: integratorTaskId }, orderBy: { runNumber: "asc" } });
+  assert.equal(runs.length, 2, `exactly one new Run (approve ${approved.status}, tick ${ticked.status})`);
+  assert.equal(runs[1]!.status, RunStatus.QUEUED);
+  const recorded = await supersessions(integratorTaskId);
+  if (recorded.length === 1) {
+    assert.equal(approved.status, "rejected", "the human loses to the recorded supersession");
+    assert.equal((recorded[0]!.metadata as Record<string, unknown>).runId, runs[1]!.id);
+  } else {
+    assert.equal(recorded.length, 0);
+    assert.equal(approved.status, "fulfilled", "the human approval opened the Run");
+  }
 });

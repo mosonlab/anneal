@@ -20,7 +20,7 @@ import { heldPredicate } from "./chain-hold.js";
 import { layerOf } from "./chain-order.js";
 import { requireDefaultFeishuThread } from "./default-feishu-thread.js";
 import { lockAgentRow } from "./locks.js";
-import { INTEGRATOR_OUTPUT_KIND, INTEGRATOR_TEMPLATE_NAME, parseMergeResult } from "./merge-integrator.js";
+import { INTEGRATOR_OUTPUT_KIND, INTEGRATOR_TEMPLATE_NAME, MERGE_INTEGRATOR_KIND, parseMergeResult } from "./merge-integrator.js";
 import {
   ensureRefreshRequestedConfirmationCard,
   gateFeedsIntegratorStep,
@@ -1019,6 +1019,36 @@ const openRunRefusal = <Code extends OpenRunRefusal["code"]>(
   return { ok: false, refusal };
 };
 
+/**
+ * Whether `sourceRunId` is the Run a `mergeIntegrator.stopSuperseded` activity
+ * queued for this stop, or a platform retry descending from it. Lease loss and
+ * claim invalidation re-home that same authorized attempt; they are not a new
+ * decision, so the supersession that admitted the first birth admits the retry.
+ */
+const retriesSupersedingRun = async (
+  tx: Tx,
+  taskId: string,
+  stopId: string,
+  sourceRunId: string,
+): Promise<boolean> => {
+  const superseded = await tx.taskActivity.findFirst({
+    where: { taskId, AND: [
+      { metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.stopSuperseded } },
+      { metadata: { path: ["stopId"], equals: stopId } },
+    ] },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { metadata: true },
+  });
+  const metadata = superseded?.metadata;
+  const runId = metadata && typeof metadata === "object" && !Array.isArray(metadata)
+    ? (metadata as Record<string, unknown>).runId : null;
+  if (typeof runId !== "string") return false;
+  const supersedingRun = await tx.run.findUnique({ where: { id: runId }, select: { taskId: true, runNumber: true } });
+  const sourceRun = await tx.run.findUnique({ where: { id: sourceRunId }, select: { taskId: true, runNumber: true } });
+  return supersedingRun?.taskId === taskId && sourceRun?.taskId === taskId
+    && sourceRun.runNumber >= supersedingRun.runNumber;
+};
+
 const sourceRetryIntent = (
   intent: OpenRunIntent,
 ): intent is Extract<OpenRunIntent, { kind: "retry-after-completion" | "retry-after-lease-loss" }> =>
@@ -1105,10 +1135,15 @@ export const openRun = async (
   // refusal by construction rather than by remembering to ask.
   const stopped = await stopStateFor(tx, task.id);
   const stopBypass = intent.kind === "enqueue" ? intent.stopBypass ?? null : null;
-  // A recovered confirmation approval is itself the human-authorized exit
-  // from this unresolved stop. Its named intent is the only path that may open
-  // the renewed mechanical Run while the original stop remains in history.
+  // Exits from an unresolved stop that remains in history: a recovered
+  // confirmation approval (`integrator-authorized`), a matching deferral, an
+  // enqueue `stopBypass` (base-drift recovery, or supersession by a fresh
+  // mechanical authorization after a `re-authorize` answer; ADR-0011), and a
+  // platform retry of the Run that supersession itself queued.
   const humanReauthorization = intent.kind === "integrator-authorized";
+  const supersededRetry = stopped !== null
+    && (intent.kind === "retry-after-lease-loss" || intent.kind === "claim-invalidated")
+    && await retriesSupersedingRun(tx, task.id, stopped.stop.stopId, intent.sourceRunId);
   const deferredMarker = intent.kind === "integrator-deferred"
     ? await readLatestMarker(tx, task.id, "mergeabilityWait") : null;
   const deferredStopBypass = intent.kind === "integrator-deferred"
@@ -1116,7 +1151,7 @@ export const openRun = async (
     && deferredMarker.raw.sourceRunId === intent.sourceRunId
     && deferredMarker.raw.sourceStopId === intent.sourceStopId
     && (stopped?.stop.stopId ?? null) === intent.sourceStopId;
-  if (stopped && !humanReauthorization && !deferredStopBypass
+  if (stopped && !humanReauthorization && !deferredStopBypass && !supersededRetry
     && (stopBypass?.integratorTaskId !== task.id || stopBypass.sourceStopId !== stopped.stop.stopId)) {
     return openRunRefusal(
       "integrator-stopped",
