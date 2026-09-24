@@ -136,15 +136,25 @@ const envelopeFailureClass = (envelope: FailureEnvelope): FailureClass => {
     return FailureClass.NO_CHANGES_PRODUCED;
   }
   // The runner fetched the remote branch and found commits this Run's head
-  // does not contain: a DELIVER push that can only be rejected again, or a
-  // PROVISION merge of those commits that conflicted. Both are repository
-  // facts, not transport noise, so they must outrank the phase-transient rule
-  // below. Compass "Fix F3" replayed one such rejection four times on refunded
-  // budget. TOOL_FAILED is neither retryable nor refunded (see
-  // `envelopeExternalFailure`), so the Task parks in REVIEW with the runner's
-  // evidence as its failure reason. Like BUDGET_EXCEEDED, a runner that set
-  // this falsely could only stop its own Task, never buy another attempt.
-  if (envelope.phase !== "EXECUTE" && envelope.remoteBranchDiverged) return FailureClass.TOOL_FAILED;
+  // does not contain. These are repository facts, not transport noise, so they
+  // outrank the phase-transient rule below, and `envelopeExternalFailure`
+  // refuses them a refund either way.
+  //
+  // PROVISION: merging those commits into the salvage base conflicted. No
+  // rerun can resolve that, so TOOL_FAILED (neither retryable nor refunded)
+  // parks the Task in REVIEW with the conflicting paths as its failure reason.
+  //
+  // DELIVER: the push was refused because the chain branch moved while the
+  // agent ran, typically an operator pushing from a host session. A retry
+  // re-provisions from this Run's salvage ref and merges the remote tip before
+  // the agent starts, so the rerun works on the combined head. Nothing merges
+  // and pushes in DELIVER instead: step verdicts such as Regression are bound
+  // to the exact head they verified. The retry spends a Run, so the Task's
+  // ceiling bounds a branch that keeps moving; Compass "Fix F3" replayed one
+  // such rejection four times on refunded budget.
+  if (envelope.phase !== "EXECUTE" && envelope.remoteBranchDiverged) {
+    return envelope.phase === "PROVISION" ? FailureClass.TOOL_FAILED : FailureClass.TRANSIENT_PROVIDER;
+  }
   // This is a repository/runner contract violation observed before an agent
   // starts, not the runner's advisory classification. The exact named
   // condition is carried on the structured stderr evidence channel so it
@@ -217,8 +227,8 @@ const envelopeExternalFailure = (envelope: FailureEnvelope, failureClass: Failur
   // The runner observed that the agent left HEAD unchanged. This is an agent
   // outcome reported during delivery, not a delivery-plumbing failure.
   if (failureClass === FailureClass.NO_CHANGES_PRODUCED) return false;
-  // Someone else moved the branch. The environment did not fail transiently,
-  // and a refund would only fund a replay of the same rejection.
+  // Someone else moved the branch. The environment did not fail, so a DELIVER
+  // retry spends the Task's budget, which is what bounds it.
   if (envelope.phase !== "EXECUTE" && envelope.remoteBranchDiverged) return false;
   // The runner's own plumbing failed, so the agent never got to decide
   // anything. This replaces trusting the runner's `externalFailure` claim with

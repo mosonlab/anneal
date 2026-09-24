@@ -69,6 +69,14 @@ written.
 
 ### Chains, Runs and the runner
 
+- **Pushing to a running chain branch no longer parks the Task.** When an
+  operator pushes to a chain branch while a Step runs, the Step's rejected
+  push now queues an automatic retry instead of stopping in `REVIEW`. The retry
+  merges the pushed commits into the failed Run's salvaged work before the agent
+  starts, then reruns the Step on the combined head. Each such retry spends one
+  of the Task's attempts, without refund, so a branch that keeps moving stops
+  when the attempt budget runs out. A conflict in that merge still parks the
+  Task for an operator to reconcile.
 - **A Run that continues its own published branch without changing it is now
   held to its own Task's output contract.** Reported from outside
   ([Issue #630](https://github.com/mosonlab/anneal/issues/630)): a manual Task's

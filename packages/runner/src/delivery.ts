@@ -154,7 +154,7 @@ const remoteBranchDivergence = async (
     const pushOutput = messageOf(pushError);
     const message = `git push rejected: remote branch '${branch}' is at ${remoteSha}, which this Run's head ${head}`
       + ` does not contain (${describeForeignCommits(foreign)}). Replaying this head cannot succeed;`
-      + " an operator must reconcile the branch before the step runs again."
+      + " a retry merges the remote tip into this Run's salvaged work before the agent runs again."
       + ` git output: ${pushOutput.length > PUSH_OUTPUT_EVIDENCE_LIMIT
         ? `${pushOutput.slice(0, PUSH_OUTPUT_EVIDENCE_LIMIT)}…`
         : pushOutput}`;

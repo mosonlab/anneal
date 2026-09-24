@@ -3802,19 +3802,26 @@ under the same caps. A durable verdict alone does not advance a failed Run.
 A branch push that git rejects as a ref update (`! [rejected]`: non-fast-forward,
 fetch first, stale info) is not re-pushed. The runner fetches the branch and,
 when its tip holds commits the Run's head lacks, sets the failure envelope's
-`remoteBranchDiverged` marker. The API classifies such a failure in any phase other than
-`EXECUTE` as `TOOL_FAILED`: no automatic retry and no refund. The
-Task parks in `REVIEW`. Its `failureReason` and the Run's `pushError` name the
-remote tip, this Run's head, and up to ten foreign commits by SHA, author and
-subject. Reconcile the branch, then use `POST /tasks/:taskId/retry`.
+`remoteBranchDiverged` marker. The API classifies such a `DELIVER` failure as
+`TRANSIENT_PROVIDER` with no refund: the Task queues an automatic retry that
+spends one of its `maxRunsPerTask` attempts, so a branch that keeps moving
+exhausts the budget like any other retryable failure. The Run's
+`failureReason` and `pushError` name the remote tip, this Run's head, and up to
+ten foreign commits by SHA, author and subject. Pushing to a chain branch while
+its Chain runs therefore needs no operator action unless the merge below
+conflicts. The runner never merges and pushes during `DELIVER`, because step
+verdicts such as Regression are bound to the exact head they verified; the
+retry reruns the Step on the combined head.
 
 When a Run's clone base is a published ref other than its declared head (for
 example a failed Run's WIP salvage ref), and that head exists on the remote with
 commits the base lacks, provisioning merges the head into the base before the
 agent starts. It never rebases or force-pushes. The Run's `baseSha` is the
 resulting commit. If the merge conflicts, provisioning stops with
-`remoteBranchDiverged` and the conflicting paths, and the Task parks as above
-without starting an agent.
+`remoteBranchDiverged` and the conflicting paths without starting an agent. The
+API classifies that `PROVISION` failure as `TOOL_FAILED`: no automatic retry
+and no refund. The Task parks in `REVIEW` with the conflict as its
+`failureReason`. Reconcile the branch, then use `POST /tasks/:taskId/retry`.
 
 ### Task spend cap
 

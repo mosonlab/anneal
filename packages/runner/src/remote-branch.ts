@@ -9,10 +9,12 @@ import type { CommandRunner } from "./exec.js";
  *
  *  - DELIVER: `git push` of the chain branch failed and a fetch of that branch
  *    showed a tip that is not an ancestor of HEAD. Replaying the same head can
- *    only be rejected again, so the failure is deterministic.
+ *    only be rejected again, so the control plane retries the Step instead: its
+ *    PROVISION merges that tip into the salvaged work.
  *  - PROVISION: the declared head carries commits the published base lacks and
  *    merging them into the base conflicts. Starting the agent anyway would
- *    reproduce the DELIVER rejection at the end of the session.
+ *    reproduce the DELIVER rejection at the end of the session, so the Task
+ *    parks for an operator.
  *
  * It is a type so the failure envelope can carry a typed marker
  * (`remoteBranchDiverged`) and the control plane never has to match git's text.
