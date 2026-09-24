@@ -48,6 +48,23 @@ class MechanicalApiIncompatible extends Error {
   }
 }
 
+/**
+ * A credential-free description of a GitHub request that produced no response.
+ * The shared HTTP layer aborts the signal on its deadline, so an aborted signal
+ * is a timeout; anything else is a connection failure. The code is copied only
+ * when it has the shape of an errno or undici code, never free text.
+ */
+export const describeGitHubTransportFailure = (error: unknown, signal: AbortSignal): string => {
+  if (signal.aborted) return "GitHub request timed out";
+  const codeOf = (value: unknown): unknown =>
+    typeof value === "object" && value !== null && "code" in value ? (value as { code: unknown }).code : undefined;
+  const cause = typeof error === "object" && error !== null && "cause" in error ? (error as { cause: unknown }).cause : undefined;
+  const code = codeOf(error) ?? codeOf(cause);
+  return typeof code === "string" && /^[A-Z][A-Z0-9_]{1,63}$/u.test(code)
+    ? `GitHub connection failed (${code})`
+    : "GitHub connection failed";
+};
+
 export const runClaim = async (
   config: ExecutorConfig,
   privateKeyFile: string,
@@ -161,11 +178,13 @@ export const runClaim = async (
           // record. Filter an echoed credential before the decision table sees
           // it; a replacement that makes a required field malformed fails shut.
           return { status: response.status, body: redactInstallationToken(await response.text()) };
-        } catch {
+        } catch (error: unknown) {
           // Some transports include request headers in thrown errors. Convert
           // them to a fixed string before the shared HTTP layer classifies the
-          // no-response case.
-          throw new Error("GitHub request failed");
+          // no-response case; only the abort state and a bare errno-style code
+          // survive, so the stop evidence still tells a timeout from a
+          // connection failure.
+          throw new Error(describeGitHubTransportFailure(error, signal));
         }
       },
     });

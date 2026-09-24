@@ -231,7 +231,29 @@ export type GitHubClientOptions = {
   http: Http;
   /** Recorded for the no-publication assertion; the caller owns the array. */
   trace?: HttpTrace;
+  /** Waits between replays of a read whose response never arrived. Tests
+   *  inject it; production waits in real time. */
+  sleep?: (ms: number) => Promise<void>;
+  /** Jitter source in [0, 1); defaults to `Math.random`. */
+  random?: () => number;
 };
+
+/**
+ * Transport-failure replay for requests that change nothing on GitHub.
+ *
+ * A single dropped connection or timed-out read used to end a mechanical Run as
+ * an `api-error` stop that waits for an operator. Reads are replayed on a
+ * *transport* failure only (`NO_RESPONSE`): an HTTP answer — 4xx, 422, 409, a
+ * rate-limit 403/429, or a 5xx — keeps its existing single-shot handling.
+ * Writes are never replayed here; their lost responses stay with the read-back
+ * paths that already settle them (`ref-update-uncertain`, §11.4 disarms, train
+ * publication read-back).
+ */
+/** Base waits before the second and third attempt; each is jittered by ±20%. */
+export const NETWORK_READ_BACKOFF_MS = [2_000, 5_000] as const;
+export const NETWORK_READ_ATTEMPTS = NETWORK_READ_BACKOFF_MS.length + 1;
+
+const realSleep = (ms: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 export type PullRequestRef = { owner: string; name: string; number: number; baseRef: string };
 
@@ -265,21 +287,47 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
     "Content-Type": "application/json",
   });
 
-  const call = async (
-    request: { url: string; method: HttpMethod; accept: string; body?: string },
-  ): Promise<HttpAttempt> => callWithTimeout(options.http, {
-    url: request.url,
-    method: request.method,
-    headers: headers(request.accept),
-    ...(request.body === undefined ? {} : { body: request.body }),
-  }, options.timeoutMs, options.trace);
+  const sleep = options.sleep ?? realSleep;
+  const random = options.random ?? Math.random;
 
-  const graphql = async (query: string, variables: Json): Promise<{ data: Json } | GraphQlFailure> => {
+  /**
+   * `replaySafe` is true for every GET and for the GraphQL read query, which is
+   * a POST only by transport convention. Every other request is sent once.
+   * An exhausted replay keeps `NO_RESPONSE` and appends the attempt count, so
+   * the stop evidence says how hard the executor tried.
+   */
+  const call = async (
+    request: { url: string; method: HttpMethod; accept: string; body?: string; replaySafe?: boolean },
+  ): Promise<HttpAttempt> => {
+    const send = (): Promise<HttpAttempt> => callWithTimeout(options.http, {
+      url: request.url,
+      method: request.method,
+      headers: headers(request.accept),
+      ...(request.body === undefined ? {} : { body: request.body }),
+    }, options.timeoutMs, options.trace);
+    if (request.method !== "GET" && request.replaySafe !== true) return send();
+    let response = await send();
+    for (const base of NETWORK_READ_BACKOFF_MS) {
+      if (response.status !== NO_RESPONSE) return response;
+      await sleep(Math.round(base * (0.8 + 0.4 * random())));
+      response = await send();
+    }
+    return response.status === NO_RESPONSE
+      ? { status: NO_RESPONSE, body: `${response.body} (after ${NETWORK_READ_ATTEMPTS} attempts)` }
+      : response;
+  };
+
+  const graphql = async (
+    query: string,
+    variables: Json,
+    access: { replaySafe: boolean } = { replaySafe: false },
+  ): Promise<{ data: Json } | GraphQlFailure> => {
     const response = await call({
       url: options.graphqlUrl,
       method: "POST",
       accept: "application/json",
       body: JSON.stringify({ query, variables }),
+      replaySafe: access.replaySafe,
     });
     const responseClass = classifyHttpStatus(response.status);
     if (responseClass !== "applied") {
@@ -311,7 +359,7 @@ export const makeGitHubClient = (options: GitHubClientOptions) => {
       name: reference.name,
       number: reference.number,
       base: reference.baseRef,
-    });
+    }, { replaySafe: true });
     if ("error" in result) return { status: "api-error", reason: result.error };
     const repository = asRecord(result.data.repository);
     if (!repository) return { status: "api-error", reason: "repository resolved to null" };

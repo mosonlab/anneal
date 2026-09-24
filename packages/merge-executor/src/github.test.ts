@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { makeGitHubClient, splitRepository, type Http, type HttpResponse } from "./github.js";
+import { makeGitHubClient, NETWORK_READ_ATTEMPTS, NETWORK_READ_BACKOFF_MS, splitRepository, type Http, type HttpResponse } from "./github.js";
 
 const TOKEN = `ghp_${"Q".repeat(36)}`;
 
@@ -225,6 +225,7 @@ test("a network failure or an unparseable body is reported, never treated as suc
     token: TOKEN,
     timeoutMs: 5,
     http: async () => { throw new Error("ECONNRESET"); },
+    sleep: async () => {},
   });
   const read = await client.readPullRequest(reference);
   assert.equal(read.status, "api-error");
@@ -613,5 +614,138 @@ test("an unreadable comparison is an error, never a confirmation", async () => {
     const { client } = clientWith([response]);
     const result = await client.readLandedCommit(reference, MERGE_SHA);
     assert.equal(result.status, "error", label);
+  }
+});
+
+/**
+ * A client whose transport answers from a script: `"lost"` throws (no response),
+ * anything else is returned. Sleeps are recorded, never waited.
+ */
+const scriptedClient = (script: Array<HttpResponse | "lost">) => {
+  const requests: Array<{ url: string; method: string; body?: string }> = [];
+  const sleeps: number[] = [];
+  let index = 0;
+  const http: Http = async (request) => {
+    requests.push({ url: request.url, method: request.method, ...(request.body ? { body: request.body } : {}) });
+    const next = script[Math.min(index++, script.length - 1)]!;
+    if (next === "lost") throw new Error("GitHub connection failed (ECONNRESET)");
+    return next;
+  };
+  return {
+    requests,
+    sleeps,
+    client: makeGitHubClient({
+      restUrl: "https://api.github.test", graphqlUrl: "https://api.github.test/graphql",
+      token: TOKEN, timeoutMs: 1_000, http,
+      sleep: async (ms) => { sleeps.push(ms); },
+      random: () => 0.5,
+    }),
+  };
+};
+
+test("a transient transport failure on the pull-request read is replayed and the read succeeds", async () => {
+  const { client, requests, sleeps } = scriptedClient(["lost", { status: 200, body: readBody() }]);
+  const read = await client.readPullRequest(reference);
+  assert.equal(read.status, "ok");
+  assert.equal(requests.length, 2);
+  assert.deepEqual(sleeps, [NETWORK_READ_BACKOFF_MS[0]]);
+});
+
+test("an exhausted read replay stays an api-error that records the attempt count and the last failure", async () => {
+  const { client, requests, sleeps } = scriptedClient(["lost"]);
+  assert.deepEqual(await client.readPullRequest(reference), {
+    status: "api-error",
+    reason: `network: GitHub connection failed (ECONNRESET) (after ${NETWORK_READ_ATTEMPTS} attempts)`,
+  });
+  assert.equal(requests.length, NETWORK_READ_ATTEMPTS);
+  assert.deepEqual(sleeps, [...NETWORK_READ_BACKOFF_MS]);
+});
+
+test("backoff is jittered within ±20% of its base", async () => {
+  for (const [random, factor] of [[0, 0.8], [0.999999, 1.2]] as const) {
+    const sleeps: number[] = [];
+    const client = makeGitHubClient({
+      restUrl: "https://api.github.test", graphqlUrl: "https://api.github.test/graphql",
+      token: TOKEN, timeoutMs: 1_000,
+      http: async () => { throw new Error("GitHub request timed out"); },
+      sleep: async (ms) => { sleeps.push(ms); },
+      random: () => random,
+    });
+    await client.readPullRequest(reference);
+    assert.deepEqual(sleeps, NETWORK_READ_BACKOFF_MS.map((base) => Math.round(base * factor)));
+  }
+});
+
+test("an HTTP answer is never replayed, including auth failures and rate limits", async () => {
+  for (const response of [
+    { status: 401, body: "Bad credentials" },
+    { status: 403, body: "API rate limit exceeded" },
+    { status: 404, body: "Not Found" },
+    { status: 422, body: "Unprocessable" },
+    { status: 429, body: "slow down" },
+    { status: 502, body: "Bad Gateway" },
+  ]) {
+    const read = scriptedClient([response]);
+    assert.equal((await read.client.readPullRequest(reference)).status, "api-error", String(response.status));
+    assert.equal(read.requests.length, 1, String(response.status));
+    assert.deepEqual(read.sleeps, [], String(response.status));
+
+    const ref = scriptedClient([response]);
+    await ref.client.readCommit({ owner: "owner", name: "name" }, "a".repeat(40));
+    assert.equal(ref.requests.length, 1, String(response.status));
+  }
+});
+
+test("REST reads are replayed on a transport failure, so a merge proceeds past a dropped head read", async () => {
+  const head = "a".repeat(40);
+  const merge = "c".repeat(40);
+  const { client, requests } = scriptedClient([
+    "lost",
+    { status: 200, body: JSON.stringify({ tree: { sha: "1".repeat(40) } }) },
+    { status: 200, body: JSON.stringify({ truncated: false, tree: [{ path: "src/a.ts" }] }) },
+    { status: 201, body: JSON.stringify({ sha: merge }) },
+    { status: 200, body: JSON.stringify({ data: { updateRefs: { clientMutationId: null } } }) },
+  ]);
+  assert.deepEqual(await client.mergePullRequest(
+    { owner: "owner", name: "name", number: 7 }, head,
+    { ref: "main", sha: "b".repeat(40), repositoryId: "R_repo" },
+  ), { status: "merged", sha: merge });
+  assert.deepEqual(requests.map((request) => request.method), ["GET", "GET", "GET", "POST", "POST"]);
+});
+
+test("a write whose response is lost is sent exactly once and left to its read-back path", async () => {
+  const head = "a".repeat(40);
+  const target = { ref: "main", sha: "b".repeat(40), repositoryId: "R_repo" };
+  // The ref update is the merge: a lost response must surface as uncertain, not be resent.
+  const refUpdate = scriptedClient([
+    { status: 200, body: JSON.stringify({ tree: { sha: "1".repeat(40) } }) },
+    { status: 200, body: JSON.stringify({ truncated: false, tree: [{ path: "src/a.ts" }] }) },
+    { status: 201, body: JSON.stringify({ sha: "c".repeat(40) }) },
+    "lost",
+  ]);
+  const merged = await refUpdate.client.mergePullRequest({ owner: "owner", name: "name", number: 7 }, head, target);
+  assert.equal(merged.status, "ref-update-uncertain");
+  assert.equal(refUpdate.requests.filter((request) => request.body?.includes("updateRefs")).length, 1);
+  assert.deepEqual(refUpdate.sleeps, []);
+
+  // Merge-commit creation is a POST and is not replayed either.
+  const commit = scriptedClient([
+    { status: 200, body: JSON.stringify({ tree: { sha: "1".repeat(40) } }) },
+    { status: 200, body: JSON.stringify({ truncated: false, tree: [{ path: "src/a.ts" }] }) },
+    "lost",
+  ]);
+  assert.equal((await commit.client.mergePullRequest({ owner: "owner", name: "name", number: 7 }, head, target)).status, "unknown");
+  assert.equal(commit.requests.length, 3);
+
+  for (const [label, run] of [
+    ["publishTrain", (client: ReturnType<typeof makeGitHubClient>) => client.publishTrain({ owner: "owner", name: "name" }, "main", "d".repeat(40))],
+    ["deleteTrainRef", (client: ReturnType<typeof makeGitHubClient>) => client.deleteTrainRef({ owner: "owner", name: "name" }, "refs/heads/train")],
+    ["disableAutoMerge", (client: ReturnType<typeof makeGitHubClient>) => client.disableAutoMerge("PR_1")],
+    ["dequeuePullRequest", (client: ReturnType<typeof makeGitHubClient>) => client.dequeuePullRequest("MQE_1")],
+  ] as const) {
+    const { client, requests, sleeps } = scriptedClient(["lost"]);
+    await run(client);
+    assert.equal(requests.length, 1, label);
+    assert.deepEqual(sleeps, [], label);
   }
 });
