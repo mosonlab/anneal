@@ -1734,7 +1734,7 @@ const capabilityAgent = (overrides: Record<string, unknown> = {}) => ({
 }) as { projectId: string; archivedAt: Date | null; model: string; runnerPreference: RunnerPreference };
 
 test("the compound implementation root admits any in-project Codex gpt-* Agent", () => {
-  for (const model of ["gpt-6-astra:medium", "gpt-6-sol:high", "gpt-6-luna:max"]) {
+  for (const model of ["gpt-6-astra:medium", "gpt-5.6-sol:high", "gpt-6-luna:max"]) {
     assert.equal(
       compoundImplementationAssigneeValid("project-1", AssigneeType.AGENT, capabilityAgent({ model }), compoundStep),
       true,
@@ -1748,7 +1748,7 @@ test("the compound implementation root refuses a non-Codex runner, a non-gpt mod
     ["claude runner", { runnerPreference: RunnerPreference.CLAUDE, model: "claude-opus-5:high" }],
     // A Codex preference does not make a Claude model a gpt-* one.
     ["codex runner on a claude model", { runnerPreference: RunnerPreference.CODEX, model: "claude-opus-5:high" }],
-    ["pi runner on a pi-hosted gpt model", { runnerPreference: RunnerPreference.PI, model: "openai-codex/gpt-6-sol:high" }],
+    ["pi runner on a pi-hosted gpt model", { runnerPreference: RunnerPreference.PI, model: "openai-codex/gpt-5.6-sol:high" }],
     ["another project", { projectId: "project-2" }],
     ["archived", { archivedAt: now }],
   ];
@@ -1875,7 +1875,7 @@ for (const intent of reassignedRetryIntents) {
   });
 
   test(`${intent.kind} replaces a retired native subagent pin with the current one`, async () => {
-    const unchanged = agent({ model: "gpt-6-sol:high", runnerPreference: RunnerPreference.CODEX });
+    const unchanged = agent({ model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX });
     const task = taskRow({
       assigneeAgent: unchanged,
       repoId: "repo-1",

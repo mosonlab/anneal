@@ -38,7 +38,7 @@ test("the eight tool toggles render in canonical order and reflect the denied se
 });
 
 test("honesty tags name exactly what each concrete runner enforces", () => {
-  const codex = cardDom(agent({ model: "gpt-6-sol:high", runnerPreference: "CODEX" }));
+  const codex = cardDom(agent({ model: "gpt-5.6-sol:high", runnerPreference: "CODEX" }));
   assert.match(codex.window.document.body.textContent ?? "", /codex has no per-tool switch/);
   assert.equal((codex.window.document.body.textContent?.match(/not enforced on codex/gu) ?? []).length, 8);
 

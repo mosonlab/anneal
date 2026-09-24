@@ -120,7 +120,7 @@ const queueAgentRun = async (
       dedupeKey: `task:${task.id}:run:1`,
       status: RunStatus.QUEUED,
       runner,
-      model: runner === RunnerKind.CODEX ? "gpt-6-sol" : "claude-opus-5:high",
+      model: runner === RunnerKind.CODEX ? "gpt-5.6-sol" : "claude-opus-5:high",
       readyAt,
       ...(createdAt ? { createdAt } : {}),
     },

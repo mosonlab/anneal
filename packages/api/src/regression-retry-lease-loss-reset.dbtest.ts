@@ -49,7 +49,7 @@ const seedRegressionAtLeaseLossCap = async () => {
     environmentId: environment.id,
     name: `regression-agent-${suffix}`,
     title: "Regression agent",
-    model: "gpt-6-sol:high",
+    model: "gpt-5.6-sol:high",
     foundationalPrompt: "foundation",
     rolePrompt: "role",
   } });

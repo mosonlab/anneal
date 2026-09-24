@@ -48,7 +48,7 @@ const seedQueuedTask = async (runnerPreference: RunnerPreference) => {
       environmentId: environment.id,
       name: `agent-${suffix}`,
       title: "Agent",
-      model: runnerPreference === RunnerPreference.CODEX ? "gpt-6-sol" : "claude-opus-5:high",
+      model: runnerPreference === RunnerPreference.CODEX ? "gpt-5.6-sol" : "claude-opus-5:high",
       runnerPreference,
       foundationalPrompt: "foundation",
       rolePrompt: "role",

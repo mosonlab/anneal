@@ -20,7 +20,7 @@ Use the current repository instructions as authority. Bind every report to an ex
 
 ## Model and delegation contract
 
-Launch the discovery task with `gpt-6-sol` at `high` reasoning effort; the skill cannot reconfigure its parent task. If runtime metadata explicitly exposes the effective parent model and effort, record them and stop before surveying only when they conflict with this launch contract. If the runtime does not expose either field, record `requested gpt-6-sol/high; runtime metadata unavailable` and continue. Do not infer task settings from documentation, global defaults, process inspection, or environment variables.
+Launch the discovery task with `gpt-5.6-sol` at `high` reasoning effort; the skill cannot reconfigure its parent task. If runtime metadata explicitly exposes the effective parent model and effort, record them and stop before surveying only when they conflict with this launch contract. If the runtime does not expose either field, record `requested gpt-5.6-sol/high; runtime metadata unavailable` and continue. Do not infer task settings from documentation, global defaults, process inspection, or environment variables.
 
 When the runtime supports subagents, use available capacity to widen the read-only survey:
 

@@ -364,7 +364,7 @@ const executorRow = (overrides: Record<string, unknown> = {}): Record<string, un
   canonicalRole: "plan-executor-astra-low",
   customizedFields: [],
   title: "Plan Executor",
-  model: "gpt-6-sol:high",
+  model: "gpt-5.6-sol:high",
   runnerPreference: RunnerPreference.CODEX,
   foundationalPrompt: "foundation",
   rolePrompt: "role",
@@ -450,7 +450,7 @@ test("Agent API marks only the fields an edit actually changes", async () => {
     assert.equal(response.status, 200);
     assert.deepEqual(updates, [{
       title: "Renamed title",
-      model: "gpt-6-sol:high",
+      model: "gpt-5.6-sol:high",
       runnerPreference: RunnerPreference.CODEX,
       customizedFields: ["model", "title"],
     }]);
@@ -503,7 +503,7 @@ test("reset-runtime-config restores canonical runtime values and refuses invalid
             name: nonCodexRole.name,
             canonicalRole: nonCodexRole.canonicalRole,
             customizedFields: ["model", "runnerPreference"],
-            model: "gpt-6-sol:high",
+            model: "gpt-5.6-sol:high",
             runnerPreference: RunnerPreference.CODEX,
             codexServiceTier: CodexServiceTier.FAST,
           });

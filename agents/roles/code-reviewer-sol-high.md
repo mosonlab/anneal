@@ -1,7 +1,7 @@
 ---
 name: code-reviewer-sol-high
 title: Code Reviewer
-model: openai-codex/gpt-6-sol:high
+model: openai-codex/gpt-5.6-sol:high
 runner: pi
 inboxAccess: false
 collaborators: []

@@ -67,7 +67,7 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
 
   for (const { name, model, runnerPreference } of roles) {
     if (name === "code-reviewer-sol-high" || name === "review-coordinator-sol-high") {
-      assert.equal(model, "openai-codex/gpt-6-sol:high");
+      assert.equal(model, "openai-codex/gpt-5.6-sol:high");
       assert.equal(runnerPreference, RunnerPreference.PI);
       continue;
     }
@@ -95,13 +95,13 @@ test("canonical OpenAI roles pin their Codex model and runner", async () => {
 
   assert.equal(frontmatterValue(reviewCoordinator, "model"), "gpt-6-astra:medium");
   assert.equal(frontmatterValue(reviewCoordinator, "runner"), "codex");
-  assert.equal(frontmatterValue(reviewCoordinatorSol, "model"), "openai-codex/gpt-6-sol:high");
+  assert.equal(frontmatterValue(reviewCoordinatorSol, "model"), "openai-codex/gpt-5.6-sol:high");
   assert.equal(frontmatterValue(reviewCoordinatorSol, "runner"), "pi");
-  assert.equal(frontmatterValue(codeReviewerSol, "model"), "openai-codex/gpt-6-sol:high");
+  assert.equal(frontmatterValue(codeReviewerSol, "model"), "openai-codex/gpt-5.6-sol:high");
   assert.equal(frontmatterValue(codeReviewerSol, "runner"), "pi");
   assert.equal(frontmatterValue(planExecutor, "model"), "gpt-6-astra:low");
   assert.equal(frontmatterValue(planExecutor, "runner"), "codex");
-  assert.equal(frontmatterValue(planExecutorSol, "model"), "gpt-6-sol:high");
+  assert.equal(frontmatterValue(planExecutorSol, "model"), "gpt-5.6-sol:high");
   assert.equal(frontmatterValue(planExecutorSol, "runner"), "codex");
   assert.equal(bodyOf(reviewCoordinatorSol), bodyOf(reviewCoordinator));
   assert.equal(bodyOf(planExecutorSol), bodyOf(planExecutor));
@@ -337,7 +337,7 @@ test("the split review prompts enforce persisted-range, blindness, and regressio
 
 test("the executioner delegates only through platform-pinned native Luna children", async () => {
   const executioner = await roleSource("plan-executor-sol-high");
-  assert.equal(frontmatterValue(executioner, "model"), "gpt-6-sol:high");
+  assert.equal(frontmatterValue(executioner, "model"), "gpt-5.6-sol:high");
   assert.match(executioner, /pins every native child to Luna max/u);
   assert.match(executioner, /eight concurrent child threads/u);
   assert.match(executioner, /Delegation is not one slice per child/u);

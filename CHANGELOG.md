@@ -15,9 +15,9 @@ written.
   `claude-opus-5-5:medium`; the model picker offers Claude Opus 5.5 in place of
   Claude Opus 5, and cost estimates price it. Slugs are unchanged, so sync
   updates existing rows in place unless an operator customized their model.
-- **Sol and Luna move to GPT-6.** Every canonical Sol role now runs
-  `gpt-6-sol` and every Luna role `gpt-6-luna`; the model picker offers GPT-6
-  Sol and Luna in place of GPT-5.6, and cost estimates price both. Native
+- **Luna moves to GPT-6; Sol remains on GPT-5.6.** Every canonical Luna role
+  runs `gpt-6-luna`, while canonical Sol roles run `gpt-5.6-sol`. The model picker
+  offers GPT-6 Luna alongside GPT-5.6 Sol, and cost estimates price both. Native
   implementation subagents pin `gpt-6-luna:max`: unfinished Runs move to the
   new pin on migration, a retry takes the current pin, and finished Runs keep
   the GPT-5.6 snapshot they ran. The runner now executes each Run's own child
@@ -32,7 +32,7 @@ written.
   so archive them once no staffing profile references them.
 - **Code review and plan review default to PI runner for Sol high.** The
   canonical `code-reviewer-sol-high` and `review-coordinator-sol-high` roles now
-  run under the PI CLI runner using `openai-codex/gpt-6-sol:high`, reducing
+  run under the PI CLI runner using `openai-codex/gpt-5.6-sol:high`, reducing
   startup latency and context overhead for read-only reviews.
 - **Apply review fixes defaults to Claude Opus medium across all templates.**
   The review-fix step in `direct-engineer-workflow`, `compound-engineer-workflow`,

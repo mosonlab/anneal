@@ -8,7 +8,7 @@ Use this structure for a completed discovery run. Omit empty prose, but keep eve
 - Compared ref, if any
 - Working-tree state
 - Survey date
-- Parent model and reasoning effort, or `requested gpt-6-sol/high; runtime metadata unavailable`
+- Parent model and reasoning effort, or `requested gpt-5.6-sol/high; runtime metadata unavailable`
 - Subagent model and reasoning effort, or `serial parent-only survey`
 - Delegated areas and completion status
 - Areas surveyed

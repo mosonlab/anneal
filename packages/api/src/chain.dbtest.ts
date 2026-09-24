@@ -99,7 +99,7 @@ const seedCompoundImplementationApproval = async (validSuccessor = false) => {
     environmentId: environment.id,
     name: "senior-dev-high",
     title: "Senior developer",
-    model: "gpt-6-sol:high",
+    model: "gpt-5.6-sol:high",
     foundationalPrompt: "foundation",
     rolePrompt: "role",
   } });
@@ -108,7 +108,7 @@ const seedCompoundImplementationApproval = async (validSuccessor = false) => {
     environmentId: environment.id,
     name: "plan-executor-astra-low",
     title: "Implementation Plan Executioner",
-    model: "gpt-6-sol:high",
+    model: "gpt-5.6-sol:high",
     foundationalPrompt: "foundation",
     rolePrompt: "role",
   } });

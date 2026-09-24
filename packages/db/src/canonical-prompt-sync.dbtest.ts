@@ -778,7 +778,7 @@ test("sync rolls the exact adjudication-era graphs forward without touching inst
       if (index === 0) {
         const run = await prisma.run.create({ data: {
           projectId: project.id, taskId: task.id, agentId: taskAssigneeId!, runNumber: 1,
-          dedupeKey: `canonical-sync-legacy:${task.id}`, runner: "CODEX", model: agents.get("default")?.model ?? "gpt-6-sol:medium", promptHash: "legacy-snapshot",
+          dedupeKey: `canonical-sync-legacy:${task.id}`, runner: "CODEX", model: agents.get("default")?.model ?? "gpt-5.6-sol:medium", promptHash: "legacy-snapshot",
         } });
         await prisma.session.create({ data: {
           runId: run.id, projectId: project.id, agentId: taskAssigneeId!, taskId: task.id, runner: "CODEX",
@@ -907,7 +907,7 @@ test("sync adopts any uncustomized canonical runtime drift", async () => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
   const names = ["review-coordinator-astra-medium", "code-reviewer-sol-high"];
   const driftedCoordinator = { model: "claude-opus-5:medium", runnerPreference: RunnerPreference.CLAUDE };
-  const driftedSol = { model: "gpt-6-sol:medium", runnerPreference: RunnerPreference.CODEX };
+  const driftedSol = { model: "gpt-5.6-sol:medium", runnerPreference: RunnerPreference.CODEX };
   const coordinatorSource = canonicalRuntime("review-coordinator-astra-medium");
   const solSource = canonicalRuntime("code-reviewer-sol-high");
 
@@ -966,7 +966,7 @@ test("sync adopts uncustomized model-only runtime drift", async () => {
   await prisma.agent.update({
     where: { projectId_name: { projectId: project.id, name: "plan-executor-astra-low" } },
     data: {
-      model: "gpt-6-sol:medium",
+      model: "gpt-5.6-sol:medium",
       runnerPreference: RunnerPreference.CODEX,
       customizedFields: [],
       runtimeConfigDriftNoticeFingerprint: "stale-runtime-drift",
@@ -996,8 +996,8 @@ test("sync adopts uncustomized model-only runtime drift", async () => {
 
 test("sync notifies once per current customized runtime drift without overwriting it", async (t) => {
   const project = await prisma.project.findUniqueOrThrow({ where: { slug: "agentos-example" } });
-  const originalProduction = { model: "gpt-6-sol:high", runnerPreference: RunnerPreference.CODEX };
-  const changedProduction = { model: "gpt-6-sol:medium", runnerPreference: RunnerPreference.CODEX };
+  const originalProduction = { model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX };
+  const changedProduction = { model: "gpt-5.6-sol:medium", runnerPreference: RunnerPreference.CODEX };
   const mergeResolverSource = canonicalRuntime("merge-resolver-luna-max");
   const mergeResolver = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "merge-resolver-luna-max" } },
@@ -1068,7 +1068,7 @@ test("sync notifies once per current customized runtime drift without overwritin
     `Canonical: model=${escapeRegex(mergeResolverSource.model)}, runner=${mergeResolverSource.runnerPreference}`,
     "u",
   ));
-  assert.match(firstNotice[0]!.body, /Production: model=gpt-6-sol:high, runner=CODEX/u);
+  assert.match(firstNotice[0]!.body, /Production: model=gpt-5\.6-sol:high, runner=CODEX/u);
   assert.match(firstNotice[0]!.body, /customizedFields=model,runnerPreference/u);
 
   const unchangedSync = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
@@ -1088,7 +1088,7 @@ test("sync notifies once per current customized runtime drift without overwritin
     orderBy: { createdAt: "asc" },
   });
   assert.equal(notices.length, 2);
-  assert.match(notices[1]!.body, /Production: model=gpt-6-sol:medium, runner=CODEX/u);
+  assert.match(notices[1]!.body, /Production: model=gpt-5\.6-sol:medium, runner=CODEX/u);
   const afterChangedSync = await prisma.agent.findUniqueOrThrow({
     where: { id: mergeResolver.id },
     select: { model: true, runnerPreference: true, customizedFields: true },

@@ -666,8 +666,8 @@ test("a qualifying Codex disconnect with a regression handoff does not resume", 
     const remote = await seedRemote(root);
     const claimed = regressionOutputClaim(remote);
     claimed.runner = "CODEX";
-    claimed.agent = { ...claimed.agent, model: "gpt-6-sol" };
-    claimed.run = { ...claimed.run, model: "gpt-6-sol" };
+    claimed.agent = { ...claimed.agent, model: "gpt-5.6-sol" };
+    claimed.run = { ...claimed.run, model: "gpt-5.6-sol" };
     let resumeCalls = 0;
     const adapter: CliAdapter = {
       ...adapters.CODEX,
@@ -1315,8 +1315,8 @@ test("a qualifying Codex disconnect with delivered result does not resume", asyn
     const remote = await seedRemote(root);
     const claimed = resultOutputClaim(remote);
     claimed.runner = "CODEX";
-    claimed.agent = { ...claimed.agent, model: "gpt-6-sol" };
-    claimed.run = { ...claimed.run, model: "gpt-6-sol" };
+    claimed.agent = { ...claimed.agent, model: "gpt-5.6-sol" };
+    claimed.run = { ...claimed.run, model: "gpt-5.6-sol" };
     let resumeCalls = 0;
     const adapter: CliAdapter = {
       ...adapters.CODEX,
@@ -1372,8 +1372,8 @@ test("an inconclusive delivered-output probe fails closed and does not resume", 
     const remote = await seedRemote(root);
     const claimed = resultOutputClaim(remote);
     claimed.runner = "CODEX";
-    claimed.agent = { ...claimed.agent, model: "gpt-6-sol" };
-    claimed.run = { ...claimed.run, model: "gpt-6-sol" };
+    claimed.agent = { ...claimed.agent, model: "gpt-5.6-sol" };
+    claimed.run = { ...claimed.run, model: "gpt-5.6-sol" };
     let resumeCalls = 0;
     const adapter: CliAdapter = {
       ...adapters.CODEX,

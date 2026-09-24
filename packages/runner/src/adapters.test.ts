@@ -907,7 +907,7 @@ test("PI runtime preflight rejects an openai-codex Run whose explicit service ti
     {
       ...claim,
       runner: "PI",
-      run: { ...claim.run, model: "openai-codex/gpt-6-sol:high" },
+      run: { ...claim.run, model: "openai-codex/gpt-5.6-sol:high" },
       secrets: { ...claim.secrets, AGENTOS_PI_EXPECTS_OPENAI_CODEX: "0" },
     },
     scratch,
@@ -918,7 +918,7 @@ test("PI runtime preflight rejects an openai-codex Run whose explicit service ti
   const result = await adapters.PI.preflight({
     config: {} as RunnerConfig,
     runner: "PI",
-    model: "openai-codex/gpt-6-sol:high",
+    model: "openai-codex/gpt-5.6-sol:high",
     env: { AGENTOS_RUN_ID: "run-1" },
   });
   assert.equal(result.ok, false);
@@ -1774,7 +1774,7 @@ test("PI preflight fails closed when the CLI omits an isolation capability", { t
       binaries: { CLAUDE: stub, CODEX: stub, PI: stub },
       runAsPrefix: [],
     } as unknown as RunnerConfig;
-    const result = await adapters.PI.preflight({ config, runner: "PI", model: "openai-codex/gpt-6-sol:high", env: {} });
+    const result = await adapters.PI.preflight({ config, runner: "PI", model: "openai-codex/gpt-5.6-sol:high", env: {} });
     assert.equal(result.ok, false);
     assert.equal(result.error, "cli-incompatible: the CLI does not expose the required Anneal exec protocol");
     assert.equal(result.authMode, null);
@@ -1800,7 +1800,7 @@ test("PI preflight verifies every isolation capability before authentication", {
       binaries: { CLAUDE: stub, CODEX: stub, PI: stub },
       runAsPrefix: [],
     } as unknown as RunnerConfig;
-    const result = await adapters.PI.preflight({ config, runner: "PI", model: "openai-codex/gpt-6-sol:high", env: {} });
+    const result = await adapters.PI.preflight({ config, runner: "PI", model: "openai-codex/gpt-5.6-sol:high", env: {} });
     assert.equal(result.ok, true);
     assert.equal(result.authMode, "openai-codex");
     assert.equal(result.capabilities.cliProtocol, "json-stdin-resume-isolated");

@@ -162,7 +162,7 @@ const reader = (
 const seedReadiness = async () => {
   const project = await db.project.create({ data: { name: "Merge tail", slug: `merge-tail-${Date.now()}` } });
   const environment = await db.environment.create({ data: { projectId: project.id, name: "local", allowedHosts: [] } });
-  const makeAgent = (name: string, model = "gpt-6-sol:high") => db.agent.create({ data: {
+  const makeAgent = (name: string, model = "gpt-5.6-sol:high") => db.agent.create({ data: {
     projectId: project.id,
     environmentId: environment.id,
     name,

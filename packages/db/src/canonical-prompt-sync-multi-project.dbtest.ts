@@ -370,7 +370,7 @@ test("ordinary sync covers active canonical Agents in every Project and preserve
     data: {
       foundationalPrompt: "second Project foundational drift",
       rolePrompt: "second Project role drift",
-      model: "gpt-6-sol:medium",
+      model: "gpt-5.6-sol:medium",
       runnerPreference: RunnerPreference.CODEX,
     },
   });
@@ -586,7 +586,7 @@ test("sync adopts renamed canonical roles in place without duplicating Agents", 
     where: { id: idFor("merge-resolver-luna-max") },
     data: {
       name: "operator-resolver",
-      model: "gpt-6-sol:high",
+      model: "gpt-5.6-sol:high",
       runnerPreference: RunnerPreference.CODEX,
       customizedFields: ["name", "model", "runnerPreference"],
     },
@@ -607,7 +607,7 @@ test("sync adopts renamed canonical roles in place without duplicating Agents", 
   const operator = await prisma.agent.findUniqueOrThrow({ where: { id: idFor("merge-resolver-luna-max") } });
   assert.deepEqual(
     { name: operator.name, model: operator.model, runnerPreference: operator.runnerPreference },
-    { name: "operator-resolver", model: "gpt-6-sol:high", runnerPreference: RunnerPreference.CODEX },
+    { name: "operator-resolver", model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX },
   );
 });
 
@@ -1204,7 +1204,7 @@ test("summary reports every Project, nested canonical keys, lexical slugs, and f
     data: {
       foundationalPrompt: "summary foundational drift",
       rolePrompt: "summary role drift",
-      model: "gpt-6-sol:medium",
+      model: "gpt-5.6-sol:medium",
       runnerPreference: RunnerPreference.CODEX,
     },
   });
@@ -1237,7 +1237,7 @@ test("summary reports every Project, nested canonical keys, lexical slugs, and f
     runNumber: 1,
     dedupeKey: `a2-summary-started:${started.id}`,
     runner: "CODEX",
-    model: "gpt-6-sol:medium",
+    model: "gpt-5.6-sol:medium",
     promptHash: "a2-summary-started",
   } });
   const withOutput = await createPreservedTask("summary output", { status: TaskStatus.TODO, archivedAt: null });

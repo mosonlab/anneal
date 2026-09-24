@@ -37,7 +37,7 @@ import {
 } from "./runtime.js";
 import { provisionIsolatedSessionConfig, type SessionConfigOptions } from "./session-config.js";
 
-export const CODEX_STARTER_MODEL = "gpt-6-sol:medium";
+export const CODEX_STARTER_MODEL = "gpt-5.6-sol:medium";
 
 const CODEX_BARE_DISCONNECT = /^stream disconnected before completion:[^\r\n]+$/iu;
 const isCodexBareDisconnect = (message: string | null): boolean => CODEX_BARE_DISCONNECT.test(message?.trim() ?? "");

@@ -78,7 +78,7 @@ const seedRegression = async (options: RegressionSeedOptions = {}) => {
   const environment = await db.environment.create({ data: { projectId: project.id, name: "local", allowedHosts: [] } });
   const makeAgent = (name: string) => db.agent.create({ data: {
     projectId: project.id, environmentId: environment.id, name, title: name,
-    model: "gpt-6-sol:high", runnerPreference: "CODEX", foundationalPrompt: "foundation", rolePrompt: "role",
+    model: "gpt-5.6-sol:high", runnerPreference: "CODEX", foundationalPrompt: "foundation", rolePrompt: "role",
   } });
   const [regressionAgent, resolverAgent, fixAgent, reviewAgent, librarianAgent] = await Promise.all([
     makeAgent("code-reviewer-sol-high"), makeAgent("merge-resolver-luna-max"), makeAgent("senior-dev-astra-medium"),

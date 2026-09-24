@@ -30,7 +30,7 @@ test("the catalog covers every canonical roster model", () => {
   assert.equal(findModel("claude-fable-5")?.defaultEffort, "medium");
   assert.equal(findModel("gpt-6-luna")?.defaultEffort, "max");
   assert.equal(findModel("gpt-6-astra")?.defaultEffort, "medium");
-  assert.equal(findModel("openai-codex/gpt-6-sol")?.defaultEffort, "high");
+  assert.equal(findModel("openai-codex/gpt-5.6-sol")?.defaultEffort, "high");
   assert.equal(findModel("openai-codex/gpt-6-luna")?.defaultEffort, "max");
 });
 
@@ -51,7 +51,7 @@ test("model effort encoding round-trips on the runner's last-colon rule", () => 
 });
 
 test("pi-hosted entries override the substring heuristic in the catalog", () => {
-  assert.equal(runnerForModel("openai-codex/gpt-6-sol:high"), "PI");
+  assert.equal(runnerForModel("openai-codex/gpt-5.6-sol:high"), "PI");
   assert.equal(runnerForModel("openai-codex/gpt-6-luna:xhigh"), "PI");
 });
 
@@ -72,7 +72,7 @@ test("validateModelPair names mismatches and permits the Custom escape hatch", (
 
 test("every catalog model names the short name its slugs carry", () => {
   assert.deepEqual(
-    ["gpt-6-astra", "gpt-6-luna", "gpt-6-sol", "claude-opus-5-5", "claude-fable-5"].map(modelShortName),
+    ["gpt-6-astra", "gpt-6-luna", "gpt-5.6-sol", "claude-opus-5-5", "claude-fable-5"].map(modelShortName),
     ["astra", "luna", "sol", "opus", "fable"],
   );
   // The pi-hosted entries name the same model as their codex twins.
@@ -99,7 +99,7 @@ test("a slug is role-model-effort, and the model-free roles have none to regener
   assert.equal(slugForModel("code-reviewer-sol-high", "claude-opus-5-5:high"), "code-reviewer-opus-high");
   assert.equal(slugForModel("librarian-opus-medium", "claude-fable-5:low"), "librarian-fable-low");
   // An operator's own role name is the whole role.
-  assert.equal(slugForModel("nightly-triage", "gpt-6-sol:high"), "nightly-triage-sol-high");
+  assert.equal(slugForModel("nightly-triage", "gpt-5.6-sol:high"), "nightly-triage-sol-high");
   // A Custom model is outside the rule, and a model with no effort pins nothing.
   assert.equal(slugForModel("nightly-triage", "private/model:turbo"), null);
   assert.equal(slugForModel("senior-dev-astra-medium", "gpt-6-astra"), null);

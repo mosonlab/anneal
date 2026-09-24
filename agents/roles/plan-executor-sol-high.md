@@ -1,7 +1,7 @@
 ---
 name: plan-executor-sol-high
 title: Plan Executor
-model: gpt-6-sol:high
+model: gpt-5.6-sol:high
 runner: codex
 inboxAccess: true
 collaborators: []

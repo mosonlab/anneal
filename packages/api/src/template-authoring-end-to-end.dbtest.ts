@@ -52,7 +52,7 @@ const seedCanonicalTemplate = async () => {
       environmentId: environment.id,
       name,
       title: name,
-      model: "gpt-6-sol:medium",
+      model: "gpt-5.6-sol:medium",
       foundationalPrompt: "foundation",
       rolePrompt: "role",
     },

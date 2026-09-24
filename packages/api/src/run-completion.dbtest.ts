@@ -42,7 +42,7 @@ const seed = async (status: RunStatus = RunStatus.RUNNING) => {
   });
   const agent = await db.agent.create({ data: {
     projectId: project.id, environmentId: environment.id, name: `agent-${suffix}`, title: "Agent",
-    model: "gpt-6-sol:high", runnerPreference: "CODEX", foundationalPrompt: "foundation", rolePrompt: "role",
+    model: "gpt-5.6-sol:high", runnerPreference: "CODEX", foundationalPrompt: "foundation", rolePrompt: "role",
   } });
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "repo", remoteUrl: "https://github.com/acme/repo.git",
@@ -319,7 +319,7 @@ test("a resolved integrator stop race rolls back the whole predecessor completio
     environmentId: environment.id,
     name: `predecessor-${suffix}`,
     title: "Predecessor",
-    model: "gpt-6-sol:high",
+    model: "gpt-5.6-sol:high",
     runnerPreference: "CODEX",
     foundationalPrompt: "foundation",
     rolePrompt: "role",

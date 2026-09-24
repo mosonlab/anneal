@@ -24,7 +24,7 @@ const agent = (overrides: Partial<Agent> & Pick<Agent, "id" | "name" | "title" |
 
 const seniorAstra = agent({ id: "a1", name: "senior-dev-astra-medium", title: "Senior Dev", model: "gpt-6-astra:medium", canonicalRole: "senior-dev-astra-medium" });
 const seniorLuna = agent({ id: "a2", name: "senior-dev-luna-max", title: "Senior Dev", model: "gpt-6-luna:max", canonicalRole: "senior-dev-luna-max" });
-const reviewer = agent({ id: "a3", name: "code-reviewer-sol-high", title: "Code Reviewer", model: "gpt-6-sol:high" });
+const reviewer = agent({ id: "a3", name: "code-reviewer-sol-high", title: "Code Reviewer", model: "gpt-5.6-sol:high" });
 const integrator = agent({
   id: "a4", name: "merge-integrator", title: "Merge Integrator", model: "mechanical/merge-executor-v1",
   runnerPreference: "INHERIT", assignable: false,

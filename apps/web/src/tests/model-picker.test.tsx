@@ -33,9 +33,9 @@ test("catalog selection retains a supported effort, falls back otherwise, and wr
     ));
     const model = dom.window.document.querySelector("select");
     assert.ok(model);
-    model.value = "gpt-6-sol";
+    model.value = "gpt-5.6-sol";
     await act(async () => model.dispatchEvent(new dom.window.Event("change", { bubbles: true })));
-    assert.deepEqual(seen.pop(), { model: "gpt-6-sol:max", runnerPreference: "CODEX" });
+    assert.deepEqual(seen.pop(), { model: "gpt-5.6-sol:max", runnerPreference: "CODEX" });
 
     await act(async () => root.render(
       <ModelPicker model="gpt-6-luna:none" runnerPreference="CODEX" onChange={(next) => seen.push(next)} />,
@@ -127,7 +127,7 @@ test("the real detail Save button blocks a stored contradiction until the picker
 
     const model = dom.window.document.querySelector("select");
     assert.ok(model);
-    model.value = "gpt-6-sol";
+    model.value = "gpt-5.6-sol";
     await act(async () => model.dispatchEvent(new dom.window.Event("change", { bubbles: true })));
     assert.equal(save.disabled, false);
   } finally {
@@ -142,7 +142,7 @@ test("the executioner Setup page has no legacy subprocess profile controls", asy
   const root = (await reactDom()).createRoot(container);
   const agent: Agent = {
     id: "a", projectId: "p", environmentId: "e", name: "plan-executor-astra-low", canonicalRole: "plan-executor-astra-low", customizedFields: [], title: "Implementation Plan Executioner",
-    model: "gpt-6-sol:high", codexServiceTier: "DEFAULT", runnerPreference: "CODEX", inboxAccess: true, disabledTools: [],
+    model: "gpt-5.6-sol:high", codexServiceTier: "DEFAULT", runnerPreference: "CODEX", inboxAccess: true, disabledTools: [],
     foundationalPrompt: "foundation", rolePrompt: "role", createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(), archivedAt: null,
   };

@@ -31,7 +31,7 @@ const agent = (id: string, title: string, model: string): Agent => ({
 const implementer = agent("agent-impl", "Senior Developer", "gpt-6-astra:medium");
 const reviewer = agent("agent-review", "Reviewer", "gpt-6-luna:max");
 const stand_in = agent("agent-standin", "Stand In", "claude-opus-5-5:high");
-const integrator: Agent = { ...agent("agent-merge", "Merge Integrator", "gpt-6-sol:low"), assignable: false };
+const integrator: Agent = { ...agent("agent-merge", "Merge Integrator", "gpt-5.6-sol:low"), assignable: false };
 
 const step = (stepIndex: number, name: string, outputKind: string, overrides: Partial<TaskTemplateStep> = {}): TaskTemplateStep => ({
   id: `step-${stepIndex}`,

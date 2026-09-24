@@ -156,7 +156,7 @@ test("synchronizeAgents refuses incompatible runner adoption for customized mode
     canonicalRole: "code-reviewer-sol-high",
     name: "code-reviewer-sol-high",
     title: "Code Reviewer",
-    model: "openai-codex/gpt-6-sol:high",
+    model: "openai-codex/gpt-5.6-sol:high",
     runnerPreference: "PI",
     inboxAccess: false,
     collaborators: [],
@@ -256,7 +256,7 @@ test("synchronizeAgents refuses incompatible runner adoption for customized mode
   assert.equal(createdMessages.length, 1);
   const msg = createdMessages[0] as { data: { body: string } };
   assert.match(msg.data.body, /Canonical runtime drift detected/u);
-  assert.match(msg.data.body, /Canonical: model=openai-codex\/gpt-6-sol:high, runner=PI/u);
+  assert.match(msg.data.body, /Canonical: model=openai-codex\/gpt-5.6-sol:high, runner=PI/u);
   assert.match(msg.data.body, /Production: model=gpt-6-astra:medium, runner=CODEX/u);
 });
 
@@ -266,7 +266,7 @@ test("synchronizeAgents adopts compatible uncustomized runtime fields and syncs 
     canonicalRole: "code-reviewer-sol-high",
     name: "code-reviewer-sol-high",
     title: "Code Reviewer",
-    model: "openai-codex/gpt-6-sol:high",
+    model: "openai-codex/gpt-5.6-sol:high",
     runnerPreference: "PI",
     inboxAccess: false,
     collaborators: [],
@@ -283,7 +283,7 @@ test("synchronizeAgents adopts compatible uncustomized runtime fields and syncs 
     name: "code-reviewer-sol-high",
     archivedAt: null,
     title: "Code Reviewer",
-    model: "gpt-6-sol:high",
+    model: "gpt-5.6-sol:high",
     customizedFields: [],
     runtimeConfigDriftNoticeFingerprint: "stale-drift",
     runnerPreference: "CODEX",
@@ -339,7 +339,7 @@ test("synchronizeAgents adopts compatible uncustomized runtime fields and syncs 
 
   const adoptionRecord = updatedRecords.find((record) => {
     const data = record.data as Record<string, unknown>;
-    return data.runnerPreference === "PI" && data.model === "openai-codex/gpt-6-sol:high";
+    return data.runnerPreference === "PI" && data.model === "openai-codex/gpt-5.6-sol:high";
   });
   assert.ok(adoptionRecord, "Both compatible runtime fields must be adopted together");
   const data = adoptionRecord.data as Record<string, unknown>;

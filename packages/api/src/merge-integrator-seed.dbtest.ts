@@ -797,7 +797,7 @@ test("canonical sync restores Agent prompts in every Project and preserves custo
   await db.agent.update({
     where: { id: uncustomized.id },
     data: {
-      model: "gpt-6-sol:medium",
+      model: "gpt-5.6-sol:medium",
       runnerPreference: RunnerPreference.CODEX,
       customizedFields: [],
       runtimeConfigDriftNoticeFingerprint: "stale-runtime-drift",

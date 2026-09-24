@@ -50,7 +50,7 @@ const seed = async (overrides: {
   const environment = await db.environment.create({ data: { projectId: project.id, name: "local", allowedHosts: [] } });
   const agent = await db.agent.create({ data: {
     projectId: project.id, environmentId: environment.id, name: `agent-${suffix}`, title: "Agent",
-    model: "gpt-6-sol:high", runnerPreference: "CODEX", foundationalPrompt: "foundation", rolePrompt: "role",
+    model: "gpt-5.6-sol:high", runnerPreference: "CODEX", foundationalPrompt: "foundation", rolePrompt: "role",
   } });
   const repo = await db.repo.create({ data: {
     projectId: project.id, name: "repo", remoteUrl: "https://github.com/acme/repo.git",
@@ -169,7 +169,7 @@ test("replacement start and late salvage publication complete without a Run-Task
     dedupeKey: `task:${seeded.task.id}:run:2`,
     status: RunStatus.CLAIMED,
     runner: "CODEX",
-    model: "gpt-6-sol:high",
+    model: "gpt-5.6-sol:high",
     promptHash: "b".repeat(64),
     targetBranch: originalBase,
     runnerId: replacementRunner,

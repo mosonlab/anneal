@@ -671,7 +671,7 @@ test("direct Route overrides implementation while non-direct templates refuse Ro
   };
   const routed = {
     id: "agent-senior", name: "senior-dev-astra-medium", projectId: "project-1", archivedAt: null,
-    model: "gpt-6-sol:high", foundationalPrompt: "foundation", rolePrompt: "role",
+    model: "gpt-5.6-sol:high", foundationalPrompt: "foundation", rolePrompt: "role",
   };
   const steps = [
     {

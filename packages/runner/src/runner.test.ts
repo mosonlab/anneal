@@ -1304,8 +1304,8 @@ test("Codex provision auth failure is PROVISION, retains its root, and never spa
       ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
       session: testSession(root),
     }, { adapter });
     assert.equal(preflightCalls, 0);
@@ -1348,8 +1348,8 @@ test("Codex baseline-copy failure is PROVISION and never reaches preflight or th
       ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
       session: testSession(root),
     }, { adapter });
     assert.equal(preflightCalls, 0);
@@ -1388,8 +1388,8 @@ test("runtime-tool materialization failure is PROVISION and never reaches prefli
       ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
       session: testSession(root),
     }, {
       adapter,
@@ -1444,8 +1444,8 @@ for (const failureCase of ["collision", "missing source", "wrong source type", "
         ...agentClaim,
         runner: "CODEX",
         repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-        agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-        run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+        agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+        run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
         session: testSession(root),
       }, {
         adapter,
@@ -1510,8 +1510,8 @@ test("Codex rejects a run-as config-root symlink in PROVISION without copying ho
       ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
       session: { id: sessionId },
     }, { adapter });
     assert.equal(preflightCalls, 0);
@@ -1600,10 +1600,10 @@ const codexResumeClaim = (remoteUrl: string, root: string): ClaimedTask => ({
   ...agentClaim,
   runner: "CODEX",
   repo: { ...mechanicalClaim.repo, remoteUrl, defaultBranch: "master" },
-  agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
+  agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
   run: {
     ...agentClaim.run,
-    model: "gpt-6-sol",
+    model: "gpt-5.6-sol",
     requiresCommit: false,
     opensPullRequest: false,
     maxRunsPerTask: 3,
@@ -2382,8 +2382,8 @@ test("event delivery failures do not starve heartbeats and recover in seq order"
       ...agentClaim,
       runner: "CLAUDE",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
       session: testSession(root),
     }, { adapter });
 
@@ -2828,8 +2828,8 @@ test("a Codex claim passes its own preflight and starts while the others stay bl
       ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
       session: testSession(root),
     } satisfies ClaimedTask;
     await executeClaim(configured, codexClaim);
@@ -2875,8 +2875,8 @@ test("an outside worktree is reported without changing a successful run outcome"
       ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
       session: testSession(root),
     });
 
@@ -2920,8 +2920,8 @@ test("Codex records success after reconnecting and reaching terminal completion"
       ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
       session: testSession(root),
     });
 
@@ -2958,8 +2958,8 @@ test("Codex preserves reconnect evidence when the stream ends before terminal co
       ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
       session: testSession(root),
     });
 
@@ -3001,8 +3001,8 @@ test("Codex preserves reconnect evidence when terminal completion is followed by
       ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
       session: testSession(root),
     });
 
@@ -3041,8 +3041,8 @@ test("a failed first completion request restores and retains CODEX_HOME", async 
       ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
       session: testSession(root),
     });
 
@@ -3111,8 +3111,8 @@ test("session-config cleanup failure does not turn delivered work into a failed 
       ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
       session: testSession(root),
     }, {
       cleanupAgentScratch: async (runnerConfig, scratch) => {
@@ -3157,8 +3157,8 @@ test("default failed-workspace retention still salvages and records the exact du
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
     });
 
     const salvage = "agentos/task-10/run-1";
@@ -3206,8 +3206,8 @@ test("a dead delivery lease still salvages before cleanup without terminal API a
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
     });
 
     const salvage = "agentos/task-10/run-1";
@@ -3263,8 +3263,8 @@ test("a heartbeat cancellation kills the provider group, acknowledges once, and 
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
     });
 
     const acknowledgements = posts.filter((post) => post.path.endsWith("/cancel/acknowledge"));
@@ -3304,8 +3304,8 @@ test("a clean failed run records that there is nothing to salvage before cleanup
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
     });
 
     assert.equal(posts.some((post) => post.path.endsWith("/publication")), false);
@@ -3346,8 +3346,8 @@ test("failed-run salvage excludes worktrees created at the instructed in-workspa
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
     });
 
     const salvage = "agentos/task-10/run-1";
@@ -3385,8 +3385,8 @@ test("a failed salvage keeps the workspace and reports cleanup failure", async (
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
     });
 
     const completion = posts.find((post) => post.path.endsWith("/complete"));
@@ -3430,10 +3430,10 @@ test("successful execution with failed delivery salvages before removing the wor
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: {
         ...mechanicalClaim.run,
-        model: "gpt-6-sol",
+        model: "gpt-5.6-sol",
         maxRunsPerTask: 3,
         branch: "declared/head",
       },
@@ -3491,10 +3491,10 @@ test("a pull-request failure after publication keeps the primary delivery eviden
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: githubRemote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: {
         ...mechanicalClaim.run,
-        model: "gpt-6-sol",
+        model: "gpt-5.6-sol",
         maxRunsPerTask: 3,
         opensPullRequest: true,
         branch: "declared/head",
@@ -3538,10 +3538,10 @@ test("a successful pinned review never publishes its dirty detached checkout", a
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: {
         ...mechanicalClaim.run,
-        model: "gpt-6-sol",
+        model: "gpt-5.6-sol",
         targetBranch: pinned,
         pinnedBaseSha: pinned,
         implementationBaseSha: pinned,
@@ -3580,10 +3580,10 @@ test("a failed pinned review reports failure without publishing its dirty detach
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
       run: {
         ...mechanicalClaim.run,
-        model: "gpt-6-sol",
+        model: "gpt-5.6-sol",
         targetBranch: pinned,
         pinnedBaseSha: pinned,
         implementationBaseSha: pinned,
@@ -3633,8 +3633,8 @@ test("a dead-lease salvage failure is durably reported and retains the workspace
       runner: "CODEX",
       session: testSession(root),
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
     });
     const cleanup = posts.find((post) => post.path.endsWith("/cleanup"));
     assert.equal(cleanup?.body.cleanupStatus, "FAILED");
@@ -3694,8 +3694,8 @@ test("a signed-out Codex reports a class and an exit code, never what the CLI pr
       ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
       session: testSession(root),
     });
     const completion = posts.find((post) => post.path.endsWith("/complete"))!;
@@ -3739,8 +3739,8 @@ test("a Codex CLI that is not installed is a class of its own, and still reads a
       ...agentClaim,
       runner: "CODEX",
       repo: { ...mechanicalClaim.repo, remoteUrl: remote, defaultBranch: "master" },
-      agent: { ...mechanicalClaim.agent, model: "gpt-6-sol" },
-      run: { ...mechanicalClaim.run, model: "gpt-6-sol", maxRunsPerTask: 3 },
+      agent: { ...mechanicalClaim.agent, model: "gpt-5.6-sol" },
+      run: { ...mechanicalClaim.run, model: "gpt-5.6-sol", maxRunsPerTask: 3 },
       session: testSession(root),
     });
     const completion = posts.find((post) => post.path.endsWith("/complete"))!;
