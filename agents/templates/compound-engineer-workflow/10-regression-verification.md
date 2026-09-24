@@ -28,7 +28,7 @@ omitted. Review the entire refreshed fix diff as one unit, account for every
 finding id in every present report, and verify that the approved specification
 is preserved without a new defect. Run focused regressions for the findings and
 changed behavior; the Merge gate owns full workspace and repository suites. Do not modify code or repair
-a failure.
+a failure. The tracked `.chain/` Chain workspace is platform bookkeeping that merge execution strips from the merge commit tree; it never counts toward diff-scope, forbidden-surface, or changed-file acceptance checks, so never report it as a defect or modify it.
 
 Sweep changed code and sites governed by changed contracts for each defect class identified in the prior findings or
 refreshed fix. Record proven pre-existing out-of-scope instances and non-blocking P2 observations separately in the

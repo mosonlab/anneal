@@ -1,4 +1,16 @@
 /**
+ * Restore the Regression bytes retired by the Chain workspace scope rollover
+ * (2026-09-24), which exempted the tracked `.chain/` directory from scope
+ * checks. Every registered generation predates it, so the older fixtures apply
+ * it before reconstructing their earlier prompt bytes.
+ */
+export const restorePreChainWorkspaceScopePrompt = (prompt: string): string => prompt
+  .replace(
+    " The tracked `.chain/` Chain workspace is platform bookkeeping that merge execution strips from the merge commit tree; it never counts toward diff-scope, forbidden-surface, or changed-file acceptance checks, so never report it as a defect or modify it.",
+    "",
+  );
+
+/**
  * Restore the prompt bytes retired by the defect-class sweep rollover
  * (2026-09-23): the Regression sweep, the input traces in Spec, Plan,
  * Revalidate, Implementation and plan review, the shared-contract sentences in
@@ -7,7 +19,7 @@
  * predates it, so the older fixtures apply it before reconstructing their
  * earlier prompt bytes.
  */
-export const restorePreDefectClassSweepPrompt = (prompt: string): string => prompt
+export const restorePreDefectClassSweepPrompt = (prompt: string): string => restorePreChainWorkspaceScopePrompt(prompt)
   .replace(
     "Sweep changed code and sites governed by changed contracts for each defect class identified in the prior findings or\nrefreshed fix. Record proven pre-existing out-of-scope instances and non-blocking P2 observations separately in the\nactivity log. If an adopted finding remains open, a rejection is unsupported, or a new blocking defect exists, report\nevery blocking instance in one call, one line per finding ID, location (`file:line`, or command and cwd for an\nexecution failure), and consequence:",
     "If an adopted finding remains open, a rejection is unsupported, or a new\ndefect exists, run",
