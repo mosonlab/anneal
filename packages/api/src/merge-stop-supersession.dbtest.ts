@@ -430,3 +430,53 @@ test("a human approval racing the readiness supersession opens exactly one Run",
     assert.equal(approved.status, "fulfilled", "the human approval opened the Run");
   }
 });
+
+test("resume with readiness still bound to the pre-answer authorization issues the next confirmation card", async () => {
+  const seeded = await seedIntegratorChain(db, { label: "stop-stale-auth", shape: "canonical-compound-readiness" });
+  const integratorTaskId = seeded.integratorTask!.id;
+  const stop = await rejectedAndRegressed(seeded, "stale-auth");
+  // Readiness completes without re-verifying: its output still selects the
+  // authorization the stopped Run consumed, written before the answer.
+  await db.task.update({ where: { id: seeded.readinessTask!.id }, data: { status: TaskStatus.DONE } });
+  await holdAtReadinessLayer(seeded);
+
+  const resumed = await db.$transaction((tx) => resumeChain(tx, {
+    projectId: seeded.project.id, chainId: seeded.chainId, taskId: integratorTaskId, requestId: "resume-stale",
+  }, new Date()));
+  if ("message" in resumed) assert.fail(resumed.message);
+  assert.equal(await db.run.count({ where: { taskId: integratorTaskId } }), 1, "the stop still guards the birth");
+  assert.equal((await supersessions(integratorTaskId)).length, 0);
+  const next = await db.inboxMessage.findUnique({ where: { dedupeKey: `confirmation:${integratorTaskId}:${stop.stopId}:r1` } });
+  assert.ok(next, "the human confirmation path continues with the :r1 card");
+  assert.equal(next.status, "OPEN");
+});
+
+test("a lease-loss retry after the superseding Run stops again is refused", async () => {
+  const seeded = await seedIntegratorChain(db, { label: "stop-restopped", shape: "canonical-compound-readiness" });
+  const integratorTaskId = seeded.integratorTask!.id;
+  await rejectedAndRegressed(seeded, "restopped");
+  await readinessAuthorizes();
+  const superseding = await db.run.findFirstOrThrow({ where: { taskId: integratorTaskId }, orderBy: { runNumber: "desc" } });
+  assert.equal((await supersessions(integratorTaskId)).length, 1);
+
+  await db.run.update({ where: { id: superseding.id }, data: { status: RunStatus.SUCCEEDED } });
+  await db.session.create({ data: {
+    runId: superseding.id, projectId: seeded.project.id, taskId: integratorTaskId,
+    agentId: seeded.integratorAgent.id, runner: "CLAUDE", executionStatus: "SUCCEEDED",
+  } });
+  const evidence = JSON.stringify({ reason: "GitHub API 502 again" });
+  const body = JSON.stringify({ outcome: "stopped", condition: "api-error", evidence });
+  await db.taskStepOutput.update({ where: { taskId: integratorTaskId }, data: { runId: superseding.id, kind: "merge-result", body } });
+  const restop = await db.$transaction((tx) => recordIntegratorStop(tx, {
+    integratorTaskId, condition: "api-error", evidence, sourceRunId: superseding.id,
+  }));
+  assert.ok(restop.questionId);
+
+  const retry = await db.$transaction((tx) => openRun(tx, integratorTaskId, {
+    kind: "retry-after-lease-loss", readyAt: new Date(), sourceRunId: superseding.id,
+    sourceMaxRunsPerTask: superseding.maxRunsPerTask, sourceBudgetGrants: superseding.budgetGrants,
+  }));
+  assert.equal(retry.ok, false, "the new stop is not covered by the earlier supersession");
+  if (!retry.ok) assert.equal(retry.refusal.code, "integrator-stopped");
+  assert.equal(await db.run.count({ where: { taskId: integratorTaskId } }), 2);
+});
