@@ -124,6 +124,7 @@ const failedEnvelope = (overrides: Partial<FailureEnvelope> = {}): FailureEnvelo
   stdoutSummary: null,
   timedOut: false,
   transient: false,
+  remoteBranchDiverged: false,
   timeoutMs: null,
   ...overrides,
 });

@@ -10,6 +10,7 @@ import type { ExitEvidence } from "./adapters.js";
 import type { DeliveryFailure } from "./delivery.js";
 import { isCommandTimeout } from "./exec.js";
 import { isTransientNetworkError } from "./network-retry.js";
+import { isRemoteBranchDiverged } from "./remote-branch.js";
 
 export {
   type FailureEnvelope,
@@ -43,6 +44,7 @@ export const buildFailureEnvelope = (input: {
   error?: unknown;
 }): FailureEnvelope => {
   const timeout = isCommandTimeout(input.error) ? input.error : null;
+  const remoteBranchDiverged = isRemoteBranchDiverged(input.error);
   return {
     version: FAILURE_ENVELOPE_VERSION,
     phase: input.phase,
@@ -57,7 +59,11 @@ export const buildFailureEnvelope = (input: {
     stderrSummary: truncateEvidence(input.evidence.stderr),
     stdoutSummary: truncateEvidence(input.evidence.stdout),
     timedOut: timeout !== null,
-    transient: timeout !== null || (input.error !== undefined && isTransientNetworkError(input.error)),
+    // A verified divergence is deterministic whatever words its evidence
+    // (commit subjects, git output) happens to contain.
+    transient: !remoteBranchDiverged
+      && (timeout !== null || (input.error !== undefined && isTransientNetworkError(input.error))),
+    remoteBranchDiverged,
     timeoutMs: timeout?.timeoutMs ?? null,
   };
 };

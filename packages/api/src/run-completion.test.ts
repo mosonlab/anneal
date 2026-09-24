@@ -43,6 +43,7 @@ test("the completion input shape is pinned to its shared contract version", () =
   const schemaHashesByVersion: Record<number, string> = {
     1: "fb27fe3f07d0dce703452f1706186bfe61521eb3bcd41fad9d193b51876ad9b7",
     2: "f5011d9c1544cfa944e5de207d3bd045e3a221eced953677051f4317bae886c7",
+    3: "7b13fa3d1062a3ad6ef9849d0bdadcd86e4683070b3de26f4f33931cd70b713e",
   };
 
   assert.equal(schemaHash, schemaHashesByVersion[RUN_COMPLETION_CONTRACT_VERSION]);
@@ -472,7 +473,7 @@ const fetchFailureOutcome = (): RunOutcome => ({
     version: 1, phase: "EXECUTE", runnerClass: null, exitCode: 0, signal: null,
     terminationReason: null, terminalEventSeen: true, terminalSuccess: false, agentExited: true,
     providerError: null, stderrSummary: "fetch failed", stdoutSummary: null, timedOut: false,
-    transient: false, timeoutMs: null,
+    transient: false, timeoutMs: null, remoteBranchDiverged: false,
   },
 });
 
@@ -596,6 +597,7 @@ const envelope = (overrides: Partial<FailureEnvelope> = {}): FailureEnvelope => 
   stdoutSummary: null,
   timedOut: false,
   transient: false,
+  remoteBranchDiverged: false,
   timeoutMs: null,
   ...overrides,
 });
@@ -695,6 +697,7 @@ const outcomeRows: ReadonlyArray<{
         terminalSuccess: true,
         timedOut: true,
         transient: true,
+        remoteBranchDiverged: false,
         timeoutMs: 6000,
         stderrSummary: "git push timed out after 6000ms; its process group was killed",
       }),
@@ -702,6 +705,41 @@ const outcomeRows: ReadonlyArray<{
     succeeded: false,
     failureClass: FailureClass.TRANSIENT_PROVIDER,
     retryable: true, externalFailure: true, timedOut: false,
+  },
+  {
+    name: "a push the runner verified the moved remote branch rejected",
+    outcome: {
+      case: "provider-failure",
+      reason: "git push rejected: remote branch 'agentos/chain/shared' is at 324e1666",
+      envelope: envelope({
+        phase: "DELIVER",
+        runnerClass: FailureClass.TOOL_FAILED,
+        exitCode: 0,
+        terminalSuccess: true,
+        remoteBranchDiverged: true,
+        stderrSummary: "git push rejected: remote branch 'agentos/chain/shared' is at 324e1666",
+      }),
+    },
+    succeeded: false,
+    failureClass: FailureClass.TOOL_FAILED,
+    retryable: false, externalFailure: false, timedOut: false,
+  },
+  {
+    name: "a provisioning merge of the moved remote branch that conflicted",
+    outcome: {
+      case: "provider-failure",
+      reason: "merging it conflicts in tree.txt",
+      envelope: envelope({
+        phase: "PROVISION",
+        agentExited: false,
+        terminationReason: "runner exception",
+        remoteBranchDiverged: true,
+        stderrSummary: "merging it conflicts in tree.txt",
+      }),
+    },
+    succeeded: false,
+    failureClass: FailureClass.TOOL_FAILED,
+    retryable: false, externalFailure: false, timedOut: false,
   },
 ];
 
@@ -720,6 +758,39 @@ for (const row of outcomeRows) {
     );
   });
 }
+
+test("completeRun stops a push the moved chain branch rejected instead of refunding replays of it", async () => {
+  // Compass "Fix F3": a foreign commit landed on the chain branch mid-run, and
+  // four refunded retries replayed the same non-fast-forward rejection.
+  const harness = statefulCompletionHarness();
+  const reason = "git push rejected: remote branch 'agentos/chain/shared' is at 324e1666, which this Run's head"
+    + " abc does not contain (1 foreign commit(s): 324e1666 Someone <someone@example.test>: hotfix)";
+  const closed = await harness.complete({
+    runNumber: 1,
+    maxRunsPerTask: 3,
+    budgetGrants: 0,
+    outcome: {
+      case: "provider-failure",
+      reason,
+      envelope: envelope({
+        phase: "DELIVER",
+        runnerClass: FailureClass.TOOL_FAILED,
+        exitCode: 0,
+        terminalSuccess: true,
+        remoteBranchDiverged: true,
+        stderrSummary: reason,
+      }),
+    },
+  });
+  assert.equal(closed.failureClass, FailureClass.TOOL_FAILED);
+  assert.equal(closed.retryable, false);
+  assert.equal(closed.budgetGrants, 0);
+  assert.equal(closed.maxRunsPerTask, 3);
+  assert.equal(closed.failureReason, reason);
+  assert.deepEqual(harness.queuedRuns, []);
+  assert.equal(harness.activities.some(({ metadata }) => metadata?.kind === "externalFailureRefund.granted"), false);
+  assert.deepEqual(harness.taskUpdates.at(-1), { status: "REVIEW", failureReason: reason });
+});
 
 test("a delivery failure is not read as an agent that exited without finishing", () => {
   // The agent's own clean exit rides on a DELIVER envelope, and "exit 0 with no
@@ -857,7 +928,7 @@ for (const outcome of ["review-fail", "refresh-conflict"]) {
           case: "provider-failure", reason,
           envelope: {
             version: 1, phase: "DELIVER", agentExited: true, exitCode: 1, signal: null,
-            terminationReason: null, timedOut: false, timeoutMs: null, transient: false,
+            terminationReason: null, timedOut: false, timeoutMs: null, transient: false, remoteBranchDiverged: false,
             runnerClass: "TASK_FAILED", providerError: null, stderrSummary: null, stdoutSummary: reason,
             terminalEventSeen: true, terminalSuccess: false,
           },
@@ -923,7 +994,7 @@ for (const repairKind of ["refresh-conflict", "review-fix", "gate-fix"]) {
         runNumber: scenario === "exhausted" ? 2 : 1, maxRunsPerTask: 2, budgetGrants: 0,
         outcome: { case: "provider-failure", reason: "resolver crashed", envelope: {
           version: 1, phase: "EXECUTE", agentExited: true, exitCode: 1, signal: null,
-          terminationReason: null, timedOut: false, timeoutMs: null, transient: false,
+          terminationReason: null, timedOut: false, timeoutMs: null, transient: false, remoteBranchDiverged: false,
           runnerClass: FailureClass.TASK_FAILED, providerError: null,
           stderrSummary: "resolver crashed", stdoutSummary: null, terminalEventSeen: true, terminalSuccess: false,
         } },

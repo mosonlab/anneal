@@ -21,6 +21,7 @@ const envelope = (overrides: Partial<FailureEnvelope> = {}): FailureEnvelope => 
   stdoutSummary: null,
   timedOut: false,
   transient: false,
+  remoteBranchDiverged: false,
   timeoutMs: null,
   ...overrides,
 });
@@ -391,6 +392,7 @@ const HUNG_PUSH_ENVELOPE: FailureEnvelope = {
   stdoutSummary: null,
   timedOut: true,
   transient: true,
+  remoteBranchDiverged: false,
   timeoutMs: 6000,
 };
 

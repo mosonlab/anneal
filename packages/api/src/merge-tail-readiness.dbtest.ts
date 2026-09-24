@@ -333,6 +333,7 @@ const externalRetryAfterLeaseLosses = async (
           stdoutSummary: null,
           timedOut: false,
           transient: true,
+          remoteBranchDiverged: false,
           timeoutMs: null,
         },
       },

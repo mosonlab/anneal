@@ -114,6 +114,7 @@ const failureEnvelopeInput = z.object({
   stdoutSummary: z.string().max(64_000).nullable().default(null),
   timedOut: z.boolean().default(false),
   transient: z.boolean().default(false),
+  remoteBranchDiverged: z.boolean().default(false),
   timeoutMs: z.number().int().nonnegative().nullable().default(null),
 });
 

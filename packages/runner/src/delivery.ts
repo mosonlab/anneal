@@ -1,3 +1,4 @@
+import { isDeterministicAccessRefusal } from "@anneal/db/transport-vocabulary";
 import { confirmedWrite, isDeterministicRefusal, isLostResponse } from "@anneal/github-client";
 import {
   canonicalOutputSchema,
@@ -12,10 +13,11 @@ import type { ClaimedTask, FailureClass } from "./api.js";
 import type { RunnerConfig } from "./config.js";
 import { bindCommandRunner, isCommandTimeout, KILL_OVERHEAD_MS, platformCommitArgs, type CommandRunner } from "./exec.js";
 import {
-  boundedTimeout, budgetRemains, GH_PROBE_TIMEOUT_MS, MIN_ATTEMPT_TIMEOUT_MS, NETWORK_ATTEMPTS,
-  NETWORK_COMMAND_TIMEOUT_MS, runWithNetworkRetry, transientBackoff, WORKSPACE_HEAD_TIMEOUT_MS,
+  boundedTimeout, budgetRemains, GH_PROBE_TIMEOUT_MS, isTransientNetworkError, MIN_ATTEMPT_TIMEOUT_MS,
+  NETWORK_ATTEMPTS, NETWORK_COMMAND_TIMEOUT_MS, runWithNetworkRetry, transientBackoff, WORKSPACE_HEAD_TIMEOUT_MS,
   type AttemptBudget, type RetryOptions,
 } from "./network-retry.js";
+import { describeForeignCommits, readForeignCommits, RemoteBranchDivergedError } from "./remote-branch.js";
 import type { Workspace } from "./workspace.js";
 import { workspaceEnvironment } from "./workspace.js";
 
@@ -112,6 +114,55 @@ const failureClassFor = (message: string): FailureClass =>
     : "TOOL_FAILED";
 
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error);
+
+/** How much of git's own push output is kept beside the divergence evidence,
+ *  so the whole account stays inside the 4000-character pushError field. */
+const PUSH_OUTPUT_EVIDENCE_LIMIT = 1_000;
+
+/**
+ * Decide from repository facts whether a failed push was rejected because the
+ * remote branch moved under this Run.
+ *
+ * Network failures and access refusals are returned untouched: they already
+ * carry their own typed or vocabulary verdict, and probing an unreachable
+ * remote would only spend the delivery deadline. For anything else the branch
+ * is fetched and its tip compared with HEAD. Commits on the remote that HEAD
+ * lacks make the rejection deterministic — replaying this head cannot succeed —
+ * so the failure becomes a `RemoteBranchDivergedError` naming the tip and the
+ * foreign commits. A probe that itself fails is reported beside the push error,
+ * never swallowed.
+ */
+const remoteBranchDivergence = async (
+  command: CommandRunner,
+  branch: string,
+  pushError: unknown,
+  retryOptions: RetryOptions,
+): Promise<unknown> => {
+  if (isTransientNetworkError(pushError) || isDeterministicAccessRefusal(messageOf(pushError))) return pushError;
+  const local: CommandRunner = (executable, args, options = {}) => command(executable, args, {
+    ...options, timeoutMs: boundedTimeout(retryOptions, WORKSPACE_HEAD_TIMEOUT_MS),
+  });
+  const trackingRef = `refs/remotes/origin/${branch}`;
+  try {
+    const fetchArgs = ["fetch", "--no-tags", "origin", `+refs/heads/${branch}:${trackingRef}`];
+    await runWithNetworkRetry("git", fetchArgs, ({ timeoutMs }) => command("git", fetchArgs, { timeoutMs }), retryOptions);
+    const remoteSha = await local("git", ["rev-parse", "--verify", `${trackingRef}^{commit}`]);
+    if (!remoteSha) return pushError;
+    const head = await local("git", ["rev-parse", "HEAD"]);
+    const foreign = await readForeignCommits(local, head, remoteSha);
+    if (foreign.total === 0) return pushError;
+    const pushOutput = messageOf(pushError);
+    const message = `git push rejected: remote branch '${branch}' is at ${remoteSha}, which this Run's head ${head}`
+      + ` does not contain (${describeForeignCommits(foreign)}). Replaying this head cannot succeed;`
+      + " an operator must reconcile the branch before the step runs again."
+      + ` git output: ${pushOutput.length > PUSH_OUTPUT_EVIDENCE_LIMIT
+        ? `${pushOutput.slice(0, PUSH_OUTPUT_EVIDENCE_LIMIT)}…`
+        : pushOutput}`;
+    return new RemoteBranchDivergedError(message, branch, remoteSha, foreign.listed);
+  } catch (probeError: unknown) {
+    return new Error(`${messageOf(pushError)}; remote branch check failed: ${messageOf(probeError)}`, { cause: pushError });
+  }
+};
 
 const manual = (branch: string, remote: string, reason: string): DeliveryResult => ({
   pushStatus: "SUCCEEDED",
@@ -600,7 +651,12 @@ export const deliverWorkspace = async (
       ({ timeoutMs }) => command("git", ["push", "--set-upstream", "origin", workspace.branch], { timeoutMs }),
       retryOptions,
     );
-  } catch (error: unknown) {
+  } catch (pushError: unknown) {
+    // A push that failed for a non-network reason is checked against the
+    // remote branch itself: if its tip carries commits HEAD lacks, the push can
+    // never succeed from this head, and the typed error tells the control
+    // plane so instead of letting the DELIVER phase read as transient.
+    const error = await remoteBranchDivergence(command, workspace.branch, pushError, retryOptions);
     const message = messageOf(error);
     return {
       pushStatus: "FAILED",

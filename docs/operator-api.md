@@ -3598,6 +3598,11 @@ publication matching the Run's resolved target ref, including when an intervenin
 Run was cancelled without publishing. A different target ref does not receive
 that salvage evidence. Runs that did not salvage omit `salvageParentSha`.
 
+A `provider-failure` outcome's envelope also accepts the boolean
+`remoteBranchDiverged` (default `false`), described under
+[Run failure classes and retries](#run-failure-classes-and-retries). Adding it
+raised the completion contract version to 3.
+
 Before a review or fix candidate is claimed, the control plane re-reads the
 specification from the repository. A read that fails transiently defers the
 queued Run at 15s, 30s, then 60s instead of failing it, and the deferral window
@@ -3793,6 +3798,23 @@ refund and retry-Run rules above. An API-level retry starts the Step again.
 This includes Regression: even with a persisted PASS or gate-fail verdict,
 a transient delivery failure queues another Run that reruns the merge gate,
 under the same caps. A durable verdict alone does not advance a failed Run.
+
+A branch push that git rejects as a ref update (`! [rejected]`: non-fast-forward,
+fetch first, stale info) is not re-pushed. The runner fetches the branch and,
+when its tip holds commits the Run's head lacks, sets the failure envelope's
+`remoteBranchDiverged` marker. The API classifies such a failure in any phase other than
+`EXECUTE` as `TOOL_FAILED`: no automatic retry and no refund. The
+Task parks in `REVIEW`. Its `failureReason` and the Run's `pushError` name the
+remote tip, this Run's head, and up to ten foreign commits by SHA, author and
+subject. Reconcile the branch, then use `POST /tasks/:taskId/retry`.
+
+When a Run's clone base is a published ref other than its declared head (for
+example a failed Run's WIP salvage ref), and that head exists on the remote with
+commits the base lacks, provisioning merges the head into the base before the
+agent starts. It never rebases or force-pushes. The Run's `baseSha` is the
+resulting commit. If the merge conflicts, provisioning stops with
+`remoteBranchDiverged` and the conflicting paths, and the Task parks as above
+without starting an agent.
 
 ### Task spend cap
 
