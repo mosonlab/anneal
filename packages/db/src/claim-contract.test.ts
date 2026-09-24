@@ -11,7 +11,7 @@ import {
 const NOW = new Date("2026-09-04T12:00:00.000Z");
 
 test("exports one completion contract version for independently built processes", () => {
-  assert.equal(RUN_COMPLETION_CONTRACT_VERSION, 2);
+  assert.equal(RUN_COMPLETION_CONTRACT_VERSION, 3);
   assert.equal(Number.isInteger(RUN_COMPLETION_CONTRACT_VERSION), true);
   assert.equal(RUN_COMPLETION_CONTRACT_VERSION > 0, true);
   assert.equal(MECHANICAL_CONTRACT_MISMATCH_CODE, "mechanical_contract_mismatch");

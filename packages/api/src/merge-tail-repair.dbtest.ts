@@ -2139,6 +2139,7 @@ const completeRegressionAfterExternalGitFailure = async (
           stdoutSummary: options.failureMode === "transient-provider" ? null : "git push failed",
           timedOut: false,
           transient: false,
+          remoteBranchDiverged: false,
           timeoutMs: null,
         },
       },

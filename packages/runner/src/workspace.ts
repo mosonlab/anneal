@@ -17,6 +17,7 @@ import {
   configureWorkspaceGit, resolveRunnerGitIdentity, type GitProvenanceClaim,
 } from "./git-provenance.js";
 import { type RetryOptions } from "./network-retry.js";
+import { describeForeignCommits, readForeignCommits, RemoteBranchDivergedError } from "./remote-branch.js";
 import {
   ensureMirrorRevisions, mirrorHasBranch, withRepoMirror, type RepoMirrorOptions,
 } from "./repo-mirror.js";
@@ -418,6 +419,46 @@ export const provisionSessionConfig = async (
   options: SessionConfigOptions = {},
 ): Promise<void> => RUNNER_DEFINITIONS[runner].provisionSessionConfig(config, scratch, options);
 
+/**
+ * Bring the declared head's remote commits into a workspace that was cloned
+ * from a different published base, as an ordinary merge (fast-forward when the
+ * base is behind). A conflict stops provisioning with a typed
+ * `RemoteBranchDivergedError` so the control plane parks the Task for an
+ * operator instead of starting an agent whose push is bound to be rejected.
+ */
+const incorporateDeclaredHead = async (
+  inWorkspace: CommandRunner,
+  mirror: string,
+  branch: string,
+): Promise<void> => {
+  const trackingRef = `refs/remotes/origin/${branch}`;
+  const refspec = `+refs/heads/${branch}:${trackingRef}`;
+  await inWorkspace("git", ["config", "--add", "remote.origin.fetch", refspec]);
+  await inWorkspace("git", ["fetch", "--no-tags", mirror, refspec]);
+  const remoteSha = await inWorkspace("git", ["rev-parse", "--verify", `${trackingRef}^{commit}`]);
+  const base = await inWorkspace("git", ["rev-parse", "HEAD"]);
+  const foreign = await readForeignCommits(inWorkspace, base, remoteSha);
+  if (foreign.total === 0) return;
+  try {
+    await inWorkspace("git", [
+      "-c", "commit.gpgSign=false", "merge", "--no-verify", "--no-edit",
+      "-m", `Merge remote ${branch} (${remoteSha}) into published base ${base}`, remoteSha,
+    ]);
+  } catch (error: unknown) {
+    const conflicted = (await inWorkspace("git", ["diff", "--name-only", "--diff-filter=U"]))
+      .split("\n").filter((path) => path.length > 0);
+    if (conflicted.length === 0) throw error;
+    throw new RemoteBranchDivergedError(
+      `Remote branch '${branch}' is at ${remoteSha}, which the published base ${base} does not contain`
+        + ` (${describeForeignCommits(foreign)}), and merging it conflicts in ${conflicted.join(", ")}.`
+        + " The agent was not started; an operator must reconcile the branch before the step runs again.",
+      branch,
+      remoteSha,
+      foreign.listed,
+    );
+  }
+};
+
 export const provisionWorkspace = async (
   config: RunnerConfig,
   claim: WorkspaceProvisionClaim,
@@ -522,11 +563,8 @@ export const provisionWorkspace = async (
         //
         // The mirror was pruned against the remote moments ago, so its refs are
         // the same answer `git ls-remote` used to make a round trip for.
-        let cloneTarget = target;
-        if (branch !== target && !claim.run.targetBranchPublished
-          && await mirrorHasBranch(run, mirror, branch)) {
-          cloneTarget = branch;
-        }
+        const declaredHeadPublished = branch !== target && await mirrorHasBranch(run, mirror, branch);
+        const cloneTarget = declaredHeadPublished && !claim.run.targetBranchPublished ? branch : target;
         if (!await mirrorHasBranch(run, mirror, cloneTarget)) {
           // The mirror was pruned against the remote moments ago, so this is the
           // remote's answer, not a mirror fault: the branch the run was told to
@@ -557,8 +595,18 @@ export const provisionWorkspace = async (
           await inWorkspace("git", ["config", "--add", "remote.origin.fetch", targetRefspec]);
           await inWorkspace("git", ["fetch", "--no-tags", mirror, targetRefspec]);
         }
-        const baseSha = await inWorkspace("git", ["rev-parse", "HEAD"]);
         if (branch !== cloneTarget) await inWorkspace("git", ["switch", "-c", branch]);
+        // A published base (a salvage ref, a newer sibling publication) was
+        // chosen over the declared head, on the assumption that the head is
+        // older. Anything else on the head — a commit pushed to the chain
+        // branch from outside the platform, a repair that landed after this
+        // base was cut — would make this Run's final push a non-fast-forward
+        // rejection. Merge it in before the agent starts; never rebase or
+        // force, because the chain branch is published history.
+        if (declaredHeadPublished && cloneTarget !== branch) {
+          await incorporateDeclaredHead(inWorkspace, mirror, branch);
+        }
+        const baseSha = await inWorkspace("git", ["rev-parse", "HEAD"]);
         return { path: workspace, branch, baseSha, ...(commitHooksPath ? { commitHooksPath } : {}) };
       },
     );

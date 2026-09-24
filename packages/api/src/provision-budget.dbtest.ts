@@ -124,6 +124,7 @@ const unreachableRemoteEnvelope = {
   stdoutSummary: null,
   timedOut: false,
   transient: false,
+  remoteBranchDiverged: false,
   timeoutMs: null,
 } as const;
 
@@ -139,6 +140,7 @@ const lostTlsEnvelope = {
   stderrSummary: "git failed (128): fatal: unable to access 'https://example.test/repo.git/': "
     + "LibreSSL SSL_connect: SSL_ERROR_SYSCALL in connection to example.test:443",
   transient: true,
+  remoteBranchDiverged: false,
 } as const;
 
 /** A retryable protocol miss after the agent had started work: the agent's
@@ -153,6 +155,7 @@ const executeEnvelope = {
   terminalEventSeen: false,
   stderrSummary: "agent stream ended without a terminal event",
   transient: false,
+  remoteBranchDiverged: false,
 } as const;
 
 /** The rest of the completion payload exactly as `runner.ts`'s catch sends it:

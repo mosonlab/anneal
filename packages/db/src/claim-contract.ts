@@ -43,7 +43,7 @@ import type { RegressionRepairHandoff } from "./merge-tail.js";
  * mechanical claim whose caller does not send this exact version rather than
  * allowing the two separately built processes to drift silently.
  */
-export const RUN_COMPLETION_CONTRACT_VERSION = 2;
+export const RUN_COMPLETION_CONTRACT_VERSION = 3;
 
 /** Stable refusal discriminator shared by the API and mechanical executor. */
 export const MECHANICAL_CONTRACT_MISMATCH_CODE = "mechanical_contract_mismatch";

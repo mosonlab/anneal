@@ -4,8 +4,16 @@ import { isCommandTimeout, KILL_OVERHEAD_MS } from "./exec.js";
 
 const messageOf = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
-const isDeterministicPushRefusal = (error: unknown): boolean =>
-  isDeterministicAccessRefusal(error instanceof Error ? `${error.name}: ${error.message}` : String(error));
+// `! [rejected]` is git's own client-side refusal of a ref update the remote
+// tip does not allow (non-fast-forward, fetch first, stale info). Resending the
+// same head gets the same answer, so it only spends the delivery deadline the
+// divergence probe in delivery.ts still needs.
+const GIT_REF_UPDATE_REJECTED = /!\s*\[rejected\]/u;
+
+const isDeterministicPushRefusal = (error: unknown): boolean => {
+  const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return isDeterministicAccessRefusal(text) || GIT_REF_UPDATE_REJECTED.test(text);
+};
 
 export const isTransientNetworkError = (error: unknown): boolean => {
   // Our own per-command timeout is recognised by type, never by its wording.

@@ -57,6 +57,11 @@ export type FailureEnvelope = {
   timedOut: boolean;
   /** Set from the runner's typed transient-network predicate. */
   transient: boolean;
+  /** Set from the runner's typed `RemoteBranchDivergedError`: the runner read
+   *  the remote branch and found commits this Run's head lacks, either when a
+   *  DELIVER push was refused or when PROVISION could not merge them into the
+   *  base. Never set from git's rejection wording. */
+  remoteBranchDiverged: boolean;
   timeoutMs: number | null;
 };
 

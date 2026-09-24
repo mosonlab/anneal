@@ -21,6 +21,7 @@ import { CommandTimeoutError, KILL_OVERHEAD_MS, type CommandRunner } from "./exe
 import {
   deliveryDeadline, NETWORK_COMMAND_TIMEOUT_MS, WORKSPACE_HEAD_TIMEOUT_MS,
 } from "./network-retry.js";
+import { RemoteBranchDivergedError } from "./remote-branch.js";
 
 const testHome = await mkdtemp(join(tmpdir(), "delivery-test-home-"));
 after(() => rm(testHome, { recursive: true, force: true }));
@@ -1561,12 +1562,106 @@ test("a hung push arrives at the API as a typed timeout, not as a failed task", 
     stdoutSummary: null,
     timedOut: true,
     transient: true,
+    remoteBranchDiverged: false,
     timeoutMs: envelope.timeoutMs,
   });
   assert.ok(
     typeof envelope.timeoutMs === "number" && envelope.timeoutMs > 0 && envelope.timeoutMs <= NETWORK_COMMAND_TIMEOUT_MS,
     `the timeout the API is told about must be the ceiling that actually fired: ${envelope.timeoutMs}`,
   );
+});
+
+test("a push the moved chain branch rejects is reported once as a typed, non-transient divergence", async () => {
+  // Compass "Fix F3": a commit without Anneal provenance landed on the chain
+  // branch while Regression ran, and the runner's push was rejected with
+  // "fetch first". That rejection must reach the API as a verified fact that
+  // names the remote tip and the foreign commit, not as transient plumbing.
+  const root = await mkdtemp(join(tmpdir(), "anneal-push-diverged-"));
+  try {
+    const remote = join(root, "remote.git");
+    const repository = join(root, "work");
+    const outsider = join(root, "outsider");
+    const branch = "agentos/chain/shared";
+    const gitIn = (cwd: string, ...args: string[]): string =>
+      execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+    execFileSync("git", ["init", "--bare", remote]);
+    await mkdir(repository);
+    gitIn(repository, "init", "-b", branch);
+    gitIn(repository, "config", "user.name", "Anneal Test");
+    gitIn(repository, "config", "user.email", "anneal@example.test");
+    gitIn(repository, "remote", "add", "origin", remote);
+    await writeFile(join(repository, "README.md"), "fixture\n");
+    gitIn(repository, "add", "README.md");
+    gitIn(repository, "commit", "-m", "base");
+    const baseSha = gitIn(repository, "rev-parse", "HEAD");
+    gitIn(repository, "push", "origin", branch);
+    execFileSync("git", ["clone", "--branch", branch, remote, outsider]);
+    gitIn(outsider, "config", "user.name", "Foreign Author");
+    gitIn(outsider, "config", "user.email", "foreign@example.test");
+    await writeFile(join(outsider, "hotfix.txt"), "pushed outside the platform\n");
+    gitIn(outsider, "add", "hotfix.txt");
+    gitIn(outsider, "commit", "-m", "hotfix pushed mid-run");
+    gitIn(outsider, "push", "origin", branch);
+    const foreignSha = gitIn(outsider, "rev-parse", "HEAD");
+    await writeFile(join(repository, "verdict.txt"), "pass\n");
+    gitIn(repository, "add", "verdict.txt");
+    gitIn(repository, "commit", "-m", "regression verdict");
+    const headSha = gitIn(repository, "rev-parse", "HEAD");
+    let pushes = 0;
+    const command: CommandRunner = async (executable, args) => {
+      if (executable === "git" && args[0] === "push") pushes += 1;
+      return execFileSync(executable, [...args], {
+        cwd: repository,
+        env: { PATH: process.env.PATH },
+        encoding: "utf8",
+      }).trim();
+    };
+    const delivery = await deliverWorkspace(
+      config,
+      { ...claim, run: { opensPullRequest: false, requiresCommit: false } },
+      { path: repository, branch, baseSha },
+      { command, headSha, retryOptions: { wait: async () => undefined } },
+    );
+    assert.equal(delivery.pushStatus, "FAILED");
+    assert.equal(pushes, 1, "a ref-update rejection is deterministic and is not re-pushed");
+    assert.ok(delivery.failure?.error instanceof RemoteBranchDivergedError);
+    assert.equal(delivery.failure.error.remoteSha, foreignSha);
+    assert.ok(delivery.pushError?.includes(foreignSha), delivery.pushError);
+    assert.ok(delivery.pushError?.includes(headSha), delivery.pushError);
+    assert.match(delivery.pushError ?? "", /Foreign Author <foreign@example\.test>: hotfix pushed mid-run/u);
+    assert.match(delivery.pushError ?? "", /\[rejected\]/u, "git's own output is kept as evidence");
+    assert.ok((delivery.pushError ?? "").length <= 4_000);
+    const envelope = completionEnvelope({
+      executionSucceeded: true,
+      evidence: {
+        exitCode: 0, signal: null, terminalEventSeen: true, terminalSuccess: true, terminationReason: null,
+        finalOutput: "pass", providerError: null, stdout: "", stderr: "",
+      },
+      deliveryFailure: delivery.failure,
+      runnerClass: delivery.failureClass ?? null,
+    });
+    assert.equal(envelope.phase, "DELIVER");
+    assert.equal(envelope.remoteBranchDiverged, true);
+    assert.equal(envelope.transient, false);
+    assert.equal(envelope.timedOut, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a rejected push whose remote tip the head already contains keeps its original verdict", async () => {
+  const fake: CommandRunner = async (executable, args) => {
+    if (executable === "git" && args[0] === "push") throw new Error("git failed (1): ! [remote rejected] hook declined");
+    if (executable === "git" && args[0] === "rev-parse") return "remote-tip";
+    if (executable === "git" && args[0] === "rev-list") return "0";
+    return "";
+  };
+  const result = await deliverWorkspace(config, claim, workspace, {
+    command: fake, headSha: "new-head", retryOptions: { wait: async () => undefined },
+  });
+  assert.equal(result.pushStatus, "FAILED");
+  assert.equal(result.failure?.error instanceof RemoteBranchDivergedError, false);
+  assert.equal(result.pushError, "git failed (1): ! [remote rejected] hook declined");
 });
 
 test("a failing agent keeps its own evidence even when the salvage push also fails", async () => {

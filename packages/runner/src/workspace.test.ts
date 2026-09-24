@@ -9,7 +9,9 @@ import test from "node:test";
 import type { RunnerConfig } from "./config.js";
 import type { DependencyProvisioningDecision } from "./dependency-provisioning.js";
 import { CLONE_COMMAND_TIMEOUT_MS } from "./network-retry.js";
+import { runnerExceptionEnvelope } from "./envelope.js";
 import { bindCommandRunner, runCommand, type CommandRunner } from "./exec.js";
+import { RemoteBranchDivergedError } from "./remote-branch.js";
 import { repoMirrorPath, repoMirrorRoot } from "./repo-mirror.js";
 import { runtimeToolPaths } from "./runtime-tools.js";
 import {
@@ -483,6 +485,117 @@ test("a resolver-confirmed newer salvage base outranks an existing declared head
     assert.equal(workspace.branch, declared);
     assert.equal(workspace.baseSha, salvageSha);
     assert.equal(await readFile(join(workspace.path, "tree.txt"), "utf8"), "newer salvage\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The Compass "Fix F3" shape: the chain branch advanced by a foreign commit
+ * after the Run whose salvage is now the newest publication was born. The
+ * retry's published base is the salvage ref, which lacks the foreign commit.
+ */
+const seedSalvageBehindForeignHead = async (
+  root: string,
+  foreignContent: { file: string; text: string },
+): Promise<{ remote: string; declared: string; salvage: string; salvageSha: string; foreignSha: string }> => {
+  const remote = join(root, "origin.git");
+  const seed = join(root, "seed");
+  git(root, "init", "--bare", "--initial-branch=main", remote);
+  git(root, "init", "--initial-branch=main", seed);
+  git(seed, "config", "user.name", "Anneal Test");
+  git(seed, "config", "user.email", "runner@agentos.local");
+  await writeFile(join(seed, "tree.txt"), "base\n");
+  git(seed, "add", "tree.txt");
+  git(seed, "commit", "-m", "base");
+  git(seed, "remote", "add", "origin", remote);
+  git(seed, "push", "-u", "origin", "main");
+  const declared = "agentos/chain/shared";
+  git(seed, "switch", "-c", declared);
+  await writeFile(join(seed, "tree.txt"), "chain step\n");
+  git(seed, "commit", "-am", "chain step");
+  git(seed, "push", "origin", declared);
+  const salvage = "agentos/task-1/run-2";
+  git(seed, "switch", "-c", "salvage-work");
+  await writeFile(join(seed, "tree.txt"), "salvaged work\n");
+  git(seed, "commit", "-am", "WIP salvage");
+  git(seed, "push", "origin", `HEAD:${salvage}`);
+  const salvageSha = git(seed, "rev-parse", "HEAD");
+  git(seed, "switch", declared);
+  git(seed, "config", "user.name", "Foreign Author");
+  git(seed, "config", "user.email", "foreign@example.test");
+  await writeFile(join(seed, foreignContent.file), foreignContent.text);
+  git(seed, "add", foreignContent.file);
+  git(seed, "commit", "-m", "hotfix pushed outside the platform");
+  git(seed, "push", "origin", declared);
+  const foreignSha = git(seed, "rev-parse", "HEAD");
+  return { remote, declared, salvage, salvageSha, foreignSha };
+};
+
+const salvageRetryClaim = (remote: string, salvage: string, declared: string): WorkspaceProvisionClaim => workspaceClaim({
+  task: { id: "task-1" },
+  repo: { remoteUrl: remote, defaultBranch: "main" },
+  run: { id: "run-3", runNumber: 3, targetBranch: salvage, targetBranchPublished: true, branch: declared },
+});
+
+const salvageRetryConfig = (root: string): RunnerConfig => ({
+  workspaceRoot: join(root, "workspaces"), runAsPrefix: [],
+  path: process.env.PATH ?? "/usr/bin:/bin", home: root,
+  gitIdentity: { name: "Runner Test", email: "runner@example.invalid" },
+}) as unknown as RunnerConfig;
+
+test("a salvage retry starts from a base that merges the foreign commit on the remote chain head", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-workspace-foreign-head-"));
+  try {
+    const { remote, declared, salvage, salvageSha, foreignSha } = await seedSalvageBehindForeignHead(
+      root, { file: "hotfix.txt", text: "hotfix\n" },
+    );
+    const workspace = await provisionWorkspace(
+      salvageRetryConfig(root), salvageRetryClaim(remote, salvage, declared), NO_DEPENDENCIES,
+    );
+    assert.equal(workspace.branch, declared);
+    assert.equal(git(workspace.path, "rev-parse", "HEAD"), workspace.baseSha);
+    // Both histories are in the base: the salvaged work and the foreign commit.
+    git(workspace.path, "merge-base", "--is-ancestor", foreignSha, workspace.baseSha);
+    git(workspace.path, "merge-base", "--is-ancestor", salvageSha, workspace.baseSha);
+    assert.equal(await readFile(join(workspace.path, "tree.txt"), "utf8"), "salvaged work\n");
+    assert.equal(await readFile(join(workspace.path, "hotfix.txt"), "utf8"), "hotfix\n");
+    assert.equal(git(workspace.path, "rev-parse", `origin/${declared}`), foreignSha);
+    // A merge, not a rewrite: the declared head's published history is kept.
+    assert.equal(git(workspace.path, "rev-list", "--count", "--merges", `${salvageSha}..HEAD`), "1");
+    assert.equal(git(workspace.path, "status", "--porcelain"), "");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a salvage retry whose foreign chain head conflicts stops before the agent with a typed divergence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agentos-workspace-foreign-conflict-"));
+  try {
+    const { remote, declared, salvage, foreignSha } = await seedSalvageBehindForeignHead(
+      root, { file: "tree.txt", text: "foreign rewrite\n" },
+    );
+    const config = salvageRetryConfig(root);
+    await assert.rejects(
+      provisionWorkspace(config, salvageRetryClaim(remote, salvage, declared), NO_DEPENDENCIES),
+      (error: unknown) => {
+        assert.ok(error instanceof RemoteBranchDivergedError);
+        assert.equal(error.remoteSha, foreignSha);
+        assert.match(error.message, /conflicts in tree\.txt/u);
+        assert.match(error.message, /Foreign Author <foreign@example\.test>: hotfix pushed outside the platform/u);
+        assert.equal(runnerExceptionEnvelope({
+          phase: "PROVISION",
+          evidence: {
+            exitCode: null, signal: null, terminalEventSeen: false, terminalSuccess: false,
+            terminationReason: null, finalOutput: null, providerError: null, stdout: "", stderr: error.message,
+          },
+          error,
+        }).remoteBranchDiverged, true);
+        return true;
+      },
+    );
+    // Provisioning's own cleanup removed the half-merged checkout.
+    assert.deepEqual(await readdir(config.workspaceRoot), []);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
