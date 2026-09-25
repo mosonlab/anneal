@@ -804,8 +804,8 @@ curl "$BASE_URL/projects/$PROJECT_ID/repos" -H "Authorization: Bearer $OPERATOR_
   `PATCH /repos/:repoId`; other failures use the existing error path. Preflight
   is never skipped as a success fallback.
 - During a Run whose Repo declares `NPM_CI`, the runner strictly validates a
-  dependency-cache entry before restoring it; when no usable entry is
-  available, it runs `npm ci`. The cache ceiling is configured by
+  dependency-cache entry before restoring it; a missing entry uses `npm ci`,
+  while a selected corrupt entry still refuses. The cache budget is configured by
   `RUNNER_DEPENDENCY_CACHE_BYTE_BUDGET`, a positive safe integer number of
   bytes with a default of `68719476736` (64 GiB). On a quiet-window deployment,
   set it in the runner host's `shared/.env`; see the [deployment runbook](runbooks/quiet-window-auto-deploy.md).
@@ -814,8 +814,13 @@ curl "$BASE_URL/projects/$PROJECT_ID/repos" -H "Authorization: Bearer $OPERATOR_
   used entries that are not being restored to trash, then deletes them outside
   the lock. Publication can be skipped when the byte budget is exceeded or
   maintenance is busy; a successful dependency install still succeeds and the
-  Run continues. Trash is not physically freed until deletion completes, and
-  the cache does not guarantee zero I/O impact.
+  Run continues. Admission counts retained entries and pending trash, and skips
+  publication while old entries or interrupted stages need accounting. The
+  initial size estimate can differ from the snapshot's allocation: one
+  serialized publication stage can temporarily exceed the budget. Its actual
+  size is checked before publication; a rejected stage becomes trash and later
+  publications remain subject to admission. Trash is not physically freed until
+  deletion completes, and background cleanup still consumes I/O.
 - With `grantAgents: false` or when omitted, a successful request returns
   `201 Created` with the created Repo row itself (the existing response
   shape), and creates no grants. With `grantAgents: true`, the same transaction

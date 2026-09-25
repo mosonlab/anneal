@@ -125,6 +125,11 @@ The source checkout is inspection state. Services and auto-deploy run through
 `current`; deployment does not read, fast-forward, clean, or publish files
 from the source checkout. Develop in an independent clone or worktree.
 
+On Linux systemd, the generated web `<label>.service` serves `apps/web/dist`
+with Vite preview at `http://127.0.0.1:4173`; on a macOS control-plane host,
+the launchd label `com.agentos.web` serves the same path. Use the numeric
+loopback address; the credential-bearing proxy rejects other origins.
+
 ### Runner dependency-cache budget
 
 Set `RUNNER_DEPENDENCY_CACHE_BYTE_BUDGET` in the runner host's `shared/.env`
@@ -133,10 +138,32 @@ as a positive safe integer count of bytes. It defaults to `68719476736` bytes
 value. Runner processes read it when started, so edit `shared/.env` before the
 runner service is restarted during quiet-window activation to apply a change.
 
-On Linux systemd, the generated web `<label>.service` serves `apps/web/dist`
-with Vite preview at `http://127.0.0.1:4173`; on a macOS control-plane host,
-the launchd label `com.agentos.web` serves the same path. Use the numeric
-loopback address; the credential-bearing proxy rejects other origins.
+The default needs no production override. For example, `137438953472` selects
+128 GiB; suffixes such as `64G`, fractions, zero, and empty values are invalid.
+All runners sharing one cache root should use the same budget.
+
+The runner starts background maintenance at startup and every minute, without
+awaiting it before claims or dependency provisioning. A maintenance lock admits
+one publisher or cleaner at a time without waiting; restore continues under
+the separate shared root lock. Publication records allocated sizes, and
+maintenance backfills records for existing entries. Only brief LRU detachment
+holds the exclusive root lock; directory walks and recursive deletion do not.
+An entry's outer directory may be owner-writable so macOS can rename it, while
+its metadata and dependency trees remain immutable and are validated on restore.
+
+The budget governs cache admission, rather than a filesystem quota. Pending
+trash still occupies space, and a single publication stage may temporarily
+exceed the budget when actual allocation exceeds its estimate. Further
+publication skips while space or trustworthy accounting is unavailable; an
+installed Run continues. Oversized entries are not cached. Interrupted stages
+and partially deleted trash are recovered by a later cleaner; no manual cache
+deletion is needed for an upgrade. Background I/O can still affect overall
+provisioning time.
+
+Journal entries with `audit: "dependency-cache"` distinguish Run phases from
+background `maintenance` phases (`account`, `lock`, `detach`, and `delete`).
+Use those phase durations with claim/start timestamps: claim-to-start includes
+Git, `npm ci`, and provider startup as well as cache work.
 
 ## Preconditions
 

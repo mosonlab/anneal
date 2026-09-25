@@ -161,8 +161,24 @@ const cleanupRoot = async (root: string): Promise<void> => {
 
 // Retention itself is proven against the store on a bare temporary directory
 // (dependency-cache-store.test.ts). What is left here is the interaction these
-// tests exist for: enforcement must wait behind a materialization's shared lock.
+// tests exist for: maintenance must defer to materialization without blocking it.
 const cacheStore = (root: string) => openCacheEntryStore(join(root, "cache"), join(root, "no-workspace-here"));
+
+// A regression to blocking flock must fail and release the test's held lock.
+// This is a hang bound, not a latency assertion; see CONTRIBUTING.md for loaded hosts.
+const withoutWaitingForLock = async <T>(operation: Promise<T>): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => { reject(new Error("operation waited for the held cache lock")); }, 60_000);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+};
 
 const publishFixtureVersions = async (root: string, versions: string[]) => {
   const configured = config(root);
@@ -268,7 +284,7 @@ test("a miss publishes complete root and workspace targets, then a hit restores 
     ]);
     assert.ok(!metadataText.includes("credential-must-not-enter-cache"));
     assert.ok(!metadataText.includes("must-not-be-hashed"));
-    assert.equal((await lstat(entry)).mode & 0o777, 0o555);
+    assert.equal((await lstat(entry)).mode & 0o777, 0o755);
     assert.equal((await lstat(join(entry, "trees"))).mode & 0o777, 0o555);
     assert.ok(((await lstat(join(entry, "trees/node_modules/fake-package/index.js"))).mode & 0o004) !== 0);
     await assert.rejects(lstat(join(entry, "trees/.agentos")), /ENOENT/u);
@@ -688,7 +704,7 @@ for (const corruption of corruptions) test(`refuses ${corruption.name} cache ent
   }
 });
 
-test("an unrelated malformed retention entry refuses the pass after a publication", async () => {
+test("unrelated malformed metadata does not block an installed Run", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-retention-corruption-"));
   try {
     const configured = config(root);
@@ -713,16 +729,16 @@ test("an unrelated malformed retention entry refuses the pass after a publicatio
     await writeFile(join(unrelated, "metadata.json"), "malformed unrelated retention entry\n");
     await writeFile(join(secondWorkspace, "package-lock.json"), packageLock("2.0.1"));
     const events: DependencyCacheProgress[] = [];
-    await assert.rejects(
-      materializeWorkspaceDependencies(
-        configured, secondWorkspace, fake.run(secondWorkspace),
-        { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
-      ),
-      /(?:integrity|retention|malformed|unsafe)/iu,
+    const result = await materializeWorkspaceDependencies(
+      configured, secondWorkspace, fake.run(secondWorkspace),
+      { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
     );
-    assert.equal(fake.installs(), 3, "the publication installs once; retention corruption adds no npm call");
-    assert.ok(!events.some(({ event }) => event === "publication"), "failed retention must not report a publication");
-    assert.ok(events.some(({ event, key }) => event === "integrity-refusal" && key === firstKey.slice(0, 16)));
+    assert.equal(result.status, "installed");
+    assert.equal(fake.installs(), 3);
+    assert.doesNotMatch(JSON.stringify(events), /"phase":"retention"/u, "publication never runs global retention");
+    await assert.rejects(materializeWorkspaceDependencies(
+      configured, firstWorkspace, fake.run(firstWorkspace), { toolchain: TOOLCHAIN, report: () => undefined },
+    ), /metadata-unreadable:invalid-json/u, "the corrupt entry still refuses when selected for restore");
   } finally {
     await cleanupRoot(root);
   }
@@ -745,7 +761,7 @@ test("a cache hit restores without the retention walk, even past an unrelated co
     assert.deepEqual(result, { status: "restored", key: current.key });
     assert.equal(fake.installs(), 2, "a hit must not invoke npm");
     assert.ok(events.some(({ event }) => event === "hit"));
-    assert.ok(!events.some(({ phase }) => phase === "retention"), "a hit does not size the population");
+    assert.doesNotMatch(JSON.stringify(events), /"phase":"retention"/u, "a hit does not size the population");
     assert.ok(!events.some(({ event }) => event === "integrity-refusal"), "a hit never inspects unrelated entries");
   } finally {
     await cleanupRoot(root);
@@ -775,7 +791,7 @@ const malformedRetentionMetadata: Array<{
 ];
 
 for (const malformed of malformedRetentionMetadata) {
-  test(`retention rejects unrelated metadata with ${malformed.name} without invoking npm`, async () => {
+  test(`a miss ignores unrelated ${malformed.name}, but selecting it still refuses`, async () => {
     const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-retention-metadata-"));
     try {
       const { configured, fake, published } = await publishFixtureVersions(root, ["2.0.1", "2.0.2"]);
@@ -790,18 +806,16 @@ for (const malformed of malformedRetentionMetadata) {
       await chmod(metadataPath, 0o444);
       await writeFile(join(current.workspace, "package-lock.json"), packageLock("2.0.3"));
       const events: DependencyCacheProgress[] = [];
-      await assert.rejects(
-        materializeWorkspaceDependencies(
-          configured, current.workspace, fake.run(current.workspace),
-          { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
-        ),
-        /metadata-malformed/u,
+      const result = await materializeWorkspaceDependencies(
+        configured, current.workspace, fake.run(current.workspace),
+        { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
       );
-      assert.equal(fake.installs(), 3, "the publication installs once; malformed unrelated metadata adds no npm call");
-      assert.deepEqual(
-        events.find(({ event }) => event === "integrity-refusal"),
-        { event: "integrity-refusal", key: unrelated.key.slice(0, 16), condition: "metadata-malformed" },
-      );
+      assert.equal(result.status, "installed");
+      assert.equal(fake.installs(), 3);
+      assert.doesNotMatch(JSON.stringify(events), /"phase":"retention"/u);
+      await assert.rejects(materializeWorkspaceDependencies(
+        configured, unrelated.workspace, fake.run(unrelated.workspace), { toolchain: TOOLCHAIN, report: () => undefined },
+      ), /metadata-malformed/u);
     } finally {
       await cleanupRoot(root);
     }
@@ -872,7 +886,7 @@ const unrelatedRetentionCorruptions: Array<{
 ];
 
 for (const corruption of unrelatedRetentionCorruptions) {
-  test(`retention rejects unrelated ${corruption.name} without invoking npm`, async () => {
+  test(`a miss ignores unrelated ${corruption.name}, but selecting it still refuses`, async () => {
     const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-retention-manifest-"));
     try {
       const { configured, fake, published } = await publishFixtureVersions(root, ["2.0.1", "2.0.2"]);
@@ -881,18 +895,16 @@ for (const corruption of unrelatedRetentionCorruptions) {
       await corruption.corrupt(entryPath(root, unrelated.key));
       await writeFile(join(current.workspace, "package-lock.json"), packageLock("2.0.3"));
       const events: DependencyCacheProgress[] = [];
-      await assert.rejects(
-        materializeWorkspaceDependencies(
-          configured, current.workspace, fake.run(current.workspace),
-          { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
-        ),
-        corruption.condition,
+      const result = await materializeWorkspaceDependencies(
+        configured, current.workspace, fake.run(current.workspace),
+        { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
       );
-      assert.equal(fake.installs(), 3, "the publication installs once; unrelated retention corruption adds no npm call");
-      assert.ok(events.some(({ event, key, condition }) =>
-        event === "integrity-refusal"
-        && key === unrelated.key.slice(0, 16)
-        && corruption.condition.test(condition ?? "")));
+      assert.equal(result.status, "installed");
+      assert.equal(fake.installs(), 3);
+      assert.doesNotMatch(JSON.stringify(events), /"phase":"retention"/u);
+      await assert.rejects(materializeWorkspaceDependencies(
+        configured, unrelated.workspace, fake.run(unrelated.workspace), { toolchain: TOOLCHAIN, report: () => undefined },
+      ), corruption.condition);
     } finally {
       await cleanupRoot(root);
     }
@@ -926,14 +938,16 @@ test("orphan publication stages and non-key usage files do not brick retention",
 
     assert.equal(result.status, "installed");
     assert.equal(fake.installs(), 2);
-    await assert.rejects(lstat(staging), /ENOENT/u, "an orphaned module-owned stage is reaped under the publication's retention lock");
+    assert.equal((await lstat(staging)).isDirectory(), true, "publication leaves orphan cleanup to the daemon");
+    await (await cacheStore(root)).maintainByteBudget(() => undefined);
+    await assert.rejects(lstat(staging), /ENOENT/u, "background maintenance reaps the orphan");
     assert.equal((await lstat(strayUsage)).isFile(), true, "unrecognised usage files are ignored, not mutated");
   } finally {
     await cleanupRoot(root);
   }
 });
 
-test("an unsafe usage marker refuses retention instead of allowing an over-budget snapshot", async () => {
+test("an unrelated unsafe usage marker cannot block an installed Run", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-marker-corruption-"));
   try {
     const configured = config(root);
@@ -958,15 +972,20 @@ test("an unsafe usage marker refuses retention instead of allowing an over-budge
     await symlink(join(root, "marker-target"), join(root, "cache/usage", firstKey));
     await writeFile(join(secondWorkspace, "package-lock.json"), packageLock("2.1.1"));
     const events: DependencyCacheProgress[] = [];
-    await assert.rejects(
-      materializeWorkspaceDependencies(
-        configured, secondWorkspace, fake.run(secondWorkspace),
-        { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
-      ),
-      /(?:integrity|usage|marker|unsafe)/iu,
+    const result = await materializeWorkspaceDependencies(
+      configured, secondWorkspace, fake.run(secondWorkspace),
+      { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
     );
-    assert.equal(fake.installs(), 3, "the publication installs once; an unsafe usage marker adds no npm call");
-    assert.ok(events.some(({ event, key }) => event === "integrity-refusal" && key === firstKey.slice(0, 16)));
+    assert.equal(result.status, "installed");
+    assert.equal(fake.installs(), 3);
+    const failures: string[] = [];
+    await (await cacheStore(root)).maintainByteBudget((event) => {
+      if (event.event === "integrity-refusal") failures.push(event.condition ?? "");
+    });
+    assert.ok(failures.includes("unsafe-usage-marker"));
+    await assert.rejects(materializeWorkspaceDependencies(
+      configured, firstWorkspace, fake.run(firstWorkspace), { toolchain: TOOLCHAIN, report: () => undefined },
+    ), /unsafe-usage-marker/u);
   } finally {
     await cleanupRoot(root);
   }
@@ -1092,6 +1111,100 @@ test("cache materialization blocks behind an existing exclusive root lock", asyn
   }
 });
 
+test("a configured byte budget skips the snapshot while installed dependencies remain usable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-budget-skip-"));
+  try {
+    const configured = { ...config(root), dependencyCacheByteBudget: 1 };
+    const workspace = join(root, "workspace");
+    await createFixture(workspace);
+    const fake = fakeInstallExecutor();
+    const events: DependencyCacheProgress[] = [];
+    const result = await materializeWorkspaceDependencies(configured, workspace, fake.run(workspace), {
+      toolchain: TOOLCHAIN, report: (event) => events.push(event),
+    });
+    assert.equal(result.status, "installed");
+    assert.equal(fake.installs(), 1);
+    assert.ok(events.some(({ event, condition }) => event === "publication" && condition === "skipped"));
+    assert.deepEqual(await readdir(join(root, "cache/entries")), [], "no rejected snapshot is copied or synchronously deleted");
+    assert.deepEqual(await readdir(join(root, "cache/usage")), [], "a skipped snapshot has no usage marker");
+    assert.equal(await readFile(join(workspace, "node_modules/fake-package/index.js"), "utf8"), "cached root\n");
+
+    await materializeWorkspaceDependencies(config(root), workspace, fake.run(workspace), {
+      toolchain: TOOLCHAIN, report: () => undefined,
+    });
+    const hit = await materializeWorkspaceDependencies(config(root), workspace, fake.run(workspace), {
+      toolchain: TOOLCHAIN, report: () => undefined,
+    });
+    assert.equal(hit.status, "restored", "raising the budget permits a future snapshot without changing the cache key");
+    assert.equal(fake.installs(), 2);
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("a cleaner holding its maintenance lock blocks neither a hit nor a fresh install", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-cleaner-busy-"));
+  try {
+    const { configured, fake, published: [current] } = await publishFixtureVersions(root, ["5.0.0"]);
+    assert.ok(current);
+    const lock = await lockCache(join(root, "cache/maintenance.lock"), "ex");
+    try {
+      const hit = await withoutWaitingForLock(materializeWorkspaceDependencies(configured, current.workspace, fake.run(current.workspace), {
+        toolchain: TOOLCHAIN, report: () => undefined,
+      }));
+      assert.equal(hit.status, "restored");
+      await writeFile(join(current.workspace, "package-lock.json"), packageLock("5.0.1"));
+      const events: DependencyCacheProgress[] = [];
+      const miss = await withoutWaitingForLock(materializeWorkspaceDependencies(configured, current.workspace, fake.run(current.workspace), {
+        toolchain: TOOLCHAIN, report: (event) => events.push(event),
+      }));
+      assert.equal(miss.status, "installed");
+      assert.equal(fake.installs(), 2);
+      assert.ok(events.some(({ event, condition }) => event === "publication" && condition === "skipped"));
+      assert.deepEqual(await readdir(join(root, "cache/entries")), [current.key]);
+    } finally {
+      await lock.close();
+    }
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("usage-marker write failures do not invalidate installed or restored dependencies", async (context) => {
+  if (process.getuid?.() === 0) {
+    context.skip("root bypasses the real filesystem permission refusal exercised here");
+    return;
+  }
+  const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-usage-write-"));
+  try {
+    const workspace = join(root, "workspace");
+    await createFixture(workspace);
+    const configured = config(root);
+    const fake = fakeInstallExecutor();
+    const execute: CommandRunner = async (executable, args, options) => {
+      const result = await fake.run(workspace)(executable, args, options);
+      if ((executable === "npm" && args[0] === "ci") || executable === "/bin/cp") {
+        // Refuse the marker only after the selected-path preflight. This is a
+        // write failure, not an unsafe marker that should refuse a cache read.
+        await chmod(join(root, "cache/usage"), 0o400);
+      }
+      return result;
+    };
+    for (const status of ["installed", "restored"]) {
+      const events: DependencyCacheProgress[] = [];
+      const result = await materializeWorkspaceDependencies(configured, workspace, execute, {
+        toolchain: TOOLCHAIN, report: (event) => events.push(event),
+      });
+      assert.equal(result.status, status);
+      assert.ok(events.some(({ event }) => event === "usage-write-skipped"));
+      assert.equal(await readFile(join(workspace, "node_modules/fake-package/index.js"), "utf8"), "cached root\n");
+    }
+    assert.equal(fake.installs(), 1);
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
 test("concurrent publishers converge on one valid immutable entry", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-race-"));
   try {
@@ -1115,19 +1228,17 @@ test("concurrent publishers converge on one valid immutable entry", async () => 
     )));
     assert.equal(fake.installs(), 2);
     assert.equal(new Set(results.map(({ key }) => key)).size, 1);
-    const names = await readdir(join(root, "cache"));
-    assert.deepEqual(names.sort(), ["entries", "lock", "usage"], "private stages must not survive publication");
     const entries = await readdir(join(root, "cache/entries"));
     assert.equal(entries.length, 1);
     const entry = join(root, "cache/entries", entries[0]!);
-    assert.equal((await lstat(entry)).mode & 0o222, 0);
+    assert.equal((await lstat(entry)).mode & 0o022, 0);
     assert.equal(await readFile(join(entry, "trees/node_modules/fake-package/index.js"), "utf8"), "race winner\n");
   } finally {
     await cleanupRoot(root);
   }
 });
 
-test("over-budget enforcement waits for an active restore and evicts only the safe LRU entry", async () => {
+test("background maintenance defers to an active restore, then evicts only the LRU entry", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-active-restore-"));
   try {
     const { configured, published } = await publishFixtureVersions(root, ["6.1.0", "6.1.1"]);
@@ -1158,35 +1269,29 @@ test("over-budget enforcement waits for an active restore and evicts only the sa
       { toolchain: TOOLCHAIN, report: () => undefined },
     );
     await restoreStarted;
-    const events: DependencyCacheProgress[] = [];
-    let enforcementSettled = false;
-    const enforcement = (await cacheStore(root)).enforceByteBudget(
-      active.key, undefined, (event) => events.push(event), Number(activeBytes),
-    ).finally(() => { enforcementSettled = true; });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(enforcementSettled, false, "retention remains blocked throughout the restore's shared lock");
-    assert.equal((await lstat(entryPath(root, oldest.key))).isDirectory(), true);
-    assert.equal((await lstat(entryPath(root, active.key))).isDirectory(), true);
-
-    releaseRestore();
-    const [result] = await Promise.all([restoring, enforcement]);
-    assert.equal(result.status, "restored");
+    const store = await cacheStore(root);
+    try {
+      assert.equal(await withoutWaitingForLock(store.maintainByteBudget(() => undefined, Number(activeBytes))), "busy",
+        "maintenance returns instead of queueing an exclusive lock behind the restore");
+      assert.equal((await lstat(entryPath(root, oldest.key))).isDirectory(), true);
+      assert.equal((await lstat(entryPath(root, active.key))).isDirectory(), true);
+    } finally {
+      releaseRestore();
+    }
+    assert.equal((await restoring).status, "restored");
+    await store.maintainByteBudget(() => undefined, Number(activeBytes));
     await assert.rejects(lstat(entryPath(root, oldest.key)), /ENOENT/u);
     assert.equal((await lstat(entryPath(root, active.key))).isDirectory(), true);
-    assert.deepEqual(events, [{ event: "eviction", key: oldest.key.slice(0, 16), condition: "byte-budget" }]);
   } finally {
     await cleanupRoot(root);
   }
 });
 
-test("over-budget enforcement waits for concurrent publication convergence and preserves the published entry", async () => {
+test("background maintenance defers to concurrent installs and later preserves the newest publication", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-active-publication-"));
-  const sizingRoot = await mkdtemp(join(tmpdir(), "runner-dependency-cache-publication-size-"));
   try {
     const { configured, published: [oldest] } = await publishFixtureVersions(root, ["6.2.0"]);
-    const { published: [sized] } = await publishFixtureVersions(sizingRoot, ["6.2.1"]);
-    assert.ok(oldest && sized);
-    const budget = await accountDependencyCacheEntryBytes(entryPath(sizingRoot, sized.key));
+    assert.ok(oldest);
     const workspaces = [join(root, "workspace-publisher-a"), join(root, "workspace-publisher-b")];
     await Promise.all(workspaces.map(async (workspace) => {
       await createFixture(workspace);
@@ -1213,30 +1318,28 @@ test("over-budget enforcement waits for concurrent publication convergence and p
       { toolchain: TOOLCHAIN, report: () => undefined },
     )));
     await publishersStarted;
-    const events: DependencyCacheProgress[] = [];
-    let enforcementSettled = false;
-    const enforcement = (await cacheStore(root)).enforceByteBudget(
-      publishedKey, undefined, (event) => events.push(event), Number(budget),
-    ).finally(() => { enforcementSettled = true; });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(enforcementSettled, false, "retention remains blocked throughout both publishers' shared locks");
-    assert.equal((await lstat(entryPath(root, oldest.key))).isDirectory(), true);
-    await assert.rejects(lstat(entryPath(root, publishedKey)), /ENOENT/u, "publication has not escaped its lock window");
-
-    releasePublishers();
-    const [results] = await Promise.all([resultsPromise, enforcement]);
+    const store = await cacheStore(root);
+    try {
+      assert.equal(await withoutWaitingForLock(store.maintainByteBudget(() => undefined, 0)), "busy");
+      assert.equal((await lstat(entryPath(root, oldest.key))).isDirectory(), true);
+      await assert.rejects(lstat(entryPath(root, publishedKey)), /ENOENT/u);
+    } finally {
+      releasePublishers();
+    }
+    const results = await resultsPromise;
     assert.equal(fake.installs(), 2);
     assert.deepEqual(new Set(results.map(({ key }) => key)), new Set([publishedKey]));
+    // Use the actual allocation rather than assuming filesystem block rounding.
+    const publishedBytes = await accountDependencyCacheEntryBytes(entryPath(root, publishedKey));
+    await store.maintainByteBudget(() => undefined, Number(publishedBytes));
     await assert.rejects(lstat(entryPath(root, oldest.key)), /ENOENT/u);
     assert.equal((await lstat(entryPath(root, publishedKey))).isDirectory(), true);
-    assert.deepEqual(events, [{ event: "eviction", key: oldest.key.slice(0, 16), condition: "byte-budget" }]);
   } finally {
     await cleanupRoot(root);
-    await cleanupRoot(sizingRoot);
   }
 });
 
-test("a malformed unrelated size walk emits integrity refusal without invoking npm", async () => {
+test("an unrelated special file is not walked during publication but still refuses restore", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-dependency-cache-retention-special-"));
   try {
     const { configured, fake, published } = await publishFixtureVersions(root, ["7.0.0", "7.0.1"]);
@@ -1248,19 +1351,16 @@ test("a malformed unrelated size walk emits integrity refusal without invoking n
     await makeImmutableFixture(unrelatedEntry);
     await writeFile(join(current.workspace, "package-lock.json"), packageLock("7.0.2"));
     const events: DependencyCacheProgress[] = [];
-    await assert.rejects(
-      materializeWorkspaceDependencies(
-        configured, current.workspace, fake.run(current.workspace),
-        { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
-      ),
-      /special-file/u,
+    const result = await materializeWorkspaceDependencies(
+      configured, current.workspace, fake.run(current.workspace),
+      { toolchain: TOOLCHAIN, report: (event) => events.push(event) },
     );
-    assert.equal(fake.installs(), 3, "the publication installs once; retention size corruption adds no npm call");
-    assert.ok(!events.some(({ event }) => event === "publication"), "a failed size walk cannot report a publication");
-    assert.deepEqual(
-      events.find(({ event }) => event === "integrity-refusal"),
-      { event: "integrity-refusal", key: unrelated.key.slice(0, 16), condition: "special-file" },
-    );
+    assert.equal(result.status, "installed");
+    assert.equal(fake.installs(), 3);
+    assert.doesNotMatch(JSON.stringify(events), /"phase":"retention"/u);
+    await assert.rejects(materializeWorkspaceDependencies(
+      configured, unrelated.workspace, fake.run(unrelated.workspace), { toolchain: TOOLCHAIN, report: () => undefined },
+    ), /special-file/u);
   } finally {
     await cleanupRoot(root);
   }
@@ -1339,7 +1439,10 @@ test("a distinct run-as uid restores readable cache entries and owns the workspa
     assert.equal(second.status, "restored");
     assert.equal(await readFile(join(workspace, "node_modules/owned-package/index.js"), "utf8"), "owned");
     assert.equal((await stat(join(workspace, "node_modules/owned-package/index.js"))).uid, targetUid);
-    assert.equal((await lstat(entryPath(root, first.key!))).mode & 0o777, 0o555);
+    assert.equal((await lstat(entryPath(root, first.key!))).mode & 0o777, 0o755);
+    await assert.rejects(real("/bin/sh", [
+      "-c", 'printf forbidden > "$1/foreign-write"', "sh", entryPath(root, first.key!),
+    ]), /permission denied/iu, "the run-as uid cannot write the runner-owned entry envelope");
   } finally {
     await cleanupRoot(root);
   }

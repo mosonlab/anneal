@@ -14,7 +14,7 @@ loadEnvironment({ path: new URL("../../../.env", import.meta.url), quiet: true }
 // one of them being stale while the other was current (issue #140).
 console.log(`Anneal runner build: ${formatBuildLine(readBuildInfo(import.meta.url))}`);
 
-const [{ loadRunnerConfig }, { nodeBinaryPath, runtimeDescriptor }, { pollForTask, runStartupPreflight, startCliAvailabilityMonitor, startupPreflightLog }, { reclaimWorkspaces }, { prepareHostProofSlots }, { runPollingLoop }, { reportPresence }] = await Promise.all([
+const [{ loadRunnerConfig }, { nodeBinaryPath, runtimeDescriptor }, { pollForTask, runStartupPreflight, startCliAvailabilityMonitor, startupPreflightLog }, { reclaimWorkspaces }, { prepareHostProofSlots }, { runPollingLoop }, { reportPresence }, { startDependencyCacheMaintenance }] = await Promise.all([
   import("./config.js"),
   import("./adapters.js"),
   import("./runner.js"),
@@ -22,6 +22,7 @@ const [{ loadRunnerConfig }, { nodeBinaryPath, runtimeDescriptor }, { pollForTas
   import("./host-proof-slots.js"),
   import("./polling-loop.js"),
   import("./api.js"),
+  import("./dependency-cache-maintenance.js"),
 ]);
 
 const config = loadRunnerConfig();
@@ -79,9 +80,11 @@ const sharedLock = await holdSharedServiceMaintenanceLock({
 const preflight = await runStartupPreflight(config);
 console.log(startupPreflightLog(preflight));
 const availabilityMonitor = startCliAvailabilityMonitor(config);
+const cacheMaintenance = startDependencyCacheMaintenance(config);
 const stop = (signal: string): void => {
   console.log(`Received ${signal}; stopping local runner after the current task`);
   stopping = true;
+  cacheMaintenance.stop();
 };
 process.once("SIGINT", () => stop("SIGINT"));
 process.once("SIGTERM", () => stop("SIGTERM"));
@@ -107,5 +110,6 @@ await runPollingLoop(config, {
 // The lock outlives the loop and nothing else: released here, on the ordinary
 // stop path, so the key is free the moment this runner is no longer polling.
 availabilityMonitor.stop();
+cacheMaintenance.stop();
 await sharedLock.release();
 if (stopExitCode !== 0) process.exitCode = stopExitCode;

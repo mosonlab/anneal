@@ -24,11 +24,11 @@ type DependencyProject = {
 };
 
 export type DependencyCacheProgress = {
-  event: "hit" | "miss" | "publication" | "integrity-refusal" | "eviction" | "phase" | "elapsed";
+  event: "hit" | "miss" | "publication" | "integrity-refusal" | "eviction" | "usage-write-skipped" | "phase" | "elapsed";
   key?: string;
   condition?: string;
   elapsedMs?: number;
-  phase?: "identity" | "validate" | "restore" | "rebuild" | "install" | "publish" | "retention";
+  phase?: "identity" | "validate" | "restore" | "rebuild" | "install" | "publish";
 };
 
 export type DependencyCacheOptions = {
@@ -569,7 +569,7 @@ const rebuildNativeWorkspaces = async (
  * (`dependency-provisioning.ts`); reaching here means the answer was yes.
  */
 export const materializeWorkspaceDependencies = async (
-  config: Pick<RunnerConfig, "workspaceRoot" | "dependencyCacheRoot">,
+  config: Pick<RunnerConfig, "workspaceRoot" | "dependencyCacheRoot" | "dependencyCacheByteBudget">,
   workspacePath: string,
   run: CommandRunner,
   options: DependencyCacheOptions = {},
@@ -605,6 +605,9 @@ export const materializeWorkspaceDependencies = async (
       workspace,
     );
     const expected: CacheEntryExpectation = { key, toolchain, inputs, targetPaths };
+    const recordUse = async (): Promise<void> => {
+      if (!await store.recordUse(key)) report({ event: "usage-write-skipped", key: key.slice(0, 16) });
+    };
     const locked = await store.withSharedLock(async () => {
       try {
         await store.validateUseMarker(key);
@@ -618,11 +621,9 @@ export const materializeWorkspaceDependencies = async (
           const document = await timed("validate", report, () => store.readEntry(expected));
           await timed("restore", report, () => restoreEntry(inWorkspace, store, document, workspace));
           await timed("rebuild", report, () => rebuildNativeWorkspaces(inWorkspace, nativeWorkspaces));
-          await store.recordUse(key);
+          await recordUse();
           return {
             result: { status: "restored", key } as DependencyCacheResult,
-            usableKey: key,
-            newlyPublishedKey: undefined,
             successEvent: { event: "hit", key: key.slice(0, 16) } as DependencyCacheProgress,
           };
         } catch (error: unknown) {
@@ -637,14 +638,16 @@ export const materializeWorkspaceDependencies = async (
       const targets = await timed("install", report, () => installDependencies(
         inWorkspace, workspace, targetPaths, options.installRetryOptions,
       ));
-      const publication = await timed("publish", report, () => store.publishEntry(expected, targets, workspace));
+      const publication = await timed("publish", report, () => store.publishEntry(
+        expected, targets, workspace, config.dependencyCacheByteBudget,
+      ));
       if (publication === "refused") {
         const integrityError = new DependencyCacheIntegrityError("concurrent-entry-invalid");
         report({ event: "integrity-refusal", key: key.slice(0, 16), condition: integrityError.condition });
         throw integrityError;
       }
       try {
-        await store.recordUse(key);
+        if (publication !== "skipped") await recordUse();
       } catch (error: unknown) {
         if (!(error instanceof DependencyCacheIntegrityError)) throw error;
         report({ event: "integrity-refusal", key: key.slice(0, 16), condition: error.condition });
@@ -652,23 +655,13 @@ export const materializeWorkspaceDependencies = async (
       }
       return {
         result: { status: "installed", key } as DependencyCacheResult,
-        usableKey: key,
-        newlyPublishedKey: publication === "published" ? key : undefined,
         successEvent: {
           event: "publication", key: key.slice(0, 16), condition: publication,
         } as DependencyCacheProgress,
       };
     });
-    // Only a publication can grow the population, so only a publication pays
-    // for the exclusive byte-budget walk. A hit that also sized the cache would
-    // convoy every concurrent restore behind one full inode walk per runner.
-    if (locked.newlyPublishedKey !== undefined) {
-      await timed("retention", report, () => store.enforceByteBudget(
-        locked.usableKey,
-        locked.newlyPublishedKey,
-        report,
-      ));
-    }
+    // Maintenance is owned by the daemon's background loop. A successful
+    // install is ready even when admission skips an optional cache snapshot.
     report(locked.successEvent);
     return locked.result;
   } finally {

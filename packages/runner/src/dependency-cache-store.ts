@@ -659,24 +659,15 @@ export const openCacheEntryStore = async (
   const recordUse = async (key: string): Promise<boolean> => {
     if (!CACHE_KEY.test(key)) throw new Error("Dependency cache usage key is invalid");
     const marker = join(usageRoot, key);
-    const prior = await lstat(marker).catch((error: unknown) => {
-      if (errorCode(error) === "ENOENT") return null;
-      throw error;
-    });
-    if (prior?.isSymbolicLink() || (prior !== null && !prior.isFile())) {
-      throw new DependencyCacheIntegrityError("unsafe-usage-marker");
-    }
     let handle;
     try {
-      handle = await open(marker, constants.O_CREAT | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+      handle = await open(marker, constants.O_CREAT | constants.O_WRONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
     } catch (error: unknown) {
-      if (isBestEffortWriteError(error)) {
-        const current = await lstat(marker).catch(() => null);
-        if (current?.isSymbolicLink() || (current !== null && !current.isFile())) {
-          throw new DependencyCacheIntegrityError("unsafe-usage-marker");
-        }
-        return false;
+      const current = await lstat(marker).catch(() => null);
+      if (current?.isSymbolicLink() || (current !== null && !current.isFile())) {
+        throw new DependencyCacheIntegrityError("unsafe-usage-marker");
       }
+      if (isBestEffortWriteError(error)) return false;
       throw new DependencyCacheIntegrityError(`usage-marker-unwritable:${errorCode(error) ?? "unknown"}`);
     }
     let succeeded = true;
