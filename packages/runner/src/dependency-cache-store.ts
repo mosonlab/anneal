@@ -166,7 +166,10 @@ const readManagedFile = async (path: string, maxBytes: number, condition: string
   try {
     const info = await handle.stat();
     if (!info.isFile() || info.size > maxBytes) throw new DependencyCacheIntegrityError(condition);
-    return await handle.readFile("utf8");
+    const buffer = Buffer.alloc(maxBytes + 1);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > maxBytes) throw new DependencyCacheIntegrityError(condition);
+    return buffer.subarray(0, bytesRead).toString("utf8");
   } finally {
     await handle.close();
   }
