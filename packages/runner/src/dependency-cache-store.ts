@@ -7,28 +7,34 @@
  * last used, and the population of entries is held under a byte budget.
  *
  * Everything here is reachable from a bare temporary directory, which is what
- * makes lock, usage, accounting, eviction and rollback testable on their own.
+ * makes lock, usage, accounting, admission and eviction testable on their own.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
-  chmod, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rename, rm, writeFile,
+  chmod, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rename, rm, statfs, writeFile,
 } from "node:fs/promises";
-import { dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 
 import { flock } from "fs-ext";
+
+import { DEPENDENCY_CACHE_BYTE_BUDGET } from "./dependency-cache-budget.js";
+
+export { DEPENDENCY_CACHE_BYTE_BUDGET };
 
 export const CACHE_ENTRY_FORMAT = "agentos-runner-dependency-cache-v2";
 const METADATA_FILE = "metadata.json";
 const TREE_DIRECTORY = "trees";
 const ENTRIES_DIRECTORY = "entries";
 const USAGE_DIRECTORY = "usage";
+const ACCOUNTING_DIRECTORY = "accounting";
+const TRASH_DIRECTORY = "trash";
 const LOCK_FILE = "lock";
+const MAINTENANCE_LOCK_FILE = "maintenance.lock";
+const PRESSURE_FILE = "pressure.json";
 const MAX_METADATA_BYTES = 128 * 1024 * 1024;
 const CACHE_KEY = /^[a-f0-9]{64}$/u;
-
-export const DEPENDENCY_CACHE_BYTE_BUDGET = 16 * 1024 ** 3;
 
 // Target confinement is lexical: a target path is relative and free of "..",
 // so whether a recorded symlink escapes depends on the target's depth and the
@@ -83,12 +89,18 @@ export type CacheEntryExpectation = {
   targetPaths: string[];
 };
 
-export type CacheEntryPublication = "published" | "converged" | "refused";
+export type CacheEntryPublication = "published" | "converged" | "refused" | "skipped";
+
+export type CacheMaintenanceResult = "maintained" | "busy";
 
 export type CacheStoreEvent = {
-  event: "integrity-refusal" | "eviction";
+  event: "integrity-refusal" | "eviction" | "maintenance";
   key?: string;
   condition?: string;
+  phase?: "account" | "detach" | "delete" | "lock";
+  outcome?: "started" | "completed" | "busy" | "aborted";
+  bytes?: number;
+  elapsedMs?: number;
 };
 
 export type CacheStoreReport = (event: CacheStoreEvent) => void;
@@ -97,12 +109,10 @@ export type DependencyCacheRetentionSize = { key: string; bytes: number; usedMs:
 
 /**
  * The least-recently-used keys whose removal brings the population inside the
- * budget. `currentKey` is never a victim; if it alone exceeds the budget the
- * population cannot be made to fit and this refuses.
+ * budget.
  */
 export const selectDependencyCacheEvictions = (
   entries: readonly DependencyCacheRetentionSize[],
-  currentKey?: string,
   budget = DEPENDENCY_CACHE_BYTE_BUDGET,
 ): string[] => {
   if (!Number.isFinite(budget) || budget < 0) throw new Error("Dependency cache byte budget is invalid");
@@ -110,16 +120,11 @@ export const selectDependencyCacheEvictions = (
     if (!Number.isFinite(entry.bytes) || entry.bytes < 0) throw new Error("Dependency cache entry size is invalid");
     if (!Number.isFinite(entry.usedMs)) throw new Error("Dependency cache usage time is invalid");
   }
-  const protectedEntry = currentKey === undefined ? undefined : entries.find(({ key }) => key === currentKey);
-  if (protectedEntry !== undefined && protectedEntry.bytes > budget) {
-    throw new DependencyCacheBudgetError("protected-entry-exceeds-byte-budget");
-  }
   let total = entries.reduce((sum, entry) => sum + entry.bytes, 0);
   const victims: string[] = [];
   const ordered = [...entries].sort((left, right) => left.usedMs - right.usedMs || left.key.localeCompare(right.key));
   for (const entry of ordered) {
     if (total <= budget) break;
-    if (entry.key === currentKey) continue;
     total -= entry.bytes;
     victims.push(entry.key);
   }
@@ -324,7 +329,10 @@ const validateImmutableEntryContents = async (entry: string, document: CacheEntr
   await treeManifest(join(entry, METADATA_FILE), NOMINAL_RESTORE_ROOT, NOMINAL_RESTORE_ROOT, true);
   const entryInfo = await lstat(entry);
   const treesInfo = await lstat(trees);
-  if ((entryInfo.mode & 0o222) !== 0 || (treesInfo.mode & 0o222) !== 0) {
+  // The entry root is a runner-owned envelope. Owner write is required on
+  // Darwin to move it across directories; group/world write is still unsafe,
+  // while metadata and every tree node remain strictly immutable.
+  if ((entryInfo.mode & 0o022) !== 0 || (treesInfo.mode & 0o222) !== 0) {
     throw new DependencyCacheIntegrityError("writable-entry");
   }
 };
@@ -369,9 +377,11 @@ const allocatedBytes = (info: { blocks: number }): bigint => {
 // inode and therefore contributes its own allocated blocks. Its lexical target
 // must remain below the entry root; validateEntry additionally checks the
 // target against the tree layout before a selected entry is restored.
-const accountCacheEntry = async (entry: string): Promise<bigint> => {
-  const root = resolve(entry);
-  const rootInfo = await lstat(root).catch((error: unknown) => {
+const accountCacheEntry = async (entry: string, containmentRoot = entry): Promise<bigint> => {
+  const root = resolve(containmentRoot);
+  const start = resolve(entry);
+  if (!insideOrEqual(root, start)) throw new DependencyCacheIntegrityError("entry-path-escape");
+  const rootInfo = await lstat(start).catch((error: unknown) => {
     if (errorCode(error) === "ENOENT") throw new DependencyCacheIntegrityError("entry-not-directory");
     throw error;
   });
@@ -408,6 +418,27 @@ const accountCacheEntry = async (entry: string): Promise<bigint> => {
     }
     return total;
   };
+  return visit(start);
+};
+
+// Trash and crash-left publication stages are owned discardable trees, not
+// entries. Count their inodes without following links or requiring a complete,
+// immutable entry shape so interrupted deletion remains recoverable.
+const accountDiscardableTree = async (path: string): Promise<bigint> => {
+  const root = resolve(path);
+  const visit = async (candidate: string): Promise<bigint> => {
+    const info = await lstat(candidate);
+    let total = allocatedBytes(info);
+    if (!info.isDirectory() || info.isSymbolicLink()) return total;
+    for (const child of await readdir(candidate)) {
+      const childPath = join(candidate, child);
+      if (!insideOrEqual(root, childPath)) throw new DependencyCacheIntegrityError("entry-path-escape");
+      total += await visit(childPath);
+    }
+    return total;
+  };
+  const info = await lstat(root);
+  if (info.isSymbolicLink() || !info.isDirectory()) throw new DependencyCacheIntegrityError("unsafe-trash-entry");
   return visit(root);
 };
 
@@ -423,11 +454,31 @@ export const accountDependencyCacheEntryBytes = async (entry: string): Promise<b
   return bytes;
 };
 
-const flockAsync = (fd: number, operation: "sh" | "ex" | "un"): Promise<void> => new Promise((accept, reject) => {
+const flockAsync = (fd: number, operation: "sh" | "ex" | "exnb" | "un"): Promise<void> => new Promise((accept, reject) => {
   flock(fd, operation, (error) => error ? reject(error) : accept());
 });
 
-type RetentionEntry = { key: string; path: string; usedMs: number; bytes: bigint };
+type EntryIdentity = { dev: string; ino: string };
+
+type MetadataIdentity = EntryIdentity & { size: number; mtimeMs: number; ctimeMs: number };
+
+type RetentionEntry = {
+  key: string;
+  path: string;
+  usedMs: number;
+  bytes: bigint;
+  identity: EntryIdentity;
+  metadataIdentity: MetadataIdentity | null;
+};
+
+type SizeRecord = {
+  format: "agentos-runner-dependency-cache-size-v1";
+  name: string;
+  key: string;
+  bytes: number;
+  identity: EntryIdentity;
+  metadataIdentity: MetadataIdentity | null;
+};
 
 const totalRetentionBytes = (entries: RetentionEntry[]): bigint =>
   entries.reduce((total, entry) => total + entry.bytes, 0n);
@@ -451,8 +502,8 @@ const snapshotTarget = async (source: string, destination: string): Promise<void
  * A cache root, opened.
  *
  * Every operation is named by a key. Publication and restore run under the
- * shared lock; byte-budget enforcement takes the exclusive one, so it always
- * sees a settled population.
+ * shared root lock; maintenance only tries the exclusive root lock long enough
+ * to detach settled victims, then deletes them outside that lock.
  */
 export type CacheEntryStore = {
   /** The resolved root. Entries, usage markers and the lock live under it. */
@@ -461,7 +512,7 @@ export type CacheEntryStore = {
   /** Where a published target tree lives inside its entry. */
   targetSourcePath: (key: string, targetPath: string) => string;
   hasEntry: (key: string) => Promise<boolean>;
-  /** Run `work` while no exclusive owner (byte-budget enforcement) can run. */
+  /** Run `work` while maintenance cannot detach an entry. */
   withSharedLock: <T>(work: () => Promise<T>) => Promise<T>;
   /** Refuse a usage marker that is not a plain file before it is trusted. */
   validateUseMarker: (key: string) => Promise<void>;
@@ -470,19 +521,17 @@ export type CacheEntryStore = {
   readEntry: (expected: CacheEntryExpectation) => Promise<CacheEntryDocument>;
   /** Snapshot `targets` out of `source` into a new immutable entry. */
   publishEntry: (
-    expected: CacheEntryExpectation, targets: CacheEntryTarget[], source: string,
+    expected: CacheEntryExpectation, targets: CacheEntryTarget[], source: string, budget?: number,
   ) => Promise<CacheEntryPublication>;
-  /**
-   * Hold the population at or below `budget` bytes, evicting least-recently-used
-   * entries. `currentKey` is never evicted; `newlyPublishedKey`, if the budget
-   * cannot be met, is rolled back so a refused pass leaves nothing behind.
-   */
-  enforceByteBudget: (
-    currentKey: string | undefined,
-    newlyPublishedKey: string | undefined,
-    report: CacheStoreReport,
-    budget?: number,
-  ) => Promise<void>;
+  /** Account legacy entries and detach LRU victims without waiting for active readers. */
+  maintainByteBudget: (
+    report: CacheStoreReport, budget?: number, options?: { signal?: AbortSignal },
+  ) => Promise<CacheMaintenanceResult>;
+};
+
+export type CacheEntryStoreOptions = {
+  /** Overrides slow trash deletion for deterministic tests. */
+  deleteTrash?: (path: string) => Promise<void>;
 };
 
 /**
@@ -492,7 +541,11 @@ export type CacheEntryStore = {
  * inside: a cache that overlaps the trees it caches cannot be immutable. The
  * comparison is lexical, so an unresolved path would not be recognised.
  */
-export const openCacheEntryStore = async (configuredRoot: string, disjointFrom: string): Promise<CacheEntryStore> => {
+export const openCacheEntryStore = async (
+  configuredRoot: string,
+  disjointFrom: string,
+  options: CacheEntryStoreOptions = {},
+): Promise<CacheEntryStore> => {
   const requestedRoot = resolve(configuredRoot);
   await mkdir(requestedRoot, { recursive: true, mode: 0o711 });
   if ((await lstat(requestedRoot)).isSymbolicLink()) throw new Error("Dependency cache root is a symlink");
@@ -509,6 +562,13 @@ export const openCacheEntryStore = async (configuredRoot: string, disjointFrom: 
   await mkdir(usageRoot, { recursive: true, mode: 0o700 });
   if ((await lstat(usageRoot)).isSymbolicLink()) throw new Error("Dependency cache usage root is a symlink");
   await chmod(usageRoot, 0o700);
+  const accountingRoot = join(root, ACCOUNTING_DIRECTORY);
+  const trashRoot = join(root, TRASH_DIRECTORY);
+  for (const directory of [accountingRoot, trashRoot]) {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    if ((await lstat(directory)).isSymbolicLink()) throw new Error("Dependency cache managed directory is a symlink");
+    await chmod(directory, 0o700);
+  }
 
   const entryPath = (key: string): string => {
     const entry = resolve(entriesRoot, key);
@@ -516,8 +576,8 @@ export const openCacheEntryStore = async (configuredRoot: string, disjointFrom: 
     return entry;
   };
 
-  const openLock = async () => {
-    const path = join(root, LOCK_FILE);
+  const openLock = async (name = LOCK_FILE) => {
+    const path = join(root, name);
     const handle = await open(path, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW, 0o600);
     const info = await handle.stat();
     if (!info.isFile()) {
@@ -525,6 +585,18 @@ export const openCacheEntryStore = async (configuredRoot: string, disjointFrom: 
       throw new Error("Dependency cache lock is not a file");
     }
     return handle;
+  };
+
+  const tryExclusiveLock = async (name: string) => {
+    const handle = await openLock(name);
+    try {
+      await flockAsync(handle.fd, "exnb");
+      return handle;
+    } catch (error: unknown) {
+      await handle.close();
+      if (["EAGAIN", "EWOULDBLOCK"].includes(errorCode(error) ?? "")) return null;
+      throw error;
+    }
   };
 
   const withSharedLock = async <T>(work: () => Promise<T>): Promise<T> => {
@@ -569,9 +641,203 @@ export const openCacheEntryStore = async (configuredRoot: string, disjointFrom: 
     }
   };
 
+  const sizeRecordPath = (name: string): string => {
+    if (basename(name) !== name || name.length === 0) throw new DependencyCacheIntegrityError("unsafe-size-record-name");
+    return join(accountingRoot, `${name}.json`);
+  };
+
+  const entryIdentity = (info: { dev: bigint | number; ino: bigint | number }): EntryIdentity =>
+    ({ dev: String(info.dev), ino: String(info.ino) });
+
+  const metadataIdentity = async (path: string): Promise<MetadataIdentity | null> => {
+    const metadata = join(path, METADATA_FILE);
+    const info = await lstat(metadata).catch((error: unknown) => {
+      if (errorCode(error) === "ENOENT") return null;
+      throw error;
+    });
+    if (info === null) return null;
+    if (info.isSymbolicLink() || !info.isFile() || (info.mode & 0o222) !== 0) {
+      throw new DependencyCacheIntegrityError("unsafe-size-record-metadata");
+    }
+    return { ...entryIdentity(info), size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs };
+  };
+
+  const writeSizeRecord = async (record: SizeRecord): Promise<void> => {
+    const destination = sizeRecordPath(record.name);
+    if (await pathKind(destination) === "symlink") throw new DependencyCacheIntegrityError("unsafe-size-record");
+    const temporary = join(accountingRoot, `.tmp-${process.pid}-${randomUUID()}`);
+    const handle = await open(
+      temporary,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      await handle.writeFile(`${JSON.stringify(record)}\n`);
+    } finally {
+      await handle.close();
+    }
+    try {
+      await rename(temporary, destination);
+    } finally {
+      await rm(temporary, { force: true }).catch(() => undefined);
+    }
+  };
+
+  const readSizeRecord = async (
+    name: string, path: string, key?: string, verifyMetadata = true,
+  ): Promise<SizeRecord | null> => {
+    const recordPath = sizeRecordPath(name);
+    const info = await lstat(recordPath).catch((error: unknown) => {
+      if (errorCode(error) === "ENOENT") return null;
+      throw error;
+    });
+    if (info === null) return null;
+    if (info.isSymbolicLink() || !info.isFile() || info.size > 64 * 1024) {
+      throw new DependencyCacheIntegrityError("unsafe-size-record");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(recordPath, "utf8"));
+    } catch {
+      throw new DependencyCacheIntegrityError("malformed-size-record");
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new DependencyCacheIntegrityError("malformed-size-record");
+    }
+    const record = parsed as Partial<SizeRecord>;
+    if (record.format !== "agentos-runner-dependency-cache-size-v1"
+      || record.name !== name || typeof record.key !== "string" || (key !== undefined && record.key !== key)
+      || !Number.isSafeInteger(record.bytes) || Number(record.bytes) < 0
+      || record.identity === undefined || typeof record.identity.dev !== "string" || typeof record.identity.ino !== "string"
+      || (record.metadataIdentity !== null && (record.metadataIdentity === undefined
+        || typeof record.metadataIdentity.dev !== "string" || typeof record.metadataIdentity.ino !== "string"
+        || !Number.isSafeInteger(record.metadataIdentity.size) || !Number.isFinite(record.metadataIdentity.mtimeMs)
+        || !Number.isFinite(record.metadataIdentity.ctimeMs)))) {
+      throw new DependencyCacheIntegrityError("malformed-size-record");
+    }
+    const targetInfo = await lstat(path).catch((error: unknown) => {
+      if (errorCode(error) === "ENOENT") return null;
+      throw error;
+    });
+    if (targetInfo === null || targetInfo.isSymbolicLink() || !targetInfo.isDirectory()
+      || !sameJson(entryIdentity(targetInfo), record.identity)) {
+      throw new DependencyCacheIntegrityError("stale-size-record");
+    }
+    if (verifyMetadata && (targetInfo.mode & 0o022) !== 0) {
+      throw new DependencyCacheIntegrityError("writable-accounted-entry");
+    }
+    if (verifyMetadata && !sameJson(record.metadataIdentity, await metadataIdentity(path))) {
+      throw new DependencyCacheIntegrityError("stale-size-record");
+    }
+    return record as SizeRecord;
+  };
+
+  const writePressure = async (requestedBytes: bigint): Promise<void> => {
+    const numeric = Number(requestedBytes > BigInt(Number.MAX_SAFE_INTEGER) ? BigInt(Number.MAX_SAFE_INTEGER) : requestedBytes);
+    let previous = 0;
+    try {
+      const pressurePath = join(root, PRESSURE_FILE);
+      const info = await lstat(pressurePath);
+      if (info.isSymbolicLink() || !info.isFile() || info.size > 64 * 1024) {
+        throw new DependencyCacheIntegrityError("unsafe-pressure-record");
+      }
+      const value: unknown = JSON.parse(await readFile(pressurePath, "utf8"));
+      if (value === null || typeof value !== "object" || Array.isArray(value)) {
+        throw new DependencyCacheIntegrityError("malformed-pressure-record");
+      }
+      const record = value as { requestedBytes?: unknown };
+      if (!Number.isSafeInteger(record.requestedBytes) || Number(record.requestedBytes) < 0) {
+        throw new DependencyCacheIntegrityError("malformed-pressure-record");
+      }
+      previous = Number(record.requestedBytes);
+    } catch (error: unknown) {
+      if (errorCode(error) !== "ENOENT") throw new DependencyCacheIntegrityError("malformed-pressure-record");
+    }
+    const temporary = join(root, `.pressure-${process.pid}-${randomUUID()}`);
+    const handle = await open(
+      temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600,
+    );
+    try {
+      await handle.writeFile(`${JSON.stringify({ requestedBytes: Math.max(previous, numeric) })}\n`);
+    } finally {
+      await handle.close();
+    }
+    try {
+      await rename(temporary, join(root, PRESSURE_FILE));
+    } finally {
+      await rm(temporary, { force: true }).catch(() => undefined);
+    }
+  };
+
+  const readPressure = async (): Promise<bigint> => {
+    try {
+      const info = await lstat(join(root, PRESSURE_FILE));
+      if (info.isSymbolicLink() || !info.isFile() || info.size > 64 * 1024) {
+        throw new DependencyCacheIntegrityError("unsafe-pressure-record");
+      }
+      const value: unknown = JSON.parse(await readFile(join(root, PRESSURE_FILE), "utf8"));
+      if (value === null || typeof value !== "object" || Array.isArray(value)) {
+        throw new DependencyCacheIntegrityError("malformed-pressure-record");
+      }
+      const record = value as { requestedBytes?: unknown };
+      if (!Number.isSafeInteger(record.requestedBytes) || Number(record.requestedBytes) < 0) {
+        throw new DependencyCacheIntegrityError("malformed-pressure-record");
+      }
+      return BigInt(Number(record.requestedBytes));
+    } catch (error: unknown) {
+      if (errorCode(error) === "ENOENT") return 0n;
+      if (error instanceof DependencyCacheIntegrityError) throw error;
+      throw new DependencyCacheIntegrityError("malformed-pressure-record");
+    }
+  };
+
+  const accountedPopulationBytes = async (): Promise<bigint | null> => {
+    let total = 0n;
+    for (const name of await readdir(entriesRoot)) {
+      if (!CACHE_KEY.test(name)) return null;
+      const record = await readSizeRecord(name, join(entriesRoot, name), name);
+      if (record === null) return null;
+      total += BigInt(record.bytes);
+    }
+    for (const name of await readdir(trashRoot)) {
+      const record = await readSizeRecord(name, join(trashRoot, name), undefined, false);
+      if (record === null) return null;
+      total += BigInt(record.bytes);
+    }
+    return total;
+  };
+
+  const sizeRecordFor = async (
+    name: string, key: string, path: string, bytes: bigint, includeMetadata = true,
+  ): Promise<SizeRecord> => {
+    if (bytes > BigInt(Number.MAX_SAFE_INTEGER)) throw new DependencyCacheIntegrityError("allocated-size-overflow");
+    const info = await lstat(path);
+    if (info.isSymbolicLink() || !info.isDirectory()) throw new DependencyCacheIntegrityError("unsafe-retention-entry");
+    return {
+      format: "agentos-runner-dependency-cache-size-v1",
+      name,
+      key,
+      bytes: Number(bytes),
+      identity: entryIdentity(info),
+      metadataIdentity: includeMetadata ? await metadataIdentity(path) : null,
+    };
+  };
+
+  const detachStage = async (staging: string, key: string, bytes?: bigint): Promise<void> => {
+    if (await pathKind(staging) === "missing") return;
+    const name = `.trash-${key}-${randomUUID()}`;
+    const destination = join(trashRoot, name);
+    await chmod(staging, 0o755);
+    await rename(staging, destination);
+    if (bytes !== undefined) await writeSizeRecord(await sizeRecordFor(name, key, destination, bytes, false));
+  };
+
   const publishEntry = async (
     expected: CacheEntryExpectation, targets: CacheEntryTarget[], source: string,
+    budget = DEPENDENCY_CACHE_BYTE_BUDGET,
   ): Promise<CacheEntryPublication> => {
+    if (!Number.isSafeInteger(budget) || budget < 0) throw new DependencyCacheBudgetError("invalid-byte-budget");
+    if (!CACHE_KEY.test(expected.key)) throw new Error("Dependency cache publication key is invalid");
     if (!sameJson(targets.map(({ path }) => path), expected.targetPaths)) {
       throw new Error("Published dependency targets do not match the expected target paths");
     }
@@ -585,16 +851,39 @@ export const openCacheEntryStore = async (configuredRoot: string, disjointFrom: 
         throw error;
       }
     }
-    const document: CacheEntryDocument = {
-      format: CACHE_ENTRY_FORMAT,
-      key: expected.key,
-      toolchain: expected.toolchain,
-      inputs: expected.inputs,
-      targets,
-    };
-    const staging = await mkdtemp(join(entriesRoot, `.stage-${expected.key.slice(0, 16)}-`));
-    if (!insideOrEqual(root, await realpath(staging))) throw new Error("Dependency cache staging escaped its root");
+    const maintenance = await tryExclusiveLock(MAINTENANCE_LOCK_FILE);
+    if (maintenance === null) return "skipped";
+    let staging: string | undefined;
+    let stagingBytes: bigint | undefined;
+    let estimatedBytes = 0n;
     try {
+      for (const target of targets) {
+        if (target.present) estimatedBytes += await accountCacheEntry(assertCacheTargetPath(source, target.path), source);
+      }
+      let population: bigint | null;
+      try {
+        population = await accountedPopulationBytes();
+      } catch (error: unknown) {
+        if (!(error instanceof DependencyCacheIntegrityError)) throw error;
+        population = null;
+      }
+      const budgetBytes = BigInt(budget);
+      const fileSystem = await statfs(root, { bigint: true });
+      const availableBytes = fileSystem.bavail * fileSystem.bsize;
+      if (estimatedBytes > budgetBytes) return "skipped";
+      if (population === null || population + estimatedBytes > budgetBytes || estimatedBytes > availableBytes) {
+        await writePressure(estimatedBytes).catch(() => undefined);
+        return "skipped";
+      }
+      const document: CacheEntryDocument = {
+        format: CACHE_ENTRY_FORMAT,
+        key: expected.key,
+        toolchain: expected.toolchain,
+        inputs: expected.inputs,
+        targets,
+      };
+      staging = await mkdtemp(join(entriesRoot, `.stage-${expected.key.slice(0, 16)}-`));
+      if (!insideOrEqual(root, await realpath(staging))) throw new Error("Dependency cache staging escaped its root");
       await mkdir(join(staging, TREE_DIRECTORY));
       for (const target of document.targets) {
         if (target.present) {
@@ -605,10 +894,17 @@ export const openCacheEntryStore = async (configuredRoot: string, disjointFrom: 
       }
       await writeFile(join(staging, METADATA_FILE), `${JSON.stringify(document)}\n`, { mode: 0o400 });
       await makeImmutable(staging);
+      await chmod(staging, 0o755);
       await validateEntry(staging, expected);
+      stagingBytes = await accountCacheEntry(staging);
+      if (stagingBytes > budgetBytes || population + stagingBytes > budgetBytes) {
+        if (stagingBytes <= budgetBytes) await writePressure(stagingBytes).catch(() => undefined);
+        await detachStage(staging, expected.key, stagingBytes);
+        staging = undefined;
+        return "skipped";
+      }
       try {
         await rename(staging, entry);
-        return "published";
       } catch (error: unknown) {
         // Darwin reports EACCES rather than EEXIST when the winning directory is
         // already immutable. The destination's independently verified state,
@@ -616,27 +912,26 @@ export const openCacheEntryStore = async (configuredRoot: string, disjointFrom: 
         if (await pathKind(entry) === "missing") throw error;
         try {
           await validateEntry(entry, expected);
+          await detachStage(staging, expected.key, stagingBytes);
+          staging = undefined;
           return "converged";
         } catch (validationError: unknown) {
           if (validationError instanceof DependencyCacheIntegrityError) return "refused";
           throw validationError;
         }
       }
+      staging = undefined;
+      await writeSizeRecord(await sizeRecordFor(expected.key, expected.key, entry, stagingBytes));
+      return "published";
+    } catch (error: unknown) {
+      if (!["ENOSPC", "EDQUOT"].includes(errorCode(error) ?? "")) throw error;
+      await writePressure(estimatedBytes).catch(() => undefined);
+      return "skipped";
     } finally {
-      if (await pathKind(staging) !== "missing") {
-        await makeWritable(staging).catch(() => undefined);
-        await rm(staging, { recursive: true, force: true });
-      }
+      if (staging !== undefined) await detachStage(staging, expected.key, stagingBytes).catch(() => undefined);
+      await flockAsync(maintenance.fd, "un").catch(() => undefined);
+      await maintenance.close();
     }
-  };
-
-  const reportIntegrityRefusal = (
-    report: CacheStoreReport,
-    key: string | undefined,
-    condition: string,
-  ): DependencyCacheIntegrityError => {
-    report({ event: "integrity-refusal", ...(key ? { key: key.slice(0, 16) } : {}), condition });
-    return new DependencyCacheIntegrityError(condition);
   };
 
   const inspectRetentionEntry = async (key: string, path: string): Promise<void> => {
@@ -644,200 +939,215 @@ export const openCacheEntryStore = async (configuredRoot: string, disjointFrom: 
     if (document.key !== key) throw new DependencyCacheIntegrityError("key-mismatch");
     await validateImmutableEntryContents(path, document);
   };
-
-  const retentionEntries = async (report: CacheStoreReport): Promise<RetentionEntry[]> => {
-    if (await pathKind(entriesRoot) !== "directory") {
-      throw reportIntegrityRefusal(report, undefined, "entries-root-missing");
-    }
-    if (await pathKind(usageRoot) !== "directory") {
-      throw reportIntegrityRefusal(report, undefined, "usage-root-missing");
-    }
-    const markerKinds = new Map<string, Awaited<ReturnType<typeof lstat>> | null>();
-    for (const name of await readdir(usageRoot)) {
-      // Only key-shaped names are cache usage markers. Ignore unrelated files
-      // rather than letting them deny all materializations on the shared host.
-      if (!CACHE_KEY.test(name)) continue;
-      const marker = join(usageRoot, name);
-      const markerInfo = await lstat(marker).catch((error: unknown) => {
-        if (errorCode(error) === "ENOENT") return null;
-        throw error;
-      });
-      if (markerInfo?.isSymbolicLink() || (markerInfo !== null && !markerInfo.isFile())) {
-        throw reportIntegrityRefusal(report, name, "unsafe-usage-marker");
-      }
-      markerKinds.set(name, markerInfo);
-    }
-    const entries: RetentionEntry[] = [];
-    for (const name of await readdir(entriesRoot)) {
-      if (!CACHE_KEY.test(name)) {
-        // publishEntry creates stages under this directory while holding a
-        // shared lock. Once the exclusive retention lock is held, a remaining
-        // stage is necessarily orphaned and may be reaped safely. Other non-key
-        // names are not immutable cache entries and are ignored.
-        if (name.startsWith(".stage-")) {
-          const staging = join(entriesRoot, name);
-          await makeWritable(staging).catch(() => undefined);
-          await rm(staging, { recursive: true, force: true }).catch(() => undefined);
-        }
-        continue;
-      }
-      const path = join(entriesRoot, name);
-      const info = await lstat(path).catch((error: unknown) => {
-        if (errorCode(error) === "ENOENT") return null;
-        throw error;
-      });
-      if (info === null) throw reportIntegrityRefusal(report, name, "retention-entry-disappeared");
-      if (info.isSymbolicLink() || !info.isDirectory()) {
-        throw reportIntegrityRefusal(report, name, "unsafe-retention-entry");
-      }
-      let bytes: bigint;
-      try {
-        await inspectRetentionEntry(name, path);
-        bytes = await accountCacheEntry(path);
-      } catch (error: unknown) {
-        throw reportIntegrityRefusal(report, name, asRetentionIntegrityError(error).condition);
-      }
-      const markerInfo = markerKinds.get(name) ?? null;
-      const usedMs = Number(markerInfo?.mtimeMs ?? info.mtimeMs);
-      if (!Number.isFinite(usedMs)) throw reportIntegrityRefusal(report, name, "invalid-usage-marker-time");
-      entries.push({ key: name, path, usedMs, bytes });
-    }
-    return entries;
-  };
-
-  const removeRetentionEntry = async (entry: RetentionEntry): Promise<void> => {
-    try {
-      await makeWritable(entry.path);
-      await rm(entry.path, { recursive: true, force: true });
-      if (await pathKind(entry.path) !== "missing") throw new Error("cache entry remained after deletion");
-      await rm(join(usageRoot, entry.key), { force: true });
-      if (await pathKind(join(usageRoot, entry.key)) !== "missing") {
-        throw new Error("cache usage marker remained after deletion");
-      }
-    } catch (error: unknown) {
-      throw new DependencyCacheBudgetError(`eviction-failed:${errorCode(error) ?? "unknown"}`);
-    }
-  };
-
-  const rollbackPublishedEntry = async (key: string, report: CacheStoreReport): Promise<void> => {
-    const entry: RetentionEntry = { key, path: entryPath(key), usedMs: 0, bytes: 0n };
-    const existed = await pathKind(entry.path) !== "missing";
-    try {
-      await removeRetentionEntry(entry);
-    } catch (error: unknown) {
-      const condition = error instanceof DependencyCacheBudgetError
-        ? `publication-rollback-failed:${error.condition}`
-        : "publication-rollback-failed";
-      report({ event: "integrity-refusal", key: key.slice(0, 16), condition });
-      throw new DependencyCacheBudgetError(condition);
-    }
-    if (existed) report({ event: "eviction", key: key.slice(0, 16), condition: "byte-budget" });
-  };
-
-  const enforceByteBudget = async (
-    currentKey: string | undefined,
-    newlyPublishedKey: string | undefined,
+  const maintainByteBudget = async (
     report: CacheStoreReport,
     budget = DEPENDENCY_CACHE_BYTE_BUDGET,
-  ): Promise<void> => {
-    if (!Number.isSafeInteger(budget) || budget < 0) {
-      throw new DependencyCacheBudgetError("invalid-byte-budget");
+    maintenanceOptions: { signal?: AbortSignal } = {},
+  ): Promise<CacheMaintenanceResult> => {
+    if (!Number.isSafeInteger(budget) || budget < 0) throw new DependencyCacheBudgetError("invalid-byte-budget");
+    const started = Date.now();
+    const maintenance = await tryExclusiveLock(MAINTENANCE_LOCK_FILE);
+    if (maintenance === null) {
+      report({ event: "maintenance", phase: "lock", outcome: "busy", elapsedMs: Date.now() - started });
+      return "busy";
     }
-    const budgetBytes = BigInt(budget);
-    const handle = await openLock();
-    let locked = false;
+    const checkAbort = (): void => maintenanceOptions.signal?.throwIfAborted();
     try {
-      // This is deliberately blocking. Shared restore and publication owners
-      // must finish before this snapshot can be sized or entries removed.
-      await flockAsync(handle.fd, "ex");
-      locked = true;
-      try {
-        let entries: RetentionEntry[];
+      const accountStarted = Date.now();
+      report({ event: "maintenance", phase: "account", outcome: "started" });
+      const entries: RetentionEntry[] = [];
+      const stages: RetentionEntry[] = [];
+      const trash: RetentionEntry[] = [];
+      for (const name of await readdir(entriesRoot)) {
+        checkAbort();
+        const path = join(entriesRoot, name);
         try {
-          entries = await retentionEntries(report);
-        } catch (error: unknown) {
-          const integrityError = asRetentionIntegrityError(error);
-          if (!(error instanceof DependencyCacheIntegrityError)) {
-            report({ event: "integrity-refusal", condition: integrityError.condition });
-          }
-          throw integrityError;
-        }
-        const protectedKey = currentKey && CACHE_KEY.test(currentKey) ? currentKey : undefined;
-        let total = totalRetentionBytes(entries);
-        if (total > budgetBytes) {
-          let victimKeys: string[];
-          try {
-            victimKeys = selectDependencyCacheEvictions(
-              entries.map(({ key, bytes, usedMs }) => {
-                const numericBytes = Number(bytes);
-                if (!Number.isSafeInteger(numericBytes)) throw new DependencyCacheIntegrityError("allocated-size-overflow");
-                return { key, bytes: numericBytes, usedMs };
-              }),
-              protectedKey,
-              budget,
-            );
-          } catch (error: unknown) {
-            if (error instanceof DependencyCacheBudgetError
-              && newlyPublishedKey
-              && CACHE_KEY.test(newlyPublishedKey)) {
-              await rollbackPublishedEntry(newlyPublishedKey, report);
+          const info = await lstat(path);
+          if (info.isSymbolicLink() || !info.isDirectory()) throw new DependencyCacheIntegrityError("unsafe-retention-entry");
+          if (CACHE_KEY.test(name)) {
+            await validateUseMarker(name);
+            let bytes: bigint;
+            const existing = await readSizeRecord(name, path, name);
+            if (existing === null) {
+              await inspectRetentionEntry(name, path);
+              bytes = await accountCacheEntry(path);
+              await writeSizeRecord(await sizeRecordFor(name, name, path, bytes));
+            } else {
+              bytes = BigInt(existing.bytes);
             }
-            const condition = error instanceof DependencyCacheBudgetError
-              ? error.condition
-              : asRetentionIntegrityError(error).condition;
-            report({
-              event: "integrity-refusal",
-              ...(protectedKey ? { key: protectedKey.slice(0, 16) } : {}),
-              condition,
+            const marker = await lstat(join(usageRoot, name)).catch((error: unknown) => {
+              if (errorCode(error) === "ENOENT") return null;
+              throw error;
             });
-            throw error instanceof DependencyCacheBudgetError ? error : new DependencyCacheIntegrityError(condition);
+            const usedMs = Number(marker?.mtimeMs ?? info.mtimeMs);
+            if (!Number.isFinite(usedMs)) throw new DependencyCacheIntegrityError("invalid-usage-marker-time");
+            const retained = {
+              key: name, path, usedMs, bytes, identity: entryIdentity(info), metadataIdentity: await metadataIdentity(path),
+            };
+            entries.push(retained);
+          } else if (name.startsWith(".stage-")) {
+            const bytes = await accountDiscardableTree(path);
+            stages.push({
+              key: "", path, usedMs: info.mtimeMs, bytes,
+              identity: entryIdentity(info), metadataIdentity: null,
+            });
           }
-          const entriesByKey = new Map(entries.map((entry) => [entry.key, entry] as const));
-          for (const victimKey of victimKeys) {
-            const victim = entriesByKey.get(victimKey);
-            if (victim === undefined) throw new DependencyCacheBudgetError("byte-budget-invariant-unmet");
-            try {
-              await removeRetentionEntry(victim);
-            } catch (error: unknown) {
-              const condition = error instanceof DependencyCacheBudgetError ? error.condition : "eviction-failed";
-              report({ event: "integrity-refusal", key: victim.key.slice(0, 16), condition });
-              if (newlyPublishedKey && newlyPublishedKey !== victim.key && CACHE_KEY.test(newlyPublishedKey)) {
-                await rollbackPublishedEntry(newlyPublishedKey, report);
-              }
-              throw error instanceof DependencyCacheBudgetError ? error : new DependencyCacheBudgetError(condition);
-            }
-            total -= victim.bytes;
-            report({ event: "eviction", key: victim.key.slice(0, 16), condition: "byte-budget" });
-          }
+        } catch (error: unknown) {
+          const condition = asRetentionIntegrityError(error).condition;
+          report({ event: "integrity-refusal", ...(CACHE_KEY.test(name) ? { key: name.slice(0, 16) } : {}), condition });
         }
-
-        // The exclusive lock has covered the initial walk and every deletion,
-        // so this tracked total is the authoritative final invariant without a
-        // second full manifest parse and inode walk.
-        if (total <= budgetBytes) return;
-
-        const protectedEntry = protectedKey === undefined
-          ? undefined
-          : entries.find((entry) => entry.key === protectedKey);
-        const condition = protectedEntry !== undefined && protectedEntry.bytes > budgetBytes
-          ? "protected-entry-exceeds-byte-budget"
-          : "byte-budget-invariant-unmet";
-        if (newlyPublishedKey && CACHE_KEY.test(newlyPublishedKey)) {
-          await rollbackPublishedEntry(newlyPublishedKey, report);
-        }
-        report({
-          event: "integrity-refusal",
-          ...(protectedKey ? { key: protectedKey.slice(0, 16) } : {}),
-          condition,
-        });
-        throw new DependencyCacheBudgetError(condition);
-      } finally {
-        await flockAsync(handle.fd, "un");
-        locked = false;
       }
+      for (const name of await readdir(trashRoot)) {
+        checkAbort();
+        const path = join(trashRoot, name);
+        try {
+          const info = await lstat(path);
+          if (info.isSymbolicLink() || !info.isDirectory()) throw new DependencyCacheIntegrityError("unsafe-trash-entry");
+          const key = name.startsWith(".trash-") && CACHE_KEY.test(name.slice(7, 71)) ? name.slice(7, 71) : "";
+          let existing: SizeRecord | null = null;
+          try {
+            existing = await readSizeRecord(name, path, undefined, false);
+          } catch (error: unknown) {
+            report({ event: "integrity-refusal", condition: asRetentionIntegrityError(error).condition });
+            await rm(sizeRecordPath(name), { force: true });
+          }
+          const bytes = existing === null ? await accountDiscardableTree(path) : BigInt(existing.bytes);
+          trash.push({
+            key, path, usedMs: info.mtimeMs, bytes,
+            identity: entryIdentity(info), metadataIdentity: null,
+          });
+          if (existing === null) await writeSizeRecord(await sizeRecordFor(name, key, path, bytes, false));
+        } catch (error: unknown) {
+          report({ event: "integrity-refusal", condition: asRetentionIntegrityError(error).condition });
+        }
+      }
+      report({
+        event: "maintenance", phase: "account", outcome: "completed",
+        bytes: Number(totalRetentionBytes([...entries, ...stages, ...trash])), elapsedMs: Date.now() - accountStarted,
+      });
+
+      let pressure = 0n;
+      try {
+        pressure = await readPressure();
+      } catch (error: unknown) {
+        report({ event: "integrity-refusal", condition: asRetentionIntegrityError(error).condition });
+      }
+      const target = BigInt(budget) - (pressure > BigInt(budget) ? BigInt(budget) : pressure);
+      const plannedVictimKeys = selectDependencyCacheEvictions(entries.map(({ key, bytes, usedMs }) => ({
+        key, bytes: Number(bytes), usedMs,
+      })), Number(target));
+      const entriesByKey = new Map(entries.map((entry) => [entry.key, entry] as const));
+
+      const deleteCandidates = async (
+        candidates: Array<{ name: string; path: string; key: string; bytes: bigint }>,
+      ): Promise<void> => {
+        for (const candidate of candidates) {
+          checkAbort();
+          const deleteStarted = Date.now();
+          try {
+            if (options.deleteTrash) {
+              await options.deleteTrash(candidate.path);
+            } else {
+              await makeWritable(candidate.path);
+              await rm(candidate.path, { recursive: true, force: true });
+            }
+            if (await pathKind(candidate.path) !== "missing") throw new Error("trash remained after deletion");
+            await rm(sizeRecordPath(candidate.name), { force: true });
+            report({
+              event: "maintenance", phase: "delete", outcome: "completed", bytes: Number(candidate.bytes),
+              elapsedMs: Date.now() - deleteStarted,
+            });
+          } catch (error: unknown) {
+            report({ event: "integrity-refusal", condition: `trash-delete-failed:${errorCode(error) ?? "unknown"}` });
+          }
+        }
+      };
+      await deleteCandidates(trash.map((entry) => ({
+        name: basename(entry.path), path: entry.path, key: entry.key, bytes: entry.bytes,
+      })));
+
+      if (stages.length === 0 && plannedVictimKeys.length === 0) {
+        await rm(join(root, PRESSURE_FILE), { force: true });
+        return "maintained";
+      }
+      const detachStarted = Date.now();
+      const rootLock = await tryExclusiveLock(LOCK_FILE);
+      if (rootLock === null) {
+        report({ event: "maintenance", phase: "lock", outcome: "busy", elapsedMs: Date.now() - detachStarted });
+        return "busy";
+      }
+      const detached: Array<{ name: string; path: string; key: string; bytes: bigint }> = [];
+      try {
+        checkAbort();
+        // A restore may refresh usage between the account walk and this
+        // nonblocking exclusive lock. Re-read every marker now and select LRU
+        // victims from the settled population so a just-hit entry is spared.
+        const refreshedEntries: DependencyCacheRetentionSize[] = [];
+        for (const entry of entries) {
+          const marker = join(usageRoot, entry.key);
+          const markerInfo = await lstat(marker).catch((error: unknown) => {
+            if (errorCode(error) === "ENOENT") return null;
+            throw error;
+          });
+          if (markerInfo?.isSymbolicLink() || (markerInfo !== null && !markerInfo.isFile())) {
+            report({ event: "integrity-refusal", key: entry.key.slice(0, 16), condition: "unsafe-usage-marker" });
+            continue;
+          }
+          refreshedEntries.push({
+            key: entry.key,
+            bytes: Number(entry.bytes),
+            usedMs: Number(markerInfo?.mtimeMs ?? entry.usedMs),
+          });
+        }
+        const victimKeys = selectDependencyCacheEvictions(refreshedEntries, Number(target));
+        const toDetach = [
+          ...stages,
+          ...victimKeys.map((key) => entriesByKey.get(key)).filter((entry): entry is RetentionEntry => entry !== undefined),
+        ];
+        for (const candidate of toDetach) {
+          checkAbort();
+          const current = await lstat(candidate.path).catch((error: unknown) => {
+            if (errorCode(error) === "ENOENT") return null;
+            throw error;
+          });
+          if (current === null || !sameJson(entryIdentity(current), candidate.identity)) continue;
+          const name = `.trash-${candidate.key || "stage"}-${randomUUID()}`;
+          const destination = join(trashRoot, name);
+          await chmod(candidate.path, 0o755);
+          await rename(candidate.path, destination);
+          await writeSizeRecord({
+            format: "agentos-runner-dependency-cache-size-v1",
+            name,
+            key: candidate.key,
+            bytes: Number(candidate.bytes),
+            identity: candidate.identity,
+            metadataIdentity: candidate.metadataIdentity,
+          });
+          if (candidate.key) {
+            await validateUseMarker(candidate.key);
+            await rm(join(usageRoot, candidate.key), { force: true });
+            await rm(sizeRecordPath(candidate.key), { force: true });
+            report({ event: "eviction", key: candidate.key.slice(0, 16), condition: "byte-budget" });
+          }
+          detached.push({ name, path: destination, key: candidate.key, bytes: candidate.bytes });
+        }
+      } finally {
+        await flockAsync(rootLock.fd, "un").catch(() => undefined);
+        await rootLock.close();
+      }
+      report({ event: "maintenance", phase: "detach", outcome: "completed", elapsedMs: Date.now() - detachStarted });
+
+      await deleteCandidates(detached);
+      await rm(join(root, PRESSURE_FILE), { force: true });
+      return "maintained";
+    } catch (error: unknown) {
+      if (maintenanceOptions.signal?.aborted) {
+        report({ event: "maintenance", phase: "delete", outcome: "aborted" });
+      }
+      throw error;
     } finally {
-      if (locked) await flockAsync(handle.fd, "un").catch(() => undefined);
-      await handle.close();
+      await flockAsync(maintenance.fd, "un").catch(() => undefined);
+      await maintenance.close();
     }
   };
 
@@ -852,6 +1162,6 @@ export const openCacheEntryStore = async (configuredRoot: string, disjointFrom: 
     recordUse,
     readEntry: (expected: CacheEntryExpectation) => validateEntry(entryPath(expected.key), expected),
     publishEntry,
-    enforceByteBudget,
+    maintainByteBudget,
   };
 };

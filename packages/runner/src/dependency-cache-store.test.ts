@@ -10,7 +10,8 @@ import test from "node:test";
 import {
   DEPENDENCY_CACHE_BYTE_BUDGET, accountDependencyCacheEntryBytes, describeTargetTrees, openCacheEntryStore,
   selectDependencyCacheEvictions,
-  type CacheEntryExpectation, type CacheEntryInput, type CacheEntryStore, type CacheStoreEvent,
+  type CacheEntryExpectation, type CacheEntryInput, type CacheEntryStore, type CacheEntryStoreOptions,
+  type CacheStoreEvent,
   type DependencyCacheToolchain,
 } from "./dependency-cache-store.js";
 
@@ -56,8 +57,8 @@ const cleanupRoot = async (root: string): Promise<void> => {
   await rm(root, { recursive: true, force: true });
 };
 
-const openStore = (root: string): Promise<CacheEntryStore> =>
-  openCacheEntryStore(join(root, "cache"), join(root, "sources"));
+const openStore = (root: string, options?: CacheEntryStoreOptions): Promise<CacheEntryStore> =>
+  openCacheEntryStore(join(root, "cache"), join(root, "sources"), options);
 
 /** A plain directory holding the two target trees a publication snapshots. */
 const sourceTree = async (root: string, name: string, content: string): Promise<string> => {
@@ -119,7 +120,7 @@ test("a cache root refuses a layout it cannot own", async () => {
     await assert.rejects(openCacheEntryStore(join(root, "linked-cache"), join(root, "sources")), /symlink/u);
 
     const store = await openStore(root);
-    assert.deepEqual((await readdir(store.root)).sort(), ["entries", "usage"]);
+    assert.deepEqual((await readdir(store.root)).sort(), ["accounting", "entries", "trash", "usage"]);
     assert.equal((await lstat(join(store.root, "usage"))).mode & 0o777, 0o700);
   } finally {
     await cleanupRoot(root);
@@ -135,7 +136,8 @@ test("a published entry is immutable, reads back, and refuses a different expect
     assert.equal(await store.hasEntry(key(1)), true);
 
     const entry = store.entryPath(key(1));
-    assert.equal((await lstat(entry)).mode & 0o222, 0, "a published entry carries no writable bit");
+    assert.equal((await lstat(entry)).mode & 0o777, 0o755, "the entry envelope remains runner-movable");
+    assert.equal((await lstat(join(entry, "trees"))).mode & 0o222, 0, "published trees carry no writable bit");
     assert.equal(
       await readFile(join(store.targetSourcePath(key(1), "node_modules"), "package-a/index.js"), "utf8"),
       "published tree\n",
@@ -193,8 +195,9 @@ test("usage markers are written per key and refused when they are not plain file
   }
 });
 
-test("byte-budget eviction takes the least recently used keys and never the protected one", () => {
+test("byte-budget eviction takes the least recently used keys", () => {
   const gibibyte = 1024 ** 3;
+  const budget = 16 * gibibyte;
   const belowBudget = Array.from({ length: 40 }, (_, index) => ({
     key: key(index), bytes: 256 * 1024 ** 2, usedMs: index + 1,
   }));
@@ -204,7 +207,7 @@ test("byte-budget eviction takes the least recently used keys and never the prot
     "the synthetic population is below the fixed budget",
   );
   assert.deepEqual(
-    selectDependencyCacheEvictions(belowBudget, key(39), DEPENDENCY_CACHE_BYTE_BUDGET),
+    selectDependencyCacheEvictions(belowBudget, DEPENDENCY_CACHE_BYTE_BUDGET),
     [],
     "entry count does not trigger retention",
   );
@@ -215,17 +218,17 @@ test("byte-budget eviction takes the least recently used keys and never the prot
     { key: key(102), bytes: 6 * gibibyte, usedMs: 3 },
     { key: key(103), bytes: 5 * gibibyte, usedMs: 4 },
   ];
-  const victims = selectDependencyCacheEvictions(entries, key(103), DEPENDENCY_CACHE_BYTE_BUDGET);
+  const victims = selectDependencyCacheEvictions(entries, budget);
   assert.deepEqual(victims, [key(100), key(101)], "multiple oldest entries are evicted in one pass");
   assert.ok(entries.filter(({ key: candidate }) => !victims.includes(candidate))
-    .reduce((total, entry) => total + entry.bytes, 0) <= DEPENDENCY_CACHE_BYTE_BUDGET);
+    .reduce((total, entry) => total + entry.bytes, 0) <= budget);
 
   const exact = [
     { key: key(110), bytes: 8 * gibibyte, usedMs: 1 },
     { key: key(111), bytes: 8 * gibibyte, usedMs: 2 },
   ];
   assert.deepEqual(
-    selectDependencyCacheEvictions(exact, key(111), DEPENDENCY_CACHE_BYTE_BUDGET),
+    selectDependencyCacheEvictions(exact, budget),
     [],
     "exactly the budget is retained",
   );
@@ -235,173 +238,270 @@ test("byte-budget eviction takes the least recently used keys and never the prot
     { key: key(121), bytes: 7 * gibibyte, usedMs: 2 },
     { key: key(122), bytes: 5 * gibibyte, usedMs: 3 },
   ];
-  assert.deepEqual(selectDependencyCacheEvictions(refreshable, key(122), DEPENDENCY_CACHE_BYTE_BUDGET), [key(120)]);
+  assert.deepEqual(selectDependencyCacheEvictions(refreshable, budget), [key(120)]);
   refreshable[0]!.usedMs = 10;
   assert.deepEqual(
-    selectDependencyCacheEvictions(refreshable, key(122), DEPENDENCY_CACHE_BYTE_BUDGET),
+    selectDependencyCacheEvictions(refreshable, budget),
     [key(121)],
     "refreshing the oldest usage marker changes the victim",
   );
 
-  assert.throws(
-    () => selectDependencyCacheEvictions(
-      [{ key: key(130), bytes: DEPENDENCY_CACHE_BYTE_BUDGET + 1, usedMs: 1 }], key(130), DEPENDENCY_CACHE_BYTE_BUDGET,
-    ),
-    /protected-entry-exceeds-byte-budget/u,
-    "a protected entry larger than the budget is a named refusal",
+  assert.deepEqual(
+    selectDependencyCacheEvictions([{ key: key(130), bytes: budget + 1, usedMs: 1 }], budget),
+    [key(130)],
   );
 });
 
-test("locked byte-budget enforcement deletes multiple oldest entries and preserves exact-budget state", async () => {
-  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-budget-"));
-  try {
-    const store = await openStore(root);
-    const keys = [key(1), key(2), key(3)];
-    for (const entryKey of keys) await publish(store, root, entryKey);
-    await orderUsage(store, keys);
-    const sizes = await Promise.all(keys.map((entryKey) => accountDependencyCacheEntryBytes(store.entryPath(entryKey))));
-    const exactBudget = Number(sizes.reduce((total, size) => total + size, 0n));
-
-    const exactEvents: CacheStoreEvent[] = [];
-    await store.enforceByteBudget(key(3), undefined, (event) => exactEvents.push(event), exactBudget);
-    assert.deepEqual(exactEvents, [], "exact budget emits no eviction");
-
-    const events: CacheStoreEvent[] = [];
-    await store.enforceByteBudget(key(3), undefined, (event) => events.push(event), Number(sizes[2]));
-    assert.deepEqual(events, [key(1), key(2)].map((evicted) => ({
-      event: "eviction", key: evicted.slice(0, 16), condition: "byte-budget",
-    })));
-    await assert.rejects(lstat(store.entryPath(key(1))), /ENOENT/u);
-    await assert.rejects(lstat(store.entryPath(key(2))), /ENOENT/u);
-    await assert.rejects(lstat(usageMarker(store, key(1))), /ENOENT/u);
-    await assert.rejects(lstat(usageMarker(store, key(2))), /ENOENT/u);
-    assert.equal((await lstat(store.entryPath(key(3)))).isDirectory(), true);
-  } finally {
-    await cleanupRoot(root);
-  }
-});
-
-test("an oversized protected publication is rolled back and rejected with audit evidence", async () => {
-  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-rollback-"));
+test("legacy entries are measured only by maintenance and publication stays conservative", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-legacy-"));
   try {
     const store = await openStore(root);
     await publish(store, root, key(1));
-    const bytes = await accountDependencyCacheEntryBytes(store.entryPath(key(1)));
-    const events: CacheStoreEvent[] = [];
+    await rm(join(store.root, `accounting/${key(1)}.json`));
+    const second = await sourceTree(root, "legacy-second", "second\n");
+    assert.equal(await store.publishEntry(expectation(key(2)), await describeTargetTrees(second, TARGET_PATHS), second), "skipped");
 
-    await assert.rejects(
-      store.enforceByteBudget(key(1), key(1), (event) => events.push(event), Number(bytes - 1n)),
-      (error: unknown) => error instanceof Error
-        && error.name === "DependencyCacheBudgetError"
-        && /protected-entry-exceeds-byte-budget/u.test(error.message),
-    );
-
-    await assert.rejects(lstat(store.entryPath(key(1))), /ENOENT/u, "the rolled-back entry is gone");
-    await assert.rejects(lstat(usageMarker(store, key(1))), /ENOENT/u, "its usage marker goes with it");
-    assert.deepEqual(events, [
-      { event: "eviction", key: key(1).slice(0, 16), condition: "byte-budget" },
-      { event: "integrity-refusal", key: key(1).slice(0, 16), condition: "protected-entry-exceeds-byte-budget" },
-    ]);
+    await store.maintainByteBudget(() => undefined);
+    assert.equal(await store.publishEntry(expectation(key(2)), await describeTargetTrees(second, TARGET_PATHS), second), "published");
   } finally {
     await cleanupRoot(root);
   }
 });
 
-test("an entry that cannot be safely evicted rejects the byte-budget invariant", async () => {
-  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-eviction-failure-"));
-  const entriesRoot = join(root, "cache/entries");
+test("slow trash deletion does not hold the root lock or block another reader", { timeout: 10_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-delete-lock-"));
+  let deletionStarted!: () => void;
+  const deleting = new Promise<void>((resolve) => { deletionStarted = resolve; });
+  let releaseDeletion!: () => void;
+  const deletionHeld = new Promise<void>((resolve) => { releaseDeletion = resolve; });
   try {
-    const store = await openStore(root);
+    const store = await openStore(root, { deleteTrash: async (path) => {
+      deletionStarted();
+      await deletionHeld;
+      await makeWritable(path);
+      await rm(path, { recursive: true, force: true });
+    } });
     await publish(store, root, key(1));
     await publish(store, root, key(2));
     await orderUsage(store, [key(1), key(2)]);
-    const currentBytes = await accountDependencyCacheEntryBytes(store.entryPath(key(2)));
-    await chmod(entriesRoot, 0o555);
-    const events: CacheStoreEvent[] = [];
+    const size = await accountDependencyCacheEntryBytes(store.entryPath(key(2)));
+    const maintenance = store.maintainByteBudget(() => undefined, Number(size));
+    await deleting;
 
-    await assert.rejects(
-      store.enforceByteBudget(key(2), undefined, (event) => events.push(event), Number(currentBytes)),
-      (error: unknown) => error instanceof Error
-        && error.name === "DependencyCacheBudgetError"
-        && /eviction-failed/u.test(error.message),
-    );
-    assert.ok(events.some(({ event, key: evicted, condition }) =>
-      event === "integrity-refusal" && evicted === key(1).slice(0, 16) && condition?.startsWith("eviction-failed")));
-    assert.equal(events.some(({ event }) => event === "eviction"), false);
-  } finally {
-    await chmod(entriesRoot, 0o711).catch(() => undefined);
-    await cleanupRoot(root);
-  }
-});
-
-test("an unrelated corrupt entry refuses the pass and preserves a valid new publication", async () => {
-  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-unrelated-"));
-  try {
-    const store = await openStore(root);
-    await publish(store, root, key(1));
-    await publish(store, root, key(2));
-    await makeWritable(store.entryPath(key(1)));
-    await writeFile(join(store.entryPath(key(1)), "metadata.json"), "malformed\n");
-    const events: CacheStoreEvent[] = [];
-
-    await assert.rejects(
-      store.enforceByteBudget(key(2), key(2), (event) => events.push(event)),
-      /metadata-unreadable/u,
-    );
-
-    assert.equal((await lstat(store.entryPath(key(2)))).isDirectory(), true);
-    assert.equal((await lstat(usageMarker(store, key(2)))).isFile(), true);
-    assert.equal(events.some(({ event }) => event === "eviction"), false);
-  } finally {
-    await cleanupRoot(root);
-  }
-});
-
-test("orphan publication stages are reaped and unrecognised usage files are left alone", async () => {
-  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-orphan-"));
-  try {
-    const store = await openStore(root);
-    await publish(store, root, key(1));
-    const staging = join(store.root, "entries/.stage-0123456789abcdef-orphaned");
-    await mkdir(staging);
-    await writeFile(join(staging, "partial-snapshot"), "interrupted publication\n");
-    const stray = join(store.root, "usage/stray-operator-file");
-    await writeFile(stray, "not a cache usage marker\n");
-
-    await store.enforceByteBudget(key(1), undefined, () => undefined);
-
-    await assert.rejects(lstat(staging), /ENOENT/u, "an orphaned stage is reaped under the exclusive lock");
-    assert.equal((await lstat(stray)).isFile(), true, "unrecognised usage files are ignored, not mutated");
-    assert.equal((await lstat(store.entryPath(key(1)))).isDirectory(), true);
-  } finally {
-    await cleanupRoot(root);
-  }
-});
-
-test("exclusive byte-budget enforcement waits for an existing shared lock owner", async () => {
-  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-lock-"));
-  try {
-    const store = await openStore(root);
-    await publish(store, root, key(1));
-    let enterShared!: () => void;
-    const sharedEntered = new Promise<void>((resolve) => { enterShared = resolve; });
-    let releaseShared!: () => void;
-    const sharedHeld = new Promise<void>((resolve) => { releaseShared = resolve; });
-
-    const shared = store.withSharedLock(async () => {
-      enterShared();
-      await sharedHeld;
+    await store.withSharedLock(async () => {
+      assert.equal((await lstat(store.entryPath(key(2)))).isDirectory(), true);
     });
-    await sharedEntered;
-    let settled = false;
-    const enforcement = store.enforceByteBudget(key(1), undefined, () => undefined)
-      .finally(() => { settled = true; });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(settled, false, "blocking exclusive retention must wait instead of skipping enforcement");
+    releaseDeletion();
+    assert.equal(await maintenance, "maintained");
+    await assert.rejects(lstat(store.entryPath(key(1))), /ENOENT/u);
+  } finally {
+    releaseDeletion?.();
+    await cleanupRoot(root);
+  }
+});
 
-    releaseShared();
-    await Promise.all([shared, enforcement]);
+test("maintenance backs off while a shared owner is active and never detaches its entry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-active-reader-"));
+  try {
+    const store = await openStore(root);
+    await publish(store, root, key(1));
+    let entered!: () => void;
+    const sharedEntered = new Promise<void>((resolve) => { entered = resolve; });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const shared = store.withSharedLock(async () => { entered(); await held; });
+    await sharedEntered;
+    assert.equal(await store.maintainByteBudget(() => undefined, 0), "busy");
     assert.equal((await lstat(store.entryPath(key(1)))).isDirectory(), true);
+    release();
+    await shared;
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("maintenance refreshes LRU markers after acquiring the root lock", { timeout: 10_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-lru-refresh-"));
+  let deletionStarted!: () => void;
+  const deleting = new Promise<void>((resolve) => { deletionStarted = resolve; });
+  let releaseDeletion!: () => void;
+  const deletionHeld = new Promise<void>((resolve) => { releaseDeletion = resolve; });
+  try {
+    const initial = await openStore(root, { deleteTrash: async () => { throw new Error("leave crash trash"); } });
+    for (const entryKey of [key(1), key(2), key(3)]) await publish(initial, root, entryKey);
+    await orderUsage(initial, [key(1), key(2), key(3)]);
+    const size = await accountDependencyCacheEntryBytes(initial.entryPath(key(1)));
+    await initial.maintainByteBudget(() => undefined, Number(size * 2n));
+
+    const store = await openStore(root, { deleteTrash: async (path) => {
+      deletionStarted();
+      await deletionHeld;
+      await makeWritable(path);
+      await rm(path, { recursive: true, force: true });
+    } });
+    await orderUsage(store, [key(2), key(3)]);
+    const maintenance = store.maintainByteBudget(() => undefined, Number(size));
+    await deleting;
+    await store.recordUse(key(2));
+    releaseDeletion();
+    await maintenance;
+
+    assert.equal((await lstat(store.entryPath(key(2)))).isDirectory(), true, "the just-hit entry remains");
+    await assert.rejects(lstat(store.entryPath(key(3))), /ENOENT/u, "the stale snapshot is not used for eviction");
+  } finally {
+    releaseDeletion?.();
+    await cleanupRoot(root);
+  }
+});
+
+test("a competing publication observes the real maintenance flock and skips", { timeout: 10_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-flock-"));
+  let deletionStarted!: () => void;
+  const deleting = new Promise<void>((resolve) => { deletionStarted = resolve; });
+  let releaseDeletion!: () => void;
+  const deletionHeld = new Promise<void>((resolve) => { releaseDeletion = resolve; });
+  try {
+    const cleaner = await openStore(root, { deleteTrash: async (path) => {
+      deletionStarted(); await deletionHeld; await makeWritable(path); await rm(path, { recursive: true, force: true });
+    } });
+    await publish(cleaner, root, key(1));
+    const size = await accountDependencyCacheEntryBytes(cleaner.entryPath(key(1)));
+    const maintenance = cleaner.maintainByteBudget(() => undefined, 0);
+    await deleting;
+    const publisher = await openStore(root);
+    const source = await sourceTree(root, "contended", "contended\n");
+    assert.equal(await publisher.publishEntry(
+      expectation(key(2)), await describeTargetTrees(source, TARGET_PATHS), source, Number(size * 4n),
+    ), "skipped");
+    releaseDeletion();
+    await maintenance;
+  } finally {
+    releaseDeletion?.();
+    await cleanupRoot(root);
+  }
+});
+
+test("crash trash and orphan stages are recovered by a later maintenance pass", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-crash-trash-"));
+  try {
+    const failing = await openStore(root, { deleteTrash: async () => { throw new Error("simulated crash"); } });
+    await publish(failing, root, key(1));
+    await failing.maintainByteBudget(() => undefined, 0);
+    assert.ok((await readdir(join(failing.root, "trash"))).length > 0);
+    const stage = join(failing.root, "entries/.stage-orphaned");
+    await mkdir(stage);
+    await writeFile(join(stage, "partial"), "partial\n");
+
+    const recovered = await openStore(root);
+    await recovered.maintainByteBudget(() => undefined);
+    assert.deepEqual(await readdir(join(recovered.root, "trash")), []);
+    await assert.rejects(lstat(stage), /ENOENT/u);
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("capacity skips do not create stages and pressure lets maintenance reclaim headroom", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-pressure-"));
+  try {
+    const store = await openStore(root);
+    await publish(store, root, key(1));
+    const size = await accountDependencyCacheEntryBytes(store.entryPath(key(1)));
+    const source = await sourceTree(root, "pressure", "pressure\n");
+    const targets = await describeTargetTrees(source, TARGET_PATHS);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      assert.equal(await store.publishEntry(expectation(key(2)), targets, source, Number(size)), "skipped");
+    }
+    assert.deepEqual(await readdir(join(store.root, "entries")), [key(1)]);
+    assert.deepEqual(await readdir(join(store.root, "trash")), []);
+
+    await store.maintainByteBudget(() => undefined, Number(size));
+    assert.equal(await store.publishEntry(expectation(key(2)), targets, source, Number(size)), "published");
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("oversized publications skip without pressuring maintenance to evict usable entries", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-oversized-"));
+  try {
+    const store = await openStore(root);
+    await publish(store, root, key(1));
+    const retainedBytes = await accountDependencyCacheEntryBytes(store.entryPath(key(1)));
+    const source = await sourceTree(root, "oversized", "oversized\n");
+    assert.equal(await store.publishEntry(
+      expectation(key(2)), await describeTargetTrees(source, TARGET_PATHS), source, 1,
+    ), "skipped");
+    await assert.rejects(lstat(join(store.root, "pressure.json")), /ENOENT/u);
+
+    await store.maintainByteBudget(() => undefined, Number(retainedBytes));
+    assert.equal((await lstat(store.entryPath(key(1)))).isDirectory(), true);
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("unsafe accounting and pressure paths fail closed without following symlinks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-unsafe-accounting-"));
+  try {
+    const store = await openStore(root);
+    await publish(store, root, key(1));
+    const sentinel = join(root, "sentinel");
+    await writeFile(sentinel, "preserved\n");
+    const record = join(store.root, `accounting/${key(1)}.json`);
+    await rm(record);
+    await symlink(sentinel, record);
+    const source = await sourceTree(root, "unsafe", "unsafe\n");
+    assert.equal(await store.publishEntry(
+      expectation(key(2)), await describeTargetTrees(source, TARGET_PATHS), source,
+    ), "skipped");
+
+    await rm(join(store.root, "pressure.json"));
+    await symlink(sentinel, join(store.root, "pressure.json"));
+    const events: CacheStoreEvent[] = [];
+    assert.equal(await store.maintainByteBudget((event) => events.push(event)), "maintained");
+    assert.equal(await readFile(sentinel, "utf8"), "preserved\n");
+    assert.ok(events.some(({ event }) => event === "integrity-refusal"));
+    assert.equal((await store.readEntry(expectation(key(1)))).key, key(1));
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("maintenance resumes deletion of writable partial trash after a crash", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-partial-trash-"));
+  try {
+    const interrupted = await openStore(root, { deleteTrash: async (path) => {
+      await makeWritable(path);
+      await rm(join(path, "metadata.json"), { force: true });
+      throw new Error("simulated mid-delete crash");
+    } });
+    await publish(interrupted, root, key(1));
+    await interrupted.maintainByteBudget(() => undefined, 0);
+    assert.ok((await readdir(join(interrupted.root, "trash"))).length > 0);
+
+    const recovered = await openStore(root);
+    assert.equal(await recovered.maintainByteBudget(() => undefined), "maintained");
+    assert.deepEqual(await readdir(join(recovered.root, "trash")), []);
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("an aborted maintenance pass leaves entries attached for a later pass", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-abort-"));
+  try {
+    const store = await openStore(root);
+    await publish(store, root, key(1));
+    const controller = new AbortController();
+    controller.abort();
+    const events: CacheStoreEvent[] = [];
+    await assert.rejects(
+      store.maintainByteBudget((event) => events.push(event), 0, { signal: controller.signal }),
+      (error: unknown) => error instanceof Error && error.name === "AbortError",
+    );
+    assert.equal((await lstat(store.entryPath(key(1)))).isDirectory(), true);
+    assert.ok(events.some(({ event, outcome }) => event === "maintenance" && outcome === "aborted"));
   } finally {
     await cleanupRoot(root);
   }
@@ -440,11 +540,6 @@ test("allocated-byte accounting rejects special files instead of treating them a
     await makeImmutable(entry);
 
     await assert.rejects(accountDependencyCacheEntryBytes(entry), /special-file/u);
-    await assert.rejects(
-      store.enforceByteBudget(key(1), undefined, () => undefined),
-      /special-file/u,
-      "retention refuses rather than sizing a population it cannot walk",
-    );
   } finally {
     await cleanupRoot(root);
   }
