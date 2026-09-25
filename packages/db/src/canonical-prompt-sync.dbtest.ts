@@ -1297,6 +1297,7 @@ test("sync recreates a missing spec revalidator with read-only repository covera
 for (const { name: specialName, source: sourceName } of [
   { name: "senior-dev-sol-high", source: "senior-dev-astra-medium" },
   { name: "senior-dev-opus-medium", source: "senior-dev-astra-medium" },
+  { name: "senior-dev-astra-high", source: "senior-dev-astra-medium" },
   { name: "review-coordinator-sol-high", source: "review-coordinator-astra-medium" },
   { name: "plan-executor-sol-high", source: "plan-executor-astra-low" },
 ] as const) {

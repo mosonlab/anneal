@@ -48,6 +48,7 @@ import { installCanonicalDefaultStaffingProfiles } from "../src/staffing-profile
 const SENIOR_DEV_SOL_ROLE = "senior-dev-sol-high";
 const SENIOR_DEV_OPUS_ROLE = "senior-dev-opus-medium";
 const SENIOR_DEV_ASTRA_LOW_ROLE = "senior-dev-astra-low";
+const SENIOR_DEV_ASTRA_HIGH_ROLE = "senior-dev-astra-high";
 const SENIOR_DEV_ROLE = "senior-dev-astra-medium";
 const REVIEW_COORDINATOR_SOL_ROLE = "review-coordinator-sol-high";
 const REVIEW_COORDINATOR_ROLE = "review-coordinator-astra-medium";
@@ -70,6 +71,7 @@ const SPECIAL_CANONICAL_AGENTS: readonly {
   { canonicalRole: SENIOR_DEV_SOL_ROLE, source: SENIOR_DEV_ROLE, permissions: null },
   { canonicalRole: SENIOR_DEV_OPUS_ROLE, source: SENIOR_DEV_ROLE, permissions: null },
   { canonicalRole: SENIOR_DEV_ASTRA_LOW_ROLE, source: SENIOR_DEV_ROLE, permissions: null },
+  { canonicalRole: SENIOR_DEV_ASTRA_HIGH_ROLE, source: SENIOR_DEV_ROLE, permissions: null },
   { canonicalRole: REVIEW_COORDINATOR_SOL_ROLE, source: REVIEW_COORDINATOR_ROLE, permissions: null },
   { canonicalRole: PLAN_EXECUTOR_SOL_ROLE, source: PLAN_EXECUTOR_ROLE, permissions: null },
 ];
@@ -765,13 +767,39 @@ export const main = async (
           }
 
           await adoptRenamedCanonicalRoles(tx, project.id, (message) => projectError(project, message));
+          const requiredSpecialRoles = new Set(specialCanonicalRolesUsedByProjectTemplates(
+            project,
+            canonicalProject,
+            installationRows,
+            templateSources,
+          ));
+          // Keep the user-named Astra high escalation role available in an
+          // existing canonical-template Project when its designated source is
+          // already present. Partial Projects without that source stay valid.
+          if (project.id !== canonicalProject.id && installationRows.length > 0) {
+            const source = await findCanonicalAgent(tx, {
+              projectId: project.id,
+              canonicalRole: SENIOR_DEV_ROLE,
+              activeOnly: true,
+            });
+            if (source) {
+              const existingAstraHigh = await findCanonicalAgent(tx, {
+                projectId: project.id,
+                canonicalRole: SENIOR_DEV_ASTRA_HIGH_ROLE,
+                activeOnly: false,
+              });
+              if (!existingAstraHigh || existingAstraHigh.archivedAt === null) {
+                requiredSpecialRoles.add(SENIOR_DEV_ASTRA_HIGH_ROLE);
+              }
+            }
+          }
           await migrateSpecialCanonicalAgents(
             tx,
             project,
             sources,
             rolesByRole,
             projectCounters,
-            specialCanonicalRolesUsedByProjectTemplates(project, canonicalProject, installationRows, templateSources),
+            requiredSpecialRoles,
           );
           await synchronizeAgents(
             tx,

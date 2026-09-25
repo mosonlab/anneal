@@ -1892,6 +1892,11 @@ curl -X POST "$BASE_URL/projects/$PROJECT_ID/tasks" \
 ### GET `/tasks/:taskId`
 
 - Required path parameter: `taskId`.
+- A Run's `subagentModel` and `subagentMaxConcurrent` describe its native-child
+  launch capability. Both `null` means no platform-enabled capability; a `null`
+  model with a concurrency limit lets the root choose child models (new Direct
+  Implementation Runs). A non-null model retains the Run's fixed child model.
+  These fields do not prove that a child actually ran.
 - Each returned Run's `session.latestAgentMessage` is either `null` when the
   session has no non-empty qualifying text event, or `{body, at}` containing the
   newest qualifying event's plain-text body and timestamp. Only the Run holding

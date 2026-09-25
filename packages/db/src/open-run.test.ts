@@ -336,6 +336,41 @@ test("Run birth derives a manual commit policy from delivery shape and snapshots
   }
 });
 
+test("fresh Direct Implementation Runs enable autonomous children at either step index", async () => {
+  for (const stepIndex of [1, 2]) {
+    const task = taskRow({
+      assigneeAgent: agent({ model: "gpt-6-luna:max", runnerPreference: RunnerPreference.CODEX }),
+      repoId: "repo-1", repo: { id: "repo-1", defaultBranch: "main" },
+      templateId: "template-direct", templateStepId: "direct-implementation",
+      templateStep: {
+        id: "direct-implementation", stepIndex, outputKind: "implementation",
+        runner: null, baseFromStepIndex: null, taskTemplate: { name: "direct-engineer-workflow" },
+      },
+    });
+    const { tx, creates } = fakeTx(task);
+    assert.equal((await openRun(tx, task.id, { kind: "task-created", readyAt: now })).ok, true);
+    assert.equal(creates[0]!.subagentModel, null);
+    assert.equal(creates[0]!.subagentMaxConcurrent, 8);
+  }
+});
+
+test("a retired Direct Chain keeps its fixed-child contract when its first Implementation Run opens", async () => {
+  const task = taskRow({
+    assigneeAgent: agent({ model: "gpt-6-luna:max", runnerPreference: RunnerPreference.CODEX }),
+    repoId: "repo-1", repo: { id: "repo-1", defaultBranch: "main" },
+    templateId: "template-retired-direct", templateStepId: "direct-implementation",
+    templateStep: {
+      id: "direct-implementation", stepIndex: 2, outputKind: "implementation",
+      runner: null, baseFromStepIndex: null,
+      taskTemplate: { name: "direct-engineer-workflow-legacy-pre-direct-work-directed-delegation-row" },
+    },
+  });
+  const { tx, creates } = fakeTx(task);
+  assert.equal((await openRun(tx, task.id, { kind: "task-created", readyAt: now })).ok, true);
+  assert.equal(creates[0]!.subagentModel, NATIVE_IMPLEMENTATION_SUBAGENT_MODEL);
+  assert.equal(creates[0]!.subagentMaxConcurrent, 8);
+});
+
 test("a retry snapshots the current Step commit contract instead of inheriting its prior Run", async () => {
   const task = taskRow({
     templateId: "template-1",
@@ -1872,6 +1907,23 @@ for (const intent of reassignedRetryIntents) {
     assert.equal(creates[0]!.model, "claude-opus-5:high");
     assert.equal(creates[0]!.branch, expectedBranch);
     assert.equal(creates[0]!.targetBranch, "main");
+  });
+
+  test(`${intent.kind} preserves autonomous child selection on retry`, async () => {
+    const unchanged = agent({ model: "gpt-5.6-sol:high", runnerPreference: RunnerPreference.CODEX });
+    const task = taskRow({
+      assigneeAgent: unchanged,
+      repoId: "repo-1",
+      repo: { id: "repo-1", defaultBranch: "main" },
+      runs: [priorRun({
+        runner: RunnerKind.CODEX, model: "gpt-5.6-sol:high",
+        subagentModel: null, subagentMaxConcurrent: NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT,
+      })],
+    });
+    const { tx, creates } = fakeTx(task, { lockedAgent: unchanged });
+    assert.equal((await openRun(tx, "task-1", intent)).ok, true);
+    assert.equal(creates[0]!.subagentModel, null);
+    assert.equal(creates[0]!.subagentMaxConcurrent, NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT);
   });
 
   test(`${intent.kind} replaces a retired native subagent pin with the current one`, async () => {

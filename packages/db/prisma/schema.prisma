@@ -1124,8 +1124,8 @@ model Run {
   /// Immutable launch snapshot. DEFAULT is explicit rather than an omitted
   /// provider value, so Anneal never delegates this choice to `auto`.
   codexServiceTier              CodexServiceTier       @default(DEFAULT)
-  /// Immutable native-child capability snapshot. Null outside Codex
-  /// implementation steps; fixed by the platform rather than Agent setup.
+  /// Immutable native-child capability snapshot. Both null disables it;
+  /// a null model with a concurrency limit lets the root choose child models.
   subagentModel                 String?
   subagentMaxConcurrent         Int?
   authMode                      String?

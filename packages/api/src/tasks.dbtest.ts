@@ -1565,6 +1565,18 @@ test("Run native subagent snapshots reject incomplete or noncanonical capability
     ...base, runNumber: 4, dedupeKey: `task:${context.task.id}:run:4`,
     subagentModel: "gpt-5.6-luna:max", subagentMaxConcurrent: 8,
   } });
+  await db.run.create({ data: {
+    ...base, runNumber: 5, dedupeKey: `task:${context.task.id}:run:5`,
+    subagentModel: null, subagentMaxConcurrent: 8,
+  } });
+  for (const [runNumber, runner, subagentMaxConcurrent] of [
+    [6, "CLAUDE", 8], [7, "PI", 8], [8, "CODEX", 7],
+  ] as const) {
+    await assert.rejects(() => db.run.create({ data: {
+      ...base, runNumber, runner, dedupeKey: `task:${context.task.id}:run:${runNumber}`,
+      subagentModel: null, subagentMaxConcurrent,
+    } }));
+  }
 });
 
 test("an archive committing under the lock is seen by task creation and by instantiation", { timeout: 30_000 }, async () => {

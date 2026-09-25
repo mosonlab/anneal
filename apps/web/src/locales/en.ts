@@ -967,6 +967,7 @@ export const en = {
   "taskDetail.run.id": "Run ID",
   "taskDetail.run.leaseGeneration": "Lease generation",
   "taskDetail.run.nativeSubagents": "Native subagents",
+  "taskDetail.run.autonomousSubagentModel": "Agent-selected model",
   "taskDetail.run.openSession": "Open session ↗",
   "taskDetail.run.pullRequest": "Pull request",
   "taskDetail.run.push": "Push",

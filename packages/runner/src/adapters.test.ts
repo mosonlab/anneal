@@ -847,6 +847,27 @@ test("native implementation subagents are pinned on fresh and resumed Codex laun
   );
 });
 
+test("autonomous native subagents keep the cap without a model override on fresh and resumed launches", () => {
+  const autonomous = {
+    ...claim,
+    run: { ...claim.run, subagentModel: null, subagentMaxConcurrent: 8 },
+  };
+  const spec = { ...runSpec(), claim: autonomous };
+  const resume = { ...spec, providerConversationId: "thread-autonomous", input: "continue" };
+  for (const args of [argsForRunner("CODEX", spec), argsForRunner("CODEX", resume, resume)]) {
+    assert.ok(args.includes("multi_agent_v2"));
+    assert.ok(args.includes("agents.max_concurrent_threads_per_session=8"));
+    assert.ok(!args.some((arg) => /agents\.default_subagent_(model|reasoning_effort)/u.test(arg)));
+  }
+  const prompt = buildPrompt(autonomous);
+  assert.match(prompt, /Choose whether to delegate and select available child models/u);
+  assert.doesNotMatch(prompt, /Do not select or escalate a child model/u);
+  assert.throws(() => buildPrompt({ ...autonomous, runner: "PI" }), /require a Codex root Run/u);
+  assert.throws(() => buildPrompt({
+    ...autonomous, run: { ...autonomous.run, subagentMaxConcurrent: 7 },
+  }), /need concurrency 8/u);
+});
+
 test("the PI extension injects the explicit tier only into openai-codex requests", async () => {
   type ProviderContext = { model?: { provider?: string }; abort(): void; shutdown(): void };
   const loaded = await import(pathToFileURL(piExtensionPath()).href) as {

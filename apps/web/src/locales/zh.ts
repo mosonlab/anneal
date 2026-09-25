@@ -963,6 +963,7 @@ export const zh = {
   "taskDetail.run.id": "运行 ID",
   "taskDetail.run.leaseGeneration": "租约代次",
   "taskDetail.run.nativeSubagents": "原生子代理",
+  "taskDetail.run.autonomousSubagentModel": "主代理自主选型",
   "taskDetail.run.openSession": "打开会话 ↗",
   "taskDetail.run.pullRequest": "Pull request",
   "taskDetail.run.push": "推送",

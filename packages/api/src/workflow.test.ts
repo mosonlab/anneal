@@ -107,7 +107,7 @@ test("deriveRunConfig preserves the selected Agent runtime profile for ordinary 
   }), /requires a Codex gpt-\* model/u);
 });
 
-test("Codex implementation steps receive the fixed native Luna child capability", () => {
+test("Direct Codex implementation chooses child models while Compound retains its pin", () => {
   const compound = {
     stepIndex: 5,
     outputKind: "implementation",
@@ -125,7 +125,15 @@ test("Codex implementation steps receive the fixed native Luna child capability"
   };
   const expected = { subagentModel: "gpt-6-luna:max", subagentMaxConcurrent: 8 };
   assert.deepEqual(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, compound), expected);
-  assert.deepEqual(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, direct), expected);
+  for (const stepIndex of [1, 2]) {
+    assert.deepEqual(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, { ...direct, stepIndex }), {
+      subagentModel: null, subagentMaxConcurrent: 8,
+    });
+  }
+  assert.deepEqual(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, {
+    ...direct,
+    taskTemplate: { name: "direct-engineer-workflow-legacy-pre-direct-work-directed-delegation-row" },
+  }), expected);
   assert.equal(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, pullRequestWorkflow), null);
   assert.equal(nativeImplementationSubagentRunConfig(RunnerKind.CLAUDE, direct), null);
   assert.equal(nativeImplementationSubagentRunConfig(RunnerKind.CODEX, null), null);

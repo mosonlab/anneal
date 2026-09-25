@@ -1,10 +1,16 @@
+/** Restore the fixed-child Direct prompt for deployed-generation sync fixtures. */
+export const restorePreDirectAutonomyPrompt = (prompt: string): string => prompt.replace(
+  "Implement this task on {{branchName}} directly from the feature brief below — a direct chain carries no spec or plan phase, so the brief is the specification of record. The platform materializes `.chain/{{branchName}}/spec.md` as the specification of record; leave it untouched.\n\nChoose whether and how to delegate based on the work, and select session-supported child models and reasoning effort to fit it. Give each concurrent writer its own branch and git worktree. Integrate and verify all child work against the specification of record and acceptance criteria in your context, resolve conflicts, and own final acceptance. Children must not perform irreversible external actions.\n\nFollow the platform-pinned Implementation proof boundary after integration. ",
+  "Implement this task on {{branchName}} directly from the feature brief below — a direct chain carries no spec or plan phase, so the brief is the specification of record. The platform materializes `.chain/{{branchName}}/spec.md` as the specification of record; leave it untouched. The platform pins native child threads to Luna max and limits the session to eight concurrent children. Use them only when the brief contains independent, safely parallel work; group related change points instead of creating one child per item. In the controlled resource limit, fill as many slots as can execute safely in parallel. Give every concurrent writer its own branch and git worktree, and keep coupled work in your own context. When at least two child-writer branches need integration, start one long-lived merger after the first result is ready; integrate a sole child-writer branch yourself. The merger integrates completed branches in dependency-safe order, resolves only mechanical conflicts, reruns affected narrow tests, and reports semantic conflicts to you. Follow the platform-pinned Implementation proof boundary after integration. Give a failed child one bounded correction in the same thread, then take over its assignment yourself. A child must not perform irreversible external actions. ",
+);
+
 /**
  * Restore the Regression bytes retired by the Chain workspace scope rollover
  * (2026-09-24), which exempted the tracked `.chain/` directory from scope
  * checks. Every registered generation predates it, so the older fixtures apply
  * it before reconstructing their earlier prompt bytes.
  */
-export const restorePreChainWorkspaceScopePrompt = (prompt: string): string => prompt
+export const restorePreChainWorkspaceScopePrompt = (prompt: string): string => restorePreDirectAutonomyPrompt(prompt)
   .replace(
     " The tracked `.chain/` Chain workspace is platform bookkeeping that merge execution strips from the merge commit tree; it never counts toward diff-scope, forbidden-surface, or changed-file acceptance checks, so never report it as a defect or modify it.",
     "",

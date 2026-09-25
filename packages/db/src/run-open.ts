@@ -174,8 +174,8 @@ export const isCompoundImplementationAssigneeError = (
 ): error is CompoundImplementationAssigneeError =>
   error instanceof Error && error.name === "CompoundImplementationAssigneeError";
 
-/** The child model new implementation Runs and their retries snapshot. Bumping it
- * needs no migration: a Run already opened keeps executing its own snapshot. */
+/** The model fixed-child implementation Runs and their retries snapshot.
+ * A Run already opened keeps executing its own snapshot. */
 export const NATIVE_IMPLEMENTATION_SUBAGENT_MODEL = "gpt-6-luna:max";
 export const NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT = 8;
 
@@ -188,11 +188,14 @@ export const isDirectImplementationStep = (templateStep: CompoundImplementationS
 export const nativeImplementationSubagentRunConfig = (
   runner: RunnerKind,
   templateStep: CompoundImplementationStepShape,
-): { subagentModel: string; subagentMaxConcurrent: number } | null => {
+): { subagentModel: string | null; subagentMaxConcurrent: number } | null => {
   if (runner !== RunnerKind.CODEX) return null;
   if (!isCompoundImplementationStep(templateStep) && !isDirectImplementationStep(templateStep)) return null;
+  // Retired Direct templates still carry the fixed-child prompt, including
+  // Chains whose Implementation has not opened its first Run yet.
+  const autonomous = templateStep?.taskTemplate?.name === DIRECT_TEMPLATE_NAME;
   return {
-    subagentModel: NATIVE_IMPLEMENTATION_SUBAGENT_MODEL,
+    subagentModel: autonomous ? null : NATIVE_IMPLEMENTATION_SUBAGENT_MODEL,
     subagentMaxConcurrent: NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT,
   };
 };

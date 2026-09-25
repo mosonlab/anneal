@@ -81,7 +81,7 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
 const bodyOf = (source: string): string => source.split("---\n").slice(2).join("---\n");
 
 test("canonical OpenAI roles pin their Codex model and runner", async () => {
-  const [reviewCoordinator, reviewCoordinatorSol, codeReviewerSol, planExecutor, planExecutorSol, librarian, specRevalidator, seniorDev, reviewFix] = await Promise.all([
+  const [reviewCoordinator, reviewCoordinatorSol, codeReviewerSol, planExecutor, planExecutorSol, librarian, specRevalidator, seniorDev, seniorDevAstraHigh, reviewFix] = await Promise.all([
     roleSource("review-coordinator-astra-medium"),
     roleSource("review-coordinator-sol-high"),
     roleSource("code-reviewer-sol-high"),
@@ -90,6 +90,7 @@ test("canonical OpenAI roles pin their Codex model and runner", async () => {
     roleSource("librarian-luna-high"),
     roleSource("spec-revalidator-luna-high"),
     roleSource("senior-dev-astra-medium"),
+    roleSource("senior-dev-astra-high"),
     roleSource("senior-dev-astra-low"),
   ]);
 
@@ -111,9 +112,12 @@ test("canonical OpenAI roles pin their Codex model and runner", async () => {
   assert.equal(frontmatterValue(specRevalidator, "runner"), "codex");
   assert.equal(frontmatterValue(seniorDev, "model"), "gpt-6-astra:medium");
   assert.equal(frontmatterValue(seniorDev, "runner"), "codex");
+  assert.equal(frontmatterValue(seniorDevAstraHigh, "model"), "gpt-6-astra:high");
+  assert.equal(frontmatterValue(seniorDevAstraHigh, "runner"), "codex");
   assert.equal(frontmatterValue(reviewFix, "model"), "gpt-6-astra:low");
   assert.equal(frontmatterValue(reviewFix, "runner"), "codex");
-  assert.equal(reviewFix.rolePrompt, seniorDev.rolePrompt);
+  assert.equal(bodyOf(reviewFix), bodyOf(seniorDev));
+  assert.equal(bodyOf(seniorDevAstraHigh), bodyOf(seniorDev));
 });
 
 test("canonical role slugs spell role-model-effort and titles name the role only", async () => {
@@ -215,6 +219,7 @@ test("named canonical roles use their model catalog runner and retired role name
     "regression-verifier-luna-max",
     "librarian-luna-high",
     "senior-dev-astra-medium",
+    "senior-dev-astra-high",
     "senior-dev-sol-high",
     "senior-dev-opus-medium",
     "senior-dev-astra-low",
@@ -482,9 +487,10 @@ test("the direct template sources expose the layered review spine and mechanical
     directImplementation,
     /The platform materializes `\.chain\/\{\{branchName\}\}\/spec\.md` as the specification of record; leave it untouched\./u,
   );
-  assert.match(directImplementation, /at least two child-writer branches need integration/u);
-  assert.match(directImplementation, /integrate a sole child-writer branch yourself/u);
-  assert.match(directImplementation, /resolves only mechanical conflicts[\s\S]*reports semantic conflicts to you/u);
+  assert.match(directImplementation, /Choose whether and how to delegate/u);
+  assert.match(directImplementation, /session-supported child models and reasoning effort/u);
+  assert.doesNotMatch(directImplementation, /Luna|max merger|child-writer branches|one bounded correction/u);
+  assert.match(directImplementation, /resolve conflicts, and own final acceptance/u);
   assert.match(directImplementation, /platform-pinned Implementation proof boundary/u);
   assert.match(directTemplateSteps[6]!.prompt, /server-owned mechanical readiness step/u);
   // Readiness is server-owned and the terminal step is the sentinel-bound

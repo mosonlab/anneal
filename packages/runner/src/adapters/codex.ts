@@ -84,15 +84,21 @@ export const isCodexProviderDisconnect = (evidence: ExitEvidence, providerState:
 };
 
 export const codexNativeSubagentProfile = (run: ClaimedTask["run"], runner: RunnerKind): {
-  model: string;
-  effort: string;
+  model: string | null;
+  effort: string | null;
   maxConcurrent: number;
 } | null => {
   if (run.subagentModel === null && run.subagentMaxConcurrent === null) return null;
-  if (run.subagentModel === null || run.subagentMaxConcurrent === null) {
+  if (run.subagentMaxConcurrent === null) {
     throw new Error("Run contains an incomplete native subagent snapshot");
   }
   if (runner !== "CODEX") throw new Error("Native implementation subagents require a Codex root Run");
+  if (run.subagentModel === null) {
+    if (run.subagentMaxConcurrent !== NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT) {
+      throw new Error(`Native implementation subagents need concurrency ${NATIVE_IMPLEMENTATION_SUBAGENT_MAX_CONCURRENT}`);
+    }
+    return { model: null, effort: null, maxConcurrent: run.subagentMaxConcurrent };
+  }
   // The control plane chose the child model when it opened the Run; executing
   // that snapshot lets a Run opened before a model bump finish on its own pin.
   const { model, effort } = modelSpec(run.subagentModel);
@@ -122,8 +128,10 @@ const nativeSubagentArgs = (run: ClaimedTask["run"]): string[] => {
   if (!profile) return [];
   return [
     "--enable", "multi_agent_v2",
-    "-c", `agents.default_subagent_model=${JSON.stringify(profile.model)}`,
-    "-c", `agents.default_subagent_reasoning_effort=${JSON.stringify(profile.effort)}`,
+    ...(profile.model === null ? [] : [
+      "-c", `agents.default_subagent_model=${JSON.stringify(profile.model)}`,
+      "-c", `agents.default_subagent_reasoning_effort=${JSON.stringify(profile.effort)}`,
+    ]),
     "-c", `agents.max_concurrent_threads_per_session=${profile.maxConcurrent}`,
   ];
 };
@@ -133,12 +141,16 @@ const codexPromptSections = (claim: ClaimedTask): string[] => {
   if (!profile) return [];
   return [
     "",
-    "Platform-pinned native implementation subagents:",
-    `- model: ${profile.model}`,
-    `- reasoning effort: ${profile.effort}`,
+    "Native implementation subagents:",
+    ...(profile.model === null ? [
+      "- Choose whether to delegate and select available child models and reasoning effort according to the work. You own integration and acceptance.",
+    ] : [
+      `- model: ${profile.model}`,
+      `- reasoning effort: ${profile.effort}`,
+      "- The runner enforces the same child model and concurrency snapshot on fresh starts and resumes. Do not select or escalate a child model.",
+    ]),
     `- maximum concurrent child threads: ${profile.maxConcurrent} (root excluded)`,
     "- multi_agent_v2 is enabled by the runner. Spawn, message, wait for, and close native children through the session collaboration tools; do not launch nested Codex CLI processes.",
-    "- The runner enforces the same child model and concurrency snapshot on fresh starts and resumes. Do not select or escalate a child model.",
   ];
 };
 

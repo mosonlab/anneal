@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { restorePreChainWorkspaceScopePrompt, restorePreDefectClassSweepPrompt, restorePreFrozenRegressionPrompt, restorePreOptionalReviewPrompt, restorePreSolHighHazardTierPrompt, restorePreSolHighHardTierPrompt, restorePreTierRevalidationPrompt } from "./canonical-prompt-sync-fixtures.js";
+import { restorePreDirectAutonomyPrompt, restorePreChainWorkspaceScopePrompt, restorePreDefectClassSweepPrompt, restorePreFrozenRegressionPrompt, restorePreOptionalReviewPrompt, restorePreSolHighHazardTierPrompt, restorePreSolHighHardTierPrompt, restorePreTierRevalidationPrompt } from "./canonical-prompt-sync-fixtures.js";
 import { LEGACY_TEMPLATE_GENERATIONS, templatePromptGenerationDigest } from "./canonical-template-transition.js";
 import { loadAllTemplateStepSources } from "./template-sources.js";
 
@@ -65,4 +65,10 @@ test("sync fixtures reconstruct the registered pre-chain-workspace-scope-exempti
     const steps = sources.get(name)!.map((step) => ({ ...step, prompt: restorePreChainWorkspaceScopePrompt(step.prompt) }));
     assert.equal(templatePromptGenerationDigest(steps), LEGACY_TEMPLATE_GENERATIONS[name].find((generation) => generation.marker === "pre-chain-workspace-scope-exemption")!.promptDigest, name);
   }
+});
+
+test("sync fixtures reconstruct the deployed pre-direct-work-directed-delegation generation", async () => {
+  const sources = await loadAllTemplateStepSources();
+  const steps = sources.get("direct-engineer-workflow")!.map((step) => ({ ...step, prompt: restorePreDirectAutonomyPrompt(step.prompt) }));
+  assert.equal(templatePromptGenerationDigest(steps), LEGACY_TEMPLATE_GENERATIONS["direct-engineer-workflow"].find((generation) => generation.marker === "pre-direct-work-directed-delegation")!.promptDigest);
 });

@@ -419,6 +419,7 @@ test("sync recreates missing special Agents before adopting historical bindings"
   const project = await createProject(`a2-special-bindings-${randomBytes(4).toString("hex")}`);
   const refusedProject = await createProject(`a2-special-bindings-refused-${randomBytes(4).toString("hex")}`);
   const healthyProject = await createProject(`a2-special-bindings-healthy-${randomBytes(4).toString("hex")}`);
+  const noAstraSourceProject = await createProject(`a2-special-bindings-no-astra-source-${randomBytes(4).toString("hex")}`);
   const overrides = new Map([
     ["review-coordinator-sol-high", "review-coordinator-astra-medium"],
     ["plan-executor-sol-high", "plan-executor-astra-low"],
@@ -429,6 +430,7 @@ test("sync recreates missing special Agents before adopting historical bindings"
     "spec-revalidator-luna-high",
     "review-coordinator-sol-high",
     "plan-executor-sol-high",
+    "senior-dev-astra-high",
   ]);
   const names = new Set([
     ...(await templateAssigneeNames("direct-engineer-workflow")),
@@ -452,6 +454,7 @@ test("sync recreates missing special Agents before adopting historical bindings"
     await deleteProject(project.id);
     await deleteProject(refusedProject.id);
     await deleteProject(healthyProject.id);
+    await deleteProject(noAstraSourceProject.id);
   });
   for (const sourceName of [
     "code-reviewer-sol-high",
@@ -484,6 +487,11 @@ test("sync recreates missing special Agents before adopting historical bindings"
     .filter((name) => name !== "code-reviewer-opus-medium");
   const refusedAgents = await createAgents(refusedProject, refusedNames);
   await copyTemplate(refusedProject, "direct-engineer-workflow", refusedAgents);
+  const noAstraSourceAgents = await createAgents(
+    noAstraSourceProject,
+    await templateAssigneeNames("direct-engineer-workflow"),
+  );
+  await copyTemplate(noAstraSourceProject, "direct-engineer-workflow", noAstraSourceAgents);
   await createAgents(healthyProject, ["default"]);
   const healthyAgent = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: healthyProject.id, name: "default" } },
@@ -508,6 +516,11 @@ test("sync recreates missing special Agents before adopting historical bindings"
   assert.equal(summary.projects[project.slug]!.createdAgents, missingSpecialRoles.size);
   assert.equal(summary.projects[project.slug]!.createdAgentRepoGrants, missingSpecialRoles.size);
   assert.equal(summary.projects[healthyProject.slug]!.templates, 0);
+  assert.ok(summary.projects[noAstraSourceProject.slug], "a partial Project without the Astra medium source still syncs");
+  assert.equal(summary.projects[noAstraSourceProject.slug]!.createdAgents, 0);
+  assert.equal(await prisma.agent.count({
+    where: { projectId: noAstraSourceProject.id, canonicalRole: "senior-dev-astra-high" },
+  }), 0);
   assert.equal(Object.hasOwn(summary.projects, refusedProject.slug), false);
   assert.equal(await prisma.agent.count({ where: { projectId: project.id, canonicalRole: { in: [...missingSpecialRoles] } } }), missingSpecialRoles.size);
   const grants = await prisma.agentRepoAccess.findMany({
@@ -519,6 +532,7 @@ test("sync recreates missing special Agents before adopting historical bindings"
     ["plan-executor-sol-high", RepoPermission.GIT_WRITE],
     ["regression-verifier-luna-max", RepoPermission.GIT_WRITE],
     ["review-coordinator-sol-high", RepoPermission.GIT_WRITE],
+    ["senior-dev-astra-high", RepoPermission.GIT_WRITE],
     ["spec-revalidator-luna-high", RepoPermission.GIT_READ],
   ]);
   const assigneeName = async (templateId: string, stepIndex: number): Promise<string | null> => (

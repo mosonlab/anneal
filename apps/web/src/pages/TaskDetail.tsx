@@ -176,8 +176,8 @@ export const RunRow = ({ run, remoteUrl, baseline, expanded, onToggle }: { run: 
                 { k: t("taskDetail.run.serviceTier"), v: tierApplies
                   ? <Pill tone={run.codexServiceTier === "FAST" ? "green" : "grey"}>{t(`serviceTier.${run.codexServiceTier}`)}</Pill>
                   : "—" },
-                { k: t("taskDetail.run.nativeSubagents"), v: run.subagentModel && run.subagentMaxConcurrent
-                  ? `${run.subagentModel} · max ${run.subagentMaxConcurrent}`
+                { k: t("taskDetail.run.nativeSubagents"), v: run.subagentMaxConcurrent
+                  ? `${run.subagentModel ?? t("taskDetail.run.autonomousSubagentModel")} · max ${run.subagentMaxConcurrent}`
                   : "—" },
                 { k: t("taskDetail.run.leaseGeneration"), v: `${run.leaseGeneration}` },
                 { k: t("taskDetail.run.workspace"), v: <span className="text-[11.5px]">{run.workspacePath ?? "—"}{run.workspaceRetained ? ` ${t("taskDetail.run.retained")}` : ""}</span> },

@@ -63,6 +63,10 @@ import type { PersistedTemplateStepStructure } from "./template-sources.js";
  * named `senior-dev-astra-medium` as the `hazard` tier's Agent, before the tier's
  * canonical role moved to `senior-dev-sol-high` (2026-09-19 ruling).
  * Prompt-only in the direct template.
+ * `pre-direct-work-directed-delegation`: the direct implementation prompt
+ * before implementers chose whether and how to delegate and staff child threads.
+ * Prompt-only in the direct template; the compound executor keeps its separate
+ * pinned child policy.
  */
 export type LegacyTemplateGeneration = Readonly<{
   marker: string;
@@ -413,6 +417,20 @@ const legacyTemplateGenerations = {
       // changed-file acceptance checks. The graph is unchanged.
       marker: "pre-chain-workspace-scope-exemption",
       promptDigest: "1f0e2e51164d32a69ba9911b845ba310e0651791c67b1f5f11bb40d6463cc458",
+      shape: [
+        { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
+        { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
+        { name: "Code review", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "review-findings", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null, provisionDependencies: false },
+        { name: "Blind code review", assigneeType: AssigneeType.AGENT, approvalGate: false, optional: true, outputKind: "blind-findings", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: 2, layer: 3, spawnPolicy: null, provisionDependencies: false },
+        { name: "Apply review fixes", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "fixed-implementation", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 4, spawnPolicy: null },
+        { name: "Regression verification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "regression-verification-v2", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 5, spawnPolicy: null },
+        { name: "Merge authorization", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-authorization", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 6, spawnPolicy: null },
+        { name: "Merge execution", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "merge-result", attachmentsFromPrevious: true, opensPullRequest: false, baseFromStepIndex: null, layer: 7, spawnPolicy: null },
+      ],
+    },
+    {
+      marker: "pre-direct-work-directed-delegation",
+      promptDigest: "4ec2f0b834a5412c536ac0b6f41e714bd22193bcb23a767e649e13b21cd37de1",
       shape: [
         { name: "Revalidate specification", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "revalidation", attachmentsFromPrevious: false, opensPullRequest: false, baseFromStepIndex: null, layer: 1, spawnPolicy: null },
         { name: "Implementation", assigneeType: AssigneeType.AGENT, approvalGate: false, outputKind: "implementation", attachmentsFromPrevious: false, requiresCommit: true, opensPullRequest: true, baseFromStepIndex: null, layer: 2, spawnPolicy: null },
@@ -858,7 +876,7 @@ export const LEGACY_TEMPLATE_GENERATIONS: Readonly<
  * `agents/templates/` and fails on a mismatch.
  */
 export const CANONICAL_SOURCE_PROMPT_GENERATIONS = {
-  [DIRECT_TEMPLATE_NAME]: "4ec2f0b834a5412c536ac0b6f41e714bd22193bcb23a767e649e13b21cd37de1",
+  [DIRECT_TEMPLATE_NAME]: "e2abb23fbd2e3306fb64c8b7b63560a4c11c9a04e8fdbf38790166a77e936f5c",
   "compound-engineer-workflow": "48e594e3fb62ba1101d96fede1aa71b8fb776b4e9b08e2f1a287758f64806239",
   [PR_TEMPLATE_NAME]: "d749e399aa98598d802cb4b6704330a1f8a7031e54ab3bdff87f8c43be0c2130",
 } as const satisfies Readonly<Record<CanonicalTemplateRegistryName, string>>;

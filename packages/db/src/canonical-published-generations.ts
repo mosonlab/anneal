@@ -66,6 +66,7 @@ export const PUBLISHED_PROMPT_GENERATIONS = {
     { digest: "57c1f304441e38bf4a0dd63bb7a9f031dbcbc55acf52ac0ff16d416a885d5ceb" },
     { digest: "1f0e2e51164d32a69ba9911b845ba310e0651791c67b1f5f11bb40d6463cc458" },
     { digest: "4ec2f0b834a5412c536ac0b6f41e714bd22193bcb23a767e649e13b21cd37de1" },
+    { digest: "e2abb23fbd2e3306fb64c8b7b63560a4c11c9a04e8fdbf38790166a77e936f5c" },
   ],
   "compound-engineer-workflow": [
     { digest: "e1e95c18a408a0c1847508ed16d4c60ae3978007dfccdbfe50cd793ee8a78fa9", retiredByShape: "model-neutral-review-step-names" },
