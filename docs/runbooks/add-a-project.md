@@ -227,10 +227,11 @@ and templates are left absent. If a present canonical template needs a missing
 role listed in `SPECIAL_CANONICAL_AGENTS`, sync recreates that special Agent
 from its designated active source (including the source's environment, tools,
 and repository grants) before adopting the step binding. Aside from
-`senior-dev-astra-high`, no unbound special Agent is created. A Project with an
-existing canonical template receives that explicit escalation role when an
+`senior-dev-astra-high` and `senior-dev-astra-xhigh`, no unbound special Agent is
+created. A Project with an
+existing canonical template receives those explicit escalation roles when an
 active `senior-dev-astra-medium` source exists. A missing source or an archived
-high role leaves the optional role absent or archived without refusing the
+high or xhigh role leaves that optional role absent or archived without refusing the
 Project. A missing non-special target, or a missing/archived source for a role
 the template needs, still refuses that Project. `agentos-example` remains the
 canonical Project and its complete template inventory is restored when a

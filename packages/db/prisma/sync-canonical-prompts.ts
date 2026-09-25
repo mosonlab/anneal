@@ -49,6 +49,7 @@ const SENIOR_DEV_SOL_ROLE = "senior-dev-sol-high";
 const SENIOR_DEV_OPUS_ROLE = "senior-dev-opus-medium";
 const SENIOR_DEV_ASTRA_LOW_ROLE = "senior-dev-astra-low";
 const SENIOR_DEV_ASTRA_HIGH_ROLE = "senior-dev-astra-high";
+const SENIOR_DEV_ASTRA_XHIGH_ROLE = "senior-dev-astra-xhigh";
 const SENIOR_DEV_ROLE = "senior-dev-astra-medium";
 const REVIEW_COORDINATOR_SOL_ROLE = "review-coordinator-sol-high";
 const REVIEW_COORDINATOR_ROLE = "review-coordinator-astra-medium";
@@ -72,6 +73,7 @@ const SPECIAL_CANONICAL_AGENTS: readonly {
   { canonicalRole: SENIOR_DEV_OPUS_ROLE, source: SENIOR_DEV_ROLE, permissions: null },
   { canonicalRole: SENIOR_DEV_ASTRA_LOW_ROLE, source: SENIOR_DEV_ROLE, permissions: null },
   { canonicalRole: SENIOR_DEV_ASTRA_HIGH_ROLE, source: SENIOR_DEV_ROLE, permissions: null },
+  { canonicalRole: SENIOR_DEV_ASTRA_XHIGH_ROLE, source: SENIOR_DEV_ROLE, permissions: null },
   { canonicalRole: REVIEW_COORDINATOR_SOL_ROLE, source: REVIEW_COORDINATOR_ROLE, permissions: null },
   { canonicalRole: PLAN_EXECUTOR_SOL_ROLE, source: PLAN_EXECUTOR_ROLE, permissions: null },
 ];
@@ -773,7 +775,7 @@ export const main = async (
             installationRows,
             templateSources,
           ));
-          // Keep the user-named Astra high escalation role available in an
+          // Keep the user-named Astra high and xhigh escalation roles available in an
           // existing canonical-template Project when its designated source is
           // already present. Partial Projects without that source stay valid.
           if (project.id !== canonicalProject.id && installationRows.length > 0) {
@@ -783,13 +785,15 @@ export const main = async (
               activeOnly: true,
             });
             if (source) {
-              const existingAstraHigh = await findCanonicalAgent(tx, {
-                projectId: project.id,
-                canonicalRole: SENIOR_DEV_ASTRA_HIGH_ROLE,
-                activeOnly: false,
-              });
-              if (!existingAstraHigh || existingAstraHigh.archivedAt === null) {
-                requiredSpecialRoles.add(SENIOR_DEV_ASTRA_HIGH_ROLE);
+              for (const canonicalRole of [SENIOR_DEV_ASTRA_HIGH_ROLE, SENIOR_DEV_ASTRA_XHIGH_ROLE]) {
+                const existing = await findCanonicalAgent(tx, {
+                  projectId: project.id,
+                  canonicalRole,
+                  activeOnly: false,
+                });
+                if (!existing || existing.archivedAt === null) {
+                  requiredSpecialRoles.add(canonicalRole);
+                }
               }
             }
           }

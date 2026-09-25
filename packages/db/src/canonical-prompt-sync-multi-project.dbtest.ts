@@ -431,6 +431,7 @@ test("sync recreates missing special Agents before adopting historical bindings"
     "review-coordinator-sol-high",
     "plan-executor-sol-high",
     "senior-dev-astra-high",
+    "senior-dev-astra-xhigh",
   ]);
   const names = new Set([
     ...(await templateAssigneeNames("direct-engineer-workflow")),
@@ -519,7 +520,7 @@ test("sync recreates missing special Agents before adopting historical bindings"
   assert.ok(summary.projects[noAstraSourceProject.slug], "a partial Project without the Astra medium source still syncs");
   assert.equal(summary.projects[noAstraSourceProject.slug]!.createdAgents, 0);
   assert.equal(await prisma.agent.count({
-    where: { projectId: noAstraSourceProject.id, canonicalRole: "senior-dev-astra-high" },
+    where: { projectId: noAstraSourceProject.id, canonicalRole: { in: ["senior-dev-astra-high", "senior-dev-astra-xhigh"] } },
   }), 0);
   assert.equal(Object.hasOwn(summary.projects, refusedProject.slug), false);
   assert.equal(await prisma.agent.count({ where: { projectId: project.id, canonicalRole: { in: [...missingSpecialRoles] } } }), missingSpecialRoles.size);
@@ -533,6 +534,7 @@ test("sync recreates missing special Agents before adopting historical bindings"
     ["regression-verifier-luna-max", RepoPermission.GIT_WRITE],
     ["review-coordinator-sol-high", RepoPermission.GIT_WRITE],
     ["senior-dev-astra-high", RepoPermission.GIT_WRITE],
+    ["senior-dev-astra-xhigh", RepoPermission.GIT_WRITE],
     ["spec-revalidator-luna-high", RepoPermission.GIT_READ],
   ]);
   const assigneeName = async (templateId: string, stepIndex: number): Promise<string | null> => (
@@ -1269,10 +1271,10 @@ test("summary reports every Project, nested canonical keys, lexical slugs, and f
   const activeCounters: CanonicalSyncCounters = {
     ...zeroCounters(),
     templates: 2,
-    createdAgents: 1,
+    createdAgents: 2,
     adoptedAgentDefaults: 1,
     adoptedDependencyProvisioning: 4,
-    updated: 8,
+    updated: 9,
     updatedSteps: {
       ...zeroSteps(),
       "pr-engineer-workflow": { ...zeroSteps()["pr-engineer-workflow"], "1": 1 },

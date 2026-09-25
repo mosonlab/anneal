@@ -29,7 +29,7 @@ copying the designated source Agent's environment, tools, and repository
 grants. Projects without such a template keep their partial inventory, and a
 missing or archived source Agent still refuses that Project. Their Astra
 counterparts remain available as explicit user-named escalation roles.
-Ordinary sync also installs `senior-dev-astra-high` in Projects with a canonical
+Ordinary sync also installs `senior-dev-astra-high` and `senior-dev-astra-xhigh` in Projects with a canonical
 template and an active `senior-dev-astra-medium` source, copying that source's
 environment, tool restrictions, and repository grants. Partial Projects without
 that source keep their inventory.
@@ -179,8 +179,8 @@ explicit Claude route an operator names to spend Claude capacity. The Astra role
 roster for history and explicit staffing, but are used only when the user names
 one for that dispatch after a Sol high attempt actually fails; the optional
 `review-astra-medium` staffing profile remains available for that escalation.
-The `senior-dev-astra-high` Agent is available only when the user explicitly
-selects it; it is not a default or automatic fallback.
+The `senior-dev-astra-high` and `senior-dev-astra-xhigh` Agents are available only
+when the user explicitly selects them; neither is a default or automatic fallback.
 Keep experiments out of `roles/`; create them as local overlays and archive
 them when no longer needed so a seed cannot silently turn an experiment into a
 release default. Implementation-assignee escalation follows the

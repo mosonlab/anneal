@@ -81,7 +81,7 @@ test("canonical role frontmatter matches the Prisma seed contract", async () => 
 const bodyOf = (source: string): string => source.split("---\n").slice(2).join("---\n");
 
 test("canonical OpenAI roles pin their Codex model and runner", async () => {
-  const [reviewCoordinator, reviewCoordinatorSol, codeReviewerSol, planExecutor, planExecutorSol, librarian, specRevalidator, seniorDev, seniorDevAstraHigh, reviewFix] = await Promise.all([
+  const [reviewCoordinator, reviewCoordinatorSol, codeReviewerSol, planExecutor, planExecutorSol, librarian, specRevalidator, seniorDev, seniorDevAstraHigh, seniorDevAstraXhigh, reviewFix] = await Promise.all([
     roleSource("review-coordinator-astra-medium"),
     roleSource("review-coordinator-sol-high"),
     roleSource("code-reviewer-sol-high"),
@@ -91,6 +91,7 @@ test("canonical OpenAI roles pin their Codex model and runner", async () => {
     roleSource("spec-revalidator-luna-high"),
     roleSource("senior-dev-astra-medium"),
     roleSource("senior-dev-astra-high"),
+    roleSource("senior-dev-astra-xhigh"),
     roleSource("senior-dev-astra-low"),
   ]);
 
@@ -118,6 +119,9 @@ test("canonical OpenAI roles pin their Codex model and runner", async () => {
   assert.equal(frontmatterValue(reviewFix, "runner"), "codex");
   assert.equal(bodyOf(reviewFix), bodyOf(seniorDev));
   assert.equal(bodyOf(seniorDevAstraHigh), bodyOf(seniorDev));
+  assert.equal(frontmatterValue(seniorDevAstraXhigh, "model"), "gpt-6-astra:xhigh");
+  assert.equal(frontmatterValue(seniorDevAstraXhigh, "runner"), "codex");
+  assert.equal(bodyOf(seniorDevAstraXhigh), bodyOf(seniorDev));
 });
 
 test("canonical role slugs spell role-model-effort and titles name the role only", async () => {
@@ -220,6 +224,7 @@ test("named canonical roles use their model catalog runner and retired role name
     "librarian-luna-high",
     "senior-dev-astra-medium",
     "senior-dev-astra-high",
+    "senior-dev-astra-xhigh",
     "senior-dev-sol-high",
     "senior-dev-opus-medium",
     "senior-dev-astra-low",
