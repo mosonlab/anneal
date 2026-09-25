@@ -13,7 +13,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import {
-  chmod, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rename, rm, statfs, writeFile,
+  chmod, cp, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rename, rm, rmdir, statfs,
+  unlink, writeFile,
 } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 
@@ -140,6 +141,9 @@ const sameJson = (left: unknown, right: unknown): boolean => JSON.stringify(left
 
 const errorCode = (error: unknown): string | undefined => (error as NodeJS.ErrnoException).code;
 
+const isBestEffortWriteError = (error: unknown): boolean =>
+  ["ENOSPC", "EDQUOT", "EIO", "EACCES", "EPERM", "EROFS"].includes(errorCode(error) ?? "");
+
 const pathKind = async (path: string): Promise<"missing" | "directory" | "file" | "symlink" | "other"> => {
   try {
     const info = await lstat(path);
@@ -150,6 +154,21 @@ const pathKind = async (path: string): Promise<"missing" | "directory" | "file" 
   } catch (error: unknown) {
     if (errorCode(error) === "ENOENT") return "missing";
     throw error;
+  }
+};
+
+const readManagedFile = async (path: string, maxBytes: number, condition: string): Promise<string | null> => {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW).catch((error: unknown) => {
+    if (errorCode(error) === "ENOENT") return null;
+    throw new DependencyCacheIntegrityError(`${condition}-unreadable:${errorCode(error) ?? "unknown"}`);
+  });
+  if (handle === null) return null;
+  try {
+    const info = await handle.stat();
+    if (!info.isFile() || info.size > maxBytes) throw new DependencyCacheIntegrityError(condition);
+    return await handle.readFile("utf8");
+  } finally {
+    await handle.close();
   }
 };
 
@@ -357,14 +376,6 @@ const makeImmutable = async (path: string): Promise<void> => {
   await chmod(path, info.isDirectory() ? 0o555 : 0o444 | (info.mode & 0o111));
 };
 
-const makeWritable = async (path: string): Promise<void> => {
-  const kind = await pathKind(path);
-  if (kind === "missing" || kind === "symlink") return;
-  const info = await lstat(path);
-  await chmod(path, info.mode | 0o700);
-  if (kind === "directory") for (const child of await readdir(path)) await makeWritable(join(path, child));
-};
-
 const allocatedBytes = (info: { blocks: number }): bigint => {
   if (!Number.isSafeInteger(info.blocks) || info.blocks < 0) {
     throw new DependencyCacheIntegrityError("invalid-allocated-size");
@@ -442,6 +453,31 @@ const accountDiscardableTree = async (path: string): Promise<bigint> => {
   return visit(root);
 };
 
+const removeDiscardableTree = async (path: string, checkAbort: () => void): Promise<void> => {
+  const root = resolve(path);
+  const visit = async (candidate: string): Promise<void> => {
+    checkAbort();
+    const info = await lstat(candidate).catch((error: unknown) => {
+      if (errorCode(error) === "ENOENT") return null;
+      throw error;
+    });
+    if (info === null) return;
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      await unlink(candidate);
+      return;
+    }
+    await chmod(candidate, 0o700);
+    for (const child of await readdir(candidate)) {
+      const childPath = join(candidate, child);
+      if (!insideOrEqual(root, childPath)) throw new DependencyCacheIntegrityError("entry-path-escape");
+      await visit(childPath);
+    }
+    checkAbort();
+    await rmdir(candidate);
+  };
+  await visit(root);
+};
+
 /** Allocated bytes an entry directory occupies, symlink inodes included. */
 export const accountDependencyCacheEntryBytes = async (entry: string): Promise<bigint> => {
   let bytes: bigint;
@@ -516,7 +552,7 @@ export type CacheEntryStore = {
   withSharedLock: <T>(work: () => Promise<T>) => Promise<T>;
   /** Refuse a usage marker that is not a plain file before it is trusted. */
   validateUseMarker: (key: string) => Promise<void>;
-  recordUse: (key: string) => Promise<void>;
+  recordUse: (key: string) => Promise<boolean>;
   /** Validate the entry under `expected.key` against `expected` and return it. */
   readEntry: (expected: CacheEntryExpectation) => Promise<CacheEntryDocument>;
   /** Snapshot `targets` out of `source` into a new immutable entry. */
@@ -532,6 +568,10 @@ export type CacheEntryStore = {
 export type CacheEntryStoreOptions = {
   /** Overrides slow trash deletion for deterministic tests. */
   deleteTrash?: (path: string) => Promise<void>;
+  /** Wraps one stage detach for deterministic fault injection. */
+  moveStageToTrash?: (move: () => Promise<void>) => Promise<void>;
+  /** Wraps one usage-marker write for deterministic fault injection. */
+  writeUseMarker?: (write: () => Promise<void>) => Promise<void>;
 };
 
 /**
@@ -613,21 +653,56 @@ export const openCacheEntryStore = async (
     }
   };
 
-  const recordUse = async (key: string): Promise<void> => {
+  const recordUse = async (key: string): Promise<boolean> => {
     if (!CACHE_KEY.test(key)) throw new Error("Dependency cache usage key is invalid");
     const marker = join(usageRoot, key);
-    const handle = await open(
-      marker,
-      constants.O_CREAT | constants.O_WRONLY | constants.O_TRUNC | constants.O_NOFOLLOW,
-      0o600,
-    ).catch((error: unknown) => {
-      throw new DependencyCacheIntegrityError(`usage-marker-unwritable:${errorCode(error) ?? "unknown"}`);
+    const prior = await lstat(marker).catch((error: unknown) => {
+      if (errorCode(error) === "ENOENT") return null;
+      throw error;
     });
-    try {
-      await handle.writeFile(`${new Date().toISOString()}\n`);
-    } finally {
-      await handle.close();
+    if (prior?.isSymbolicLink() || (prior !== null && !prior.isFile())) {
+      throw new DependencyCacheIntegrityError("unsafe-usage-marker");
     }
+    let handle;
+    try {
+      handle = await open(marker, constants.O_CREAT | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+    } catch (error: unknown) {
+      if (isBestEffortWriteError(error)) {
+        const current = await lstat(marker).catch(() => null);
+        if (current?.isSymbolicLink() || (current !== null && !current.isFile())) {
+          throw new DependencyCacheIntegrityError("unsafe-usage-marker");
+        }
+        return false;
+      }
+      throw new DependencyCacheIntegrityError(`usage-marker-unwritable:${errorCode(error) ?? "unknown"}`);
+    }
+    let succeeded = true;
+    let failure: unknown;
+    try {
+      const info = await handle.stat();
+      if (!info.isFile()) throw new DependencyCacheIntegrityError("unsafe-usage-marker");
+      const write = async (): Promise<void> => {
+        await handle.truncate(0);
+        await handle.writeFile(`${new Date().toISOString()}\n`);
+      };
+      if (options.writeUseMarker) await options.writeUseMarker(write);
+      else await write();
+    } catch (error: unknown) {
+      if (isBestEffortWriteError(error)) succeeded = false;
+      else failure = error instanceof DependencyCacheIntegrityError
+        ? error
+        : new DependencyCacheIntegrityError(`usage-marker-unwritable:${errorCode(error) ?? "unknown"}`);
+    }
+    try {
+      await handle.close();
+    } catch (error: unknown) {
+      if (isBestEffortWriteError(error)) succeeded = false;
+      else if (failure === undefined) {
+        failure = new DependencyCacheIntegrityError(`usage-marker-unwritable:${errorCode(error) ?? "unknown"}`);
+      }
+    }
+    if (failure !== undefined) throw failure;
+    return succeeded;
   };
 
   const validateUseMarker = async (key: string): Promise<void> => {
@@ -687,17 +762,11 @@ export const openCacheEntryStore = async (
     name: string, path: string, key?: string, verifyMetadata = true,
   ): Promise<SizeRecord | null> => {
     const recordPath = sizeRecordPath(name);
-    const info = await lstat(recordPath).catch((error: unknown) => {
-      if (errorCode(error) === "ENOENT") return null;
-      throw error;
-    });
-    if (info === null) return null;
-    if (info.isSymbolicLink() || !info.isFile() || info.size > 64 * 1024) {
-      throw new DependencyCacheIntegrityError("unsafe-size-record");
-    }
+    const content = await readManagedFile(recordPath, 64 * 1024, "unsafe-size-record");
+    if (content === null) return null;
     let parsed: unknown;
     try {
-      parsed = JSON.parse(await readFile(recordPath, "utf8"));
+      parsed = JSON.parse(content);
     } catch {
       throw new DependencyCacheIntegrityError("malformed-size-record");
     }
@@ -708,8 +777,10 @@ export const openCacheEntryStore = async (
     if (record.format !== "agentos-runner-dependency-cache-size-v1"
       || record.name !== name || typeof record.key !== "string" || (key !== undefined && record.key !== key)
       || !Number.isSafeInteger(record.bytes) || Number(record.bytes) < 0
-      || record.identity === undefined || typeof record.identity.dev !== "string" || typeof record.identity.ino !== "string"
+      || record.identity === null || record.identity === undefined || typeof record.identity !== "object"
+      || Array.isArray(record.identity) || typeof record.identity.dev !== "string" || typeof record.identity.ino !== "string"
       || (record.metadataIdentity !== null && (record.metadataIdentity === undefined
+        || typeof record.metadataIdentity !== "object" || Array.isArray(record.metadataIdentity)
         || typeof record.metadataIdentity.dev !== "string" || typeof record.metadataIdentity.ino !== "string"
         || !Number.isSafeInteger(record.metadataIdentity.size) || !Number.isFinite(record.metadataIdentity.mtimeMs)
         || !Number.isFinite(record.metadataIdentity.ctimeMs)))) {
@@ -737,21 +808,21 @@ export const openCacheEntryStore = async (
     let previous = 0;
     try {
       const pressurePath = join(root, PRESSURE_FILE);
-      const info = await lstat(pressurePath);
-      if (info.isSymbolicLink() || !info.isFile() || info.size > 64 * 1024) {
-        throw new DependencyCacheIntegrityError("unsafe-pressure-record");
+      const content = await readManagedFile(pressurePath, 64 * 1024, "unsafe-pressure-record");
+      if (content !== null) {
+        const value: unknown = JSON.parse(content);
+        if (value === null || typeof value !== "object" || Array.isArray(value)) {
+          throw new DependencyCacheIntegrityError("malformed-pressure-record");
+        }
+        const record = value as { requestedBytes?: unknown };
+        if (!Number.isSafeInteger(record.requestedBytes) || Number(record.requestedBytes) < 0) {
+          throw new DependencyCacheIntegrityError("malformed-pressure-record");
+        }
+        previous = Number(record.requestedBytes);
       }
-      const value: unknown = JSON.parse(await readFile(pressurePath, "utf8"));
-      if (value === null || typeof value !== "object" || Array.isArray(value)) {
-        throw new DependencyCacheIntegrityError("malformed-pressure-record");
-      }
-      const record = value as { requestedBytes?: unknown };
-      if (!Number.isSafeInteger(record.requestedBytes) || Number(record.requestedBytes) < 0) {
-        throw new DependencyCacheIntegrityError("malformed-pressure-record");
-      }
-      previous = Number(record.requestedBytes);
     } catch (error: unknown) {
-      if (errorCode(error) !== "ENOENT") throw new DependencyCacheIntegrityError("malformed-pressure-record");
+      if (error instanceof DependencyCacheIntegrityError) throw error;
+      throw new DependencyCacheIntegrityError("malformed-pressure-record");
     }
     const temporary = join(root, `.pressure-${process.pid}-${randomUUID()}`);
     const handle = await open(
@@ -771,11 +842,9 @@ export const openCacheEntryStore = async (
 
   const readPressure = async (): Promise<bigint> => {
     try {
-      const info = await lstat(join(root, PRESSURE_FILE));
-      if (info.isSymbolicLink() || !info.isFile() || info.size > 64 * 1024) {
-        throw new DependencyCacheIntegrityError("unsafe-pressure-record");
-      }
-      const value: unknown = JSON.parse(await readFile(join(root, PRESSURE_FILE), "utf8"));
+      const content = await readManagedFile(join(root, PRESSURE_FILE), 64 * 1024, "unsafe-pressure-record");
+      if (content === null) return 0n;
+      const value: unknown = JSON.parse(content);
       if (value === null || typeof value !== "object" || Array.isArray(value)) {
         throw new DependencyCacheIntegrityError("malformed-pressure-record");
       }
@@ -827,8 +896,12 @@ export const openCacheEntryStore = async (
     if (await pathKind(staging) === "missing") return;
     const name = `.trash-${key}-${randomUUID()}`;
     const destination = join(trashRoot, name);
-    await chmod(staging, 0o755);
-    await rename(staging, destination);
+    const move = async (): Promise<void> => {
+      await chmod(staging, 0o755);
+      await rename(staging, destination);
+    };
+    if (options.moveStageToTrash) await options.moveStageToTrash(move);
+    else await move();
     if (bytes !== undefined) await writeSizeRecord(await sizeRecordFor(name, key, destination, bytes, false));
   };
 
@@ -899,8 +972,12 @@ export const openCacheEntryStore = async (
       stagingBytes = await accountCacheEntry(staging);
       if (stagingBytes > budgetBytes || population + stagingBytes > budgetBytes) {
         if (stagingBytes <= budgetBytes) await writePressure(stagingBytes).catch(() => undefined);
-        await detachStage(staging, expected.key, stagingBytes);
-        staging = undefined;
+        try {
+          await detachStage(staging, expected.key, stagingBytes);
+          staging = undefined;
+        } catch {
+          // The orphan remains under entries or trash for background maintenance.
+        }
         return "skipped";
       }
       try {
@@ -912,8 +989,12 @@ export const openCacheEntryStore = async (
         if (await pathKind(entry) === "missing") throw error;
         try {
           await validateEntry(entry, expected);
-          await detachStage(staging, expected.key, stagingBytes);
-          staging = undefined;
+          try {
+            await detachStage(staging, expected.key, stagingBytes);
+            staging = undefined;
+          } catch {
+            // Convergence succeeded; cleanup remains background maintenance work.
+          }
           return "converged";
         } catch (validationError: unknown) {
           if (validationError instanceof DependencyCacheIntegrityError) return "refused";
@@ -921,16 +1002,21 @@ export const openCacheEntryStore = async (
         }
       }
       staging = undefined;
-      await writeSizeRecord(await sizeRecordFor(expected.key, expected.key, entry, stagingBytes));
+      try {
+        await writeSizeRecord(await sizeRecordFor(expected.key, expected.key, entry, stagingBytes));
+      } catch {
+        // The immutable entry is safe but legacy until maintenance accounts it.
+        return "skipped";
+      }
       return "published";
     } catch (error: unknown) {
-      if (!["ENOSPC", "EDQUOT"].includes(errorCode(error) ?? "")) throw error;
+      if (!isBestEffortWriteError(error)) throw error;
       await writePressure(estimatedBytes).catch(() => undefined);
       return "skipped";
     } finally {
       if (staging !== undefined) await detachStage(staging, expected.key, stagingBytes).catch(() => undefined);
       await flockAsync(maintenance.fd, "un").catch(() => undefined);
-      await maintenance.close();
+      await maintenance.close().catch(() => undefined);
     }
   };
 
@@ -1045,11 +1131,11 @@ export const openCacheEntryStore = async (
           checkAbort();
           const deleteStarted = Date.now();
           try {
+            report({ event: "maintenance", phase: "delete", outcome: "started", bytes: Number(candidate.bytes) });
             if (options.deleteTrash) {
               await options.deleteTrash(candidate.path);
             } else {
-              await makeWritable(candidate.path);
-              await rm(candidate.path, { recursive: true, force: true });
+              await removeDiscardableTree(candidate.path, checkAbort);
             }
             if (await pathKind(candidate.path) !== "missing") throw new Error("trash remained after deletion");
             await rm(sizeRecordPath(candidate.name), { force: true });
@@ -1058,6 +1144,7 @@ export const openCacheEntryStore = async (
               elapsedMs: Date.now() - deleteStarted,
             });
           } catch (error: unknown) {
+            if (maintenanceOptions.signal?.aborted) throw error;
             report({ event: "integrity-refusal", condition: `trash-delete-failed:${errorCode(error) ?? "unknown"}` });
           }
         }
@@ -1077,13 +1164,16 @@ export const openCacheEntryStore = async (
         return "busy";
       }
       const detached: Array<{ name: string; path: string; key: string; bytes: bigint }> = [];
+      let retainPressure = false;
       try {
         checkAbort();
-        // A restore may refresh usage between the account walk and this
-        // nonblocking exclusive lock. Re-read every marker now and select LRU
-        // victims from the settled population so a just-hit entry is spared.
-        const refreshedEntries: DependencyCacheRetentionSize[] = [];
-        for (const entry of entries) {
+        const toDetach = [...stages];
+        // Recheck only the planned victims. A refreshed marker defers that
+        // eviction and keeps pressure for the next pass rather than extending
+        // the root lock to recalculate the whole LRU population.
+        for (const key of plannedVictimKeys) {
+          const entry = entriesByKey.get(key);
+          if (entry === undefined) continue;
           const marker = join(usageRoot, entry.key);
           const markerInfo = await lstat(marker).catch((error: unknown) => {
             if (errorCode(error) === "ENOENT") return null;
@@ -1091,19 +1181,16 @@ export const openCacheEntryStore = async (
           });
           if (markerInfo?.isSymbolicLink() || (markerInfo !== null && !markerInfo.isFile())) {
             report({ event: "integrity-refusal", key: entry.key.slice(0, 16), condition: "unsafe-usage-marker" });
+            retainPressure = true;
             continue;
           }
-          refreshedEntries.push({
-            key: entry.key,
-            bytes: Number(entry.bytes),
-            usedMs: Number(markerInfo?.mtimeMs ?? entry.usedMs),
-          });
+          const currentUsedMs = Number(markerInfo?.mtimeMs ?? entry.usedMs);
+          if (currentUsedMs !== entry.usedMs) {
+            retainPressure = true;
+            continue;
+          }
+          toDetach.push(entry);
         }
-        const victimKeys = selectDependencyCacheEvictions(refreshedEntries, Number(target));
-        const toDetach = [
-          ...stages,
-          ...victimKeys.map((key) => entriesByKey.get(key)).filter((entry): entry is RetentionEntry => entry !== undefined),
-        ];
         for (const candidate of toDetach) {
           checkAbort();
           const current = await lstat(candidate.path).catch((error: unknown) => {
@@ -1138,7 +1225,8 @@ export const openCacheEntryStore = async (
       report({ event: "maintenance", phase: "detach", outcome: "completed", elapsedMs: Date.now() - detachStarted });
 
       await deleteCandidates(detached);
-      await rm(join(root, PRESSURE_FILE), { force: true });
+      if (retainPressure) await writePressure(0n).catch(() => undefined);
+      else await rm(join(root, PRESSURE_FILE), { force: true });
       return "maintained";
     } catch (error: unknown) {
       if (maintenanceOptions.signal?.aborted) {

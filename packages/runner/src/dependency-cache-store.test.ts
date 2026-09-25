@@ -171,23 +171,29 @@ test("usage markers are written per key and refused when they are not plain file
     const store = await openStore(root);
     await store.validateUseMarker(key(1));
 
-    await store.recordUse(key(1));
+    assert.equal(await store.recordUse(key(1)), true);
     const marker = usageMarker(store, key(1));
     assert.equal((await lstat(marker)).isFile(), true);
     const first = await readFile(marker, "utf8");
     assert.match(first, /^\d{4}-\d{2}-\d{2}T/u);
     await utimes(marker, new Date(1_000), new Date(1_000));
-    await store.recordUse(key(1));
+    assert.equal(await store.recordUse(key(1)), true);
     assert.ok((await lstat(marker)).mtimeMs > 1_000, "recording use refreshes the marker");
     await store.validateUseMarker(key(1));
+
+    const writeError = Object.assign(new Error("simulated marker write failure"), { code: "EIO" });
+    const bestEffort = await openStore(root, { writeUseMarker: async () => { throw writeError; } });
+    assert.equal(await bestEffort.recordUse(key(1)), false, "ordinary marker write failures do not fail a Run");
 
     await rm(marker);
     await mkdir(join(root, "marker-target"));
     await symlink(join(root, "marker-target"), marker);
     await assert.rejects(store.validateUseMarker(key(1)), /unsafe-usage-marker/u);
+    await assert.rejects(store.recordUse(key(1)), /unsafe-usage-marker/u);
     await rm(marker);
     await mkdir(marker);
     await assert.rejects(store.validateUseMarker(key(1)), /unsafe-usage-marker/u);
+    await assert.rejects(store.recordUse(key(1)), /unsafe-usage-marker/u);
 
     await assert.rejects(store.recordUse("not-a-cache-key"), /usage key is invalid/u);
   } finally {
@@ -320,7 +326,7 @@ test("maintenance backs off while a shared owner is active and never detaches it
   }
 });
 
-test("maintenance refreshes LRU markers after acquiring the root lock", { timeout: 10_000 }, async () => {
+test("maintenance defers a planned victim whose usage changed before detach", { timeout: 10_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-cache-store-lru-refresh-"));
   let deletionStarted!: () => void;
   const deleting = new Promise<void>((resolve) => { deletionStarted = resolve; });
@@ -347,7 +353,8 @@ test("maintenance refreshes LRU markers after acquiring the root lock", { timeou
     await maintenance;
 
     assert.equal((await lstat(store.entryPath(key(2)))).isDirectory(), true, "the just-hit entry remains");
-    await assert.rejects(lstat(store.entryPath(key(3))), /ENOENT/u, "the stale snapshot is not used for eviction");
+    assert.equal((await lstat(store.entryPath(key(3)))).isDirectory(), true, "the pass does not select a replacement");
+    assert.equal((await lstat(join(store.root, "pressure.json"))).isFile(), true, "a later pass will recalculate LRU");
   } finally {
     releaseDeletion?.();
     await cleanupRoot(root);
@@ -422,6 +429,23 @@ test("capacity skips do not create stages and pressure lets maintenance reclaim 
   }
 });
 
+test("a failed over-budget stage detach stays background cleanup and returns skipped", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-stage-detach-"));
+  try {
+    const detachError = Object.assign(new Error("simulated detach failure"), { code: "EIO" });
+    const store = await openStore(root, { moveStageToTrash: async () => { throw detachError; } });
+    const source = await sourceTree(root, "detach", "detach\n");
+    const targets = await describeTargetTrees(source, TARGET_PATHS);
+    const sourceBytes = await Promise.all(TARGET_PATHS.map((target) => accountedBytes(join(source, target))));
+    const budget = Number(sourceBytes.reduce((total, bytes) => total + bytes, 0n));
+
+    assert.equal(await store.publishEntry(expectation(key(1)), targets, source, budget), "skipped");
+    assert.ok((await readdir(join(store.root, "entries"))).some((name) => name.startsWith(".stage-")));
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
 test("oversized publications skip without pressuring maintenance to evict usable entries", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-cache-store-oversized-"));
   try {
@@ -468,6 +492,25 @@ test("unsafe accounting and pressure paths fail closed without following symlink
   }
 });
 
+test("nested malformed accounting identities are refused without throwing type errors", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-malformed-accounting-"));
+  try {
+    const store = await openStore(root);
+    await publish(store, root, key(1));
+    const recordPath = join(store.root, `accounting/${key(1)}.json`);
+    const record = JSON.parse(await readFile(recordPath, "utf8")) as Record<string, unknown>;
+    const source = await sourceTree(root, "malformed", "malformed\n");
+    const targets = await describeTargetTrees(source, TARGET_PATHS);
+
+    await writeFile(recordPath, `${JSON.stringify({ ...record, identity: null })}\n`);
+    assert.equal(await store.publishEntry(expectation(key(2)), targets, source), "skipped");
+    await writeFile(recordPath, `${JSON.stringify({ ...record, metadataIdentity: [] })}\n`);
+    assert.equal(await store.publishEntry(expectation(key(2)), targets, source), "skipped");
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
 test("maintenance resumes deletion of writable partial trash after a crash", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-cache-store-partial-trash-"));
   try {
@@ -481,6 +524,29 @@ test("maintenance resumes deletion of writable partial trash after a crash", asy
     assert.ok((await readdir(join(interrupted.root, "trash"))).length > 0);
 
     const recovered = await openStore(root);
+    assert.equal(await recovered.maintainByteBudget(() => undefined), "maintained");
+    assert.deepEqual(await readdir(join(recovered.root, "trash")), []);
+  } finally {
+    await cleanupRoot(root);
+  }
+});
+
+test("abort interrupts real trash deletion and a later pass resumes it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-cache-store-abort-delete-"));
+  try {
+    const interrupted = await openStore(root, { deleteTrash: async () => { throw new Error("leave trash"); } });
+    await publish(interrupted, root, key(1));
+    await interrupted.maintainByteBudget(() => undefined, 0);
+    const controller = new AbortController();
+    const recovered = await openStore(root);
+    await assert.rejects(
+      recovered.maintainByteBudget((event) => {
+        if (event.phase === "delete" && event.outcome === "started") controller.abort();
+      }, undefined, { signal: controller.signal }),
+      (error: unknown) => error instanceof Error && error.name === "AbortError",
+    );
+    assert.ok((await readdir(join(recovered.root, "trash"))).length > 0);
+
     assert.equal(await recovered.maintainByteBudget(() => undefined), "maintained");
     assert.deepEqual(await readdir(join(recovered.root, "trash")), []);
   } finally {
