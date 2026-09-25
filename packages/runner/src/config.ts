@@ -7,6 +7,7 @@ import { type BuildInfo, readBuildInfo } from "@anneal/build-info";
 
 import { RUNNER_DEFINITIONS, RUNNER_KINDS } from "./adapters.js";
 import { MAX_HOST_PROOF_SLOTS } from "./host-proof-slots.js";
+import { DEPENDENCY_CACHE_BYTE_BUDGET } from "./dependency-cache-budget.js";
 import { runnerProxyEnvironment } from "./adapters/environment.js";
 import { requireLocalApiDestination } from "./local-origin.js";
 
@@ -65,6 +66,8 @@ export type RunnerConfig = {
   hostProofSlots: number;
   /** Runner-owned, write-once dependency snapshots. Defaults beside workspaceRoot. */
   dependencyCacheRoot?: string;
+  /** Maximum accounted bytes retained in the runner dependency cache. */
+  dependencyCacheByteBudget?: number;
   /** Persistent bare mirrors, in the home of the account that runs tasks. */
   repoMirrorRoot?: string;
   failedWorkspaceRetention: number;
@@ -207,6 +210,10 @@ export const loadRunnerConfig = ({ cpuCount = cpus().length }: { cpuCount?: numb
       "AGENTOS_HOST_PROOF_SLOTS", process.env.AGENTOS_HOST_PROOF_SLOTS ?? "3", MAX_HOST_PROOF_SLOTS,
     ),
     dependencyCacheRoot: process.env.RUNNER_DEPENDENCY_CACHE_ROOT ?? join(dirname(workspaceRoot), "dependency-cache"),
+    dependencyCacheByteBudget: positiveInteger(
+      "RUNNER_DEPENDENCY_CACHE_BYTE_BUDGET",
+      process.env.RUNNER_DEPENDENCY_CACHE_BYTE_BUDGET ?? String(DEPENDENCY_CACHE_BYTE_BUDGET),
+    ),
     // One bare mirror per remote. Provisioning clones every workspace out of it
     // and only ever fetches incrementally from GitHub; see repo-mirror.ts for
     // why a full clone per run had to go, and why the mirror lives in the home

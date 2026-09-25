@@ -52,8 +52,9 @@ No condition recorded.
 `scripts/merge-gate.sh` runs its own separate `npm ci`.
 
 **Why:** Concurrent Merge gates once deleted each other's `node_modules`; the
-runner dependency cache is tuned by `DEPENDENCY_CACHE_ENTRY_LIMIT`, not by
-sharing installs.
+runner dependency cache has a byte ceiling configured by
+`RUNNER_DEPENDENCY_CACHE_BYTE_BUDGET`; it does not share installs with the
+merge gate.
 
 #### Revisit when
 

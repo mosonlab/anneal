@@ -803,6 +803,19 @@ curl "$BASE_URL/projects/$PROJECT_ID/repos" -H "Authorization: Bearer $OPERATOR_
   These two dependency-policy refusals apply to both this route and
   `PATCH /repos/:repoId`; other failures use the existing error path. Preflight
   is never skipped as a success fallback.
+- During a Run whose Repo declares `NPM_CI`, the runner strictly validates a
+  dependency-cache entry before restoring it; when no usable entry is
+  available, it runs `npm ci`. The cache ceiling is configured by
+  `RUNNER_DEPENDENCY_CACHE_BYTE_BUDGET`, a positive safe integer number of
+  bytes with a default of `68719476736` (64 GiB). On a quiet-window deployment,
+  set it in the runner host's `shared/.env`; see the [deployment runbook](runbooks/quiet-window-auto-deploy.md).
+- Cache publication does not synchronously hash, scan, or evict the whole
+  cache. A single background cleaner takes a short lock to move least-recently
+  used entries that are not being restored to trash, then deletes them outside
+  the lock. Publication can be skipped when the byte budget is exceeded or
+  maintenance is busy; a successful dependency install still succeeds and the
+  Run continues. Trash is not physically freed until deletion completes, and
+  the cache does not guarantee zero I/O impact.
 - With `grantAgents: false` or when omitted, a successful request returns
   `201 Created` with the created Repo row itself (the existing response
   shape), and creates no grants. With `grantAgents: true`, the same transaction

@@ -103,6 +103,47 @@ test("the dependency cache defaults beside the workspace root and accepts an exp
   }
 });
 
+const withDependencyCacheByteBudget = (value: string | undefined, body: () => void): void => {
+  const previous = process.env.RUNNER_DEPENDENCY_CACHE_BYTE_BUDGET;
+  if (value === undefined) delete process.env.RUNNER_DEPENDENCY_CACHE_BYTE_BUDGET;
+  else process.env.RUNNER_DEPENDENCY_CACHE_BYTE_BUDGET = value;
+  try {
+    body();
+  } finally {
+    if (previous === undefined) delete process.env.RUNNER_DEPENDENCY_CACHE_BYTE_BUDGET;
+    else process.env.RUNNER_DEPENDENCY_CACHE_BYTE_BUDGET = previous;
+  }
+};
+
+test("the dependency cache byte budget defaults to 64 GiB and accepts positive safe-integer byte overrides", () => {
+  const previous = process.env.RUNNER_DEPENDENCY_CACHE_BYTE_BUDGET;
+  withDependencyCacheByteBudget(undefined, () => {
+    assert.equal(loadRunnerConfig().dependencyCacheByteBudget, 68_719_476_736);
+  });
+
+  for (const [raw, expected] of [
+    ["1", 1],
+    ["85899345920", 85_899_345_920],
+    ["9007199254740991", Number.MAX_SAFE_INTEGER],
+  ] as const) {
+    withDependencyCacheByteBudget(raw, () => {
+      assert.equal(loadRunnerConfig().dependencyCacheByteBudget, expected);
+    });
+  }
+
+  for (const raw of ["", " ", "0", "-1", "1.5", "NaN", "Infinity", "64G", " 1", "1 ", "9007199254740992"]) {
+    withDependencyCacheByteBudget(raw, () => {
+      assert.throws(
+        loadRunnerConfig,
+        /RUNNER_DEPENDENCY_CACHE_BYTE_BUDGET must be a positive integer/u,
+        `${JSON.stringify(raw)} was accepted`,
+      );
+    });
+  }
+
+  assert.equal(process.env.RUNNER_DEPENDENCY_CACHE_BYTE_BUDGET, previous);
+});
+
 // The mirror belongs to the account that runs the tasks, not to the machine's
 // workspace area: it is fetched with that account's credentials and read only
 // by it, and its home is the one directory every deployment already gives that
