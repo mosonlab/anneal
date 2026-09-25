@@ -889,7 +889,7 @@ test("canonical unbound direct instantiation retains the seven-task prompt snaps
     name: row.name,
     descriptionSha256: createHash("sha256").update(String(row.description)).digest("hex"),
   })), [
-    { name: "snapshot chain: Implementation", descriptionSha256: "1a6969de27793a2c65484cac94c55327569a7b3149efce35c62ab744a124edda" },
+    { name: "snapshot chain: Implementation", descriptionSha256: "abeb0ed4ca4ca2901ae01fcd355f603a2ac1a663c6f09a176561c5b48d288a5b" },
     { name: "snapshot chain: Code review", descriptionSha256: "b409a9a0a138e6e6f39347ae5be9243f340d4ed85e649589c125d96766233227" },
     { name: "snapshot chain: Blind code review", descriptionSha256: "73f78996fbd84eb60b01bdb265c98588c1eba4897af283d4ceb15e9ec42687b7" },
     { name: "snapshot chain: Apply review fixes", descriptionSha256: "1e399ffab8e2fa0062d62d9c642c004b14a1eb0bdf1bdd697251758113ac464b" },

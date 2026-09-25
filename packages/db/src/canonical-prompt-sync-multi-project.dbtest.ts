@@ -1269,9 +1269,10 @@ test("summary reports every Project, nested canonical keys, lexical slugs, and f
   const activeCounters: CanonicalSyncCounters = {
     ...zeroCounters(),
     templates: 2,
+    createdAgents: 1,
     adoptedAgentDefaults: 1,
     adoptedDependencyProvisioning: 4,
-    updated: 7,
+    updated: 8,
     updatedSteps: {
       ...zeroSteps(),
       "pr-engineer-workflow": { ...zeroSteps()["pr-engineer-workflow"], "1": 1 },
