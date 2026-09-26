@@ -1721,6 +1721,11 @@ requires train integration proof, including one candidate and configured width
 zero: zero disables batching, not the full gate obligation. No GateAttestation
 is derived from a semantic-only verdict. Approval remains bound to the candidate
 head and semantic base; the actual publication prefix needs its own gate proof.
+For a stopped v3 merge, `re-authorize` returns readiness to a fresh train while
+preserving that semantic evidence and candidate Approval; it neither creates an
+integrator Run nor repeats Regression. Approving a persisted v3 confirmation
+card performs the same revalidation. Only fresh train authorization can resume
+merge execution. Legacy full-gate generations keep confirmation renewal.
 
 The control plane represents a train with one detached platform Task of kind
 `merge-train`. This Task has `assigneeType: AGENT`,

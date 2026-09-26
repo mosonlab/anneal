@@ -1013,7 +1013,7 @@ export const rearmSemanticReadinessForStop = async (
       metadata: {
         kind: MERGE_TAIL_KIND.readiness,
         schemaVersion: 1,
-        state: "semantic-renewal-queued",
+        state: "queued",
         integratorTaskId,
         stopId,
         regressionTaskId: regression.id,

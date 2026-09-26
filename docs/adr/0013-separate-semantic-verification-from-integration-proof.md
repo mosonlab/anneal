@@ -42,8 +42,11 @@ impact guess. A width-three train still gates three prefixes, not one batch.
 
 The v3 contract rejects legacy `pass` and `gate-fail` outputs; those remain
 valid only for older Regression protocols. Re-authorization through a confirmation
-card still requires a gate attestation and cannot turn semantic evidence into
-single-candidate publication authority.
+card cannot turn semantic evidence into single-candidate publication authority.
+For a stopped v3 merge, `re-authorize` preserves the semantic candidate and its
+original Approval, returns readiness to the train, and requires a new prefix
+gate proof. Existing v3 confirmation cards converge to that same action.
+Legacy full-gate generations retain confirmation renewal with gate attestation.
 
 ## Recovery and repair
 
