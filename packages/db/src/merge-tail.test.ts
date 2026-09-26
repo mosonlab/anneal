@@ -60,12 +60,26 @@ test("merge recovery state transitions and operator phases are explicit", () => 
 
 test("a repaired Regression Run is carried onto the active recovery aggregate", async () => {
   const updates: Array<Record<string, any>> = [];
+  const activities: Array<Record<string, any>> = [];
   const aggregate = {
     id: "recovery-1",
     status: MergeRecoveryStatus.REPAIRING,
     recoveryRunId: "regression-run-1",
   };
   const tx = {
+    taskActivity: {
+      findFirst: async () => ({ metadata: {
+        schemaVersion: 1,
+        kind: "mergeTail.baseDriftRecovery",
+        state: "queued",
+        recoveryRunId: "regression-run-1",
+        currentBaseSha: B,
+        authorizedHeadSha: A,
+        priorOutput: null,
+        ciFailures: [{ name: "typecheck", conclusion: "FAILURE", log: "TS2322" }],
+      } }),
+      create: async (args: Record<string, any>) => { activities.push(args); },
+    },
     mergeRecoveryAttempt: {
       findFirst: async () => aggregate,
       findUnique: async () => aggregate,
@@ -81,11 +95,17 @@ test("a repaired Regression Run is carried onto the active recovery aggregate", 
     regressionTaskId: "regression-1",
     recoveryRunId: "regression-run-2",
     previousRecoveryRunId: "regression-run-1",
+    preserveClaimContext: true,
   });
   assert.equal(updates[0]?.data.status, MergeRecoveryStatus.REPAIRING);
   assert.equal(updates[0]?.data.recoveryRunId, "regression-run-2");
   assert.equal(updates[0]?.where.AND[1].regressionTaskId, "regression-1");
   assert.equal(updates[0]?.where.AND[1].recoveryRunId, "regression-run-1");
+  assert.equal(activities[0]?.data.metadata.recoveryRunId, "regression-run-2");
+  assert.equal(activities[0]?.data.metadata.previousRecoveryRunId, "regression-run-1");
+  assert.deepEqual(activities[0]?.data.metadata.ciFailures, [
+    { name: "typecheck", conclusion: "FAILURE", log: "TS2322" },
+  ]);
 });
 
 test("a repaired Regression Run cannot retarget an unrelated recovery", async () => {

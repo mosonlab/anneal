@@ -12,6 +12,7 @@ import {
   MERGE_INTEGRATOR_KIND,
   MergeRecoveryRefusalCode,
   openDeferredBaseDriftQuestion,
+  openRun,
   Prisma,
   PrismaClient,
   readMarkerHistory,
@@ -32,6 +33,7 @@ import {
   pendingMergeabilityTick,
   readCandidateFacts,
   recordRecoveryClassificationRetry,
+  replayFailedRecoveryRegressions,
 } from "./merge-base-drift-worker.js";
 import { handleRegressionCompletion } from "./merge-tail-actions.js";
 import { evidenceTick } from "./merge-evidence-worker.js";
@@ -524,6 +526,258 @@ const completeQueuedTask = async (taskId: string, headSha: string, output?: { ki
   }
   return run;
 };
+
+const failQueuedRecoveryRun = async (taskId: string, external: boolean) => {
+  const task = await db.task.findUniqueOrThrow({ where: { id: taskId } });
+  const run = await db.run.findFirstOrThrow({
+    where: { taskId, status: "QUEUED" },
+    orderBy: { runNumber: "desc" },
+  });
+  const runnerId = `recovery-failure-runner-${run.id}`;
+  const fencingToken = `recovery-failure:${run.id}:1`;
+  await db.run.update({ where: { id: run.id }, data: {
+    status: "RUNNING", runnerId, fencingToken, leaseExpiresAt: new Date(Date.now() + 60_000),
+  } });
+  await db.session.create({ data: {
+    runId: run.id,
+    projectId: task.projectId,
+    agentId: task.assigneeAgentId!,
+    taskId,
+    runner: run.runner,
+    executionStatus: "RUNNING",
+  } });
+  await db.task.update({ where: { id: taskId }, data: { status: TaskStatus.DOING } });
+  const prior = process.env.RUNNER_TOKEN;
+  process.env.RUNNER_TOKEN = "recovery-failure-runner-token";
+  try {
+    const response = await createApp(db).request(`/runner/runs/${run.id}/complete`, {
+      method: "POST",
+      headers: { Authorization: "Bearer recovery-failure-runner-token", "Content-Type": "application/json" },
+      body: JSON.stringify({
+        runnerId,
+        fencingToken,
+        exitCode: 1,
+        outcome: external
+          ? {
+              case: "provider-failure",
+              reason: "Codex provider authentication failed",
+              envelope: { version: 1, phase: "EXECUTE", agentExited: false, providerError: "HTTP 401" },
+            }
+          : { case: "terminal-protocol-failure", reason: "Regression protocol failed deterministically" },
+        cleanupStatus: "SUCCEEDED",
+        pushStatus: "NOT_REQUESTED",
+      }),
+    });
+    assert.equal(response.status, 200, await response.text());
+  } finally {
+    if (prior === undefined) delete process.env.RUNNER_TOKEN;
+    else process.env.RUNNER_TOKEN = prior;
+  }
+  return run;
+};
+
+const requestOrdinaryRetry = async (taskId: string) => {
+  const prior = process.env.OPERATOR_TOKEN;
+  process.env.OPERATOR_TOKEN = OPERATOR;
+  try {
+    return await createApp(db).request(`/tasks/${taskId}/retry`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${OPERATOR}` },
+    });
+  } finally {
+    if (prior === undefined) delete process.env.OPERATOR_TOKEN;
+    else process.env.OPERATOR_TOKEN = prior;
+  }
+};
+
+test("a recovery Regression external failure replays with context and can authorize the integrator", async () => {
+  const seeded = await seedStopped("canonical-compound-readiness", "recovery-regression-external-replay");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const first = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  });
+  const failed = await failQueuedRecoveryRun(seeded.gateTask.id, true);
+  assert.equal(first.recoveryRunId, failed.id);
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 0,
+    "completion must not create an unbound ordinary retry");
+
+  const operatorRetry = await requestOrdinaryRetry(seeded.gateTask.id);
+  const operatorBody = await operatorRetry.json() as { code?: string };
+  assert.equal(operatorRetry.status, 409, JSON.stringify(operatorBody));
+  assert.equal(operatorBody.code, "merge_recovery_retry_owned");
+
+  assert.deepEqual(await replayFailedRecoveryRegressions(db), { examined: 1, replayed: 1, blocked: 0 });
+  const replay = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.gateTask.id, status: "QUEUED" },
+    orderBy: { runNumber: "desc" },
+  });
+  const carried = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: first.id } });
+  assert.equal(carried.recoveryRunId, replay.id);
+  assert.equal(carried.externalReplayCount, 1);
+  const context = await db.$transaction((tx) => regressionRecoveryContextForClaim(tx, {
+    taskId: seeded.gateTask.id,
+    runId: replay.id,
+  }));
+  assert.equal(context?.recoveryRunId, replay.id);
+
+  await recordRecoveryPass(seeded, BASE_2, HEAD);
+  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, {
+    task: seeded.gateTask,
+    run: {
+      id: replay.id,
+      agentId: replay.agentId,
+      branch: replay.branch,
+      headSha: HEAD,
+      sessionId: seeded.gateSession.id,
+    },
+    qualifiedVerdict: {
+      schemaVersion: 1,
+      outcome: "pass",
+      headSha: HEAD,
+      baseHeadSha: BASE_2,
+      gateVerdict: "PASS",
+    },
+    now: new Date(),
+  })), "advance");
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: first.id } })).status,
+    "AWAITING_AUTHORIZATION");
+
+  const leased: WithMergeLease = (target, fn, database) => withMergeLease(target, fn, database, {
+    acquire: acquireChainLease,
+    release: releaseLeaseAdapter,
+  });
+  const readiness = await readinessTick(
+    db,
+    reader(snapshot(BASE_2)),
+    new Date(),
+    5,
+    releaseChainLease,
+    leased,
+    executorsOnline,
+  );
+  assert.equal(readiness.authorized, 1);
+  assert.equal(await db.run.count({ where: { taskId: seeded.integratorTask!.id, status: "QUEUED" } }), 1);
+});
+
+test("a recovery Regression external replay preserves bounded CI findings", async () => {
+  const seeded = await seedStopped(
+    "canonical-direct",
+    "recovery-regression-ci-context",
+    "non-clean-mergeability",
+    "UNSTABLE",
+  );
+  assert.equal((await baseDriftRecoveryTick(db, ciReader())).recovered, 1);
+  await failQueuedRecoveryRun(seeded.gateTask.id, true);
+  assert.equal((await replayFailedRecoveryRegressions(db)).replayed, 1);
+  const replay = await db.run.findFirstOrThrow({
+    where: { taskId: seeded.gateTask.id, status: "QUEUED" },
+    orderBy: { runNumber: "desc" },
+  });
+  const context = await db.$transaction((tx) => regressionRecoveryContextForClaim(tx, {
+    taskId: seeded.gateTask.id,
+    runId: replay.id,
+  }));
+  assert.equal(context?.ciFailures?.[0]?.name, "optional typecheck");
+  assert.match(context?.ciFailures?.[0]?.log ?? "", /TS2322/u);
+  await failQueuedRecoveryRun(seeded.gateTask.id, true);
+  assert.deepEqual(await replayFailedRecoveryRegressions(db), { examined: 1, replayed: 0, blocked: 1 },
+    "the CI recovery birth and its external replay spend the same two-attempt allowance");
+  assert.equal((await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  })).status, "BLOCKED_DOWNSTREAM");
+});
+
+test("a stuck recovery Regression failure stops with an answerable card when allowance is spent", async () => {
+  const seeded = await seedStopped("canonical-direct", "recovery-regression-exhausted");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const failed = await failQueuedRecoveryRun(seeded.gateTask.id, true);
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  });
+  await db.mergeRecoveryAttempt.update({
+    where: { id: aggregate.id },
+    data: { externalReplayCount: 1 },
+  });
+
+  assert.deepEqual(await replayFailedRecoveryRegressions(db), { examined: 1, replayed: 0, blocked: 1 });
+  const stopped = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } });
+  assert.equal(stopped.status, "BLOCKED_DOWNSTREAM");
+  assert.equal(stopped.recoveryRunId, failed.id);
+  assert.match(stopped.failureReason ?? "", /allowance exhausted/u);
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 0);
+  const card = await db.inboxMessage.findFirstOrThrow({ where: {
+    taskId: seeded.integratorTask!.id,
+    status: "OPEN",
+    kind: "MULTIPLE_CHOICE",
+  } });
+  assert.ok(card.threadId, "the stop question uses the configured default thread");
+});
+
+test("a non-external recovery Regression failure stops without replay", async () => {
+  const seeded = await seedStopped("canonical-direct", "recovery-regression-deterministic");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  await failQueuedRecoveryRun(seeded.gateTask.id, false);
+  assert.deepEqual(await replayFailedRecoveryRegressions(db), { examined: 1, replayed: 0, blocked: 1 });
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  });
+  assert.equal(aggregate.status, "BLOCKED_DOWNSTREAM");
+  assert.match(aggregate.failureReason ?? "", /without an external failure classification/u);
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 0);
+});
+
+test("a legacy unbound successor is stopped instead of leaving recovery stuck", async () => {
+  const seeded = await seedStopped("canonical-direct", "recovery-regression-legacy-unbound");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const failed = await failQueuedRecoveryRun(seeded.gateTask.id, true);
+  const opened = await db.$transaction((tx) => openRun(tx, seeded.gateTask.id, {
+    kind: "retry",
+    readyAt: new Date(),
+  }));
+  assert.equal(opened.ok, true);
+  if (!opened.ok) return;
+  await db.run.update({ where: { id: opened.run.id }, data: {
+    status: "FAILED",
+    failureReason: "legacy unbound retry failed",
+  } });
+  await db.task.update({ where: { id: seeded.gateTask.id }, data: { status: TaskStatus.REVIEW } });
+
+  assert.deepEqual(await replayFailedRecoveryRegressions(db), { examined: 1, replayed: 0, blocked: 1 });
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  });
+  assert.equal(aggregate.status, "BLOCKED_DOWNSTREAM");
+  assert.equal(aggregate.recoveryRunId, failed.id);
+  assert.match(aggregate.failureReason ?? "", /newer unbound Run/u);
+  assert.equal(await db.inboxMessage.count({ where: {
+    taskId: seeded.integratorTask!.id,
+    status: "OPEN",
+    kind: "MULTIPLE_CHOICE",
+  } }), 1);
+});
+
+test("Hold defers a recovery Regression replay without spending its allowance", async () => {
+  const seeded = await seedStopped("canonical-direct", "recovery-regression-held");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  await failQueuedRecoveryRun(seeded.gateTask.id, true);
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
+    where: { integratorTaskId: seeded.integratorTask!.id },
+  });
+  const hold = await db.chainControl.create({ data: {
+    projectId: seeded.project.id,
+    chainId: seeded.chainId,
+    state: "HELD",
+    heldLayer: seeded.gateTask.chainLayer ?? 0,
+    heldAt: new Date(),
+  } });
+  assert.deepEqual(await replayFailedRecoveryRegressions(db), { examined: 1, replayed: 0, blocked: 0 });
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } })).externalReplayCount, 0);
+  assert.equal(await db.inboxMessage.count({ where: { taskId: seeded.integratorTask!.id, status: "OPEN" } }), 0);
+
+  await db.chainControl.update({ where: { id: hold.id }, data: { state: "RELEASED", releasedAt: new Date() } });
+  assert.equal((await replayFailedRecoveryRegressions(db)).replayed, 1);
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } })).externalReplayCount, 1);
+});
 
 const openRecoveryRepair = async (
   shape: "canonical-direct" | "canonical-compound-readiness",

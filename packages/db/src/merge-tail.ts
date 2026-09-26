@@ -252,12 +252,18 @@ export async function transitionMergeRecovery(
   });
 }
 
-/** Carries an expected in-progress recovery onto the Regression Run born after
- * genuine repair completion. Callers qualify ordinary repairs before this
- * point, so a missing or inactive aggregate is a state-machine fault. */
+/** Carries an expected in-progress recovery onto a successor Regression Run.
+ * A replay of the failed Run explicitly preserves its unconsumed claim
+ * context; a Run born after genuine repair completion does not reintroduce
+ * CI findings that the repair just consumed. */
 export const carryMergeRecoveryRun = async (
   tx: Prisma.TransactionClient,
-  input: { regressionTaskId: string; recoveryRunId: string; previousRecoveryRunId: string },
+  input: {
+    regressionTaskId: string;
+    recoveryRunId: string;
+    previousRecoveryRunId: string;
+    preserveClaimContext?: boolean;
+  },
 ): Promise<void> => {
   const aggregate = await tx.mergeRecoveryAttempt.findFirst({
     where: { regressionTaskId: input.regressionTaskId },
@@ -272,6 +278,24 @@ export const carryMergeRecoveryRun = async (
   if (aggregate.recoveryRunId !== input.previousRecoveryRunId) {
     throw new Error(`Merge recovery ${aggregate.id} is not bound to repaired Run ${input.previousRecoveryRunId}`);
   }
+  const handoff = input.preserveClaimContext
+    ? asJsonObject((await tx.taskActivity.findFirst({
+        where: {
+          taskId: input.regressionTaskId,
+          actorType: "control-plane",
+          AND: [
+            { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery } },
+            { metadata: { path: ["state"], equals: "queued" } },
+            { metadata: { path: ["recoveryRunId"], equals: input.previousRecoveryRunId } },
+          ],
+        },
+        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+        select: { metadata: true },
+      }))?.metadata)
+    : null;
+  if (input.preserveClaimContext && (!handoff || !Object.hasOwn(handoff, "priorOutput"))) {
+    throw new Error(`Merge recovery ${aggregate.id} has no queued context for Run ${input.previousRecoveryRunId}`);
+  }
   const transitioned = await transitionMergeRecovery(
     tx,
     aggregate.id,
@@ -285,6 +309,21 @@ export const carryMergeRecoveryRun = async (
   );
   if (!transitioned) {
     throw new Error(`Merge recovery ${aggregate.id} changed while carrying its repaired Regression Run`);
+  }
+  if (handoff) {
+    await tx.taskActivity.create({ data: {
+      taskId: input.regressionTaskId,
+      actorType: "control-plane",
+      body: `Merge recovery context carried from Run ${input.previousRecoveryRunId} to Run ${input.recoveryRunId}`,
+      metadata: {
+        ...handoff,
+        schemaVersion: MERGE_TAIL_SCHEMA_VERSION,
+        state: "queued",
+        kind: MERGE_TAIL_KIND.baseDriftRecovery,
+        recoveryRunId: input.recoveryRunId,
+        previousRecoveryRunId: input.previousRecoveryRunId,
+      } as Prisma.InputJsonObject,
+    } });
   }
 };
 
