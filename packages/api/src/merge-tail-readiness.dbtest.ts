@@ -48,6 +48,7 @@ import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
 
 let db: PrismaClient;
+const previousTrainWidth = process.env.MERGE_TRAIN_WIDTH;
 before(() => { db = setupTestDb(); });
 const releasedChainLeases: string[] = [];
 const releasedLeaseTargets: MergeLeaseTarget[] = [];
@@ -114,12 +115,17 @@ const assertConfirmedHold = async (projectId: string): Promise<void> => {
   assert.equal(metadata.heldForSeconds, 62);
 };
 beforeEach(async () => {
+  process.env.MERGE_TRAIN_WIDTH = "0";
   releasedChainLeases.length = 0;
   releasedLeaseTargets.length = 0;
   leasedTargets.length = 0;
   await resetTestDb(db);
 });
-after(async () => { await db.$disconnect(); });
+after(async () => {
+  await db.$disconnect();
+  if (previousTrainWidth === undefined) delete process.env.MERGE_TRAIN_WIDTH;
+  else process.env.MERGE_TRAIN_WIDTH = previousTrainWidth;
+});
 
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);

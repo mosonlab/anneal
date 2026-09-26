@@ -3,7 +3,7 @@ import "./test-workspace-root.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { RunStatus, TaskStatus } from "@anneal/db";
+import { MERGE_TRAIN_OUTPUT_KIND, RunStatus, TaskStatus } from "@anneal/db";
 
 import type { PullRequestReader, PullRequestSnapshot } from "./github-read.js";
 import { withMergeLease, type ReleaseMergeLease, type WithMergeLease } from "./merge-lease.js";
@@ -136,20 +136,55 @@ test("a direct chain without blind review advances through fixes and regression 
     ["implementation", "review-findings", "fixed-implementation"],
   );
   const regressionResult = await complete(regression, "optional-regression", {
-    outputKind: "regression-verification-v2",
+    outputKind: "regression-verification-v3",
     output: {
-      schemaVersion: 2,
-      outcome: "pass",
+      schemaVersion: 3,
+      outcome: "semantic-pass",
       headSha: IMPLEMENTATION_HEAD,
       baseHeadSha: DEFAULT_HEAD,
-      gateVerdict: "PASS",
-      gateProof: `MERGE GATE: PASS ${IMPLEMENTATION_HEAD}`,
     },
   });
   assert.equal(regressionResult.status, 200, JSON.stringify(regressionResult.body));
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: fixture.regressionTaskId } })).status, TaskStatus.DONE);
 
-  const readiness = await readinessTick(db, reader, new Date(), 5, releaseLease, runWithMergeLease, executorsOnline);
+  const formed = await readinessTick(db, reader, new Date(), 5, releaseLease, runWithMergeLease, executorsOnline, 0);
+  assert.deepEqual(formed, { claimed: 1, authorized: 0, requeued: 0, stopped: 0 });
+  const train = await db.task.findFirstOrThrow({ where: {
+    projectId: fixture.projectId,
+    repoId: fixture.repoId,
+    chainId: null,
+    description: { contains: "merge-train.sh" },
+  }, orderBy: [{ createdAt: "desc" }, { id: "desc" }] });
+  const trainRun = await db.run.findFirstOrThrow({ where: { taskId: train.id } });
+  const prefixSha = "4".repeat(40);
+  await db.run.update({ where: { id: trainRun.id }, data: { status: RunStatus.SUCCEEDED } });
+  await db.task.update({ where: { id: train.id }, data: { status: TaskStatus.DONE } });
+  await db.taskStepOutput.create({ data: {
+    taskId: train.id,
+    runId: trainRun.id,
+    kind: MERGE_TRAIN_OUTPUT_KIND,
+    body: JSON.stringify({
+      schemaVersion: 1,
+      baseSha: DEFAULT_HEAD,
+      width: 1,
+      prefixes: [{
+        index: 1,
+        taskId: fixture.readinessTaskId,
+        chainId: fixture.chainId,
+        candidateHeadSha: IMPLEMENTATION_HEAD,
+        predecessorOid: DEFAULT_HEAD,
+        prefixOid: prefixSha,
+        ref: `refs/anneal/train/${prefixSha}`,
+        verdict: "pass",
+        gateExcerpt: `MERGE GATE: PASS ${prefixSha}`,
+      }],
+      blocked: [],
+      skipped: [],
+      contiguousPassCount: 1,
+    }),
+    commitSha: prefixSha,
+  } });
+  const readiness = await readinessTick(db, reader, new Date(), 5, releaseLease, runWithMergeLease, executorsOnline, 0);
   assert.deepEqual(readiness, { claimed: 1, authorized: 1, requeued: 0, stopped: 0 });
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: fixture.readinessTaskId } })).status, TaskStatus.DONE);
   assert.equal(await db.run.count({ where: { taskId: fixture.mergeTaskId, status: RunStatus.QUEUED } }), 1);
@@ -161,7 +196,7 @@ test("a direct chain without blind review advances through fixes and regression 
   assert.equal(await db.taskStepOutput.count({ where: { kind: "blind-findings", task: { chainId: fixture.chainId } } }), 0);
   assert.equal(await db.taskStepOutput.count({ where: { kind: "review-findings", task: { chainId: fixture.chainId } } }), 1);
   assert.equal(await db.taskStepOutput.count({ where: { kind: "fixed-implementation", task: { chainId: fixture.chainId } } }), 1);
-  assert.equal(await db.taskStepOutput.count({ where: { kind: "regression-verification-v2", task: { chainId: fixture.chainId } } }), 1);
+  assert.equal(await db.taskStepOutput.count({ where: { kind: "regression-verification-v3", task: { chainId: fixture.chainId } } }), 1);
   assert.equal(await db.run.count({ where: { taskId: fixture.fixTaskId, status: RunStatus.SUCCEEDED } }), 1);
   assert.equal(await db.run.count({ where: { taskId: fixture.regressionTaskId, status: RunStatus.SUCCEEDED } }), 1);
   assert.notEqual(IMPLEMENTATION_BASE, IMPLEMENTATION_HEAD);

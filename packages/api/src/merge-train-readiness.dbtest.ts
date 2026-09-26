@@ -1097,6 +1097,7 @@ test("width zero sends one approved semantic candidate through a gated prefix be
   assert.equal(marker.width, 1);
   assert.equal(await db.taskActivity.count({ where: {
     taskId: candidate.readiness.id,
+    actorType: "control-plane",
     metadata: { path: ["kind"], equals: "mergeIntegrator.authorization" },
   } }), 0, "semantic evidence alone cannot authorize the candidate");
 
@@ -1246,6 +1247,7 @@ test("a proofless semantic train prefix authorizes nothing", async () => {
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.readiness.id } })).status, TaskStatus.REVIEW);
   assert.equal(await db.taskActivity.count({ where: {
     taskId: candidate.readiness.id,
+    actorType: "control-plane",
     metadata: { path: ["kind"], equals: "mergeIntegrator.authorization" },
   } }), 0);
   const train = await trainTaskFor(seed);

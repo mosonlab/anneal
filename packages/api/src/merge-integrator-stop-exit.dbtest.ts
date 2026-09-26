@@ -260,7 +260,10 @@ const recordRecoveryPass = async (seeded: Seeded, baseSha: string) => {
  * fresh verified Regression and is waiting for readiness to authorize it.
  */
 const recoveredChain = async (label: string) => {
-  const seeded = await seedIntegratorChain(db, { label, shape: "canonical-compound-readiness" });
+  // These tests exercise the legacy full-gate recovery exit, where readiness
+  // may authorize a single candidate directly. Current canonical v3 evidence
+  // deliberately requires a merge train and is covered by the train suite.
+  const seeded = await seedIntegratorChain(db, { label, shape: "twelve-step-readiness" });
   const authorization = await authorize(seeded.readinessTask!.id, BASE);
   const sourceRun = await mechanicalBaseDriftStop(seeded, authorization.id);
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
