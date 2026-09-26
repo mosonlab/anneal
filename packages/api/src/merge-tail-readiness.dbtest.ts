@@ -1286,6 +1286,91 @@ test("a contended lease leaves readiness for a later tick instead of authorizing
   );
 });
 
+test("repeated ticks during lease contention leave readiness status and updatedAt stable", async () => {
+  const seeded = await seedReadiness();
+  const started = new Date();
+  let acquisitions = 0;
+  const contended: MergeLeaseAcquirer = async () => {
+    acquisitions += 1;
+    return { outcome: "contended" };
+  };
+
+  assert.equal(
+    (await readinessTick(db, reader(), started, 5, releaseChainLease,
+      leaseRunner(contended), executorsOnline)).claimed,
+    1,
+  );
+  const deferred = await db.task.findUniqueOrThrow({
+    where: { id: seeded.readiness.id },
+    select: { status: true, updatedAt: true, readinessClaimToken: true, readinessClaimExpiresAt: true },
+  });
+  assert.equal(deferred.status, TaskStatus.DOING);
+  assert.notEqual(deferred.readinessClaimToken, null);
+
+  for (const elapsed of [2_000, 4_000, 6_000]) {
+    assert.deepEqual(
+      await readinessTick(db, reader(), new Date(started.getTime() + elapsed), 5,
+        releaseChainLease, leaseRunner(contended), executorsOnline),
+      { claimed: 0, authorized: 0, requeued: 0, stopped: 0 },
+    );
+    assert.deepEqual(await db.task.findUniqueOrThrow({
+      where: { id: seeded.readiness.id },
+      select: { status: true, updatedAt: true, readinessClaimToken: true, readinessClaimExpiresAt: true },
+    }), deferred);
+  }
+  assert.equal(acquisitions, 1, "polling does not reacquire while the deferred claim is live");
+
+  const acquired: MergeLeaseAcquirer = async () => ({ outcome: "acquired" });
+  const resumed = await readinessTick(
+    db,
+    reader(),
+    new Date(started.getTime() + READINESS_CLAIM_LEASE_MS),
+    5,
+    releaseChainLease,
+    leaseRunner(acquired),
+    executorsOnline,
+  );
+  assert.equal(resumed.authorized, 1);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
+});
+
+test("transport-deferred readiness stays stable until its claim expires and then authorizes", async () => {
+  const seeded = await seedReadiness();
+  const started = new Date();
+  const timingOut: PullRequestReader = {
+    readPullRequest: async () => {
+      throw new GitHubReadError("readiness evaluation timed out", "timeout");
+    },
+    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+  };
+
+  assert.deepEqual(
+    await readinessTick(db, timingOut, started, 5, releaseChainLease, runWithMergeLease, executorsOnline),
+    { claimed: 1, authorized: 0, requeued: 0, stopped: 0 },
+  );
+  const deferred = await db.task.findUniqueOrThrow({
+    where: { id: seeded.readiness.id },
+    select: { status: true, updatedAt: true, readinessClaimToken: true, readinessClaimExpiresAt: true },
+  });
+  assert.equal(deferred.status, TaskStatus.DOING);
+  assert.notEqual(deferred.readinessClaimToken, null);
+
+  assert.deepEqual(
+    await readinessTick(db, timingOut, new Date(started.getTime() + 2_000), 5,
+      releaseChainLease, runWithMergeLease, executorsOnline),
+    { claimed: 0, authorized: 0, requeued: 0, stopped: 0 },
+  );
+  assert.deepEqual(await db.task.findUniqueOrThrow({
+    where: { id: seeded.readiness.id },
+    select: { status: true, updatedAt: true, readinessClaimToken: true, readinessClaimExpiresAt: true },
+  }), deferred);
+
+  const resumed = await readinessTick(db, reader(), new Date(started.getTime() + READINESS_CLAIM_LEASE_MS),
+    5, releaseChainLease, runWithMergeLease, executorsOnline);
+  assert.equal(resumed.authorized, 1);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
+});
+
 const contentionMarkers = async (taskId: string) => await db.taskActivity.findMany({
   where: { taskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseContention } },
   orderBy: [{ createdAt: "asc" }, { id: "asc" }],

@@ -875,20 +875,29 @@ const readReadiness = async (
   }
 };
 
+/** A mechanical wait keeps the fenced claim until its ordinary expiry. The
+ * stable DOING row is both the recovery anchor and the board presentation;
+ * returning it to TODO would make every poll rewrite the Task twice. */
 const deferReadinessSettlement = (
-  readinessTaskId: string,
   regressionTaskId: string,
-  now: Date,
-): ReadinessSettlement => readinessSettlement("defer", {
+): ReadinessSettlement => ({
+  kind: "defer",
   taskId: regressionTaskId,
-  at: now,
-  apply: async (tx) => {
-    await tx.task.update({
-      where: { id: readinessTaskId },
-      data: { status: TaskStatus.TODO, failureReason: null },
+  body: async (tx, claim) => {
+    const deferred = await claim.settle(tx, {
+      kind: "keep",
+      apply: async () => undefined,
     });
+    if (!deferred.settled) {
+      return {
+        value: { applied: false },
+        leaseOutcome: deferred.ownership === "released"
+          ? { kind: "stop", taskId: regressionTaskId }
+          : { kind: "continue" },
+      };
+    }
     return {
-      ownership: "released",
+      value: { applied: true },
       leaseOutcome: { kind: "stop", taskId: regressionTaskId },
     };
   },
@@ -1127,7 +1136,7 @@ const applyReadinessDecision = async (
   return dispatchReadinessDecision(selectedDecision, {
     skip: () => Promise.resolve(runner.skip(regression.id)),
     defer: () => runner.apply(
-      deferReadinessSettlement(readiness.id, regression.id, new Date()),
+      deferReadinessSettlement(regression.id),
       claim,
     ),
     stop: async (stopping) => {

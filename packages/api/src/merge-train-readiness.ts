@@ -887,11 +887,20 @@ export const mergeTrainReadinessTick = async (
           taskId: first.readiness.id, actorType: "control-plane",
           body: `Merge train formation deferred: ${error instanceof Error ? error.message : String(error)}`,
         } }) }), serializable);
+        // A remote-read deferral owns the same durable claim as the direct
+        // path. Keep every selected card stable until that claim expires;
+        // releasing them here would rewrite DOING -> TODO on every poll.
+        for (const read of selected) handOffClaim(read);
         continue;
       }
       if (unresolvedLeaseRepos.has(repoId)) {
         for (const read of selected) {
-          if (read.input.regression.verification === "semantic") await releaseClaim(db, read);
+          if (read.input.regression.verification === "semantic") {
+            // Semantic evidence cannot fall back to the direct path while a
+            // deferred release fences train formation. Its live claim is the
+            // retry timer and keeps the readiness card stable meanwhile.
+            handOffClaim(read);
+          }
           else await single(read, await evaluateReadiness(reader, read.input));
         }
         continue;
