@@ -255,7 +255,7 @@ test("Regression v3 canonical output accepts semantic PASS without gate evidence
   );
   assert.match(
     canonicalOutputRefusal(current, semantic({ gateProof: `MERGE GATE: PASS ${headSha}` }), "run-1", headSha) ?? "",
-    /semantic-pass must not carry merge gate evidence/u,
+    /regression-verification-v3 task output body violates schemaVersion 3 at gateProof/u,
   );
 });
 
