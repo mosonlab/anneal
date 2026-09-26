@@ -1371,6 +1371,72 @@ test("transport-deferred readiness stays stable until its claim expires and then
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
 });
 
+test("a stale deferred worker cannot overwrite its successor and stops its held Lease", async () => {
+  const seeded = await seedReadiness();
+  let heldReadStarted!: () => void;
+  let finishHeldRead!: () => void;
+  const heldRead = new Promise<void>((resolve) => { heldReadStarted = resolve; });
+  const mayFinishHeldRead = new Promise<void>((resolve) => { finishHeldRead = resolve; });
+  let reads = 0;
+  const delayedTimeout: PullRequestReader = {
+    readPullRequest: async () => {
+      reads += 1;
+      if (reads === 1) return snapshot();
+      heldReadStarted();
+      await mayFinishHeldRead;
+      throw new GitHubReadError("late held-Lease read timed out", "timeout");
+    },
+    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+  };
+  let lateLeaseOutcome: { kind: "continue" } | { kind: "stop"; taskId: string } | null = null;
+  const captureHeldLease: WithMergeLease = async (_target, fn) => {
+    const result = await fn();
+    lateLeaseOutcome = result.leaseOutcome;
+    return { outcome: "ran", value: result.value };
+  };
+  const workerA = readinessTick(
+    db,
+    delayedTimeout,
+    new Date(),
+    5,
+    releaseChainLease,
+    captureHeldLease,
+    executorsOnline,
+  );
+  await heldRead;
+
+  const timingOut: PullRequestReader = {
+    readPullRequest: async () => {
+      throw new GitHubReadError("successor read timed out", "timeout");
+    },
+    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
+  };
+  const successor = await readinessTick(
+    db,
+    timingOut,
+    new Date(Date.now() + (READINESS_CLAIM_LEASE_MS * 2)),
+    5,
+    releaseChainLease,
+    runWithMergeLease,
+    executorsOnline,
+  );
+  assert.deepEqual(successor, { claimed: 1, authorized: 0, requeued: 0, stopped: 0 });
+  const successorState = await db.task.findUniqueOrThrow({
+    where: { id: seeded.readiness.id },
+    select: { status: true, updatedAt: true, readinessClaimToken: true, readinessClaimExpiresAt: true },
+  });
+  assert.equal(successorState.status, TaskStatus.DOING);
+  assert.notEqual(successorState.readinessClaimToken, null);
+
+  finishHeldRead();
+  assert.deepEqual(await workerA, { claimed: 1, authorized: 0, requeued: 0, stopped: 0 });
+  assert.deepEqual(await db.task.findUniqueOrThrow({
+    where: { id: seeded.readiness.id },
+    select: { status: true, updatedAt: true, readinessClaimToken: true, readinessClaimExpiresAt: true },
+  }), successorState, "the late settlement performs no Task write after fencing loss");
+  assert.deepEqual(lateLeaseOutcome, { kind: "stop", taskId: seeded.regression.id });
+});
+
 const contentionMarkers = async (taskId: string) => await db.taskActivity.findMany({
   where: { taskId, metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.leaseContention } },
   orderBy: [{ createdAt: "asc" }, { id: "asc" }],
@@ -2299,22 +2365,17 @@ for (const width of [0, 2]) test(`executor return re-arms a ceiling stop with tr
       where: { id: seeded.readiness.id },
       select: { status: true, updatedAt: true, readinessClaimToken: true, readinessClaimExpiresAt: true },
     });
-    assert.equal(deferred.status, width === 0 ? TaskStatus.TODO : TaskStatus.DOING);
-    assert.equal(deferred.readinessClaimToken === null, width === 0);
+    assert.equal(deferred.status, TaskStatus.TODO);
+    assert.equal(deferred.readinessClaimToken, null);
+    assert.equal(deferred.readinessClaimExpiresAt, null);
     assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } })).status,
       width === 0 ? MergeRecoveryStatus.REPAIRING : MergeRecoveryStatus.AWAITING_AUTHORIZATION);
     assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), width === 0 ? 2 : 1);
     if (width > 0) {
-      assert.deepEqual(
-        await readinessTick(db, reader([], snapshot({ baseSha: "d".repeat(40) })),
-          new Date(expired.getTime() + 3_000), 5, releaseChainLease, runWithMergeLease,
-          executorsAt(ONLINE_NOW), width),
-        { claimed: 0, authorized: 0, requeued: 0, stopped: 0 },
-      );
-      assert.deepEqual(await db.task.findUniqueOrThrow({
-        where: { id: seeded.readiness.id },
-        select: { status: true, updatedAt: true, readinessClaimToken: true, readinessClaimExpiresAt: true },
-      }), deferred, "the train wait leaves the deferred readiness row untouched");
+      const nextTick = await readinessTick(db, reader([], snapshot({ baseSha: "d".repeat(40) })),
+        new Date(expired.getTime() + 3_000), 5, releaseChainLease, runWithMergeLease,
+        executorsAt(ONLINE_NOW), width);
+      assert.equal(nextTick.claimed, 1, "train formation can reclaim a one-shot base-advanced defer");
     }
   });
 });

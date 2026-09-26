@@ -903,6 +903,28 @@ const deferReadinessSettlement = (
   },
 });
 
+/** A train-enabled base move is a one-shot handoff, not a mechanical wait:
+ * release the claim so formation can reconsider this oldest candidate on the
+ * very next tick instead of allowing a younger peer to pass it. */
+const queueTrainFormationSettlement = (
+  readinessTaskId: string,
+  regressionTaskId: string,
+  now: Date,
+): ReadinessSettlement => readinessSettlement("defer", {
+  taskId: regressionTaskId,
+  at: now,
+  apply: async (tx) => {
+    await tx.task.update({
+      where: { id: readinessTaskId },
+      data: { status: TaskStatus.TODO, failureReason: null },
+    });
+    return {
+      ownership: "released",
+      leaseOutcome: { kind: "stop", taskId: regressionTaskId },
+    };
+  },
+});
+
 const recordLeaseDeferral = async (
   db: PrismaClient,
   input: {
@@ -1129,11 +1151,15 @@ const applyReadinessDecision = async (
   trainWidth: number,
 ): Promise<ReadinessSettlementApplication> => {
   const { readiness, regression, recovery, claim } = read;
-  const selectedDecision = trainWidth > 0 && decision.kind === "requeue-regression"
-    && decision.condition === "base-advanced"
-    ? { kind: "defer" as const, reason: "Base advanced; candidate will join a merge train" }
-    : decision;
-  return dispatchReadinessDecision(selectedDecision, {
+  if (trainWidth > 0 && decision.kind === "requeue-regression"
+    && decision.condition === "base-advanced") {
+    return runner.apply(queueTrainFormationSettlement(
+      readiness.id,
+      regression.id,
+      read.input.now,
+    ), claim);
+  }
+  return dispatchReadinessDecision(decision, {
     skip: () => Promise.resolve(runner.skip(regression.id)),
     defer: () => runner.apply(
       deferReadinessSettlement(regression.id),
