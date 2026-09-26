@@ -37,10 +37,13 @@ import {
   READINESS_BASE_DRIFT_REQUEUE_LIMIT,
   READINESS_CLAIM_LEASE_MS,
   READINESS_EXCEPTION_REQUEUE_LIMIT,
+  deferReadinessSettlement,
   readinessTick,
   requeueRegressionSettlement,
   type DaemonSnapshotReader,
 } from "./merge-readiness-worker.js";
+import { claimReadinessStep } from "./readiness-claim.js";
+import { createReadinessSettlementRunner } from "./readiness-settlement.js";
 import { reconcileDatabaseRuns } from "./reconcile.js";
 import { createRunnerRegistry } from "./runners.js";
 import { completeRun } from "./run-completion.js";
@@ -1371,56 +1374,30 @@ test("transport-deferred readiness stays stable until its claim expires and then
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.DONE);
 });
 
-test("a stale deferred worker cannot overwrite its successor and stops its held Lease", async () => {
+test("a stale deferred settlement cannot overwrite its successor and stops its held Lease", async () => {
   const seeded = await seedReadiness();
-  let heldReadStarted!: () => void;
-  let finishHeldRead!: () => void;
-  const heldRead = new Promise<void>((resolve) => { heldReadStarted = resolve; });
-  const mayFinishHeldRead = new Promise<void>((resolve) => { finishHeldRead = resolve; });
-  let reads = 0;
-  const delayedTimeout: PullRequestReader = {
-    readPullRequest: async () => {
-      reads += 1;
-      if (reads === 1) return snapshot();
-      heldReadStarted();
-      await mayFinishHeldRead;
-      throw new GitHubReadError("late held-Lease read timed out", "timeout");
+  const started = new Date();
+  const workerA = await claimReadinessStep(db, seeded.readiness.id, started);
+  assert.ok(workerA);
+  const heldRunner = createReadinessSettlementRunner(db, { kind: "held", release: releaseChainLease });
+  const firstDefer = await heldRunner.apply(deferReadinessSettlement(seeded.regression.id), workerA);
+  assert.deepEqual(firstDefer, {
+    kind: "settled",
+    outcome: {
+      value: { applied: true },
+      leaseOutcome: { kind: "stop", taskId: seeded.regression.id },
     },
-    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
-  };
-  let lateLeaseOutcome: { kind: "continue" } | { kind: "stop"; taskId: string } | null = null;
-  const captureHeldLease: WithMergeLease = async (_target, fn) => {
-    const result = await fn();
-    lateLeaseOutcome = result.leaseOutcome;
-    return { outcome: "ran", value: result.value };
-  };
-  const workerA = readinessTick(
-    db,
-    delayedTimeout,
-    new Date(),
-    5,
-    releaseChainLease,
-    captureHeldLease,
-    executorsOnline,
-  );
-  await heldRead;
+  });
 
-  const timingOut: PullRequestReader = {
-    readPullRequest: async () => {
-      throw new GitHubReadError("successor read timed out", "timeout");
-    },
-    compareCommits: async () => ({ status: "ahead", behindBy: 0, filesComplete: true, files: [] }),
-  };
-  const successor = await readinessTick(
+  const workerB = await claimReadinessStep(
     db,
-    timingOut,
-    new Date(Date.now() + (READINESS_CLAIM_LEASE_MS * 2)),
-    5,
-    releaseChainLease,
-    runWithMergeLease,
-    executorsOnline,
+    seeded.readiness.id,
+    new Date(started.getTime() + (READINESS_CLAIM_LEASE_MS * 2)),
   );
-  assert.deepEqual(successor, { claimed: 1, authorized: 0, requeued: 0, stopped: 0 });
+  assert.ok(workerB);
+  const successorDefer = await heldRunner.apply(deferReadinessSettlement(seeded.regression.id), workerB);
+  assert.equal(successorDefer.kind, "settled");
+  assert.equal(successorDefer.kind === "settled" && successorDefer.outcome.value.applied, true);
   const successorState = await db.task.findUniqueOrThrow({
     where: { id: seeded.readiness.id },
     select: { status: true, updatedAt: true, readinessClaimToken: true, readinessClaimExpiresAt: true },
@@ -1428,13 +1405,18 @@ test("a stale deferred worker cannot overwrite its successor and stops its held 
   assert.equal(successorState.status, TaskStatus.DOING);
   assert.notEqual(successorState.readinessClaimToken, null);
 
-  finishHeldRead();
-  assert.deepEqual(await workerA, { claimed: 1, authorized: 0, requeued: 0, stopped: 0 });
+  const lateSettlement = await heldRunner.apply(deferReadinessSettlement(seeded.regression.id), workerA);
+  assert.deepEqual(lateSettlement, {
+    kind: "settled",
+    outcome: {
+      value: { applied: false },
+      leaseOutcome: { kind: "stop", taskId: seeded.regression.id },
+    },
+  });
   assert.deepEqual(await db.task.findUniqueOrThrow({
     where: { id: seeded.readiness.id },
     select: { status: true, updatedAt: true, readinessClaimToken: true, readinessClaimExpiresAt: true },
   }), successorState, "the late settlement performs no Task write after fencing loss");
-  assert.deepEqual(lateLeaseOutcome, { kind: "stop", taskId: seeded.regression.id });
 });
 
 const contentionMarkers = async (taskId: string) => await db.taskActivity.findMany({
@@ -2319,7 +2301,6 @@ test("a tick whose readiness claim was replaced cannot close the offline episode
   await withExecutorAllowlist(EXECUTOR_RUNNER_ID, async () => {
     const seeded = await seedReadiness();
     await readinessTick(db, reader(), OFFLINE_NOW, 5, releaseChainLease, runWithMergeLease, executorsAt(OFFLINE_NOW));
-    const { claimReadinessStep } = await import("./readiness-claim.js");
     const { closeExecutorOfflineEpisode } = await import("./merge-readiness-worker.js");
     const claim = await claimReadinessStep(db, seeded.readiness.id, OFFLINE_NOW);
     assert.ok(claim);

@@ -878,7 +878,7 @@ const readReadiness = async (
 /** A mechanical wait keeps the fenced claim until its ordinary expiry. The
  * stable DOING row is both the recovery anchor and the board presentation;
  * returning it to TODO would make every poll rewrite the Task twice. */
-const deferReadinessSettlement = (
+export const deferReadinessSettlement = (
   regressionTaskId: string,
 ): ReadinessSettlement => ({
   kind: "defer",
