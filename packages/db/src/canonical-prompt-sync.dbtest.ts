@@ -19,7 +19,7 @@ import { AssigneeType, Prisma, PrismaClient, RepoPermission, RunnerPreference, T
 import { restorePreDefectClassSweepPrompt, restorePreOptionalReviewPrompt, restorePreTierRevalidationPrompt } from "./canonical-prompt-sync-fixtures.js";
 import { loadAgentSources } from "./agent-sources.js";
 import { parseCanonicalSyncSummary } from "./canonical-sync-report.js";
-import { isMergeReadinessStep } from "./merge-tail.js";
+import { isMergeReadinessStep, REGRESSION_VERIFICATION_OUTPUT_KIND, REGRESSION_VERIFICATION_V3_OUTPUT_KIND } from "./merge-tail.js";
 import { isIntegratorStep } from "./merge-integrator.js";
 import {
   canonicalTemplateIdentity,
@@ -353,7 +353,7 @@ test("sync rolls the checkout Regression prompt generation once and preserves ch
     }
     await restoreRetiredReviewStepNames(template.id);
     await rebindFixStepToRetiredSeniorDev(project.id, template.id);
-    const regression = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
+    const regression = template.steps.find(({ outputKind }) => outputKind === REGRESSION_VERIFICATION_V3_OUTPUT_KIND);
     assert.ok(regression);
     assert.equal(regression.prompt.split(runnerResolver).length - 1, 3);
     const fix = template.steps.find(({ outputKind }) => outputKind === "fixed-implementation");
@@ -365,7 +365,10 @@ test("sync rolls the checkout Regression prompt generation once and preserves ch
     const outgoingPrompt = restorePreOptionalReviewPrompt(regression.prompt)
       .replaceAll(runnerResolver, retiredResolver);
     assert.doesNotMatch(outgoingPrompt, /AGENTOS_TOOLS/u);
-    await prisma.taskTemplateStep.update({ where: { id: regression.id }, data: { prompt: outgoingPrompt } });
+    await prisma.taskTemplateStep.update({
+      where: { id: regression.id },
+      data: { outputKind: REGRESSION_VERIFICATION_OUTPUT_KIND, prompt: outgoingPrompt },
+    });
 
     const chainId = `pre-runner-tools-${template.name}-${randomBytes(4).toString("hex")}`;
     let regressionTaskId = "";
@@ -415,7 +418,7 @@ test("sync rolls the checkout Regression prompt generation once and preserves ch
       include: { steps: { orderBy: { stepIndex: "asc" } } },
     });
     assert.notEqual(current.id, old.templateId);
-    const currentRegression = current.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
+    const currentRegression = current.steps.find(({ outputKind }) => outputKind === REGRESSION_VERIFICATION_V3_OUTPUT_KIND);
     assert.ok(currentRegression);
     assert.equal(currentRegression.prompt.split(runnerResolver).length - 1, 3);
     assert.equal(currentRegression.prompt.includes(retiredResolver), false);
@@ -488,7 +491,7 @@ test("sync rolls the deployed pre-optional-review prompt generation once", async
     await restoreRetiredReviewStepNames(template.id);
     await rebindFixStepToRetiredSeniorDev(project.id, template.id);
     const fix = template.steps.find(({ outputKind }) => outputKind === "fixed-implementation");
-    const regression = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2");
+    const regression = template.steps.find(({ outputKind }) => outputKind === REGRESSION_VERIFICATION_V3_OUTPUT_KIND);
     assert.ok(fix);
     assert.ok(regression);
     const outgoingFixPrompt = restorePreOptionalReviewPrompt(fix.prompt);
@@ -496,7 +499,10 @@ test("sync rolls the deployed pre-optional-review prompt generation once", async
     assert.notEqual(outgoingFixPrompt, fix.prompt);
     assert.notEqual(outgoingRegressionPrompt, regression.prompt);
     await prisma.taskTemplateStep.update({ where: { id: fix.id }, data: { prompt: outgoingFixPrompt } });
-    await prisma.taskTemplateStep.update({ where: { id: regression.id }, data: { prompt: outgoingRegressionPrompt } });
+    await prisma.taskTemplateStep.update({
+      where: { id: regression.id },
+      data: { outputKind: REGRESSION_VERIFICATION_OUTPUT_KIND, prompt: outgoingRegressionPrompt },
+    });
 
     const chainId = `pre-optional-review-${template.name}-${randomBytes(4).toString("hex")}`;
     let fixTaskId = "";
@@ -579,10 +585,10 @@ test("sync rolls parked and not-yet-started v1 chains forward without changing t
     await restoreRetiredReviewStepNames(template.id);
     await rebindFixStepToRetiredSeniorDev(project.id, template.id);
     await prisma.taskTemplateStep.updateMany({
-      where: { taskTemplateId: template.id, outputKind: "regression-verification-v2" },
+      where: { taskTemplateId: template.id, outputKind: REGRESSION_VERIFICATION_V3_OUTPUT_KIND },
       data: { outputKind: "regression-verification", prompt: oldPrompt },
     });
-    const regressionIndex = template.steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!.stepIndex;
+    const regressionIndex = template.steps.find(({ outputKind }) => outputKind === REGRESSION_VERIFICATION_V3_OUTPUT_KIND)!.stepIndex;
     const parked = template.name === "compound-engineer-workflow";
     const chainId = `${parked ? "parked" : "not-started"}-v1-${template.id}`;
     for (const step of template.steps) {
@@ -668,10 +674,10 @@ test("sync rolls parked and not-yet-started v1 chains forward without changing t
       include: { steps: { orderBy: { stepIndex: "asc" } } },
     });
     assert.notEqual(current.id, template.id);
-    const currentRegression = current.steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!;
+    const currentRegression = current.steps.find(({ outputKind }) => outputKind === REGRESSION_VERIFICATION_V3_OUTPUT_KIND)!;
     assert.match(currentRegression.prompt, /AGENTOS_TOOLS:\?AGENTOS_TOOLS is required/u);
     assert.doesNotMatch(currentRegression.prompt, /Run `scripts\/regression-verification\.sh/u);
-    assert.match(currentRegression.prompt, /script persists the one allowed v2 outcome/u);
+    assert.match(currentRegression.prompt, /semantic PASS is evidence about the prepared fix/u);
   }
 
   const second = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
@@ -739,7 +745,7 @@ test("sync rolls the exact adjudication-era graphs forward without touching inst
       prompt: `Adjudicate the two review reports for ${template.name}.`,
     } });
     await prisma.taskTemplateStep.updateMany({
-      where: { taskTemplateId: template.id, outputKind: "regression-verification-v2" },
+      where: { taskTemplateId: template.id, outputKind: REGRESSION_VERIFICATION_V3_OUTPUT_KIND },
       data: { outputKind: "regression-verification" },
     });
     // The adjudication-era compound graph still gated its spec and revise-plan
@@ -860,7 +866,7 @@ test("sync rolls the pre-zero-gate compound graph forward and leaves the direct 
     data: { approvalGate: true },
   });
   await prisma.taskTemplateStep.updateMany({
-    where: { taskTemplateId: full.id, outputKind: "regression-verification-v2" },
+    where: { taskTemplateId: full.id, outputKind: REGRESSION_VERIFICATION_V3_OUTPUT_KIND },
     data: { outputKind: "regression-verification" },
   });
 
@@ -1189,7 +1195,7 @@ test("sync recreates a missing regression verifier and restores canonical bindin
   });
   const regressionSteps = await prisma.taskTemplateStep.findMany({
     where: {
-      outputKind: "regression-verification-v2",
+      outputKind: REGRESSION_VERIFICATION_V3_OUTPUT_KIND,
       taskTemplate: { projectId: project.id },
     },
     select: { id: true, taskTemplate: { select: { name: true } } },
@@ -1450,7 +1456,7 @@ test("canonical sync adopts the tolerated differences and refuses every other on
   const reviewStep = step(3);
   const implementationStep = step(2);
   const regressionStep = step(6);
-  assert.equal(regressionStep.outputKind, "regression-verification-v2");
+  assert.equal(regressionStep.outputKind, REGRESSION_VERIFICATION_V3_OUTPUT_KIND);
   const retiredReviewer = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "code-reviewer-sol-high" } },
   });

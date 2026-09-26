@@ -12,7 +12,7 @@ import {
   type IntegratorTask,
 } from "./merge-integrator-db.js";
 import { isIntegratorStep } from "./merge-integrator.js";
-import { isMergeReadinessStep, REGRESSION_VERIFICATION_OUTPUT_KIND } from "./merge-tail.js";
+import { isMergeReadinessStep, REGRESSION_VERIFICATION_OUTPUT_KIND, REGRESSION_VERIFICATION_V3_OUTPUT_KIND } from "./merge-tail.js";
 import { stepGeneration, stepRole, type StepRole } from "./step-role.js";
 import { PR_TEMPLATE_NAME } from "./agent-contract.js";
 import { loadTemplateStepSources, type CanonicalTemplateName } from "./template-sources.js";
@@ -32,6 +32,7 @@ const EXPECTED_ROLES: Readonly<Record<string, StepRole>> = {
   documentation: "documentation",
   "regression-verification": "regression",
   [REGRESSION_VERIFICATION_OUTPUT_KIND]: "regression",
+  [REGRESSION_VERIFICATION_V3_OUTPUT_KIND]: "regression",
   "merge-authorization": "readiness",
   "merge-result": "integrator",
 };
@@ -70,7 +71,9 @@ for (const templateName of ["compound-engineer-workflow", "direct-engineer-workf
       assert.equal(stepRole(step), EXPECTED_ROLES[step.outputKind]);
       assert.equal(
         stepGeneration(step),
-        step.outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND || step.outputKind === "revalidation" ? "v2" : "v1",
+        step.outputKind === REGRESSION_VERIFICATION_V3_OUTPUT_KIND
+          ? "v3"
+          : step.outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND || step.outputKind === "revalidation" ? "v2" : "v1",
       );
     }
   });

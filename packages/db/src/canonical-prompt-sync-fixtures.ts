@@ -1,5 +1,47 @@
+const PRE_SEMANTIC_INTEGRATION_SEPARATION_REGRESSION_PROMPT = [
+  "The platform script owns prepare-time refresh/merge, gate dispatch and retries,",
+  "verdict transcription, and the final `regression-verification-v2` task output.",
+  "Merge readiness checks the latest target under the Merge Lease before authorizing",
+  "the exact merge. Do not perform or restate those mechanical operations yourself.",
+  "",
+  "Run `\"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh\" prepare`. If it reports",
+  "`refresh-conflict`, the final output is already persisted: record the outcome",
+  "in the activity log and finish. Otherwise read the implementation summary,",
+  "every present review report (`review-findings` and, when instantiated,",
+  "`blind-findings`), and the fixed implementation with its dispositions from",
+  "Anneal. The blind review report may be absent when its optional step was",
+  "omitted. Review the entire refreshed fix diff as one unit, account for every",
+  "finding id in every present report, and verify that the approved specification",
+  "is preserved without a new defect. Run focused regressions for the findings and",
+  "changed behavior; the Merge gate owns full workspace and repository suites. Do not modify code or repair",
+  "a failure. The tracked `.chain/` Chain workspace is platform bookkeeping that merge execution strips from the merge commit tree; it never counts toward diff-scope, forbidden-surface, or changed-file acceptance checks, so never report it as a defect or modify it.",
+  "",
+  "Sweep changed code and sites governed by changed contracts for each defect class identified in the prior findings or",
+  "refreshed fix. Record proven pre-existing out-of-scope instances and non-blocking P2 observations separately in the",
+  "activity log. If an adopted finding remains open, a rejection is unsupported, or a new blocking defect exists, report",
+  "every blocking instance in one call, one line per finding ID, location (`file:line`, or command and cwd for an",
+  "execution failure), and consequence:",
+  "`\"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh\" review-fail '<concise finding IDs or defect>'`",
+  "and finish. Otherwise run `\"${AGENTOS_TOOLS:?AGENTOS_TOOLS is required}/regression-verification.sh\" finalize`.",
+  "",
+  "A finalize exit 0 means the script persisted `pass` or `gate-fail` for the head",
+  "and baseline frozen by prepare; report the bounded `REGRESSION FINALIZE` status",
+  "line it printed. Any nonzero script exit fails the run loudly.",
+  "The script persists the one allowed v2 outcome; never call `task_output` for this step or write a report file.",
+].join("\n");
+
+/** Restore the v2 Regression prompt retired by semantic/integration separation. */
+export const restorePreSemanticIntegrationSeparationPrompt = (prompt: string): string =>
+  prompt.startsWith("The platform script owns target refresh, verdict transcription, and the final\n`regression-verification-v3` task output.")
+    ? PRE_SEMANTIC_INTEGRATION_SEPARATION_REGRESSION_PROMPT
+    : prompt;
+
+/** Map the current Step kind only while constructing pre-v3 generation fixtures. */
+export const restorePreSemanticIntegrationSeparationOutputKind = (outputKind: string): string =>
+  outputKind === "regression-verification-v3" ? "regression-verification-v2" : outputKind;
+
 /** Restore the fixed-child Direct prompt for deployed-generation sync fixtures. */
-export const restorePreDirectAutonomyPrompt = (prompt: string): string => prompt.replace(
+export const restorePreDirectAutonomyPrompt = (prompt: string): string => restorePreSemanticIntegrationSeparationPrompt(prompt).replace(
   "Implement this task on {{branchName}} directly from the feature brief below — a direct chain carries no spec or plan phase, so the brief is the specification of record. The platform materializes `.chain/{{branchName}}/spec.md` as the specification of record; leave it untouched.\n\nChoose whether and how to delegate based on the work, and select session-supported child models and reasoning effort to fit it. Give each concurrent writer its own branch and git worktree. Integrate and verify all child work against the specification of record and acceptance criteria in your context, resolve conflicts, and own final acceptance. Children must not perform irreversible external actions.\n\nFollow the platform-pinned Implementation proof boundary after integration. ",
   "Implement this task on {{branchName}} directly from the feature brief below — a direct chain carries no spec or plan phase, so the brief is the specification of record. The platform materializes `.chain/{{branchName}}/spec.md` as the specification of record; leave it untouched. The platform pins native child threads to Luna max and limits the session to eight concurrent children. Use them only when the brief contains independent, safely parallel work; group related change points instead of creating one child per item. In the controlled resource limit, fill as many slots as can execute safely in parallel. Give every concurrent writer its own branch and git worktree, and keep coupled work in your own context. When at least two child-writer branches need integration, start one long-lived merger after the first result is ready; integrate a sole child-writer branch yourself. The merger integrates completed branches in dependency-safe order, resolves only mechanical conflicts, reruns affected narrow tests, and reports semantic conflicts to you. Follow the platform-pinned Implementation proof boundary after integration. Give a failed child one bounded correction in the same thread, then take over its assignment yourself. A child must not perform irreversible external actions. ",
 );

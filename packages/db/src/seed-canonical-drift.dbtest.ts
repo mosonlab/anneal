@@ -16,6 +16,7 @@ import { after, before, test } from "node:test";
 
 import { PrismaClient } from "@prisma/client";
 import { LEGACY_TEMPLATE_GENERATIONS } from "./canonical-template-transition.js";
+import { REGRESSION_VERIFICATION_V3_OUTPUT_KIND } from "./merge-tail.js";
 
 const historicalReviewKind = LEGACY_TEMPLATE_GENERATIONS["direct-engineer-workflow"]
   .find(({ marker }) => marker === "pre-model-neutral-review-output")!.shape
@@ -122,7 +123,7 @@ test("seed rolls a registered canonical generation over inside its installation 
   assert.equal(legacy.id, outgoing.id);
   assert.notEqual(current.id, outgoing.id);
   assert.equal(await prisma.taskTemplateStep.count({
-    where: { taskTemplateId: current.id, outputKind: "regression-verification-v2" },
+    where: { taskTemplateId: current.id, outputKind: REGRESSION_VERIFICATION_V3_OUTPUT_KIND },
   }), 1);
   await prisma.taskTemplate.delete({ where: { id: legacy.id } });
 });
