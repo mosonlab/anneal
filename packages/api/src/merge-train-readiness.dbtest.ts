@@ -10,10 +10,14 @@ import {
   DependencyProvisioning,
   INTEGRATOR_SENTINEL_MODEL,
   MERGE_TRAIN_OUTPUT_KIND,
+  MERGE_INTEGRATOR_KIND,
   MergeLeaseEventState,
   openRun,
   mergeTrainClaimMetadata,
   readLatestMarker,
+  recordIntegratorStop,
+  loadIntegratorTask,
+  requestConfirmationCard,
   PrismaClient,
   PushStatus,
   RunStatus,
@@ -512,6 +516,7 @@ const trainTaskFor = async (seed: Seed) => {
   const detached = await db.task.findMany({
     where: { projectId: seed.project.id, repoId: seed.repo.id, chainId: null },
     include: { templateStep: true },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
   });
   const train = detached.find((task) => task.description.includes("merge-train.sh")
     || task.name.toLowerCase().includes("merge train")
@@ -1113,6 +1118,108 @@ test("width zero sends one approved semantic candidate through a gated prefix be
     position: 1,
     trainTaskId: train.id,
   });
+});
+
+test("a stopped v3 merge re-authorizes through a fresh train without another Regression Run", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "0";
+  const seed = await seedTrainCandidates(1);
+  const candidate = seed.candidates[0]!;
+  await makeSemanticCandidate(candidate);
+  await approveCandidate(seed, candidate, "semantic-renewal-initial-approval");
+
+  await readinessTick(
+    db, readerFor(seed), new Date(TEST_NOW.getTime() + 500), 5,
+    releaseChainLease, runWithMergeLease, () => [],
+  );
+  await finishTrainRun(seed, await recordFor(seed, ["pass"], 1));
+  const initiallyAuthorized = await readinessTick(
+    db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5,
+    releaseChainLease, runWithMergeLease, () => [],
+  );
+  assert.equal(initiallyAuthorized.authorized, 1);
+
+  const firstIntegratorRun = await db.run.findFirstOrThrow({
+    where: { taskId: candidate.integrator.id },
+    orderBy: { runNumber: "desc" },
+  });
+  await db.run.update({ where: { id: firstIntegratorRun.id }, data: { status: RunStatus.SUCCEEDED } });
+  const integratorAgentId = firstIntegratorRun.agentId;
+  assert.ok(integratorAgentId);
+  await db.session.create({ data: {
+    runId: firstIntegratorRun.id,
+    projectId: seed.project.id,
+    taskId: candidate.integrator.id,
+    agentId: integratorAgentId,
+    runner: firstIntegratorRun.runner,
+    executionStatus: "SUCCEEDED",
+  } });
+  const stopped = await db.$transaction((tx) => recordIntegratorStop(tx, {
+    integratorTaskId: candidate.integrator.id,
+    condition: "api-error",
+    evidence: JSON.stringify({ reason: "GitHub API 502" }),
+    sourceRunId: firstIntegratorRun.id,
+  }));
+  assert.ok(stopped.questionId);
+  const regressionRunsBefore = await db.run.count({ where: { taskId: candidate.regression.id } });
+
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: stopped.questionId!,
+    externalEventId: "semantic-renewal-reauthorize",
+    decision: "re-authorize",
+  }, new Date(TEST_NOW.getTime() + 2_000)));
+
+  assert.equal(await db.run.count({ where: { taskId: candidate.regression.id } }), regressionRunsBefore);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.regression.id } })).status, TaskStatus.DONE);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.readiness.id } })).status, TaskStatus.TODO);
+  assert.equal(await db.inboxMessage.count({ where: {
+    dedupeKey: { startsWith: `confirmation:${candidate.integrator.id}:${stopped.stopId}` },
+  } }), 0);
+  assert.equal(await db.run.count({ where: { taskId: candidate.integrator.id } }), 1,
+    "re-authorize itself does not birth merge execution");
+
+  // Simulate a confirmation card persisted by the pre-renewal control plane.
+  // Its approval must converge on the same readiness re-arm, not attempt the
+  // now-forbidden semantic confirmation authorization or require another
+  // operator rejection/model Run.
+  const historicalCardId = await db.$transaction(async (tx) => {
+    const integrator = await loadIntegratorTask(tx, candidate.integrator.id);
+    assert.ok(integrator);
+    return requestConfirmationCard(tx, integrator, stopped.stopId, new Date(TEST_NOW.getTime() + 2_100));
+  });
+  const recoveredHistoricalCard = await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: historicalCardId,
+    externalEventId: "semantic-renewal-historical-card",
+    decision: "approve",
+  }, new Date(TEST_NOW.getTime() + 2_200)));
+  assert.equal(recoveredHistoricalCard.gateAction, "approved");
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: historicalCardId } })).status, "ANSWERED");
+  assert.equal(await db.run.count({ where: { taskId: candidate.integrator.id } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: candidate.regression.id } }), regressionRunsBefore);
+
+  const formed = await readinessTick(
+    db, readerFor(seed), new Date(TEST_NOW.getTime() + 2_500), 5,
+    releaseChainLease, runWithMergeLease, () => [],
+  );
+  assert.deepEqual(formed, { claimed: 1, authorized: 0, requeued: 0, stopped: 0 });
+  const renewalTrain = await trainTaskFor(seed);
+  assert.equal(((await trainTaskMarkerFor(renewalTrain.id)).metadata as Record<string, unknown>).width, 1);
+  await finishTrainRun(seed, await recordFor(seed, ["pass"], 1));
+  const renewed = await readinessTick(
+    db, readerFor(seed), new Date(TEST_NOW.getTime() + 3_000), 5,
+    releaseChainLease, runWithMergeLease, () => [],
+  );
+  assert.equal(renewed.authorized, 1);
+  assert.equal(await db.run.count({ where: { taskId: candidate.integrator.id } }), 2);
+  const superseded = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: candidate.integrator.id,
+    metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.stopSuperseded },
+  } });
+  assert.equal((superseded.metadata as Record<string, unknown>).stopId, stopped.stopId);
+  const latestAuthorization = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: candidate.readiness.id,
+    metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.authorization },
+  }, orderBy: [{ createdAt: "desc" }, { id: "desc" }] });
+  assert.equal(typeof (latestAuthorization.metadata as Record<string, unknown>).train, "object");
 });
 
 test("a proofless semantic train prefix authorizes nothing", async () => {

@@ -40,12 +40,19 @@ import {
   isIntegratorStep,
   isStopCondition,
   isTerminalDisposition,
+  parseAuthorizationMetadata,
   parseStopAnswerMetadata,
 } from "./merge-integrator.js";
 import { putRecommendedChoiceFirst, recommendMergeStop } from "./inbox-recommendation.js";
 import { requireDefaultFeishuThread } from "./default-feishu-thread.js";
+import { lockChainRows } from "./locks.js";
 import { revalidateAfterClassCeiling } from "./merge-recovery-revalidate.js";
-import { MERGE_TAIL_KIND } from "./merge-tail.js";
+import {
+  isMergeReadinessStep,
+  MERGE_TAIL_KIND,
+  parseRegressionVerdict,
+  REGRESSION_VERIFICATION_V3_OUTPUT_KIND,
+} from "./merge-tail.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -870,6 +877,163 @@ export type StopAnswerOutcome = {
 };
 
 /**
+ * A v3 Regression already supplied the human-reviewed candidate evidence. A
+ * stopped merge needs a new publication proof, not another model pass: return
+ * its server-owned readiness step to the worker and let the ordinary train
+ * path produce that proof. The old readiness output is deliberately retained;
+ * stop supersession accepts only a newer mechanical authorization written
+ * after the operator's refresh-requested answer.
+ *
+ * `false` means this is a legacy/full-gate tail and must keep the confirmation
+ * card protocol. A malformed v3 tail throws instead of falling back to a card
+ * whose approval can never be valid.
+ */
+export const rearmSemanticReadinessForStop = async (
+  tx: Tx,
+  integratorTaskId: string,
+  stopId: string,
+  now = new Date(),
+): Promise<boolean> => {
+  const identity = await tx.task.findUnique({
+    where: { id: integratorTaskId },
+    select: { projectId: true, chainId: true, chainIndex: true },
+  });
+  if (!identity?.chainId || identity.chainIndex === null) return false;
+  await lockChainRows(tx, { projectId: identity.projectId, chainId: identity.chainId });
+
+  const stopped = await stopStateFor(tx, integratorTaskId);
+  if (!stopped || stopped.stop.stopId !== stopId
+    || !stopped.dispositions.includes("refresh-requested")) return false;
+
+  const superseded = await tx.taskActivity.findFirst({ where: {
+    taskId: integratorTaskId,
+    AND: [
+      { metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.stopSuperseded } },
+      { metadata: { path: ["stopId"], equals: stopId } },
+    ],
+  }, select: { id: true } });
+  if (superseded) return true;
+
+  const predecessors = await tx.task.findMany({
+    where: {
+      projectId: identity.projectId,
+      chainId: identity.chainId,
+      chainIndex: { lt: identity.chainIndex },
+    },
+    include: {
+      templateStep: { include: { taskTemplate: { select: { name: true } } } },
+      stepOutput: true,
+    },
+    orderBy: { chainIndex: "desc" },
+  });
+  const readiness = predecessors[0];
+  if (!readiness || !isMergeReadinessStep(readiness.templateStep)) return false;
+  const regression = predecessors[1];
+  if (!regression
+    || regression.templateStep?.outputKind !== REGRESSION_VERIFICATION_V3_OUTPUT_KIND) return false;
+
+  const output = regression.stepOutput;
+  const parsed = parseRegressionVerdict(output?.body, output?.kind);
+  if (regression.status !== TaskStatus.DONE
+    || output?.kind !== REGRESSION_VERIFICATION_V3_OUTPUT_KIND
+    || parsed.status !== "ok"
+    || parsed.verdict.outcome !== "semantic-pass"
+    || output.commitSha !== parsed.verdict.headSha) {
+    throw new MergeConfirmationError(
+      `Regression v3 semantic evidence is not reusable for stopped integrator ${integratorTaskId}; refusing confirmation fallback`,
+    );
+  }
+
+  const closeStaleConfirmationCards = async (): Promise<void> => {
+    const key = confirmationCardKey(integratorTaskId, stopId);
+    await tx.inboxMessage.updateMany({
+      where: {
+        status: InboxStatus.OPEN,
+        OR: [{ dedupeKey: key }, { dedupeKey: { startsWith: `${key}:r` } }],
+      },
+      data: { status: InboxStatus.CLOSED },
+    });
+  };
+
+  // A Hold may retain the fresh authorization after readiness completed but
+  // before it can birth the integrator Run. Leave that DONE row intact: Chain
+  // resume will replay activation and the existing supersession logic will
+  // consume this exact authorization.
+  if (readiness.status === TaskStatus.DONE && readiness.stepOutput?.kind === "merge-authorization") {
+    let authorizationActivityId: unknown = null;
+    try {
+      const value = JSON.parse(readiness.stepOutput.body) as unknown;
+      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+        authorizationActivityId = (value as Record<string, unknown>).authorizationActivityId;
+      }
+    } catch {
+      authorizationActivityId = null;
+    }
+    const answer = await tx.taskActivity.findFirst({
+      where: { taskId: integratorTaskId, AND: [
+        { metadata: { path: ["kind"], equals: MERGE_INTEGRATOR_KIND.stopAnswer } },
+        { metadata: { path: ["stopId"], equals: stopId } },
+        { metadata: { path: ["disposition"], equals: "refresh-requested" } },
+      ] },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      select: { createdAt: true },
+    });
+    const authorization = typeof authorizationActivityId === "string"
+      ? await tx.taskActivity.findUnique({ where: { id: authorizationActivityId }, select: {
+        id: true, taskId: true, actorType: true, createdAt: true, metadata: true,
+      } })
+      : null;
+    const parsedAuthorization = parseAuthorizationMetadata(authorization?.metadata);
+    if (answer && authorization
+      && authorization.taskId === readiness.id
+      && authorization.actorType === "control-plane"
+      && authorization.createdAt > answer.createdAt
+      && parsedAuthorization.status === "ok"
+      && parsedAuthorization.payload.decision.channel === "mechanical"
+      && parsedAuthorization.payload.headSha === readiness.stepOutput.commitSha) {
+      await closeStaleConfirmationCards();
+      return true;
+    }
+  }
+
+  if (readiness.status === TaskStatus.DONE) {
+    await tx.task.update({
+      where: { id: readiness.id },
+      data: {
+        status: TaskStatus.TODO,
+        failureReason: null,
+        readinessClaimToken: null,
+        readinessClaimExpiresAt: null,
+      },
+    });
+    await tx.taskActivity.create({ data: {
+      taskId: readiness.id,
+      actorType: "control-plane",
+      body: "Stopped merge re-authorization queued existing semantic evidence for a fresh merge train",
+      metadata: {
+        kind: MERGE_TAIL_KIND.readiness,
+        schemaVersion: 1,
+        state: "semantic-renewal-queued",
+        integratorTaskId,
+        stopId,
+        regressionTaskId: regression.id,
+        regressionOutputId: output.id,
+        headSha: parsed.verdict.headSha,
+        baseHeadSha: parsed.verdict.baseHeadSha,
+        queuedAt: now.toISOString(),
+      },
+    } });
+  } else if (readiness.status !== TaskStatus.TODO && readiness.status !== TaskStatus.DOING) {
+    throw new MergeConfirmationError(
+      `Merge readiness ${readiness.id} is ${readiness.status}; refusing to bypass its stopped state`,
+    );
+  }
+
+  await closeStaleConfirmationCards();
+  return true;
+};
+
+/**
  * §D-P7's answer transaction. Every exit from a stop runs through here, and the
  * guard downstream keys on the *disposition* this writes rather than on the
  * answer merely existing — which is the whole of C3: `flag-incident` records an
@@ -935,11 +1099,14 @@ export const applyStopAnswer = async (
   }
 
   if (disposition === "refresh-requested") {
-    // Evidence precedes judgment (C2): this creates no run and writes no
-    // authorization. It asks for a card the human will read and then approve,
-    // unless a Merge readiness re-verification completed after this answer
-    // supersedes the stop first (`activateChainSuccessor`, ADR-0011).
-    outcome.confirmationCardId = await requestConfirmationCard(tx, task, binding.stopId, now);
+    // Evidence precedes judgment (C2): this creates no Run and writes no
+    // authorization. A v3 semantic candidate returns to readiness for a fresh
+    // train; a legacy gated candidate asks for a confirmation card. Either may
+    // supersede the stop only through activateChainSuccessor (ADR-0011).
+    const rearmed = await rearmSemanticReadinessForStop(tx, task.id, binding.stopId, now);
+    if (!rearmed) {
+      outcome.confirmationCardId = await requestConfirmationCard(tx, task, binding.stopId, now);
+    }
     return outcome;
   }
 
@@ -1146,6 +1313,10 @@ export const ensureRefreshRequestedConfirmationCard = async (
   integratorTaskId: string,
   now = new Date(),
 ): Promise<string | null> => {
+  const beforeLock = await stopStateFor(tx, integratorTaskId);
+  if (!beforeLock || !beforeLock.dispositions.includes("refresh-requested")) return null;
+  if (await rearmSemanticReadinessForStop(tx, integratorTaskId, beforeLock.stop.stopId, now)) return null;
+
   const locked = await tx.$queryRaw<Array<{ id: string }>>`
     SELECT "id" FROM "Task" WHERE "id" = ${integratorTaskId} FOR UPDATE
   `;

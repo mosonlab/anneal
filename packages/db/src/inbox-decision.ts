@@ -16,7 +16,14 @@ import { lockChainRows, lockTaskRow } from "./locks.js";
 import { produceMergeAuthorization, recordMergeEvidenceRefusal } from "./merge-authorization.js";
 import { MERGE_INTEGRATOR_KIND } from "./merge-integrator.js";
 import type { MergeExecutorLivenessReader } from "./merge-integrator-db.js";
-import { applyStopAnswer, ensureRefreshRequestedConfirmationCard, parseStopQuestionKey } from "./merge-integrator-db.js";
+import {
+  applyStopAnswer,
+  ensureRefreshRequestedConfirmationCard,
+  parseEvidenceRequest,
+  parseStopQuestionKey,
+  rearmSemanticReadinessForStop,
+  stopStateFor,
+} from "./merge-integrator-db.js";
 import {
   isGatedMergeReadinessTask,
   rejectMergeReadinessGate,
@@ -215,7 +222,7 @@ export const applyInboxDecisionTx = async (
   // readiness task as the initial gate. Its durable evidence-request purpose,
   // rather than the task's persistent approvalGate flag, decides which
   // disposition owns the answer.
-  const confirmationRequest = gateDecision && question.gateTask
+  const confirmationRequestRow = gateDecision && question.gateTask
     && isGatedMergeReadinessTask(question.gateTask)
     ? await tx.taskActivity.findFirst({
       where: {
@@ -226,8 +233,11 @@ export const applyInboxDecisionTx = async (
           { metadata: { path: ["purpose"], equals: "confirmation" } },
         ],
       },
-      select: { id: true },
+      select: { id: true, taskId: true, metadata: true },
     })
+    : null;
+  const confirmationRequest = confirmationRequestRow
+    ? parseEvidenceRequest(confirmationRequestRow)
     : null;
   const initialMergeGate = isGatedMergeReadinessTask(question.gateTask)
     && confirmationRequest === null;
@@ -376,6 +386,25 @@ export const applyInboxDecisionTx = async (
           task: question.gateTask,
           sourceRunId: question.session.run.id,
         });
+        return { duplicate: false, resumed: false, gateAction: "approved", messageId: reply.id };
+      }
+      // Regression v3 confirmation cards may predate semantic renewal support.
+      // Their evidence cannot authorize merge execution directly, but the
+      // operator already chose re-authorize on the bound stop. Treat approval
+      // as the safe mechanical action it asks for: re-run readiness/train while
+      // preserving the original candidate Approval and semantic output.
+      const stopped = confirmationRequest
+        ? await stopStateFor(tx, confirmationRequest.integratorTaskId)
+        : null;
+      if (confirmationRequest && stopped?.dispositions.includes("refresh-requested")
+        && await rearmSemanticReadinessForStop(
+          tx, confirmationRequest.integratorTaskId, stopped.stop.stopId, now,
+        )) {
+        await tx.taskActivity.create({ data: {
+          taskId: question.gateTask.id,
+          actorType: "operator",
+          body: gateActivityBody("Semantic merge renewal approved; fresh merge train queued", gateNote),
+        } });
         return { duplicate: false, resumed: false, gateAction: "approved", messageId: reply.id };
       }
       await tx.task.update({ where: { id: question.gateTask.id }, data: { status: TaskStatus.DONE, failureReason: null } });
