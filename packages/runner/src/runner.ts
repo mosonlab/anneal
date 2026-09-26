@@ -72,6 +72,7 @@ import {
   type ProviderRelaunchLeaseFacts,
 } from "./provider-relaunch.js";
 import { createRunLease, deliverUnderLease, type RunLease, type RunLeaseClock } from "./run-lease.js";
+import { semanticReuseSourceFor } from "./regression-reuse.js";
 import { createSessionEventQueue } from "./session-event-queue.js";
 import { openSessionConfig, type SessionConfigLease } from "./session-config-lease.js";
 import { readMergeTrainOutputHandoff } from "./merge-train-output-handoff.js";
@@ -97,6 +98,17 @@ const MERGE_TRAIN_LAUNCHER_ENVIRONMENT = [
   "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
 ] as const;
 const MERGE_TRAIN_ADAPTER_VERSION = "merge-train-runtime-tool-v1";
+const REGRESSION_REUSE_ADAPTER_VERSION = "regression-reuse-runtime-tool-v1";
+const REGRESSION_REUSE_ENVIRONMENT = new Set([
+  "PATH", "HOME", "LANG", "GIT_TERMINAL_PROMPT", "GIT_CONFIG_GLOBAL",
+  "AGENTOS_TOOLS", "AGENTOS_HOST_PROOF_SLOT_DIR", "AGENTOS_HOST_PROOF_SLOTS",
+  "AGENTOS_GATE_SERVER", "AGENTOS_GATE_PRIMARY_SERVER", "AGENTOS_GATE_FALLBACK_SERVER",
+  "AGENTOS_GATE_ALLOW_LOCAL", "AGENTOS_GATE_LOCAL_SLOTS", "AGENTOS_GATE_PRIMARY_SLOTS",
+  "AGENTOS_RUN_ID", "AGENTOS_WORKSPACE_PATH", "AGENTOS_RUNNER_HOME", "AGENTOS_CHAIN_ID",
+  "AGENTOS_PULL_REQUEST_BASE", "AGENTOS_REGRESSION_RECOVERY_CONTEXT", "AGENTOS_REGRESSION_OUTPUT_KIND",
+  "RUNNER_WORKSPACE_ROOT", "CONTROL_PLANE_STATE_DIR",
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+]);
 
 const persistMechanicalOutputHandoff = async (
   session: RunSession,
@@ -157,46 +169,42 @@ const exitEvidencePayload = (evidence: ExitEvidence): Record<string, unknown> =>
   stderrTail: summarizeEvidence(evidence.stderr),
 });
 
-const startMergeTrainTool = (
+const startFixedRuntimeTool = (
   config: RunnerConfig,
   spec: Parameters<CliAdapter["start"]>[0],
+  options: {
+    executableName: string;
+    toolId: string;
+    args: string[];
+    input: string;
+    childEnvironment: NodeJS.ProcessEnv;
+    launcherEnvironment: readonly string[];
+  },
 ): Promise<RuntimeHandle> => new Promise((resolve, reject) => {
-  const train = spec.claim.task.mergeTrain;
-  if (!train) {
-    reject(new Error("Detached merge-train claim metadata is missing"));
-    return;
-  }
   const state = createAdapterState(spec.claim.runner, spec.claim.run.id);
   const startedAt = state.startedAt;
   state.inFlightTool = {
-    id: "merge-train-runtime-tool",
-    name: "merge-train.sh",
+    id: options.toolId,
+    name: options.executableName,
     startedAt,
     lastProgressAt: startedAt,
   };
-  const executable = join(spec.env.AGENTOS_TOOLS ?? "", "merge-train.sh");
-  if (!spec.env.AGENTOS_TOOLS || executable === "merge-train.sh") {
-    reject(new Error("AGENTOS_TOOLS is required to start the merge-train runtime tool"));
+  const executable = join(spec.env.AGENTOS_TOOLS ?? "", options.executableName);
+  if (!spec.env.AGENTOS_TOOLS || executable === options.executableName) {
+    reject(new Error(`AGENTOS_TOOLS is required to start the ${options.executableName} runtime tool`));
     return;
   }
-  const input = JSON.stringify(train);
-  const providerEnvironment = new Set(RUNNER_DEFINITIONS[spec.claim.runner].launcherEnvironmentVariables);
-  const childEnvironment = Object.fromEntries(Object.entries(spec.env).filter(([name]) =>
-    name !== "AGENTOS_API_URL"
-    && name !== "AGENTOS_SESSION_TOKEN"
-    && name !== "AGENTOS_FENCING_TOKEN"
-    && !providerEnvironment.has(name)));
   const command = launchAdapterArgv(
     config,
     { runner: spec.claim.runner, launcherEnvironmentVariables: [] },
-    [],
+    options.args,
     spec.env,
     executable,
-    MERGE_TRAIN_LAUNCHER_ENVIRONMENT,
+    options.launcherEnvironment,
   );
   const child = spawn(command.executable, command.args, {
     cwd: spec.workingDirectory,
-    env: childEnvironment,
+    env: options.childEnvironment,
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
   });
@@ -248,10 +256,48 @@ const startMergeTrainTool = (
           state.stderr += `${error.message}\n`;
         }
       });
-      child.stdin.end(input);
+      child.stdin.end(options.input);
     }),
   }) satisfies RuntimeHandle;
   resolve(handle);
+});
+
+const startMergeTrainTool = (
+  config: RunnerConfig,
+  spec: Parameters<CliAdapter["start"]>[0],
+): Promise<RuntimeHandle> => {
+  const train = spec.claim.task.mergeTrain;
+  if (!train) return Promise.reject(new Error("Detached merge-train claim metadata is missing"));
+  const providerEnvironment = new Set(RUNNER_DEFINITIONS[spec.claim.runner].launcherEnvironmentVariables);
+  const childEnvironment = Object.fromEntries(Object.entries(spec.env).filter(([name]) =>
+    name !== "AGENTOS_API_URL"
+    && name !== "AGENTOS_SESSION_TOKEN"
+    && name !== "AGENTOS_FENCING_TOKEN"
+    && !providerEnvironment.has(name)));
+  return startFixedRuntimeTool(config, spec, {
+    executableName: "merge-train.sh",
+    toolId: "merge-train-runtime-tool",
+    args: [],
+    input: JSON.stringify(train),
+    childEnvironment,
+    launcherEnvironment: MERGE_TRAIN_LAUNCHER_ENVIRONMENT,
+  });
+};
+
+const regressionReuseEnvironment = (environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv =>
+  Object.fromEntries(Object.entries(environment).filter(([name]) =>
+    REGRESSION_REUSE_ENVIRONMENT.has(name) || /^GIT_CONFIG_(?:COUNT|KEY_[0-9]+|VALUE_[0-9]+)$/u.test(name)));
+
+const startRegressionReuseTool = (
+  config: RunnerConfig,
+  spec: Parameters<CliAdapter["start"]>[0],
+): Promise<RuntimeHandle> => startFixedRuntimeTool(config, spec, {
+  executableName: "regression-verification.sh",
+  toolId: "regression-reuse-runtime-tool",
+  args: ["verify-reused"],
+  input: "",
+  childEnvironment: regressionReuseEnvironment(spec.env),
+  launcherEnvironment: [...REGRESSION_REUSE_ENVIRONMENT],
 });
 
 type MechanicalHandoff =
@@ -350,7 +396,7 @@ export const executeClaim = async (
 ): Promise<void> => {
   const providerAdapter = dependencies.adapter ?? adapters[claim.runner];
   const isMergeTrain = claim.task.isMergeTrain === true || claim.task.mergeTrain != null;
-  const adapter: CliAdapter = isMergeTrain ? {
+  let adapter: CliAdapter = isMergeTrain ? {
     ...providerAdapter,
     // A detached train is a bounded platform command. Keep the ordinary
     // RuntimeHandle heartbeat and process-group cancellation, but never start
@@ -360,6 +406,7 @@ export const executeClaim = async (
     resume: async () => { throw new Error("The merge-train runtime command cannot be resumed as a model session"); },
     isProviderDisconnect: () => false,
   } : providerAdapter;
+  let regressionReuseSource: ReturnType<typeof semanticReuseSourceFor> = null;
   const controlPlane = dependencies.controlPlane ?? openControlPlane(config);
   const session = controlPlane.openRun(claim);
   let workspace: Workspace | null = null;
@@ -606,6 +653,22 @@ export const executeClaim = async (
     workspace = claim.resume
       ? await reuseWorkspace(config, claim)
       : await provisionWorkspace(config, claim, provisioning.decision);
+    regressionReuseSource = semanticReuseSourceFor(claim, workspace);
+    if (regressionReuseSource) {
+      adapter = {
+        ...providerAdapter,
+        preflight: async () => ({
+          ok: true,
+          cliVersion: "regression-reuse-runtime-tool",
+          authMode: null,
+          capabilities: {},
+        }),
+        start: (spec) => startRegressionReuseTool(config, spec),
+        resume: async () => { throw new Error("The regression reuse runtime command cannot be resumed as a model session"); },
+        isProviderDisconnect: () => false,
+      };
+    }
+    const isFixedRuntimeTool = isMergeTrain || regressionReuseSource !== null;
     if (!provisioning.decision.provision) {
       // This is deliberately a fenced activity write with no fallback: the
       // agent must have durable evidence of the dependency-free checkout
@@ -615,8 +678,8 @@ export const executeClaim = async (
     const prompt = buildPrompt(claim);
     scratch = await provisionAgentScratch(config, claim.session.id);
     await (dependencies.materializeRuntimeTools ?? materializeRuntimeTools)(config, scratch);
-    sessionConfigLease = openSessionConfig(config, claim, scratch, dependencies, { isolate: !isMergeTrain });
-    if (!isMergeTrain) {
+    sessionConfigLease = openSessionConfig(config, claim, scratch, dependencies, { isolate: !isFixedRuntimeTool });
+    if (!isFixedRuntimeTool) {
       await (dependencies.provisionSessionConfig ?? provisionSessionConfig)(config, claim.runner, scratch, {
         reuse: claim.resume !== null,
       });
@@ -664,7 +727,9 @@ export const executeClaim = async (
       return;
     }
 
-    const credentialsPath = await (dependencies.writeSessionCredentials ?? writeSessionCredentials)(config, claim, workspace);
+    const credentialsPath = isFixedRuntimeTool
+      ? ""
+      : await (dependencies.writeSessionCredentials ?? writeSessionCredentials)(config, claim, workspace);
     if (!runLease.held) {
       runLease.abandonProviderLaunch();
       await runLease.checkpoint();
@@ -722,19 +787,37 @@ export const executeClaim = async (
     // Keep the launch manifest and durable Run hash tied to the bytes that this
     // invocation actually handed to the provider.
     const dispatchedPrompt = claim.resume?.input ?? prompt;
-    const mergeTrainInput = isMergeTrain ? JSON.stringify(claim.task.mergeTrain) : null;
+    const fixedToolInput = isMergeTrain
+      ? JSON.stringify(claim.task.mergeTrain)
+      : regressionReuseSource
+        ? JSON.stringify({ recovery: claim.regressionRecoveryContext, source: regressionReuseSource })
+        : null;
     const manifest = isMergeTrain
       ? {
         adapterVersion: MERGE_TRAIN_ADAPTER_VERSION,
         runtimeTool: "merge-train.sh",
-        inputSha256: createHash("sha256").update(mergeTrainInput ?? "").digest("hex"),
+        inputSha256: createHash("sha256").update(fixedToolInput ?? "").digest("hex"),
       }
+      : regressionReuseSource
+        ? {
+          adapterVersion: REGRESSION_REUSE_ADAPTER_VERSION,
+          runtimeTool: "regression-verification.sh",
+          subcommand: "verify-reused",
+          inputSha256: createHash("sha256").update(fixedToolInput ?? "").digest("hex"),
+          semanticSourceRunId: regressionReuseSource.runId,
+        }
       : manifestFor(spec, dispatchedPrompt);
-    const startPromptHash = isMergeTrain ? promptHashFor(mergeTrainInput ?? "") : promptHashFor(dispatchedPrompt);
+    const startPromptHash = isFixedRuntimeTool
+      ? promptHashFor(fixedToolInput ?? "")
+      : promptHashFor(dispatchedPrompt);
     await session.start({
-      adapterVersion: isMergeTrain ? MERGE_TRAIN_ADAPTER_VERSION : ADAPTER_VERSION,
-      cliVersion: isMergeTrain ? "merge-train-runtime-tool" : preflight.cliVersion ?? "unknown",
-      authMode: isMergeTrain ? null : preflight.authMode,
+      adapterVersion: isMergeTrain
+        ? MERGE_TRAIN_ADAPTER_VERSION
+        : regressionReuseSource
+          ? REGRESSION_REUSE_ADAPTER_VERSION
+          : ADAPTER_VERSION,
+      cliVersion: isFixedRuntimeTool ? preflight.cliVersion ?? "runtime-tool" : preflight.cliVersion ?? "unknown",
+      authMode: isFixedRuntimeTool ? null : preflight.authMode,
       manifest,
       promptHash: startPromptHash,
       workspacePath: workspace.path,
@@ -829,7 +912,7 @@ export const executeClaim = async (
     // process ended is one case of this verdict.
     const exitVerdict = agentExitVerdict(evidence);
     let mechanicalHandoffPersisted = false;
-    if (runLease.held && (!isMergeTrain || exitVerdict.case === "succeeded")) {
+    if (runLease.held && (!isFixedRuntimeTool || exitVerdict.case === "succeeded")) {
       try {
         const handoff = await readMechanicalOutputHandoff(config, claim, workspace);
         if (handoff) {
@@ -861,6 +944,10 @@ export const executeClaim = async (
       if (isMergeTrain && exitVerdict.case === "succeeded" && !mechanicalHandoffPersisted
         && terminalFailureReason === null) {
         terminalFailureReason = `Merge-train runtime command finished without a current-Run mechanical handoff for Run ${claim.run.id}`;
+      }
+      if (regressionReuseSource && exitVerdict.case === "succeeded" && !mechanicalHandoffPersisted
+        && terminalFailureReason === null) {
+        terminalFailureReason = `Regression reuse runtime command finished without a current-Run mechanical handoff for Run ${claim.run.id}`;
       }
     }
     if (exitVerdict.case === "succeeded"

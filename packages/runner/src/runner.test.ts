@@ -924,6 +924,294 @@ const regressionBlockAdapter = async (
   };
 };
 
+const regressionReuseClaim = (remoteUrl: string, headSha: string): ClaimedTask => {
+  const claim = regressionBlockClaim(remoteUrl);
+  return {
+    ...claim,
+    secrets: { PROVIDER_SECRET_SHOULD_NOT_LEAK: "provider-secret" },
+    run: { ...claim.run, baseSha: headSha },
+    regressionRecoveryContext: {
+      state: "queued",
+      currentBaseSha: headSha,
+      authorizedHeadSha: headSha,
+      recoveryRunId: claim.run.id,
+      priorOutput: {
+        runId: "prior-regression-run",
+        kind: "regression-verification-v2",
+        body: JSON.stringify({
+          schemaVersion: 2,
+          outcome: "pass",
+          headSha,
+          baseHeadSha: headSha,
+          gateVerdict: "PASS",
+          gateProof: `MERGE GATE: PASS ${headSha}`,
+        }),
+        commitSha: headSha,
+      },
+    },
+  };
+};
+
+const regressionReuseRuntimeSource = (options: {
+  handoff: boolean;
+  exitCode?: number;
+  waitForHeartbeat?: boolean;
+  advanceHead?: boolean;
+}): string => `#!/usr/bin/env node
+const fs = require("node:fs");
+const path = require("node:path");
+const { execFileSync } = require("node:child_process");
+if (process.argv[2] !== "verify-reused") process.exit(90);
+const root = process.env.AGENTOS_WORKSPACE_PATH;
+fs.mkdirSync(path.join(root, ".agentos"), { recursive: true });
+fs.writeFileSync(path.join(root, ".agentos", "reuse-started"), "started");
+process.stdout.write("REUSE_ENV " + JSON.stringify(process.env) + "\\n");
+const finish = () => {
+  ${options.handoff ? `
+  ${options.advanceHead ? `execFileSync("git", ["commit", "--allow-empty", "-m", "test: simulate clean target refresh"], { cwd: process.env.AGENTOS_WORKSPACE_PATH });` : ""}
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: process.env.AGENTOS_WORKSPACE_PATH, encoding: "utf8" }).trim();
+  const body = JSON.stringify({
+    schemaVersion: 2,
+    outcome: "pass",
+    headSha: head,
+    baseHeadSha: head,
+    gateVerdict: "PASS",
+    gateProof: "MERGE GATE: PASS " + head,
+    semanticVerdict: "reused",
+    semanticSourceRunId: "prior-regression-run",
+  });
+  fs.mkdirSync(path.join(process.env.AGENTOS_WORKSPACE_PATH, ".agentos"), { recursive: true });
+  fs.writeFileSync(path.join(process.env.AGENTOS_WORKSPACE_PATH, ".agentos", "regression-output.json"), JSON.stringify({
+    schemaVersion: 1,
+    runId: process.env.AGENTOS_RUN_ID,
+    kind: "regression-verification-v2",
+    body,
+    commitSha: head,
+  }), { mode: 0o600 });
+  ` : ""}
+  process.exit(${options.exitCode ?? 0});
+};
+${options.waitForHeartbeat ? `
+const wait = (deadline) => {
+  if (fs.existsSync(path.join(root, ".agentos", "reuse-heartbeat"))) return finish();
+  if (Date.now() >= deadline) process.exit(91);
+  setTimeout(() => wait(deadline), 10);
+};
+wait(Date.now() + 30000);
+` : "finish();"}
+`;
+
+const installRegressionReuseRuntimeFixture = async (
+  scratch: AgentScratch,
+  options: { handoff: boolean; exitCode?: number; waitForHeartbeat?: boolean; advanceHead?: boolean },
+): Promise<void> => {
+  await mkdir(scratch.toolsDir, { recursive: true });
+  const scriptPath = join(scratch.toolsDir, "regression-verification.sh");
+  await writeFile(scriptPath, regressionReuseRuntimeSource(options));
+  await chmod(scriptPath, 0o755);
+};
+
+test("trusted base-drift semantic evidence runs the fixed verifier without provider auth", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-regression-reuse-command-"));
+  try {
+    const remote = await seedRemote(root);
+    const headSha = git(join(root, "seed"), "rev-parse", "HEAD");
+    const claim = regressionReuseClaim(remote, headSha);
+    let startedWorkspacePath: string | null = null;
+    let publishedCommitSha = headSha;
+    let heartbeatObserved = false;
+    const controlPlane = createControlPlaneDouble({
+      openRun: () => ({
+        start: async (snapshot) => {
+          startedWorkspacePath = typeof snapshot.workspacePath === "string" ? snapshot.workspacePath : null;
+        },
+        heartbeat: async (progress) => {
+          if (progress.processAlive && startedWorkspacePath && !heartbeatObserved) {
+            heartbeatObserved = true;
+            await mkdir(join(startedWorkspacePath, ".agentos"), { recursive: true });
+            await writeFile(join(startedWorkspacePath, ".agentos", "reuse-heartbeat"), "alive");
+          }
+          return { held: true };
+        },
+      }),
+      publishOutput: async (output) => { publishedCommitSha = output.commitSha ?? headSha; },
+      outputStatus: async () => ({
+        satisfaction: { case: "delivered", output: { kind: "regression-verification-v2", commitSha: publishedCommitSha } },
+        prHandoff: { case: "not-a-pr-delivery" },
+      }),
+    });
+    let providerCalls = 0;
+    let sessionConfigCalls = 0;
+    let credentialCalls = 0;
+    const providerAdapter: CliAdapter = {
+      ...adapters.CLAUDE,
+      preflight: async () => { providerCalls += 1; throw new Error("provider preflight must not run"); },
+      start: async () => { providerCalls += 1; throw new Error("provider start must not run"); },
+    };
+
+    await executeClaimProduction({
+      ...config(join(root, "workspaces")),
+      home: root,
+      heartbeatIntervalMs: 20,
+      path: process.env.PATH ?? "/usr/bin:/bin",
+    }, claim, {
+      adapter: providerAdapter,
+      controlPlane: controlPlane.controlPlane,
+      materializeRuntimeTools: async (_runnerConfig, scratch) => installRegressionReuseRuntimeFixture(
+        scratch,
+        { handoff: true, waitForHeartbeat: true, advanceHead: true },
+      ),
+      provisionSessionConfig: async () => { sessionConfigCalls += 1; throw new Error("provider config must not be provisioned"); },
+      writeSessionCredentials: async () => { credentialCalls += 1; throw new Error("session credentials must not be written"); },
+    });
+
+    assert.equal(providerCalls, 0);
+    assert.equal(heartbeatObserved, true);
+    assert.equal(sessionConfigCalls, 0);
+    assert.equal(credentialCalls, 0);
+    assert.equal(controlPlane.completions.at(-1)?.outcome.case, "succeeded");
+    assert.equal(controlPlane.taskOutputs.length, 1);
+    assert.notEqual(controlPlane.taskOutputs[0]?.commitSha, headSha, "a clean prepare refresh may advance HEAD");
+    assert.equal(controlPlane.starts[0]?.adapterVersion, "regression-reuse-runtime-tool-v1");
+    const manifest = controlPlane.starts[0]?.manifest as Record<string, unknown>;
+    assert.equal(manifest.runtimeTool, "regression-verification.sh");
+    assert.equal(manifest.subcommand, "verify-reused");
+    const output = controlPlane.completions.at(-1)?.output ?? "";
+    const childEnvironment = JSON.parse(/^REUSE_ENV (\{.*\})$/mu.exec(output)?.[1] ?? "{}") as Record<string, string>;
+    assert.equal(childEnvironment.PROVIDER_SECRET_SHOULD_NOT_LEAK, undefined);
+    assert.equal(childEnvironment.AGENTOS_SESSION_TOKEN, undefined);
+    assert.equal(childEnvironment.AGENTOS_FENCING_TOKEN, undefined);
+    assert.equal(childEnvironment.AGENTOS_API_URL, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cancellation stops the fixed regression verifier and acknowledges under the Run lease", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-regression-reuse-cancel-"));
+  try {
+    const remote = await seedRemote(root);
+    const headSha = git(join(root, "seed"), "rev-parse", "HEAD");
+    const claim = regressionReuseClaim(remote, headSha);
+    let acknowledged = false;
+    const controlPlane = createControlPlaneDouble({
+      openRun: () => ({
+        heartbeat: async (progress) => progress.processAlive
+          ? {
+            held: false,
+            reason: "cancelled",
+            request: { requestId: "cancel-reuse", reason: "operator cancel", requestedAt: new Date().toISOString() },
+          }
+          : { held: true },
+        acknowledgeCancellation: async (request) => {
+          assert.equal(request.requestId, "cancel-reuse");
+          acknowledged = true;
+        },
+      }),
+    });
+    let providerCalls = 0;
+    const providerAdapter: CliAdapter = {
+      ...adapters.CLAUDE,
+      preflight: async () => { providerCalls += 1; throw new Error("provider preflight must not run"); },
+      start: async () => { providerCalls += 1; throw new Error("provider start must not run"); },
+    };
+    await executeClaimProduction({
+      ...config(join(root, "workspaces")),
+      home: root,
+      heartbeatIntervalMs: 20,
+      path: process.env.PATH ?? "/usr/bin:/bin",
+    }, claim, {
+      adapter: providerAdapter,
+      controlPlane: controlPlane.controlPlane,
+      materializeRuntimeTools: async (_runnerConfig, scratch) => installRegressionReuseRuntimeFixture(
+        scratch,
+        { handoff: false, waitForHeartbeat: true },
+      ),
+    });
+    assert.equal(providerCalls, 0);
+    assert.equal(acknowledged, true);
+    assert.equal(controlPlane.taskOutputs.length, 0);
+    assert.equal(controlPlane.completions.length, 0, "the cancellation acknowledgement owns terminal settlement");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an untrusted recovery binding falls back to the provider", async () => {
+  const root = await mkdtemp(join(tmpdir(), "runner-regression-reuse-fallback-"));
+  try {
+    const remote = await seedRemote(root);
+    const headSha = git(join(root, "seed"), "rev-parse", "HEAD");
+    const selected = regressionReuseClaim(remote, headSha);
+    const claim = {
+      ...selected,
+      regressionRecoveryContext: { ...selected.regressionRecoveryContext!, recoveryRunId: "another-run" },
+    };
+    const controlPlane = createControlPlaneDouble({
+      outputStatus: async () => ({
+        satisfaction: { case: "absent", outputKind: "regression-verification-v2", remediable: false },
+        prHandoff: { case: "not-a-pr-delivery" },
+      }),
+    });
+    let preflightCalls = 0;
+    let startCalls = 0;
+    const providerAdapter: CliAdapter = {
+      ...adapters.CLAUDE,
+      preflight: async () => {
+        preflightCalls += 1;
+        return { ok: true, cliVersion: "test", authMode: "test", capabilities: {} };
+      },
+      start: async ({ workingDirectory }) => {
+        startCalls += 1;
+        return regressionBlockAdapter(workingDirectory, claim.run.id);
+      },
+    };
+    await executeClaimProduction({ ...config(join(root, "workspaces")), home: root }, claim, {
+      adapter: providerAdapter,
+      controlPlane: controlPlane.controlPlane,
+      materializeRuntimeTools: async () => undefined,
+      provisionSessionConfig: async () => undefined,
+    });
+    assert.equal(preflightCalls, 1);
+    assert.equal(startCalls, 1);
+  } finally {
+    await cleanupTestSession(root);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+for (const runtimeFailure of [
+  { name: "exits nonzero after a handoff", handoff: true, exitCode: 1, expected: "provider-failure" },
+  { name: "exits zero without a handoff", handoff: false, exitCode: 0, expected: "required-output-unsatisfied" },
+] as const) {
+  test(`a fixed regression verifier that ${runtimeFailure.name} cannot report success`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "runner-regression-reuse-failure-"));
+    try {
+      const remote = await seedRemote(root);
+      const headSha = git(join(root, "seed"), "rev-parse", "HEAD");
+      const claim = regressionReuseClaim(remote, headSha);
+      const controlPlane = createControlPlaneDouble({
+        outputStatus: async () => ({
+          satisfaction: { case: "absent", outputKind: "regression-verification-v2", remediable: false },
+          prHandoff: { case: "not-a-pr-delivery" },
+        }),
+      });
+      await executeClaimProduction({
+        ...config(join(root, "workspaces")),
+        home: root,
+        path: process.env.PATH ?? "/usr/bin:/bin",
+      }, claim, {
+        controlPlane: controlPlane.controlPlane,
+        materializeRuntimeTools: async (_runnerConfig, scratch) => installRegressionReuseRuntimeFixture(scratch, runtimeFailure),
+      });
+      assert.equal(controlPlane.completions.at(-1)?.outcome.case, runtimeFailure.expected);
+      assert.equal(controlPlane.taskOutputs.length, 0);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("a Regression target-fetch block record is reported in the terminal reason and remediation event", async () => {
   const root = await mkdtemp(join(tmpdir(), "runner-regression-target-fetch-block-"));
   try {
