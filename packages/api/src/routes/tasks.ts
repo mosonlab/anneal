@@ -8,6 +8,7 @@ import {
   enqueueTaskRunInternal,
   gateSlotOf,
   MERGE_INTEGRATOR_KIND,
+  MERGE_TAIL_KIND,
   holdChain,
   LEASE_LOSS_REFUND_EXHAUSTED_PREFIX,
   integratorBindingRefusalFor,
@@ -617,13 +618,37 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
           select: { id: true, status: true },
         }),
       ]);
-      if (latestRecovery?.status === MergeRecoveryStatus.REPAIRING
+      if (latestRecovery
+        && (latestRecovery.status === MergeRecoveryStatus.REPAIRING
+          || latestRecovery.status === MergeRecoveryStatus.BLOCKED_DOWNSTREAM)
         && latestRecovery.recoveryRunId === latestRun?.id
         && ([RunStatus.FAILED, RunStatus.TIMED_OUT, RunStatus.CANCELLED, RunStatus.LOST] as RunStatus[])
           .includes(latestRun.status)) {
+        const repairOwner = await tx.taskActivity.findFirst({ where: {
+          taskId,
+          actorType: "control-plane",
+          AND: [
+            { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.repairAttempt } },
+            { metadata: { path: ["sourceRunId"], equals: latestRun.id } },
+          ],
+        }, select: { id: true } });
+        if (repairOwner) {
+          return refusal(
+            "conflict",
+            "This Regression verdict is already owned by merge-tail repair; wait for repair completion. Ordinary retry cannot replace an active repair.",
+            {
+              code: "merge_recovery_repair_owned",
+              recoveryId: latestRecovery.id,
+              recoveryRunId: latestRun.id,
+              resumeRoute: `/tasks/${taskId}/chain/resume`,
+            },
+          );
+        }
         return refusal(
           "conflict",
-          "This failed Regression Run is owned by active merge recovery; wait for automatic replay, or resume the Chain if held. After recovery stops, use the merge-tail repair or rerun route instead of ordinary retry.",
+          latestRecovery.status === MergeRecoveryStatus.REPAIRING
+            ? "This failed Regression Run is owned by active merge recovery; wait for automatic replay, resume the Chain if held, or continue from the recovery stop card if it blocks. Ordinary retry cannot detach recovery ownership."
+            : "This failed Regression Run remains bound to blocked merge recovery; continue from its stop card or a supported merge-tail repair/rerun operation. Ordinary retry cannot detach recovery ownership.",
           {
             code: "merge_recovery_retry_owned",
             recoveryId: latestRecovery.id,
