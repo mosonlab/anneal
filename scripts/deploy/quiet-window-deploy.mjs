@@ -348,11 +348,11 @@ export const createCanonicalSyncRetryStore = ({ stateDir }) => {
     write: (entries) => {
       const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
       try {
-        mkdirSync(stateDir, { recursive: true, mode: 0o700 });
         if (entries.length === 0) {
           rmSync(path, { force: true });
           return;
         }
+        mkdirSync(stateDir, { recursive: true, mode: 0o700 });
         writeFileSync(temporary, `${JSON.stringify({ schemaVersion: 1, entries })}\n`, { mode: 0o600 });
         renameSync(temporary, path);
       } catch (error) {

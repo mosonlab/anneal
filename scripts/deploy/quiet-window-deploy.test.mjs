@@ -2962,7 +2962,7 @@ const withDeployBinaries = (t) => {
   t.after(() => { process.env = previous; });
 };
 
-const spawnRecordingHost = (t, { transactionId }) => {
+const spawnRecordingHost = (t, { transactionId, commandStdout = "" }) => {
   withDeployBinaries(t);
   const spawns = [];
   const migrationTails = [];
@@ -2977,7 +2977,7 @@ const spawnRecordingHost = (t, { transactionId }) => {
     },
     runCommand: async (program, args, options) => {
       spawns.push({ args, env: options.env });
-      return { code: 0, stdout: "", stderr: "" };
+      return { code: 0, stdout: commandStdout, stderr: "" };
     },
   });
   const attempt = openDeploymentAttempt({
@@ -3027,7 +3027,10 @@ test("release artifact build hides the Prisma banner in descendant commands", as
 });
 
 test("canonical prompt sync uses the host command seam", async (t) => {
-  const { host, spawns, attempt } = spawnRecordingHost(t, { transactionId: "command-seam-sync" });
+  const { host, spawns, attempt } = spawnRecordingHost(t, {
+    transactionId: "command-seam-sync",
+    commandStdout: JSON.stringify({ projects: { "agentos-example": {} }, refused: {}, totals: {} }),
+  });
   await host.syncCanonicalPrompts(attempt);
   assert.equal(spawns.length, 1);
   assert.ok(spawns[0].args.includes("packages/db/prisma/sync-canonical-prompts.ts"));
