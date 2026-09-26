@@ -2,6 +2,10 @@
 
 Status: Accepted (2026-09-08)
 
+Current semantic/integration ownership and v3 eligibility are amended by
+[ADR-0013](0013-separate-semantic-verification-from-integration-proof.md)
+(2026-09-26). Historical v2 behavior is retained.
+
 ## Context
 
 Concurrent Chains can move the base while another Chain is under review or

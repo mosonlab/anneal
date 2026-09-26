@@ -5,6 +5,10 @@ date: 2026-09-07
 
 # Publish ready Chains through a merge train
 
+Current semantic/integration ownership and v3 eligibility are amended by
+[ADR-0013](0013-separate-semantic-verification-from-integration-proof.md)
+(2026-09-26). Historical v2 behavior is retained.
+
 ## Decision
 
 When `MERGE_TRAIN_WIDTH` is greater than zero, Merge readiness may authorize

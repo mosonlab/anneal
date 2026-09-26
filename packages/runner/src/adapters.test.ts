@@ -228,8 +228,8 @@ test("a recovery Regression claim carries the pinned context and skip instructio
   const prompt = buildPrompt(recoveryClaim);
   assert.match(prompt, /Platform-pinned base-drift recovery instruction:/u);
   assert.match(prompt, /semantic-reused[\s\S]*skip the semantic model recheck[\s\S]*finalize immediately/u);
-  assert.match(prompt, /finalize always runs the Merge gate/u);
-  assert.match(prompt, /head and baseline frozen by prepare/u);
+  assert.match(prompt, /v3, finalize records semantic evidence/u);
+  assert.match(prompt, /historical v2 finalize retains its gate/u);
   assert.doesNotMatch(prompt, /semantic-stale|exit 77/u);
 
   const config = {
@@ -626,6 +626,23 @@ test("AGENTOS_TOOLS is platform-owned for ordinary and regression steps across e
     assert.equal(regressionEnv.AGENTOS_TOOLS, scratch.toolsDir, `${runner} regression step accepted a task-owned tools path`);
     assert.equal(regressionEnv.AGENTOS_CHAIN_ID, "chain-1");
     assert.equal(regressionEnv.AGENTOS_PULL_REQUEST_BASE, "main");
+  }
+});
+
+test("the claim pins v3 output kind through every launcher despite task secrets", () => {
+  const config = {
+    path: "/bin", home: "/runner", apiUrl: "http://api", runAsPrefix: ["/usr/bin/env", "-i"],
+    workspaceRoot: productionRoot, hostProofSlots: 3,
+  };
+  for (const runner of ["CLAUDE", "CODEX", "PI"] as const) {
+    const env = buildChildEnvironment(config, {
+      ...claim, runner,
+      secrets: { ...claim.secrets, AGENTOS_REGRESSION_OUTPUT_KIND: "regression-verification-v2" },
+      task: { ...claim.task, templateStep: { name: "Regression", outputKind: "regression-verification-v3", provisionDependencies: true, taskTemplate: { name: "direct-engineer-workflow" } } },
+    }, scratch, "/work");
+    assert.equal(env.AGENTOS_REGRESSION_OUTPUT_KIND, "regression-verification-v3", runner);
+    const launch = launchArgv({ ...config, binaries: { CLAUDE: "claude", CODEX: "codex", PI: "pi" } }, runner, [], env);
+    assert.ok(launch.args.includes("AGENTOS_REGRESSION_OUTPUT_KIND=regression-verification-v3"), runner);
   }
 });
 

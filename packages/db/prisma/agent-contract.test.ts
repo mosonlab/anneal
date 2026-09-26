@@ -371,7 +371,7 @@ test("the canonical twelve-step layered template sources split review and preser
       { stepIndex: 7, layer: 6, agentName: "code-reviewer-opus-medium", outputKind: "blind-findings" },
       { stepIndex: 8, layer: 7, agentName: "senior-dev-opus-medium", outputKind: "fixed-implementation" },
       { stepIndex: 9, layer: 8, agentName: "librarian-luna-high", outputKind: "documentation" },
-      { stepIndex: 10, layer: 9, agentName: "regression-verifier-luna-max", outputKind: "regression-verification-v2" },
+      { stepIndex: 10, layer: 9, agentName: "regression-verifier-luna-max", outputKind: "regression-verification-v3" },
       { stepIndex: 11, layer: 10, agentName: "review-coordinator-sol-high", outputKind: "merge-authorization" },
       { stepIndex: 12, layer: 11, agentName: "merge-integrator", outputKind: "merge-result" },
     ],
@@ -389,14 +389,14 @@ test("the canonical twelve-step layered template sources split review and preser
   assert.match(compoundFix, /No adjudication step stands between the reviews and this one/u);
   assert.match(compoundFix, /ADOPTED[\s\S]*REJECTED[\s\S]*MERGED/u);
   const compoundRegression = templateSteps.find((step) => step.stepIndex === 10)!.prompt;
-  assert.match(compoundRegression, /platform script owns prepare-time refresh\/merge[\s\S]*final `regression-verification-v2`/u);
+  assert.match(compoundRegression, /platform script owns target refresh[\s\S]*final\s+`regression-verification-v3`/u);
   assert.match(compoundRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" prepare/u);
   assert.match(compoundRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" review-fail/u);
   assert.match(compoundRegression, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" finalize/u);
   assert.match(compoundRegression, /head[\s\S]*and baseline frozen by prepare/u);
-  assert.match(compoundRegression, /implementation summary,\s+every present review report/u);
-  assert.match(compoundRegression, /blind review report may be absent/u);
-  assert.match(compoundRegression, /fixed implementation with its dispositions/u);
+  assert.match(compoundRegression, /implementation summary, every present review\s+report/u);
+  assert.match(compoundRegression, /optional `blind-findings`/u);
+  assert.match(compoundRegression, /fix output with\s+its dispositions/u);
   assert.doesNotMatch(compoundRegression, /all\s+preceding Step outputs/u);
   assert.doesNotMatch(compoundRegression, /merge-lease\.sh|gate-dispatch\.sh|gateProof/u);
   const directRegression = (await loadTemplateStepSources(DIRECT_TEMPLATE_NAME))
@@ -461,7 +461,7 @@ test("the direct template sources expose the layered review spine and mechanical
       { stepIndex: 3, layer: 3, agentName: "code-reviewer-sol-high", outputKind: "review-findings" },
       { stepIndex: 4, layer: 3, agentName: "code-reviewer-opus-medium", outputKind: "blind-findings" },
       { stepIndex: 5, layer: 4, agentName: "senior-dev-opus-medium", outputKind: "fixed-implementation" },
-      { stepIndex: 6, layer: 5, agentName: "regression-verifier-luna-max", outputKind: "regression-verification-v2" },
+      { stepIndex: 6, layer: 5, agentName: "regression-verifier-luna-max", outputKind: "regression-verification-v3" },
       { stepIndex: 7, layer: 6, agentName: "review-coordinator-sol-high", outputKind: "merge-authorization" },
       { stepIndex: 8, layer: 7, agentName: "merge-integrator", outputKind: "merge-result" },
     ],

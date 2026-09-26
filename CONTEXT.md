@@ -35,6 +35,17 @@ lint, types, and tests run by the merge gate on the exact head, locally or on a
 remote gate worker. Gate evidence belongs to the chain tail only; review steps
 never run the gate.
 
+**Regression verification**:
+Post-fix semantic verification of findings, dispositions, and the fix's affected
+contracts against the **Specification of record**. Its semantic evidence is
+bound to the verified head and base; it is distinct from integration evidence
+and grants no merge authority.
+
+**Merge train**:
+The mechanical preparation and full Merge gate of cumulative candidate prefixes.
+Each publishable prefix has its own exact-head proof. A candidate with only
+semantic evidence still needs integration proof, including when it is alone.
+
 **Merge readiness**:
 The mechanical chain step that validates durable **Merge gate** evidence
 against current repository state, obtains the merge **Lease**, and authorizes

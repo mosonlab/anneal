@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   parseRegressionVerdict,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
+  REGRESSION_VERIFICATION_V3_OUTPUT_KIND,
 } from "@anneal/db";
 
 import type { ClaimedTask } from "./api.js";
@@ -16,13 +17,13 @@ export const HANDOFF_SHA = /^[0-9a-f]{40}$/u;
 const TARGET_FETCH_FAILURE_REASON = "target-fetch-failed" as const;
 
 type RegressionOutputHandoffSuccess = {
-  kind: typeof REGRESSION_VERIFICATION_OUTPUT_KIND;
+  kind: typeof REGRESSION_VERIFICATION_OUTPUT_KIND | typeof REGRESSION_VERIFICATION_V3_OUTPUT_KIND;
   body: string;
   commitSha: string;
 };
 
 export type RegressionOutputHandoffBlock = {
-  kind: typeof REGRESSION_VERIFICATION_OUTPUT_KIND;
+  kind: typeof REGRESSION_VERIFICATION_OUTPUT_KIND | typeof REGRESSION_VERIFICATION_V3_OUTPUT_KIND;
   reason: typeof TARGET_FETCH_FAILURE_REASON;
   stderr: string;
 };
@@ -96,7 +97,8 @@ export const readRegressionOutputHandoff = async (
   claim: RegressionHandoffClaim,
   workspace: Workspace,
 ): Promise<RegressionOutputHandoff | null> => {
-  if (claim.task.templateStep?.outputKind !== REGRESSION_VERIFICATION_OUTPUT_KIND) return null;
+  const outputKind = claim.task.templateStep?.outputKind;
+  if (outputKind !== REGRESSION_VERIFICATION_OUTPUT_KIND && outputKind !== REGRESSION_VERIFICATION_V3_OUTPUT_KIND) return null;
   const raw = await readWorkspaceHandoffFile(config, workspace, "regression-output.json", "Regression output");
   if (raw === null) return null;
 
@@ -110,13 +112,13 @@ export const readRegressionOutputHandoff = async (
   }
   if (value.schemaVersion !== HANDOFF_SCHEMA_VERSION) throw new Error("Regression output handoff has an unsupported schemaVersion");
   if (value.runId !== claim.run.id) throw new Error(`Regression output handoff belongs to Run ${String(value.runId)}, not ${claim.run.id}`);
-  if (value.kind !== REGRESSION_VERIFICATION_OUTPUT_KIND) throw new Error(`Regression output handoff has unexpected kind ${String(value.kind)}`);
+  if (value.kind !== outputKind) throw new Error(`Regression output handoff has unexpected kind ${String(value.kind)}`);
   if (value.reason === TARGET_FETCH_FAILURE_REASON) {
     if (typeof value.stderr !== "string" || value.stderr.length === 0) {
       throw new Error("Regression output handoff target-fetch-failed block stderr is not a non-empty string");
     }
     return {
-      kind: REGRESSION_VERIFICATION_OUTPUT_KIND,
+      kind: outputKind,
       reason: TARGET_FETCH_FAILURE_REASON,
       stderr: value.stderr,
     };
@@ -136,13 +138,13 @@ export const readRegressionOutputHandoff = async (
   if (value.commitSha !== headSha) {
     throw new Error(`Regression output handoff is stale: handoff ${value.commitSha}, workspace ${headSha}`);
   }
-  const verdict = parseRegressionVerdict(value.body, REGRESSION_VERIFICATION_OUTPUT_KIND);
+  const verdict = parseRegressionVerdict(value.body, outputKind);
   if (verdict.status === "invalid") throw new Error(`Regression output handoff verdict is invalid: ${verdict.reason}`);
   if (verdict.verdict.headSha !== headSha) {
     throw new Error(`Regression output handoff verdict is stale: verdict ${verdict.verdict.headSha}, workspace ${headSha}`);
   }
   return {
-    kind: REGRESSION_VERIFICATION_OUTPUT_KIND,
+    kind: outputKind,
     body: value.body,
     commitSha: headSha,
   };

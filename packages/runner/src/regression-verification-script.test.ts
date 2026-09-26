@@ -1039,3 +1039,101 @@ exec "$REGRESSION_FIXTURE_NODE" "$@"
   assert.equal(readFileSync(seeded.leaseLog, "utf8"), "");
   assert.equal(existsSync(seeded.output), false);
 });
+
+test("v3 records semantic evidence without dispatching the full gate", () => {
+  const seeded = fixture();
+  seeded.env.AGENTOS_REGRESSION_OUTPUT_KIND = "regression-verification-v3";
+  const prepared = run(seeded, "prepare");
+  assert.equal(prepared.status, 0, prepared.stderr);
+  const finalized = run(seeded, "finalize");
+  assert.equal(finalized.status, 0, finalized.stderr);
+  const result = handoff(seeded);
+  assert.equal(result.kind, "regression-verification-v3");
+  assert.deepEqual(JSON.parse(result.body), {
+    schemaVersion: 3, outcome: "semantic-pass", headSha: seeded.branchSha, baseHeadSha: seeded.baseSha,
+  });
+  assert.equal(readFileSync(seeded.gateLog, "utf8"), "");
+  assert.equal(readFileSync(seeded.leaseLog, "utf8"), "");
+});
+
+test("model-free reuse carries provenance into a v3 current-Run handoff", () => {
+  for (const sourceVersion of [2, 3]) {
+    const seeded = fixture();
+    seeded.env.AGENTOS_REGRESSION_OUTPUT_KIND = "regression-verification-v3";
+    const context = JSON.parse(recoveryContext(seeded));
+    if (sourceVersion === 3) {
+      context.priorOutput.kind = "regression-verification-v3";
+      context.priorOutput.body = JSON.stringify({
+        schemaVersion: 3, outcome: "semantic-pass", headSha: seeded.branchSha, baseHeadSha: seeded.baseSha,
+      });
+    }
+    seeded.env.AGENTOS_REGRESSION_RECOVERY_CONTEXT = JSON.stringify(context);
+    const result = run(seeded, "verify-reused");
+    assert.equal(result.status, 0, result.stderr);
+    const output = handoff(seeded);
+    assert.equal(output.runId, "run-1");
+    assert.deepEqual(JSON.parse(output.body), {
+      schemaVersion: 3, outcome: "semantic-pass", headSha: seeded.branchSha, baseHeadSha: seeded.baseSha,
+      semanticVerdict: "reused", semanticSourceRunId: context.priorOutput.runId,
+    });
+    assert.equal(readFileSync(seeded.gateLog, "utf8"), "");
+  }
+});
+
+test("model-free reuse refuses missing authority and new CI findings before refresh", () => {
+  for (const blocked of ["missing", "ci", "head"]) {
+    const seeded = fixture();
+    seeded.env.AGENTOS_REGRESSION_OUTPUT_KIND = "regression-verification-v3";
+    if (blocked !== "missing") {
+      const context = JSON.parse(recoveryContext(seeded));
+      if (blocked === "ci") context.ciFailures = [{ name: "checks", conclusion: "failure", log: "failed" }];
+      else context.authorizedHeadSha = seeded.baseSha;
+      seeded.env.AGENTOS_REGRESSION_RECOVERY_CONTEXT = JSON.stringify(context);
+    }
+    const result = run(seeded, "verify-reused");
+    assert.notEqual(result.status, 0);
+    assert.equal(existsSync(seeded.output), false);
+    assert.equal(readFileSync(seeded.fetchLog, "utf8"), "");
+    assert.equal(readFileSync(seeded.gateLog, "utf8"), "");
+  }
+});
+
+test("v3 cannot attest a head changed after semantic verification", () => {
+  const seeded = fixture();
+  seeded.env.AGENTOS_REGRESSION_OUTPUT_KIND = "regression-verification-v3";
+  assert.equal(run(seeded, "prepare").status, 0);
+  writeFileSync(join(seeded.work, "feature.txt"), "unverified change\n");
+  git(seeded.work, "add", "feature.txt");
+  git(seeded.work, "commit", "-m", "unverified");
+  const result = run(seeded, "finalize");
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /workspace HEAD changed/u);
+  assert.equal(existsSync(seeded.output), false);
+});
+
+test("model-free v3 reuse refreshes cleanly or returns a conflict without attesting it", () => {
+  for (const conflict of [false, true]) {
+    const seeded = fixture();
+    seeded.env.AGENTOS_REGRESSION_OUTPUT_KIND = "regression-verification-v3";
+    advanceBase(seeded, conflict ? "feature.txt" : "drift.txt", "upstream change\n");
+    const movedBase = git(seeded.origin, "rev-parse", "refs/heads/main");
+    seeded.env.AGENTOS_REGRESSION_RECOVERY_CONTEXT = recoveryContext(seeded, { currentBaseSha: movedBase });
+    const result = run(seeded, "verify-reused");
+    assert.equal(result.status, 0, result.stderr);
+    const verdict = JSON.parse(handoff(seeded).body);
+    assert.equal(verdict.schemaVersion, 3);
+    assert.equal(verdict.baseHeadSha, movedBase);
+    assert.equal(verdict.headSha, git(seeded.work, "rev-parse", "HEAD"));
+    if (conflict) {
+      assert.equal(verdict.outcome, "refresh-conflict");
+      assert.equal(verdict.headSha, seeded.branchSha);
+      assert.equal(verdict.semanticVerdict, undefined);
+    } else {
+      assert.equal(verdict.outcome, "semantic-pass");
+      assert.notEqual(verdict.headSha, seeded.branchSha);
+      assert.equal(verdict.semanticVerdict, "reused");
+      assert.equal(git(seeded.work, "merge-base", "--is-ancestor", movedBase, verdict.headSha), "");
+    }
+    assert.equal(readFileSync(seeded.gateLog, "utf8"), "");
+  }
+});

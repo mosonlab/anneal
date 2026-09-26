@@ -1709,13 +1709,18 @@ replaying authorization or releasing a newer lease generation.
 
 When `MERGE_TRAIN_WIDTH` is greater than zero, Merge readiness collects ready
 Chain candidates per Repo. A candidate must have a valid exact-head
-`regression-verification-v2` PASS bound to its `(headSha, baseHeadSha)`, and
+`regression-verification-v2` PASS or v3 `semantic-pass` bound to its
+`(headSha, baseHeadSha)`, and
 its recovery aggregate must not be `REPAIRING` or `BLOCKED_DOWNSTREAM`.
 Candidates are ordered FIFO by the time their Regression evidence was
 persisted. The control plane forms a train when at least one candidate's
 evidence base differs from the live default-branch head or at least two
-candidates are ready. A single candidate whose evidence is not drifted keeps
-the ordinary single-candidate authorization path.
+candidates are ready. A single v2 candidate whose evidence is not drifted keeps
+the ordinary single-candidate authorization path. A v3 `semantic-pass` always
+requires train integration proof, including one candidate and configured width
+zero: zero disables batching, not the full gate obligation. No GateAttestation
+is derived from a semantic-only verdict. Approval remains bound to the candidate
+head and semantic base; the actual publication prefix needs its own gate proof.
 
 The control plane represents a train with one detached platform Task of kind
 `merge-train`. This Task has `assigneeType: AGENT`,
@@ -2328,16 +2333,22 @@ A fresh Regression Run opened by base-drift recovery receives
 latest persisted regression output snapshotted before recovery clears it, or
 `null`). The snapshot carries the prior `runId`, `kind`, `body`, and `commitSha`.
 
-`regression-verification.sh prepare` decides once from that snapshot. It reuses
-semantic PASS only when the incoming head, before target refresh, matches both
-the authorized recovery head and the prior output's exact head, and the latest
-output is valid v2 evidence of semantic success (`pass` or `gate-fail`). A different head, a latest `review-fail` or
-`refresh-conflict`, or missing or invalid evidence requires the normal semantic
-recheck. A reused verdict skips that recheck; `finalize` still runs the Merge
-gate. The persisted v2 result adds `semanticVerdict: "reused"` and
-`semanticSourceRunId` naming the prior Run. Finalization remains bound to the
-refreshed head; a later base move invalidates reuse. First regressions and
-changed incoming heads retain semantic verification.
+The Runner may execute the fixed `regression-verification.sh verify-reused`
+command without provider preflight or model startup for a fresh, recovery-bound
+Run. The incoming workspace head must match both the authorized recovery head
+and the persisted prior output's commit and verdict head. The prior verdict must
+be valid v2 `pass`/`gate-fail` or v3 `semantic-pass`; a repair handoff, resumed
+provider session, CI failure, negative verdict, or missing/invalid binding uses
+the ordinary semantic verifier. The script rechecks reuse before target refresh.
+A conflict persists `refresh-conflict`; a clean merge binds finalization to the
+refreshed head. Missing or invalid current-Run handoff never counts as success.
+
+The persisted result carries `semanticVerdict: "reused"` and
+`semanticSourceRunId` naming the prior Run. v3 `finalize` records `semantic-pass`
+and leaves the full integration gate to Merge train. Historical v2 `finalize`
+still gates its prepared head. First regressions and changed incoming heads
+retain semantic verification. A later target move invalidates integration proof,
+not the already-qualified semantic evidence; readiness validates the live base.
 
 ### Regression verdict precedence after an external Run failure
 

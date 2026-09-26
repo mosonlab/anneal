@@ -41,7 +41,7 @@ const COMMON_PROTECTED_SECRET_ENVIRONMENT = [
   "GIT_CONFIG_GLOBAL", "AGENTOS_GATE_SERVER", "AGENTOS_GATE_PRIMARY_SERVER", "AGENTOS_GATE_FALLBACK_SERVER",
   "AGENTOS_GATE_ALLOW_LOCAL", "AGENTOS_GATE_LOCAL_SLOTS", "AGENTOS_GATE_PRIMARY_SLOTS",
   "MERGE_TRAIN_GATE_DISPATCH",
-  "AGENTOS_REGRESSION_RECOVERY_CONTEXT",
+  "AGENTOS_REGRESSION_RECOVERY_CONTEXT", "AGENTOS_REGRESSION_OUTPUT_KIND",
   "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
 ] as const;
 
@@ -73,7 +73,7 @@ const recoveryPromptSection = (claim: ClaimedTask): string[] => {
     "Platform-pinned base-drift recovery instruction:",
     `- Recovery Run ${context.recoveryRunId} is queued for base ${context.currentBaseSha} and authorized head ${context.authorizedHeadSha}.`,
     "- Run regression-verification.sh prepare first. If it reports `REGRESSION PREPARE: semantic-reused`, the persisted prior Run is an exact-head semantic PASS: skip the semantic model recheck and invoke regression-verification.sh finalize immediately.",
-    "- finalize always runs the Merge gate. If prepare reports `ready`, perform the full semantic recheck with focused regressions required by the Regression task before finalizing. The gate proves the head and baseline frozen by prepare; Merge readiness checks the latest target under its Lease.",
+    "- If prepare reports `ready`, verify the fix and affected contracts with focused regressions before finalizing. For v3, finalize records semantic evidence and Merge train owns the full integration gate; historical v2 finalize retains its gate. Merge readiness checks the latest target under its Lease.",
   ];
 };
 
@@ -245,6 +245,7 @@ export const buildChildEnvironment = (
     ...(regressionStep ? {
       AGENTOS_CHAIN_ID: claim.task.chainId!,
       AGENTOS_PULL_REQUEST_BASE: claim.run.pullRequestBase,
+      AGENTOS_REGRESSION_OUTPUT_KIND: outputKind,
     } : {}),
     ...(recoveryContext ? {
       AGENTOS_REGRESSION_RECOVERY_CONTEXT: JSON.stringify(recoveryContext),

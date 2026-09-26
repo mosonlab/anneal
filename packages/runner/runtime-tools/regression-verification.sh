@@ -4,15 +4,20 @@
 # The model invokes `prepare`, performs the semantic recheck unless prepare
 # reuses an exact-head verdict, then invokes `finalize` (or `review-fail
 # <summary>`). This script owns every git/network,
-# gate, verdict transcription, and the local Runner handoff. The Runner owns
+# v2 gate, versioned verdict transcription, and the local Runner handoff. The Runner owns
 # the fenced control-plane write outside the Agent sandbox. Merge readiness owns
-# the short merge-lease window after a durable exact-head PASS exists, so lease
-# transport failures never consume a semantic-verification Run.
+# the merge-lease window. New v3 evidence needs a Merge train gate on the
+# publication prefix; historical v2 Runs retain their candidate gate.
 
 set -u
 set -o pipefail
 
-OUTPUT_KIND="regression-verification-v2"
+OUTPUT_KIND="${AGENTOS_REGRESSION_OUTPUT_KIND:-regression-verification-v2}"
+case "$OUTPUT_KIND" in
+  regression-verification-v2) VERDICT_SCHEMA_VERSION=2 ;;
+  regression-verification-v3) VERDICT_SCHEMA_VERSION=3 ;;
+  *) printf 'regression-verification: unsupported output kind\n' >&2; exit 1 ;;
+esac
 SHA_RE='^[0-9a-f]{40}$'
 
 die() { printf 'regression-verification: %s\n' "$1" >&2; exit "${2:-1}"; }
@@ -203,17 +208,20 @@ clear_reuse_state() {
 
 json_verdict() {
   node -e '
-const [outcome, headSha, baseHeadSha, proofOrSummary, gateFailureExcerpt, semanticVerdict, semanticSourceRunId] = process.argv.slice(1);
+const [version, outcome, headSha, baseHeadSha, proofOrSummary, gateFailureExcerpt, semanticVerdict, semanticSourceRunId] = process.argv.slice(1);
+const schemaVersion = Number(version);
 const semantic = semanticVerdict === "reused" && typeof semanticSourceRunId === "string" && semanticSourceRunId.length > 0
   ? { semanticVerdict: "reused", semanticSourceRunId }
   : {};
 const value = outcome === "pass"
-  ? { schemaVersion: 2, outcome, headSha, baseHeadSha, gateVerdict: "PASS", gateProof: proofOrSummary }
+  ? { schemaVersion, outcome, headSha, baseHeadSha, gateVerdict: "PASS", gateProof: proofOrSummary }
   : outcome === "gate-fail"
-    ? { schemaVersion: 2, outcome, headSha, baseHeadSha, gateVerdict: "FAIL", gateProof: proofOrSummary, summary: proofOrSummary.slice("MERGE GATE: FAIL (".length, -1), gateFailureExcerpt }
-    : { schemaVersion: 2, outcome, headSha, baseHeadSha, summary: proofOrSummary };
+    ? { schemaVersion, outcome, headSha, baseHeadSha, gateVerdict: "FAIL", gateProof: proofOrSummary, summary: proofOrSummary.slice("MERGE GATE: FAIL (".length, -1), gateFailureExcerpt }
+    : outcome === "semantic-pass"
+      ? { schemaVersion, outcome, headSha, baseHeadSha }
+      : { schemaVersion, outcome, headSha, baseHeadSha, summary: proofOrSummary };
 process.stdout.write(JSON.stringify({ ...value, ...semantic }));
-' "$1" "$2" "$3" "$4" "${5:-}" "${6:-}" "${7:-}"
+' "$VERDICT_SCHEMA_VERSION" "$1" "$2" "$3" "$4" "${5:-}" "${6:-}" "${7:-}"
 }
 
 # Decide semantic reuse from the immutable recovery snapshot handed to this
@@ -233,7 +241,7 @@ process.stdin.on("end", () => {
   const context = (() => { try { return object(JSON.parse(input)); } catch { return null; } })();
   // A failed PR-head check is a fresh blocking finding even if the prior
   // semantic verdict was PASS on exactly this commit.
-  if (Array.isArray(context?.ciFailures) && context.ciFailures.length > 0) return;
+  if (context?.ciFailures !== undefined && (!Array.isArray(context.ciFailures) || context.ciFailures.length > 0)) return;
   const prior = object(context?.priorOutput);
   if (!context || !prior) return;
   if (context.state !== "queued" || context.recoveryRunId !== process.env.AGENTOS_RUN_ID) return;
@@ -241,22 +249,24 @@ process.stdin.on("end", () => {
   if (typeof context.authorizedHeadSha !== "string" || !SHA.test(context.authorizedHeadSha)) return;
   if (context.authorizedHeadSha !== process.env.INCOMING_HEAD_SHA) return;
   if (typeof prior.runId !== "string" || prior.runId.length === 0 || prior.runId === process.env.AGENTOS_RUN_ID) return;
-  if (prior.kind !== "regression-verification-v2") return;
+  if (prior.kind !== "regression-verification-v2" && prior.kind !== "regression-verification-v3") return;
   if (typeof prior.commitSha !== "string" || !SHA.test(prior.commitSha)) return;
   if (typeof prior.body !== "string") return;
   let verdict;
   try { verdict = object(JSON.parse(prior.body)); } catch { return; }
-  if (!verdict || verdict.schemaVersion !== 2) return;
+  if (!verdict || verdict.schemaVersion !== (prior.kind === "regression-verification-v3" ? 3 : 2)) return;
   // `pass` and `gate-fail` are the legacy persisted spellings for a semantic
   // PASS. A semantic review-fail or refresh-conflict is never reusable, even
   // when its head happens to match the recovery authorization.
-  if (verdict.outcome !== "pass" && verdict.outcome !== "gate-fail") return;
+  const semanticOnly = prior.kind === "regression-verification-v3" && verdict.outcome === "semantic-pass";
+  if (!semanticOnly && verdict.outcome !== "pass" && verdict.outcome !== "gate-fail") return;
+  if (semanticOnly && (Object.hasOwn(verdict, "gateVerdict") || Object.hasOwn(verdict, "gateProof"))) return;
   if (typeof verdict.headSha !== "string" || !SHA.test(verdict.headSha)) return;
   if (typeof verdict.baseHeadSha !== "string" || !SHA.test(verdict.baseHeadSha)) return;
   if (verdict.outcome === "pass") {
     if (verdict.gateVerdict !== "PASS") return;
     if (verdict.gateProof !== `MERGE GATE: PASS ${verdict.headSha}`) return;
-  } else {
+  } else if (!semanticOnly) {
     if (verdict.gateVerdict !== "FAIL") return;
     if (typeof verdict.summary !== "string" || verdict.summary.length === 0) return;
     if (typeof verdict.gateProof !== "string" || !/^MERGE GATE: FAIL \(.+\)$/u.test(verdict.gateProof)) return;
@@ -626,6 +636,14 @@ finalize() {
     die "workspace HEAD changed after semantic verification"
   fi
 
+  if [ "$OUTPUT_KIND" = "regression-verification-v3" ]; then
+    verdict="$(json_verdict semantic-pass "$current" "$BASE_HEAD_SHA" "" "" "$SEMANTIC_VERDICT" "$SEMANTIC_SOURCE_RUN_ID")"
+    persist_output "$verdict" "$current"
+    printf 'REGRESSION FINALIZE: semantic-pass %s\n' "$current"
+    return 0
+  fi
+
+  # Historical v2 Runs still own their original full-gate contract.
   # Prove the pair frozen by prepare. Live target reads belong to Merge
   # readiness under its Lease; a later network failure or base move must not
   # discard completed semantic work or the gate verdict for this pair.
@@ -671,6 +689,22 @@ finalize() {
   esac
 }
 
+# Only Runner-selected recoveries may use this model-free path. Revalidate the
+# incoming evidence before refresh; prepare binds any reused verdict to the
+# resulting clean merge. A conflict has its own durable negative handoff.
+verify_reused() {
+  local incoming source
+  incoming="$(head_sha)" || die "cannot resolve reuse workspace HEAD"
+  source="$(recovery_reuse_source "$incoming")"
+  [ -n "$source" ] || die "verify-reused requires trusted matching semantic evidence"
+  prepare
+  [ ! -f "$OUTPUT_FILE" ] || return 0
+  read_state
+  [ "$SEMANTIC_VERDICT" = "reused" ] && [ "$SEMANTIC_SOURCE_RUN_ID" = "$source" ] \
+    || die "prepare did not preserve trusted semantic reuse"
+  finalize
+}
+
 MODE="${1:-}"
 case "$MODE" in
   prepare)
@@ -681,9 +715,13 @@ case "$MODE" in
     [ "$#" -eq 1 ] || die "usage: $0 finalize"
     finalize
     ;;
+  verify-reused)
+    [ "$#" -eq 1 ] || die "usage: $0 verify-reused"
+    verify_reused
+    ;;
   review-fail)
     [ "$#" -eq 2 ] || die "usage: $0 review-fail <summary>"
     review_fail "$2"
     ;;
-  *) die "usage: $0 prepare | finalize | review-fail <summary>" ;;
+  *) die "usage: $0 prepare | finalize | verify-reused | review-fail <summary>" ;;
 esac

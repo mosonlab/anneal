@@ -492,7 +492,7 @@ test("the Astra-low review-fix generation is kept on record and retired from mat
     // trace, which is the reason for the flag.
     assert.deepEqual(
       asPersisted(current).map((step, index) => retiredStepShapeDifferences(step, generation.shape[index]!)),
-      current.map((step) => step.outputKind === "review-findings" ? ["name", "outputKind"] : step.outputKind === "blind-findings" ? ["name"] : []),
+      current.map((step) => step.outputKind === "review-findings" ? ["name", "outputKind"] : step.outputKind === "blind-findings" ? ["name"] : step.outputKind === "regression-verification-v3" ? ["outputKind"] : []),
       templateName,
     );
     assert.equal(legacyGenerationMatches(generation, asPersisted(current)), false, templateName);
@@ -618,7 +618,8 @@ test("model-neutral review names roll over exactly the deployed shapes and retai
     const generation = generationOf(templateName, "model-neutral-review-step-names");
     const outgoing = asPersisted(current).map((step) => ({
       ...step,
-      outputKind: step.outputKind === "review-findings" ? "sol-findings" : step.outputKind,
+      outputKind: step.outputKind === "review-findings" ? "sol-findings"
+        : step.outputKind === "regression-verification-v3" ? "regression-verification-v2" : step.outputKind,
       name: step.outputKind === "review-findings" ? "Code review (Sol)"
         : step.outputKind === "blind-findings" ? "Code review (Opus blind)" : step.name,
     }));
@@ -643,7 +644,8 @@ test("model-neutral output rollover recognizes only the retired graph across all
     const generation = generationOf(name, "pre-model-neutral-review-output");
     const outgoing = asPersisted(current).map((step) => ({
       ...step,
-      outputKind: step.outputKind === "review-findings" ? "sol-findings" : step.outputKind,
+      outputKind: step.outputKind === "review-findings" ? "sol-findings"
+        : step.outputKind === "regression-verification-v3" ? "regression-verification-v2" : step.outputKind,
       priorOutputKinds: step.priorOutputKinds.map((kind) => kind === "review-findings" ? "sol-findings" : kind),
       prompt: step.prompt.replaceAll("review-findings", "sol-findings").replaceAll("the code review report", "the Sol report"),
     }));

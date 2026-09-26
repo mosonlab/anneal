@@ -152,17 +152,18 @@ test("canonical sources expose the exact layered Direct and Full graphs", async 
     assert.match(fix.prompt, /exactly one disposition per finding id/u);
     assert.match(fix.prompt, /ADOPTED.*REJECTED.*MERGED/u);
     assert.match(fix.prompt, /every `ADOPTED` disposition has a matching `closedFindings` entry/u);
-    const regression = steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!;
+    const regression = steps.find(({ outputKind }) => outputKind === "regression-verification-v3")!;
     assert.match(regression.prompt, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" prepare/u);
     assert.match(regression.prompt, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" review-fail/u);
     assert.match(regression.prompt, /\$\{AGENTOS_TOOLS:\?AGENTOS_TOOLS is required\}\/regression-verification\.sh" finalize/u);
     assert.match(regression.prompt, /head[\s\S]*and baseline frozen by prepare/u);
-    assert.match(regression.prompt, /focused regressions[\s\S]*Merge gate owns full workspace and repository suites/u);
+    assert.match(regression.prompt, /Merge train separately runs the full integration gate/u);
+    assert.match(regression.prompt, /Run focused regressions/u);
     assert.doesNotMatch(regression.prompt, /semantic-stale|exit 77/u);
-    assert.match(regression.prompt, /finalize exit 0[\s\S]*`pass` or `gate-fail`/u);
-    assert.match(regression.prompt, /script persists the one allowed v2 outcome/u);
+    assert.match(regression.prompt, /finalize exit 0[\s\S]*`semantic-pass`/u);
+    assert.match(regression.prompt, /semantic-reused[\s\S]*skip model re-review/u);
     assert.doesNotMatch(regression.prompt, /merge-lease\.sh|gate-dispatch\.sh|\{"schemaVersion":2/u);
-    assert.ok(regression.prompt.split("\n").length < 30, "the semantic prompt stays materially shorter than the retired 62-line procedure");
+    assert.match(regression.prompt, /Do not repeat the[\s\S]*initial review of unchanged implementation/u);
   }
 });
 
@@ -170,8 +171,8 @@ test("canonical regression commands require runner tools without a checkout fall
   const templateNames = [DIRECT_TEMPLATE_NAME, INTEGRATOR_TEMPLATE_NAME] as const satisfies readonly CanonicalTemplateName[];
   for (const templateName of templateNames) {
     const regression = (await loadTemplateStepSources(templateName))
-      .find(({ outputKind }) => outputKind === "regression-verification-v2");
-    assert.ok(regression, `${templateName} must contain a v2 regression step`);
+      .find(({ outputKind }) => outputKind === "regression-verification-v3");
+    assert.ok(regression, `${templateName} must contain a v3 regression step`);
     const invocations = [...regression.prompt.matchAll(regressionCommandPattern)].map(([invocation]) => invocation);
 
     const root = await mkdtemp(join(tmpdir(), "agentos-regression-prompt-test-"));
@@ -744,7 +745,7 @@ test("bare revalidation only selects v1 for complete historical Direct identitie
 test("registered Direct generations retain their historical revalidation protocol", () => {
   for (const generation of LEGACY_TEMPLATE_GENERATIONS[DIRECT_TEMPLATE_NAME]) {
     if (!generation.shape.some(({ outputKind }) => outputKind === "revalidation")) continue;
-    const expected = ["pre-frozen-regression-baseline", "pre-sol-high-hard-tier", "pre-sol-high-hazard-tier", "pre-defect-class-sweep", "pre-chain-workspace-scope-exemption", "pre-direct-work-directed-delegation"].includes(generation.marker) ? "v2" : "v1";
+    const expected = ["pre-frozen-regression-baseline", "pre-sol-high-hard-tier", "pre-sol-high-hazard-tier", "pre-defect-class-sweep", "pre-chain-workspace-scope-exemption", "pre-direct-work-directed-delegation", "pre-semantic-integration-separation"].includes(generation.marker) ? "v2" : "v1";
     const taskTemplateName = templateRolloverName(DIRECT_TEMPLATE_NAME, generation.marker, "row");
     assert.equal(canonicalOutputGeneration({ outputKind: "revalidation", taskTemplateName }), expected);
     assert.equal(canonicalOutputGeneration({ outputKind: "revalidation", taskTemplate: { name: taskTemplateName } }), expected);

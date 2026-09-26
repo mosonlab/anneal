@@ -37,8 +37,9 @@ scripts/merge-gate.sh --expect-head <oid>
 ```
 
 Inside an Anneal Run (`AGENTOS_RUN_ID` set), run affected workspace checks and
-named test files, such as `npm run lint -w <workspace>`. Regression owns
-repository-wide proof. Root `build`, `lint`, `typecheck`, `test`, `test:db`, and
+named test files, such as `npm run lint -w <workspace>`. The Merge gate owns
+repository-wide proof; v3 Regression records semantic evidence and the Merge
+train performs that gate. Root `build`, `lint`, `typecheck`, `test`, `test:db`, and
 `merge-gate` scripts refuse with exit **78**; direct gate invocation returns
 `GATE NOT RUN:` and **76**. Runs have no scratch PostgreSQL. Database tests are
 merge gate evidence: never attempt them inside a Run, including named files,
@@ -121,8 +122,10 @@ width of ready candidates per Repo in FIFO order, acquires one Merge Lease
 under the first candidate's Chain target, and hands the detached `merge-train`
 Task a cumulative candidate list. The train authorizes the longest contiguous
 passing prefix, after which merge execution publishes the prefixes. A single
-non-drifted candidate continues through the single-candidate path; unset or
-`0` keeps the existing Chain delivery behavior. Base drift under enabled train
+non-drifted v2 candidate continues through the single-candidate path. A v3
+`semantic-pass` candidate always requires a train for integration proof, even
+alone; unset or `0` disables batching but forms width-one trains for these
+candidates. It never grants a semantic verdict merge authority. Base drift under enabled train
 readiness does not trigger a per-Chain Regression re-run: the train's Merge
 gate and readiness second read check the cumulative prefixes before
 authorization.

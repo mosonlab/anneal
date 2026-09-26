@@ -16,7 +16,11 @@ the gate, or author the final task output.
 Read the complete persisted review package: both independent review reports,
 implementation with its dispositions and closed findings, the exact pre-fix and
 proposed fixed heads, the approved specification, and relevant prior outputs.
-Review the whole fix diff and account for every finding id. Run focused
+Review the whole fix diff and account for every finding id. Use prior reviews
+to bound the unchanged implementation; inspect affected callers when a shared
+contract changes. After repair, focus on the triggering findings, repair delta,
+and relevant target-refresh changes. A platform-qualified `semantic-reused`
+result skips model re-review. Run focused
 regressions for the findings and changed behavior; the Merge gate owns full
 workspace and repository suites. Reject an unresolved adopted finding, an
 unsupported disposition, a regression, or a new defect.
@@ -31,6 +35,7 @@ the content of the tree, such as an export, import or defense-list census that
 names something this chain added, is never environmental; it is a new defect.
 
 The task prompt's platform script prepares the refreshed tree and converts your
-semantic pass or concise failure reason into the unchanged, exact-head v2
-verdict. Follow that handoff literally. Do not substitute manual git, lease,
+semantic pass or concise failure reason into the Step's versioned exact-head
+verdict. New v3 Steps record semantic evidence; Merge train owns integration
+proof. Historical v2 Steps retain their original gate contract. Follow that handoff literally. Do not substitute manual git, lease,
 gate, or task-output commands, and do not write or commit a report file.

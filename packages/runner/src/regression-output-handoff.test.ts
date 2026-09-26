@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { REGRESSION_VERIFICATION_OUTPUT_KIND } from "@anneal/db";
+import { REGRESSION_VERIFICATION_OUTPUT_KIND, REGRESSION_VERIFICATION_V3_OUTPUT_KIND } from "@anneal/db";
 
 import type { RunnerConfig } from "./config.js";
 import {
@@ -169,6 +169,31 @@ test("a symlinked handoff directory is refused", async () => {
       readRegressionOutputHandoff(runnerConfig(fixture.root), claim(), fixture.workspace),
       /symlinked-parent-directory/u,
     );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+
+test("semantic-only handoff is bound to the v3 claim, current Run and exact head", async () => {
+  const fixture = await setup();
+  try {
+    const v3Claim: RegressionHandoffClaim = {
+      ...claim(), task: { templateStep: { outputKind: REGRESSION_VERIFICATION_V3_OUTPUT_KIND } },
+    };
+    const body = JSON.stringify({ schemaVersion: 3, outcome: "semantic-pass", headSha: fixture.headSha, baseHeadSha: "b".repeat(40) });
+    const output = { schemaVersion: 1, runId: "run-1", kind: REGRESSION_VERIFICATION_V3_OUTPUT_KIND, body, commitSha: fixture.headSha };
+    await writeHandoff(fixture.path, output);
+    assert.deepEqual(await readRegressionOutputHandoff(runnerConfig(fixture.root), v3Claim, fixture.workspace), {
+      kind: REGRESSION_VERIFICATION_V3_OUTPUT_KIND, body, commitSha: fixture.headSha,
+    });
+    await assert.rejects(readRegressionOutputHandoff(runnerConfig(fixture.root), claim(), fixture.workspace), /unexpected kind/u);
+    await writeHandoff(fixture.path, { ...output, runId: "old-run" });
+    await assert.rejects(readRegressionOutputHandoff(runnerConfig(fixture.root), v3Claim, fixture.workspace), /belongs to Run/u);
+    await writeHandoff(fixture.path, { ...output, body: JSON.stringify({ ...JSON.parse(body), headSha: "a".repeat(40) }) });
+    await assert.rejects(readRegressionOutputHandoff(runnerConfig(fixture.root), v3Claim, fixture.workspace), /verdict is stale/u);
+    await writeHandoff(fixture.path, { ...output, kind: REGRESSION_VERIFICATION_OUTPUT_KIND });
+    await assert.rejects(readRegressionOutputHandoff(runnerConfig(fixture.root), claim(), fixture.workspace), /verdict is invalid/u);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

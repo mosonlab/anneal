@@ -16,6 +16,7 @@ successors for current behavior.
 | Merge Lease correctness, post-gate base checks, or refund budgets | [0006 - Merge lease is not a correctness boundary](0006-merge-lease-is-not-a-correctness-boundary.md) | Accepted (2026-09-08) |
 | Recovery mechanisms, repair budgets, or missing pull requests | [0007 - One check instead of a mechanism](0007-one-check-instead-of-a-mechanism.md) | Accepted (2026-09-08) |
 | Canonical templates, prompt generations, or review base pinning | [0008 - Templates are immutable once used](0008-templates-are-immutable-once-used.md) | Accepted (2026-09-08) |
+| Semantic verification, integration evidence, or repeated Regression work | [0013 - Separate semantic verification from integration proof](0013-separate-semantic-verification-from-integration-proof.md) | Accepted (2026-09-26) |
 | Review and fix responsibilities, mirror locks, or gate dependency installs | [0009 - Review and repair shape](0009-review-and-repair-shape.md) | Accepted (2026-09-08) |
 | Dispatch based on multi-agent audit conclusions | [0010 - Cross-family review before dispatch](0010-cross-family-review-before-dispatch.md) | Accepted (2026-09-08) |
 
