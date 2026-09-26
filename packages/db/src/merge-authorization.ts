@@ -159,6 +159,9 @@ export const produceMergeAuthorization = async (
     headSha: payload.headSha,
   });
   if (!attested.satisfied) {
+    if (purpose !== "gate") {
+      throw new MergeEvidenceError(`${attested.reason}; confirmation approval requires a merge gate attestation`);
+    }
     const semantic = await requireSemanticPassEvidence(tx, {
       chainId: gateTask.chainId,
       headSha: payload.headSha,

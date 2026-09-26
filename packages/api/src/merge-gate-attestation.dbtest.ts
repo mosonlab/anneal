@@ -190,6 +190,42 @@ test("a human may approve a trusted v3 semantic candidate while prefix gate proo
   assert.equal((await authorizations(chain.gateTask.id)).length, 1);
 });
 
+test("semantic evidence cannot renew the integrator through a confirmation approval", async () => {
+  const chain = await seedIntegratorChain(db, {
+    label: "semantic-confirmation-refused",
+    shape: "canonical-compound-readiness",
+    gatedReadiness: true,
+  });
+  await db.$transaction(async (tx) => {
+    await tx.taskTemplateStep.update({ where: { id: chain.gateStep.id }, data: { outputKind: V3 } });
+    await tx.run.update({ where: { id: chain.gateRun.id }, data: { headSha: HEAD } });
+    await tx.taskStepOutput.create({ data: {
+      taskId: chain.gateTask.id,
+      runId: chain.gateRun.id,
+      kind: V3,
+      body: JSON.stringify({
+        schemaVersion: 3,
+        outcome: "semantic-pass",
+        headSha: HEAD,
+        baseHeadSha: BASE,
+      }),
+      commitSha: HEAD,
+    } });
+  });
+  assert.equal(await db.mergeGateAttestation.count({ where: { chainId: chain.chainId } }), 0);
+
+  const card = await filledReadinessCard(chain, "confirmation");
+  const runsBefore = await db.run.count({ where: { taskId: chain.integratorTask!.id } });
+  await assert.rejects(
+    () => approve(card.id, "evt-semantic-confirmation"),
+    /confirmation approval requires a merge gate attestation/u,
+  );
+  assert.equal((await authorizations(chain.readinessTask!.id)).length, 0);
+  assert.equal(await db.run.count({ where: { taskId: chain.integratorTask!.id } }), runsBefore);
+  assert.equal((await db.inboxMessage.findUniqueOrThrow({ where: { id: card.id } })).status, "OPEN");
+  assert.equal(await db.inboxDecision.count({ where: { inboxMessageId: card.id } }), 0);
+});
+
 for (const [label, candidateHead, candidateBase] of [
   ["head", "c".repeat(40), BASE],
   ["base", HEAD, OTHER_BASE],
