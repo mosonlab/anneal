@@ -57,8 +57,11 @@ import {
   autoDeployNoticeBody,
   autoDeployNoticeDedupeKey,
   autoDeployNoticeHostScope,
+  canonicalSyncActiveRunRefusals,
   canonicalSyncNoticeRecord,
   canonicalSyncRefusedLines,
+  canonicalSyncSyncedProjects,
+  createCanonicalSyncRetryStore,
   createDeployHost,
   createDeployStartup,
   createQuietWindowWaitReporter,
@@ -1763,6 +1766,27 @@ test("canonical sync refusal output reaches the successful deploy Inbox notice",
   );
 });
 
+test("only active-Run rollover refusals enter the canonical sync retry set", () => {
+  const output = [
+    "REFUSED compass: Template direct-engineer-workflow (template-1) still has 1 tasks with active Runs or no chain identity: task-1 (Implementation); canonical rollover requires active Runs to settle first",
+    "REFUSED archived-project: Agent staff engineer (agent-1) is archived; sync will not resurrect it",
+    "REFUSED chainless-project: Template direct-engineer-workflow still has 1 tasks with active Runs or no chain identity: task-2 (Review); canonical rollover is blocked by unfinished tasks without a chain identity; operator repair is required",
+    "SYNCED healthy-project: {}",
+    JSON.stringify({
+      projects: { "healthy-project": {} },
+      refused: {
+        compass: "Template still has active Runs; canonical rollover requires active Runs to settle first",
+        "archived-project": "Agent staff engineer (agent-1) is archived; sync will not resurrect it",
+        "chainless-project": "Template is blocked by unfinished tasks without a chain identity; operator repair is required",
+      },
+      totals: {},
+    }),
+  ].join("\n");
+
+  assert.deepEqual(canonicalSyncActiveRunRefusals(output).map(({ projectSlug }) => projectSlug), ["compass"]);
+  assert.deepEqual(canonicalSyncSyncedProjects(output), ["healthy-project"]);
+});
+
 test("production host requires every deploy phase and every read-only method", () => {
   assert.throws(() => createProductionHost({}), /production-host-adapter-missing:readRevisions/u);
   const required = [
@@ -2938,7 +2962,7 @@ const withDeployBinaries = (t) => {
   t.after(() => { process.env = previous; });
 };
 
-const spawnRecordingHost = (t, { transactionId }) => {
+const spawnRecordingHost = (t, { transactionId, commandStdout = "" }) => {
   withDeployBinaries(t);
   const spawns = [];
   const migrationTails = [];
@@ -2953,7 +2977,7 @@ const spawnRecordingHost = (t, { transactionId }) => {
     },
     runCommand: async (program, args, options) => {
       spawns.push({ args, env: options.env });
-      return { code: 0, stdout: "", stderr: "" };
+      return { code: 0, stdout: commandStdout, stderr: "" };
     },
   });
   const attempt = openDeploymentAttempt({
@@ -3003,10 +3027,135 @@ test("release artifact build hides the Prisma banner in descendant commands", as
 });
 
 test("canonical prompt sync uses the host command seam", async (t) => {
-  const { host, spawns, attempt } = spawnRecordingHost(t, { transactionId: "command-seam-sync" });
+  const { host, spawns, attempt } = spawnRecordingHost(t, {
+    transactionId: "command-seam-sync",
+    commandStdout: JSON.stringify({ projects: { "agentos-example": {} }, refused: {}, totals: {} }),
+  });
   await host.syncCanonicalPrompts(attempt);
   assert.equal(spawns.length, 1);
   assert.ok(spawns[0].args.includes("packages/db/prisma/sync-canonical-prompts.ts"));
+});
+
+test("an active-Run refusal is retried on same-revision ticks until it syncs", async (t) => {
+  withDeployBinaries(t);
+  const stateDir = mkdtempSync(join(tmpdir(), "anneal-canonical-sync-retry-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const retryStore = createCanonicalSyncRetryStore({ stateDir });
+  const notices = [];
+  const commands = [];
+  const activeRefusal = [
+    "REFUSED compass: Template direct-engineer-workflow (template-1) still has 1 tasks with active Runs or no chain identity: task-1 (Implementation); canonical rollover requires active Runs to settle first",
+    "SYNCED agentos-example: {}",
+    JSON.stringify({
+      projects: { "agentos-example": {} },
+      refused: { compass: "Template still has active Runs; canonical rollover requires active Runs to settle first" },
+      totals: {},
+    }),
+  ].join("\n");
+  const synced = [
+    "SYNCED agentos-example: {}",
+    "SYNCED compass: {}",
+    JSON.stringify({ projects: { "agentos-example": {}, compass: {} }, refused: {}, totals: {} }),
+  ].join("\n");
+  const outputs = [activeRefusal, activeRefusal, synced];
+  const host = createDeployHost({
+    deployRole: "control-plane",
+    environment: controlPlaneEnvironment(),
+    serviceControl: {
+      platform: "linux",
+      restart: async () => undefined,
+      isRunning: async () => true,
+      describe: stableDescription,
+    },
+    canonicalSyncRetryStore: retryStore,
+    runCommand: async (program, args, options) => {
+      commands.push({ program, args, options });
+      return { code: 0, stdout: outputs.shift() ?? "", stderr: "" };
+    },
+    notify: async (record) => { notices.push(record); },
+    log: () => undefined,
+  });
+  const attempt = (id, from = revisions.from, to = revisions.to) => {
+    const value = openDeploymentAttempt({ deployRoot: stateDir, targetCommit: to, transactionId: id });
+    value.establish({ revisions: { from, to }, operationWorkspace: "/fixture/operation" });
+    return value;
+  };
+
+  await host.syncCanonicalPrompts(attempt("canonical-sync-first"));
+  assert.deepEqual(notices.map(({ reason }) => reason), ["canonical-prompt-sync-active-runs"]);
+  assert.equal(autoDeployNoticeBody(notices[0]), "[auto-deploy] canonical prompt sync waiting for active Runs: compass");
+  assert.deepEqual(retryStore.read().map(({ projectSlug, status, noticeDelivered }) => ({
+    projectSlug,
+    status,
+    noticeDelivered,
+  })), [{ projectSlug: "compass", status: "waiting", noticeDelivered: true }]);
+
+  await host.checkAlreadyDeployed(attempt("canonical-sync-still-active", revisions.to, revisions.to));
+  assert.equal(commands.length, 2);
+  assert.equal(commands[1].options.cwd, join(REPOSITORY_ROOT, "current"));
+  assert.deepEqual(notices.map(({ reason }) => reason), ["canonical-prompt-sync-active-runs"]);
+  assert.equal(retryStore.read()[0]?.status, "waiting");
+
+  await host.checkAlreadyDeployed(attempt("canonical-sync-settled", revisions.to, revisions.to));
+  assert.equal(commands.length, 3);
+  assert.deepEqual(notices.map(({ reason }) => reason), [
+    "canonical-prompt-sync-active-runs",
+    "canonical-prompt-sync-recovered",
+  ]);
+  assert.equal(autoDeployNoticeBody(notices[1]), "[auto-deploy] canonical prompt sync recovered: compass");
+  assert.deepEqual(retryStore.read(), []);
+
+  await host.checkAlreadyDeployed(attempt("canonical-sync-stopped", revisions.to, revisions.to));
+  assert.equal(commands.length, 3);
+  assert.equal(notices.length, 2);
+});
+
+test("an archived-Agent refusal does not create automatic canonical sync retry state", async (t) => {
+  withDeployBinaries(t);
+  const stateDir = mkdtempSync(join(tmpdir(), "anneal-canonical-sync-archived-"));
+  t.after(() => rmSync(stateDir, { recursive: true, force: true }));
+  const retryStore = createCanonicalSyncRetryStore({ stateDir });
+  const notices = [];
+  let commandCount = 0;
+  const host = createDeployHost({
+    deployRole: "control-plane",
+    environment: controlPlaneEnvironment(),
+    serviceControl: {
+      platform: "linux",
+      restart: async () => undefined,
+      isRunning: async () => true,
+      describe: stableDescription,
+    },
+    canonicalSyncRetryStore: retryStore,
+    runCommand: async () => {
+      commandCount += 1;
+      return {
+        code: 0,
+        stdout: [
+          "REFUSED compass: Agent engineer (agent-1) is archived; sync will not resurrect it",
+          JSON.stringify({
+            projects: {},
+            refused: { compass: "Agent engineer (agent-1) is archived; sync will not resurrect it" },
+            totals: {},
+          }),
+        ].join("\n"),
+        stderr: "",
+      };
+    },
+    notify: async (record) => { notices.push(record); },
+    log: () => undefined,
+  });
+  const first = openDeploymentAttempt({ deployRoot: stateDir, targetCommit: revisions.to, transactionId: "archived-sync-first" });
+  first.establish({ revisions, operationWorkspace: "/fixture/operation" });
+  await host.syncCanonicalPrompts(first);
+  assert.deepEqual(retryStore.read(), []);
+  assert.deepEqual(notices, []);
+
+  const noop = openDeploymentAttempt({ deployRoot: stateDir, targetCommit: revisions.to, transactionId: "archived-sync-noop" });
+  noop.establish({ revisions: { from: revisions.to, to: revisions.to } });
+  await host.checkAlreadyDeployed(noop);
+  assert.equal(commandCount, 1);
+  assert.deepEqual(notices, []);
 });
 
 // Both directions cross the host seam with the same adapter fixture.

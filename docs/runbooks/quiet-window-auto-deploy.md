@@ -930,6 +930,30 @@ On the macOS launchd profile, the second command is valid only after a
 migration-timeout hold has ended as described above; it does not apply to
 Linux systemd.
 
+### Canonical prompt sync deferred by active Runs
+
+A refusal ending in `canonical rollover requires active Runs to settle first`
+means the project has a registered template generation waiting for unfinished
+Chains. The deployment records that project's target revision in host state and
+sends a separate Inbox notice naming the project. The marker is scoped to the
+project and revision because the already-deployed path otherwise skips sync;
+it lives in `.agentos-deploy/canonical-prompt-sync-retries.json`. On each later
+automatic tick, even when `current` already serves that revision, the
+control-plane host reruns canonical prompt sync. While the active Run remains,
+it keeps the retry state and does not send another refusal notice. When sync
+succeeds, it clears the retry and sends a short recovery notice. Sync still
+processes each Project in its existing all-or-none transaction; retrying all
+Projects is safe and idempotent.
+
+The rollover creates the successor template generation only after its
+preconditions pass. No in-flight v2 Chain is upgraded in place: existing tasks
+remain on their original template generation, and only later Chains use the
+successor.
+
+Other refusal reasons, including an archived Agent or unfinished work without
+a Chain identity, do not enter this retry path and keep their existing
+operator repair behavior. An archived Agent is handled as described below.
+
 ### Canonical prompt sync refused by an archived Agent
 
 `reason=canonical-prompt-sync-refused` with the detail
