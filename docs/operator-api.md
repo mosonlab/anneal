@@ -2698,14 +2698,21 @@ spending that ceiling or opening
 a card. A non-external failure, an exhausted allowance, or a refused Run birth
 parks the tail in `BLOCKED_DOWNSTREAM` and opens an answerable stop card in the
 default thread. The worker also reconciles historical `REPAIRING` rows whose
-bound Regression Run is terminal and has no active successor.
+bound Regression Run is terminal and has no active successor. A legacy row is
+left untouched when its integrator is no longer `REVIEW`, any Chain task is
+archived, or the durable integrator output records `merged`; the first such
+skip writes one `mergeTail.recoveryRegressionReplaySkipped` activity naming
+the aggregate, bound Run, and reason, while later ticks reuse that audit.
 
 A durable Regression verdict still wins: `review-fail` and `refresh-conflict`
 follow their existing stop and repair paths instead of this execution-failure
-replay. Run birth, recovery rebinding, allowance charging, and operator actions
-are serialized under the Chain mutex, so concurrent automatic and human
-attempts have one winner. Exact-head validation, gate attestation, approval,
-Lease ownership, and Hold semantics are otherwise unchanged.
+replay. Completion owns that durable decision and writes the `repairAttempt`
+marker in the same transaction; the replay worker skips that marker rather
+than applying a broader second verdict interpretation. Run birth, recovery
+rebinding, allowance charging, and operator actions are serialized under the
+Chain mutex, so concurrent automatic and human attempts have one winner.
+Exact-head validation, gate attestation, approval, Lease ownership, and Hold
+semantics are otherwise unchanged.
 
 #### Re-entering after a base-drift recovery FAIL
 
@@ -2942,8 +2949,10 @@ curl -X DELETE "$BASE_URL/tasks/$TASK_ID" -H "Authorization: Bearer $OPERATOR_TO
   with `code: "merge_recovery_retry_owned"`, the recovery and Run ids, and the
   applicable `chain/resume` and ordinary `retry` routes.
   It does not open an unbound Run: wait for the automatic replay, resume a held
-  Chain, or, if recovery stops without a verdict, answer its stop card or make
-  an operator decision and retry the now-blocked Regression.
+  Chain, or, if recovery stops without a verdict, answer its stop card first.
+  Only after that decision releases recovery ownership may an operator use
+  ordinary retry; retrying while the stop card remains unresolved cannot
+  advance the merge tail.
 - If the same Run already has a durable `repairAttempt`, the route instead
   returns `409 Conflict` with `code: "merge_recovery_repair_owned"`. The
   detached repair owns the verdict; wait for it to complete (or resume the

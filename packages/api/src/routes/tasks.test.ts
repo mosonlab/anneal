@@ -648,7 +648,7 @@ test("operator retry refuses the failed Run owned by active merge recovery", asy
     });
     assert.equal(response.status, 409);
     assert.deepEqual(await response.json(), {
-      error: "This failed Regression Run is owned by active merge recovery; wait for automatic replay, or resume the Chain if held. If recovery stops without a verdict, answer its stop card or retry after an operator decision.",
+      error: "This failed Regression Run is owned by active merge recovery; wait for automatic replay, or resume the Chain if held. If recovery stops without a verdict, answer its stop card first; retry only after that decision releases recovery ownership.",
       code: "merge_recovery_retry_owned",
       recoveryId: "recovery-1",
       recoveryRunId: "run-1",

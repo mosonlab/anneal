@@ -644,7 +644,7 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         }
         return refusal(
           "conflict",
-          "This failed Regression Run is owned by active merge recovery; wait for automatic replay, or resume the Chain if held. If recovery stops without a verdict, answer its stop card or retry after an operator decision.",
+          "This failed Regression Run is owned by active merge recovery; wait for automatic replay, or resume the Chain if held. If recovery stops without a verdict, answer its stop card first; retry only after that decision releases recovery ownership.",
           {
             code: "merge_recovery_retry_owned",
             recoveryId: latestRecovery.id,
