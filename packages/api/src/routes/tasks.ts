@@ -618,7 +618,9 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
           select: { id: true, status: true },
         }),
       ]);
-      if (latestRecovery?.status === MergeRecoveryStatus.REPAIRING
+      if (latestRecovery
+        && (latestRecovery.status === MergeRecoveryStatus.REPAIRING
+          || latestRecovery.status === MergeRecoveryStatus.BLOCKED_DOWNSTREAM)
         && latestRecovery.recoveryRunId === latestRun?.id
         && ([RunStatus.FAILED, RunStatus.TIMED_OUT, RunStatus.CANCELLED, RunStatus.LOST] as RunStatus[])
           .includes(latestRun.status)) {
@@ -644,13 +646,16 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
         }
         return refusal(
           "conflict",
-          "This failed Regression Run is owned by active merge recovery; wait for automatic replay, or resume the Chain if held. If recovery stops without a verdict, answer its stop card or retry after an operator decision.",
+          latestRecovery.status === MergeRecoveryStatus.REPAIRING
+            ? "This failed Regression Run is owned by active merge recovery; wait for automatic replay, resume the Chain if held, or continue from the recovery stop card if it blocks. Ordinary retry cannot detach recovery ownership."
+            : "This failed Regression Run remains bound to blocked merge recovery; continue from its stop card or a supported merge-tail repair/rerun operation. Ordinary retry cannot detach recovery ownership.",
           {
             code: "merge_recovery_retry_owned",
             recoveryId: latestRecovery.id,
             recoveryRunId: latestRun.id,
             resumeRoute: `/tasks/${taskId}/chain/resume`,
-            retryRoute: `/tasks/${taskId}/retry`,
+            repairRoute: `/tasks/${taskId}/merge-tail/repair`,
+            rerunRoute: `/tasks/${taskId}/merge-tail/rerun`,
           },
         );
       }

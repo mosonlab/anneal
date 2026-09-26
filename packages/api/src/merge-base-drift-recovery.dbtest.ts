@@ -821,6 +821,64 @@ test("lease loss and Hold leave one recovery-owned replacement with its CI conte
     replacement.id);
 });
 
+test("a recovery completion rejection blocks replay without spending refund or recovery allowance", async () => {
+  const seeded = await seedStopped("canonical-direct", "recovery-completion-rejection");
+  assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({ where: {
+    integratorTaskId: seeded.integratorTask!.id,
+  } });
+  const run = await db.run.findUniqueOrThrow({ where: { id: aggregate.recoveryRunId! } });
+  const lostAt = new Date("2026-09-25T13:00:00.000Z");
+  await db.run.update({ where: { id: run.id }, data: {
+    status: "RUNNING",
+    startedAt: new Date(lostAt.getTime() - 60_000),
+    leaseExpiresAt: new Date(lostAt.getTime() - 1_000),
+    heartbeatAt: null,
+  } });
+  await db.taskActivity.create({ data: {
+    taskId: seeded.gateTask.id,
+    actorType: "session",
+    body: "Mechanical completion rejected with HTTP 409: operator decision required",
+    metadata: {
+      kind: "mergeExecutor.completionRejected",
+      schemaVersion: 1,
+      sourceRunId: run.id,
+      status: 409,
+      responseBody: '{"error":"operator decision required"}',
+    },
+  } });
+
+  assert.ok(await reconcileDatabaseRuns(db, lostAt, releaseChainLease) > 0);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, "LOST");
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 0);
+  assert.deepEqual(await replayFailedRecoveryRegressions(db, lostAt), {
+    examined: 1,
+    replayed: 0,
+    blocked: 1,
+  });
+
+  const blocked = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } });
+  assert.equal(blocked.status, "BLOCKED_DOWNSTREAM");
+  assert.equal(blocked.recoveryRunId, run.id);
+  assert.equal(blocked.externalReplayCount, 0);
+  const terminal = await db.run.findUniqueOrThrow({ where: { id: run.id } });
+  assert.equal(terminal.maxRunsPerTask, run.maxRunsPerTask);
+  assert.equal(terminal.budgetGrants, run.budgetGrants);
+  assert.equal(terminal.leaseLossRefunds, run.leaseLossRefunds);
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id } }), 1);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: seeded.gateTask.id,
+    metadata: { path: ["kind"], equals: "mergeTail.recoveryRegressionReplay" },
+  } }), 0);
+  const card = await db.inboxMessage.findFirstOrThrow({ where: {
+    taskId: seeded.integratorTask!.id,
+    status: "OPEN",
+  } });
+  assert.equal(card.kind, "MULTIPLE_CHOICE");
+  assert.ok(card.threadId);
+  assert.match(card.body, /durable completion rejection.*operator continuation/u);
+});
+
 test("a claim-invalidated recovery replacement is rebound atomically without an orphan", async () => {
   const seeded = await seedStopped(
     "canonical-direct",

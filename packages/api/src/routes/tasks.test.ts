@@ -648,12 +648,45 @@ test("operator retry refuses the failed Run owned by active merge recovery", asy
     });
     assert.equal(response.status, 409);
     assert.deepEqual(await response.json(), {
-      error: "This failed Regression Run is owned by active merge recovery; wait for automatic replay, or resume the Chain if held. If recovery stops without a verdict, answer its stop card or retry after an operator decision.",
+      error: "This failed Regression Run is owned by active merge recovery; wait for automatic replay, resume the Chain if held, or continue from the recovery stop card if it blocks. Ordinary retry cannot detach recovery ownership.",
       code: "merge_recovery_retry_owned",
       recoveryId: "recovery-1",
       recoveryRunId: "run-1",
       resumeRoute: "/tasks/task-1/chain/resume",
-      retryRoute: "/tasks/task-1/retry",
+      repairRoute: "/tasks/task-1/merge-tail/repair",
+      rerunRoute: "/tasks/task-1/merge-tail/rerun",
+    });
+    assert.equal(created, undefined);
+    assert.deepEqual(activities, []);
+  });
+});
+
+test("operator retry refuses a terminal Run still bound to blocked merge recovery", async () => {
+  await withTokens(async () => {
+    const { response, created, activities } = await retryRequest({
+      id: "agent-2",
+      projectId: "project-1",
+      model: "gpt-6-luna",
+      runnerPreference: RunnerPreference.CODEX,
+      foundationalPrompt: "current foundation",
+      rolePrompt: "current role",
+    }, {
+      runner: null,
+      outputKind: "regression-verification-v2",
+      taskTemplate: { name: "direct-engineer-workflow" },
+    }, {
+      taskStatus: "REVIEW",
+      recovery: { id: "recovery-1", status: "BLOCKED_DOWNSTREAM", recoveryRunId: "run-1" },
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "This failed Regression Run remains bound to blocked merge recovery; continue from its stop card or a supported merge-tail repair/rerun operation. Ordinary retry cannot detach recovery ownership.",
+      code: "merge_recovery_retry_owned",
+      recoveryId: "recovery-1",
+      recoveryRunId: "run-1",
+      resumeRoute: "/tasks/task-1/chain/resume",
+      repairRoute: "/tasks/task-1/merge-tail/repair",
+      rerunRoute: "/tasks/task-1/merge-tail/rerun",
     });
     assert.equal(created, undefined);
     assert.deepEqual(activities, []);
