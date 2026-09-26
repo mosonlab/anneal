@@ -128,6 +128,29 @@ test("selects the v3 semantic-pass generation", () => {
   assert.equal(semanticReuseSourceFor(input, workspace)?.outputKind, "regression-verification-v3");
 });
 
+test("rejects v3 semantic-pass carrying merge gate evidence", () => {
+  for (const gateEvidence of [
+    { gateVerdict: "PASS" },
+    { gateProof: `MERGE GATE: PASS ${HEAD}` },
+  ]) {
+    const input = claim();
+    input.task.templateStep!.outputKind = "regression-verification-v3";
+    input.regressionRecoveryContext!.priorOutput = {
+      runId: SOURCE_RUN,
+      kind: "regression-verification-v3",
+      body: JSON.stringify({
+        schemaVersion: 3,
+        outcome: "semantic-pass",
+        headSha: HEAD,
+        baseHeadSha: BASE,
+        ...gateEvidence,
+      }),
+      commitSha: HEAD,
+    };
+    assert.equal(semanticReuseSourceFor(input, workspace), null);
+  }
+});
+
 test("rejects stale Run, head, CI finding, resume, repair, and negative semantic evidence", () => {
   const cases: ClaimedTask[] = [];
   const staleRun = claim();
@@ -139,6 +162,9 @@ test("rejects stale Run, head, CI finding, resume, repair, and negative semantic
   const ci = claim();
   ci.regressionRecoveryContext!.ciFailures = [{ name: "test", conclusion: "failure", log: "failed" }];
   cases.push(ci);
+  const malformedCi = claim();
+  (malformedCi.regressionRecoveryContext as unknown as { ciFailures: unknown }).ciFailures = "not-an-array";
+  cases.push(malformedCi);
   cases.push(claim({ resume: { providerConversationId: "conversation", input: "continue" } }));
   cases.push(claim({ regressionRepairHandoff: {} as ClaimedTask["regressionRepairHandoff"] }));
   const negative = claim();

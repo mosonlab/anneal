@@ -41,6 +41,7 @@ const validV3SemanticPass = (verdict: Record<string, unknown>): boolean => {
   if (verdict.schemaVersion !== 3 || verdict.outcome !== "semantic-pass") return false;
   if (typeof verdict.headSha !== "string" || !SHA.test(verdict.headSha)) return false;
   if (typeof verdict.baseHeadSha !== "string" || !SHA.test(verdict.baseHeadSha)) return false;
+  if (Object.hasOwn(verdict, "gateVerdict") || Object.hasOwn(verdict, "gateProof")) return false;
   const hasReuse = Object.hasOwn(verdict, "semanticVerdict") || Object.hasOwn(verdict, "semanticSourceRunId");
   return !hasReuse || (verdict.semanticVerdict === "reused" && nonEmptyToken(verdict.semanticSourceRunId));
 };
@@ -61,7 +62,8 @@ export const semanticReuseSourceFor = (
   const context = claim.regressionRecoveryContext;
   if (!context || context.state !== "queued" || context.recoveryRunId !== claim.run.id) return null;
   if (!SHA.test(context.currentBaseSha) || !SHA.test(context.authorizedHeadSha)) return null;
-  if (context.ciFailures !== undefined && context.ciFailures.length > 0) return null;
+  if (context.ciFailures !== undefined
+    && (!Array.isArray(context.ciFailures) || context.ciFailures.length > 0)) return null;
   const prior = context.priorOutput;
   if (!prior || !nonEmptyToken(prior.runId) || prior.runId === claim.run.id) return null;
   if (!REGRESSION_OUTPUT_KINDS.has(prior.kind)) return null;
