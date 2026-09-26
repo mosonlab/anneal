@@ -39,6 +39,7 @@ import {
   loadAgentSources,
   loadTemplateStepSources,
   PrismaClient,
+  REGRESSION_VERIFICATION_V3_OUTPUT_KIND,
   RunnerPreference,
   type Task,
   TaskStatus,
@@ -622,7 +623,7 @@ test("canonical sync rolls quiescent adjudication-era graphs only after active R
       baseFromStepIndex: blind.baseFromStepIndex,
     } });
     await db.taskTemplateStep.updateMany({
-      where: { taskTemplateId: template.id, outputKind: "regression-verification-v2" },
+      where: { taskTemplateId: template.id, outputKind: REGRESSION_VERIFICATION_V3_OUTPUT_KIND },
       data: { outputKind: "regression-verification" },
     });
     // The adjudication-era compound graph still gated its spec and revise-plan
@@ -707,8 +708,8 @@ test("canonical sync refuses to mutate instantiated canonical steps", async () =
     include: { steps: { include: { assigneeAgent: true }, orderBy: { stepIndex: "asc" } } },
   });
   const regressionSteps = [
-    direct.steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!,
-    compound.steps.find(({ outputKind }) => outputKind === "regression-verification-v2")!,
+    direct.steps.find(({ outputKind }) => outputKind === REGRESSION_VERIFICATION_V3_OUTPUT_KIND)!,
+    compound.steps.find(({ outputKind }) => outputKind === REGRESSION_VERIFICATION_V3_OUTPUT_KIND)!,
   ];
   const opus = await db.agent.findFirstOrThrow({
     where: { projectId: direct.projectId, name: "code-reviewer-opus-medium" },

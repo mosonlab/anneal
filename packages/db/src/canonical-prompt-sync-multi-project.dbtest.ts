@@ -35,6 +35,7 @@ import {
   loadAllTemplateStepSources,
   type CanonicalTemplateName,
 } from "./template-sources.js";
+import { REGRESSION_VERIFICATION_OUTPUT_KIND, REGRESSION_VERIFICATION_V3_OUTPUT_KIND } from "./merge-tail.js";
 
 const packageRoot = fileURLToPath(new URL("../", import.meta.url)).replace(/\/+$/u, "");
 const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url)).replace(/\/+$/u, "");
@@ -270,7 +271,9 @@ const downgradeDirectToHistoricalSevenStep = async (projectId: string): Promise<
       where: { id: step.id },
       data: {
         // Historical generations retain their original review labels.
-        outputKind: step.outputKind === "review-findings" ? "sol-findings" : step.outputKind,
+        outputKind: step.outputKind === REGRESSION_VERIFICATION_V3_OUTPUT_KIND
+          ? REGRESSION_VERIFICATION_OUTPUT_KIND
+          : step.outputKind === "review-findings" ? "sol-findings" : step.outputKind,
         name: step.outputKind === "review-findings" ? "Code review (Sol)"
           : step.outputKind === "blind-findings" ? "Code review (Opus blind)" : step.name,
         stepIndex: step.stepIndex - 1,

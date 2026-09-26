@@ -677,7 +677,7 @@ test("sync rolls parked and not-yet-started v1 chains forward without changing t
     const currentRegression = current.steps.find(({ outputKind }) => outputKind === REGRESSION_VERIFICATION_V3_OUTPUT_KIND)!;
     assert.match(currentRegression.prompt, /AGENTOS_TOOLS:\?AGENTOS_TOOLS is required/u);
     assert.doesNotMatch(currentRegression.prompt, /Run `scripts\/regression-verification\.sh/u);
-    assert.match(currentRegression.prompt, /semantic PASS is evidence about the prepared fix/u);
+    assert.match(currentRegression.prompt, /semantic PASS is evidence about the\s+prepared fix/u);
   }
 
   const second = command(["tsx", "prisma/sync-canonical-prompts.ts"]);
@@ -1204,6 +1204,25 @@ test("sync recreates a missing regression verifier and restores canonical bindin
     where: { id: { in: regressionSteps.map(({ id }) => id) } },
     data: { assigneeAgentId: source.id },
   });
+  const verifierTaskIds = (await prisma.task.findMany({
+    where: { projectId: project.id, assigneeAgentId: existingVerifier.id },
+    select: { id: true },
+  })).map(({ id }) => id);
+  const verifierRunIds = (await prisma.run.findMany({
+    where: { projectId: project.id, agentId: existingVerifier.id },
+    select: { id: true },
+  })).map(({ id }) => id);
+  // Tasks can outlive the canonical Agent inventory. Move their restrictive
+  // foreign keys during the missing-Agent simulation, then attach them to the
+  // replacement canonical Agent after sync recreates it.
+  await prisma.task.updateMany({
+    where: { id: { in: verifierTaskIds } },
+    data: { assigneeAgentId: source.id },
+  });
+  await prisma.run.updateMany({
+    where: { id: { in: verifierRunIds } },
+    data: { agentId: source.id },
+  });
   // Model missing inventory without leaving restrictive staffing references.
   await prisma.staffingProfileEntry.updateMany({
     where: { assigneeAgentId: existingVerifier.id },
@@ -1218,6 +1237,14 @@ test("sync recreates a missing regression verifier and restores canonical bindin
 
   const verifier = await prisma.agent.findUniqueOrThrow({
     where: { projectId_name: { projectId: project.id, name: "regression-verifier-luna-max" } },
+  });
+  await prisma.task.updateMany({
+    where: { id: { in: verifierTaskIds } },
+    data: { assigneeAgentId: verifier.id },
+  });
+  await prisma.run.updateMany({
+    where: { id: { in: verifierRunIds } },
+    data: { agentId: verifier.id },
   });
   assert.equal(verifier.model, verifierSource.model);
   assert.equal(verifier.runnerPreference, verifierSource.runnerPreference);
@@ -1698,6 +1725,10 @@ test("sync rolls model-neutral review output across all canonical templates and 
 
     // Reconstruct the deployed output contract without changing review labels.
     await restoreModelSpecificReviewOutput(template.id);
+    await prisma.taskTemplateStep.updateMany({
+      where: { taskTemplateId: template.id, outputKind: REGRESSION_VERIFICATION_V3_OUTPUT_KIND },
+      data: { outputKind: REGRESSION_VERIFICATION_OUTPUT_KIND },
+    });
 
     // This historical fixture supplies its own default and retired output keys.
     await prisma.staffingProfile.deleteMany({ where: { taskTemplateId: template.id } });
@@ -1864,6 +1895,11 @@ test("seed and sync preserve every seed-era legacy template identity", async () 
   ): Promise<void> => {
     const template = await loadCanonicalTemplate(canonicalName);
     const firstStep = stepAt(template, 1);
+    await restoreRetiredReviewStepNames(template.id);
+    await prisma.taskTemplateStep.updateMany({
+      where: { taskTemplateId: template.id, outputKind: REGRESSION_VERIFICATION_V3_OUTPUT_KIND },
+      data: { outputKind: REGRESSION_VERIFICATION_OUTPUT_KIND },
+    });
     await prepare(template);
     const task = await prisma.task.create({ data: {
       projectId: project.id,

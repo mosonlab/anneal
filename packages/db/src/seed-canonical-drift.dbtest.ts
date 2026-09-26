@@ -16,7 +16,7 @@ import { after, before, test } from "node:test";
 
 import { PrismaClient } from "@prisma/client";
 import { LEGACY_TEMPLATE_GENERATIONS } from "./canonical-template-transition.js";
-import { REGRESSION_VERIFICATION_V3_OUTPUT_KIND } from "./merge-tail.js";
+import { REGRESSION_VERIFICATION_OUTPUT_KIND, REGRESSION_VERIFICATION_V3_OUTPUT_KIND } from "./merge-tail.js";
 
 const historicalReviewKind = LEGACY_TEMPLATE_GENERATIONS["direct-engineer-workflow"]
   .find(({ marker }) => marker === "pre-model-neutral-review-output")!.shape
@@ -92,7 +92,9 @@ test("seed rolls a registered canonical generation over inside its installation 
       where: { id: step.id },
       data: {
         // Historical generations retain their original review labels.
-        outputKind: step.outputKind === "review-findings" ? historicalReviewKind : step.outputKind,
+        outputKind: step.outputKind === REGRESSION_VERIFICATION_V3_OUTPUT_KIND
+          ? REGRESSION_VERIFICATION_OUTPUT_KIND
+          : step.outputKind === "review-findings" ? historicalReviewKind : step.outputKind,
         name: step.outputKind === "review-findings" ? "Code review (Sol)"
           : step.outputKind === "blind-findings" ? "Code review (Opus blind)" : step.name,
         stepIndex: step.stepIndex - 1,
