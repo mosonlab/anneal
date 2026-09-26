@@ -95,6 +95,7 @@ test("a repaired Regression Run is carried onto the active recovery aggregate", 
     regressionTaskId: "regression-1",
     recoveryRunId: "regression-run-2",
     previousRecoveryRunId: "regression-run-1",
+    preserveClaimContext: true,
   });
   assert.equal(updates[0]?.data.status, MergeRecoveryStatus.REPAIRING);
   assert.equal(updates[0]?.data.recoveryRunId, "regression-run-2");
