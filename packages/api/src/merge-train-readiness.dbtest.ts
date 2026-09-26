@@ -1110,6 +1110,7 @@ test("width zero sends one approved semantic candidate through a gated prefix be
   assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.readiness.id } })).status, TaskStatus.DONE);
   const authorization = await db.taskActivity.findFirstOrThrow({ where: {
     taskId: candidate.readiness.id,
+    actorType: "control-plane",
     metadata: { path: ["kind"], equals: "mergeIntegrator.authorization" },
   } });
   assert.deepEqual((authorization.metadata as Record<string, unknown>).train, {
