@@ -38,7 +38,13 @@ const retryRequest = async (
     outputKind?: string;
     taskTemplate?: { name: string };
   } | null = null,
-  options: { leaseLossRefunds?: number; taskStatus?: string; failureReason?: string | null; maxSessionsPerTask?: number } = {},
+  options: {
+    leaseLossRefunds?: number;
+    taskStatus?: string;
+    failureReason?: string | null;
+    maxSessionsPerTask?: number;
+    recovery?: { id: string; status: string; recoveryRunId: string | null } | null;
+  } = {},
 ) => {
   let created: Record<string, unknown> | undefined;
   const activities: Array<Record<string, unknown>> = [];
@@ -99,6 +105,7 @@ const retryRequest = async (
       // Retry takes the shared task-row lock before it reads anything else.
       $queryRaw: async () => [{ id: "task-1" }],
       agent: { findUnique: async () => lockedAgent(assigneeAgent as Record<string, unknown> | null) },
+      mergeRecoveryAttempt: { findFirst: async () => options.recovery ?? null },
       task: {
         findUniqueOrThrow: async () => ({ id: "task-1", status: "TODO", archivedAt: null }),
         findUnique: async () => currentTask,
@@ -617,6 +624,38 @@ test("operator retry re-derives runtime configuration and clears promptHash unti
     assert.equal(created?.branch, last.branch);
     assert.equal(created?.targetBranch, last.targetBranch);
     assert.equal(created?.maxRunsPerTask, last.maxRunsPerTask);
+  });
+});
+
+test("operator retry refuses the failed Run owned by active merge recovery", async () => {
+  await withTokens(async () => {
+    const { response, created, activities } = await retryRequest({
+      id: "agent-2",
+      projectId: "project-1",
+      model: "gpt-6-luna",
+      runnerPreference: RunnerPreference.CODEX,
+      foundationalPrompt: "current foundation",
+      rolePrompt: "current role",
+    }, {
+      runner: null,
+      outputKind: "regression-verification-v2",
+      taskTemplate: { name: "direct-engineer-workflow" },
+    }, {
+      taskStatus: "REVIEW",
+      recovery: { id: "recovery-1", status: "REPAIRING", recoveryRunId: "run-1" },
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "This failed Regression Run is owned by active merge recovery; wait for automatic replay, or resume the Chain if held. After recovery stops, use the merge-tail repair or rerun route instead of ordinary retry.",
+      code: "merge_recovery_retry_owned",
+      recoveryId: "recovery-1",
+      recoveryRunId: "run-1",
+      resumeRoute: "/tasks/task-1/chain/resume",
+      repairRoute: "/tasks/task-1/merge-tail/repair",
+      rerunRoute: "/tasks/task-1/merge-tail/rerun",
+    });
+    assert.equal(created, undefined);
+    assert.deepEqual(activities, []);
   });
 });
 

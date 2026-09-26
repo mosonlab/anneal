@@ -102,3 +102,27 @@ boundary:
 
 Stops without a `re-authorize` answer, and stops whose answer postdates the
 latest mechanical authorization, keep the human confirmation path unchanged.
+
+## Amendment: failed recovery Regression execution (2026-09-26)
+
+A Regression Run bound to a `REPAIRING` recovery aggregate may fail before it
+can return a durable verdict. The recovery worker, rather than ordinary Run
+retry, owns that exit. For an externally classified failure it creates one
+successor Run, atomically rebinds the aggregate, and carries the complete
+recovery handoff (prior semantic output and bounded CI findings). That replay
+spends the applicable existing two-attempt allowance: terminal-CI recovery
+shares its CI allowance, while base-drift recovery shares its allowance with
+external integrator replay. It does not alter the independent external-failure
+refund ledger. Hold defers this action without charging the allowance. The worker also
+reconciles legacy `REPAIRING` aggregates left bound to a terminal failed Run.
+
+A non-external failure, exhausted allowance, or refused successor birth parks
+the tail in `BLOCKED_DOWNSTREAM` and opens the existing answerable recovery
+question. A durable `review-fail` or `refresh-conflict` remains authoritative
+and follows its existing stop path. The ordinary task retry route refuses a
+terminal Run still owned by active recovery, preventing an unbound successor.
+
+The Chain mutex and existing compare-and-set transitions make an operator
+action and automatic replay single-winner operations. This amendment changes
+neither exact-head evidence nor gate attestation, Approval, Merge Lease,
+Run-birth, refund, or Hold boundaries.

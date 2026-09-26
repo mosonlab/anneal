@@ -272,6 +272,30 @@ export const carryMergeRecoveryRun = async (
   if (aggregate.recoveryRunId !== input.previousRecoveryRunId) {
     throw new Error(`Merge recovery ${aggregate.id} is not bound to repaired Run ${input.previousRecoveryRunId}`);
   }
+  // The claim context is intentionally carried by a control-plane marker as
+  // well as the aggregate: the marker owns the prior semantic output and the
+  // bounded CI findings, neither of which belongs in aggregate columns. Copy
+  // the exact queued handoff before moving the aggregate so every successor
+  // Run receives the same complete recovery context. Looking up the marker by
+  // its previous Run binding also works after a tail-stopped marker or repair
+  // activity became newer than the original handoff.
+  const previousHandoff = await tx.taskActivity.findFirst({
+    where: {
+      taskId: input.regressionTaskId,
+      actorType: "control-plane",
+      AND: [
+        { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery } },
+        { metadata: { path: ["state"], equals: "queued" } },
+        { metadata: { path: ["recoveryRunId"], equals: input.previousRecoveryRunId } },
+      ],
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { metadata: true },
+  });
+  const handoff = asJsonObject(previousHandoff?.metadata);
+  if (!handoff || !Object.hasOwn(handoff, "priorOutput")) {
+    throw new Error(`Merge recovery ${aggregate.id} has no queued context for Run ${input.previousRecoveryRunId}`);
+  }
   const transitioned = await transitionMergeRecovery(
     tx,
     aggregate.id,
@@ -286,6 +310,19 @@ export const carryMergeRecoveryRun = async (
   if (!transitioned) {
     throw new Error(`Merge recovery ${aggregate.id} changed while carrying its repaired Regression Run`);
   }
+  await tx.taskActivity.create({ data: {
+    taskId: input.regressionTaskId,
+    actorType: "control-plane",
+    body: `Merge recovery context carried from Run ${input.previousRecoveryRunId} to Run ${input.recoveryRunId}`,
+    metadata: {
+      ...handoff,
+      schemaVersion: MERGE_TAIL_SCHEMA_VERSION,
+      state: "queued",
+      kind: MERGE_TAIL_KIND.baseDriftRecovery,
+      recoveryRunId: input.recoveryRunId,
+      previousRecoveryRunId: input.previousRecoveryRunId,
+    } as Prisma.InputJsonObject,
+  } });
 };
 
 export const mergeRecoveryPhase = (status: MergeRecoveryStatus): MergeRecoveryPhase => (

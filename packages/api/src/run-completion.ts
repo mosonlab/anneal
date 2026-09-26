@@ -30,6 +30,7 @@ import {
   writeMarker,
   MergeLeaseEventState,
   mechanicalPrincipalRefusal,
+  MergeRecoveryStatus,
   openRun,
   type OpenRunRefusal,
   runBirthRefusalMetadata,
@@ -673,6 +674,24 @@ export const completeRun = async (
       headSha: body.headSha ?? null, budgetCeiling,
     });
     const { durableNegativeRegressionVerdict, completionHeadSha } = tail;
+    // A recovery-bound Regression failure cannot use the ordinary completion
+    // retry: that birth has no recovery binding and strands the aggregate on
+    // the old Run. Leave every such failure (external or deterministic) to
+    // the recovery worker, which owns the shared recovery allowance, Hold
+    // semantics, the full context carry, and the terminal stop card.
+    const recoveryBoundRegressionFailure = !succeeded
+      && !durableNegativeRegressionVerdict
+      && run.taskId
+      && isRegressionVerificationOutputKind(run.task?.templateStep?.outputKind)
+      ? await tx.mergeRecoveryAttempt.findFirst({
+          where: {
+            regressionTaskId: run.taskId,
+            recoveryRunId: run.id,
+            status: MergeRecoveryStatus.REPAIRING,
+          },
+          select: { id: true },
+        })
+      : null;
     // Preserve a failed completion's diagnostic reason even when a definitive
     // mechanical result overrides its protocol classification. Ordinary
     // reported success still carries no failure reason; an unbound repair's
@@ -796,7 +815,8 @@ export const completeRun = async (
     let retryCreated = false;
     let retryRunId: string | null = null;
     let retryRefusal: OpenRunRefusal | null = null;
-    if (!succeeded && (retryable || tail.retryFailedRepair) && !durableNegativeRegressionVerdict && run.task && run.runNumber < budgetCeiling) {
+    if (!succeeded && (retryable || tail.retryFailedRepair) && !durableNegativeRegressionVerdict
+      && !recoveryBoundRegressionFailure && run.task && run.runNumber < budgetCeiling) {
       const opened = await openRun(tx, run.task.id, {
         kind: "retry-after-completion",
         sourceRunId: run.id,
@@ -837,7 +857,7 @@ export const completeRun = async (
         });
       }
       const budgetExhausted = !succeeded && retryable && !durableNegativeRegressionVerdict
-        && !retryCreated && !retryRefusal;
+        && !recoveryBoundRegressionFailure && !retryCreated && !retryRefusal;
       let canonicalOutputFailure: string | null = null;
       // §4.0 outcome branching. The executor's own fenced write is the only
       // writer of a step-12 output: neither synthesis nor the metadata update

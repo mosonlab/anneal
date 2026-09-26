@@ -259,6 +259,9 @@ const statefulCompletionHarness = (
       create: async (args: unknown) => { outputWrites.push(args); return {}; },
       update: async (args: unknown) => { outputWrites.push(args); return {}; },
     },
+    mergeRecoveryAttempt: {
+      findFirst: async () => null,
+    },
     taskActivity: {
       findMany: async ({ where, take }: { where: { taskId: string }; take?: number }) => activities
         .filter((activity) => activity.taskId === where.taskId).reverse().slice(0, take),
