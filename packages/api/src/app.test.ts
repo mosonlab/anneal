@@ -150,6 +150,7 @@ test("startup reconciliation spares a run whose runner is still heartbeating", a
         findUniqueOrThrow: async () => ({ id: "task-2", archivedAt: null }),
       },
       taskActivity: { findMany: async () => [], create: async () => ({}) },
+      mergeRecoveryAttempt: { count: async () => 0, findFirst: async () => null },
       mergeLeaseEvent: { findMany: async () => [] },
       inboxThread: { findFirst: async () => ({ id: "default-thread", externalChatId: "api-unit-test-default-chat" }) },
       inboxMessage: {

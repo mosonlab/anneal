@@ -250,6 +250,7 @@ test("lease-loss retry refuses an archived Agent and parks the Task visibly", as
         findMany: async () => [],
         create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
       },
+      mergeRecoveryAttempt: { count: async () => 0, findFirst: async () => null },
       mergeLeaseEvent: { findMany: async () => [] },
       inboxMessage: {
         findUnique: async () => null,
@@ -356,6 +357,7 @@ const lostRunDatabase = (options: {
         findMany: async () => [],
         create: async ({ data }: { data: Record<string, unknown> }) => { activities.push(data); return {}; },
       },
+      mergeRecoveryAttempt: { count: async () => 0, findFirst: async () => null },
       mergeLeaseEvent: { findMany: async () => [] },
       inboxThread: { findFirst: async () => ({ id: "default-thread", externalChatId: "api-unit-test-default-chat" }) },
       inboxMessage: {

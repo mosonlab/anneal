@@ -217,7 +217,7 @@ const mechanicalStop = async (
 };
 
 const seedStopped = async (
-  shape: "canonical-direct" | "canonical-compound-readiness",
+  shape: "canonical-direct" | "canonical-compound-readiness" | "twelve-step-readiness",
   label: string,
   condition: "base-drift" | "non-clean-mergeability" | "check-failure-or-absence" = "base-drift",
   conflictShape: "CONFLICTING" | "DIRTY" | "BLOCKED" | "UNSTABLE" = "CONFLICTING",
@@ -741,6 +741,10 @@ test("a post-repair Regression external replay stays bound without restoring con
     taskId: seeded.gateTask.id,
     status: "QUEUED",
   }, orderBy: { runNumber: "desc" } });
+  await db.run.update({ where: { id: recoveryRun.id }, data: {
+    status: "SUCCEEDED",
+    headSha: HEAD,
+  } });
   assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, {
     task: seeded.gateTask,
     run: {
@@ -848,6 +852,7 @@ test("a recovery completion rejection blocks replay without spending refund or r
     integratorTaskId: seeded.integratorTask!.id,
   } });
   const run = await db.run.findUniqueOrThrow({ where: { id: aggregate.recoveryRunId! } });
+  const runCountBeforeReconciliation = await db.run.count({ where: { taskId: seeded.gateTask.id } });
   const lostAt = new Date("2026-09-25T13:00:00.000Z");
   await db.run.update({ where: { id: run.id }, data: {
     status: "RUNNING",
@@ -885,7 +890,7 @@ test("a recovery completion rejection blocks replay without spending refund or r
   assert.equal(terminal.maxRunsPerTask, run.maxRunsPerTask);
   assert.equal(terminal.budgetGrants, run.budgetGrants);
   assert.equal(terminal.leaseLossRefunds, run.leaseLossRefunds);
-  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id } }), 1);
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id } }), runCountBeforeReconciliation);
   assert.equal(await db.taskActivity.count({ where: {
     taskId: seeded.gateTask.id,
     metadata: { path: ["kind"], equals: "mergeTail.recoveryRegressionReplay" },
@@ -1053,14 +1058,14 @@ test("one malformed recovery row cannot prevent another replay in the same tick"
   } });
   await db.mergeRecoveryAttempt.update({
     where: { id: poisonedAggregate.id },
-    data: { readinessTaskId: null },
+    data: { readinessTaskId: null, sourceStopId: "poisoned-stop-id" },
   });
 
   const healthy = await seedStopped("canonical-direct", "recovery-regression-healthy-row");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
   await failQueuedRecoveryRun(healthy.gateTask.id, true);
 
-  await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)));
+  await replayFailedRecoveryRegressions(db);
   assert.equal(await db.run.count({ where: { taskId: healthy.gateTask.id, status: "QUEUED" } }), 1);
   assert.equal((await db.mergeRecoveryAttempt.findFirstOrThrow({ where: {
     integratorTaskId: healthy.integratorTask!.id,
@@ -2370,7 +2375,7 @@ test("recovery activation returns a typed stale-authorization refusal", async ()
 });
 
 test("readiness records and reopens a head-adoption refusal by code, independent of its text", async () => {
-  const seeded = await seedStopped("canonical-compound-readiness", "typed-head-adoption-refusal");
+  const seeded = await seedStopped("twelve-step-readiness", "typed-head-adoption-refusal");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
   await recordRecoveryPass(seeded, BASE_3, HEAD_2);
   const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({
