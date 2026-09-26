@@ -52,6 +52,7 @@ import { reconcileDatabaseRuns } from "./reconcile.js";
 import { GitHubReadError, type PullRequestReader, type PullRequestSnapshot } from "./github-read.js";
 import { createApp } from "./test-app.js";
 import { resetTestDb, setupTestDb } from "./testdb.js";
+import { repairReplacementAfterSalvage } from "./workspace-reclaim.js";
 
 const HEAD = "a".repeat(40);
 const HEAD_2 = "f".repeat(40);
@@ -687,6 +688,158 @@ test("a recovery Regression external replay preserves bounded CI findings", asyn
   })).status, "BLOCKED_DOWNSTREAM");
 });
 
+test("a post-repair Regression external replay stays bound without restoring consumed CI findings", async () => {
+  const seeded = await seedStopped(
+    "canonical-direct",
+    "recovery-regression-repaired-clean-context",
+    "check-failure-or-absence",
+  );
+  await addRepairTailFixtures(seeded, false);
+  assert.equal((await baseDriftRecoveryTick(db, ciReader())).recovered, 1);
+  const recoveryRun = await db.run.findFirstOrThrow({ where: {
+    taskId: seeded.gateTask.id,
+    status: "QUEUED",
+  }, orderBy: { runNumber: "desc" } });
+  assert.equal(await db.$transaction((tx) => handleRegressionCompletion(tx, {
+    task: seeded.gateTask,
+    run: {
+      id: recoveryRun.id,
+      agentId: seeded.agent.id,
+      branch: "agentos/chain/recovery",
+      headSha: HEAD,
+      sessionId: seeded.gateSession.id,
+    },
+    qualifiedVerdict: {
+      schemaVersion: 1,
+      outcome: "review-fail",
+      headSha: HEAD,
+      baseHeadSha: BASE,
+      summary: "optional typecheck fails in CI",
+    },
+    now: new Date(),
+  })), "handled");
+  const repair = await db.task.findFirstOrThrow({ where: {
+    projectId: seeded.project.id,
+    name: "Autonomous merge tail: review-fix",
+  } });
+  await completeQueuedTask(repair.id, HEAD_2);
+  const repairedRun = await db.run.findFirstOrThrow({ where: {
+    taskId: seeded.gateTask.id,
+    status: "QUEUED",
+  }, orderBy: { runNumber: "desc" } });
+  assert.equal(await db.$transaction((tx) => regressionRecoveryContextForClaim(tx, {
+    taskId: seeded.gateTask.id,
+    runId: repairedRun.id,
+  })), null, "the repair consumed the original CI findings");
+
+  await failQueuedRecoveryRun(seeded.gateTask.id, true);
+  assert.deepEqual(await replayFailedRecoveryRegressions(db), { examined: 1, replayed: 1, blocked: 0 });
+  const rebound = await db.run.findFirstOrThrow({ where: {
+    taskId: seeded.gateTask.id,
+    status: "QUEUED",
+  }, orderBy: { runNumber: "desc" } });
+  assert.notEqual(rebound.id, repairedRun.id);
+  assert.equal(await db.$transaction((tx) => regressionRecoveryContextForClaim(tx, {
+    taskId: seeded.gateTask.id,
+    runId: rebound.id,
+  })), null, "the external replay must keep the post-repair handoff clean");
+  assert.equal((await db.mergeRecoveryAttempt.findFirstOrThrow({ where: {
+    integratorTaskId: seeded.integratorTask!.id,
+  } })).recoveryRunId, rebound.id);
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 1);
+});
+
+test("lease loss and Hold leave one recovery-owned replacement with its CI context", async () => {
+  const seeded = await seedStopped(
+    "canonical-direct",
+    "recovery-regression-lease-loss",
+    "check-failure-or-absence",
+  );
+  assert.equal((await baseDriftRecoveryTick(db, ciReader())).recovered, 1);
+  const run = await db.run.findFirstOrThrow({ where: {
+    taskId: seeded.gateTask.id,
+    status: "QUEUED",
+  }, orderBy: { runNumber: "desc" } });
+  const lostAt = new Date("2026-09-25T12:00:00.000Z");
+  await db.run.update({ where: { id: run.id }, data: {
+    status: "RUNNING",
+    startedAt: new Date(lostAt.getTime() - 60_000),
+    leaseExpiresAt: new Date(lostAt.getTime() - 1_000),
+    heartbeatAt: null,
+  } });
+  const hold = await db.chainControl.create({ data: {
+    projectId: seeded.project.id,
+    chainId: seeded.chainId,
+    state: "HELD",
+    heldLayer: seeded.gateTask.chainLayer ?? 0,
+    heldAt: lostAt,
+  } });
+  assert.ok(await reconcileDatabaseRuns(db, lostAt) > 0);
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: run.id } })).status, "LOST");
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 0);
+  assert.deepEqual(await replayFailedRecoveryRegressions(db, lostAt), { examined: 1, replayed: 0, blocked: 0 });
+  const beforeResume = await db.mergeRecoveryAttempt.findFirstOrThrow({ where: {
+    integratorTaskId: seeded.integratorTask!.id,
+  } });
+  assert.equal(beforeResume.externalReplayCount, 0);
+
+  await db.chainControl.update({ where: { id: hold.id }, data: { state: "RELEASED", releasedAt: lostAt } });
+  assert.deepEqual(await replayFailedRecoveryRegressions(db, lostAt), { examined: 1, replayed: 1, blocked: 0 });
+  const replacement = await db.run.findFirstOrThrow({ where: {
+    taskId: seeded.gateTask.id,
+    status: "QUEUED",
+  }, orderBy: { runNumber: "desc" } });
+  assert.equal(replacement.runNumber, run.runNumber + 1);
+  assert.equal(replacement.leaseLossRefunds, run.leaseLossRefunds + 1);
+  const context = await db.$transaction((tx) => regressionRecoveryContextForClaim(tx, {
+    taskId: seeded.gateTask.id,
+    runId: replacement.id,
+  }));
+  assert.equal(context?.ciFailures?.[0]?.name, "optional typecheck");
+  assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: beforeResume.id } })).recoveryRunId,
+    replacement.id);
+});
+
+test("a claim-invalidated recovery replacement is rebound atomically without an orphan", async () => {
+  const seeded = await seedStopped(
+    "canonical-direct",
+    "recovery-regression-claim-invalidated",
+    "check-failure-or-absence",
+  );
+  assert.equal((await baseDriftRecoveryTick(db, ciReader())).recovered, 1);
+  const claimed = await db.run.findFirstOrThrow({ where: {
+    taskId: seeded.gateTask.id,
+    status: "QUEUED",
+  }, orderBy: { runNumber: "desc" } });
+  await db.run.update({ where: { id: claimed.id }, data: {
+    status: "CLAIMED",
+    startedAt: null,
+  } });
+  assert.equal(await db.$transaction((tx) => repairReplacementAfterSalvage(tx, {
+    taskId: seeded.gateTask.id,
+    runNumber: claimed.runNumber - 1,
+    branch: claimed.branch,
+    targetBranch: claimed.targetBranch,
+  })), "repaired");
+  assert.equal((await db.run.findUniqueOrThrow({ where: { id: claimed.id } })).status, "CANCELLED");
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 0);
+
+  assert.deepEqual(await replayFailedRecoveryRegressions(db), { examined: 1, replayed: 1, blocked: 0 });
+  const replacement = await db.run.findFirstOrThrow({ where: {
+    taskId: seeded.gateTask.id,
+    status: "QUEUED",
+  }, orderBy: { runNumber: "desc" } });
+  const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({ where: {
+    integratorTaskId: seeded.integratorTask!.id,
+  } });
+  assert.equal(aggregate.recoveryRunId, replacement.id);
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 1);
+  assert.equal((await db.$transaction((tx) => regressionRecoveryContextForClaim(tx, {
+    taskId: seeded.gateTask.id,
+    runId: replacement.id,
+  })))?.ciFailures?.[0]?.name, "optional typecheck");
+});
+
 test("a stuck recovery Regression failure stops with an answerable card when allowance is spent", async () => {
   const seeded = await seedStopped("canonical-direct", "recovery-regression-exhausted");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
@@ -1109,6 +1262,21 @@ test("two real CI recoveries across heads exhaust the Chain allowance on the nex
   } });
   assert.ok(card.threadId);
   assert.match(card.body, /limit 2 reached/u);
+});
+
+test("one CI birth plus one external replay exhausts the next CI stop", async () => {
+  const seeded = await seedStopped("canonical-direct", "ci-replay-budget", "check-failure-or-absence");
+  assert.equal((await baseDriftRecoveryTick(db, ciReader())).recovered, 1);
+  await failQueuedRecoveryRun(seeded.gateTask.id, true);
+  assert.equal((await replayFailedRecoveryRegressions(db)).replayed, 1);
+  await nextCiStop(seeded, HEAD_2);
+  assert.equal((await baseDriftRecoveryTick(db, ciReader(snapshot(BASE, {
+    ...failedCiSnapshot(), headRefOid: HEAD_2, headCommitOid: HEAD_2,
+  })))).exhausted, 1);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: seeded.integratorTask!.id,
+    metadata: { path: ["kind"], equals: "mergeTail.ciFailureRecovery" },
+  } }), 1, "the external replay shares the allowance without pretending to be a second CI birth");
 });
 
 test("held Chain does not spend CI recovery or open a card", async () => {

@@ -275,7 +275,16 @@ export const reconcileDatabaseRuns = async (
       // way out is to raise `maxSessionsPerTask` deliberately.
       // The candidate predates the Task lock. A newer Run must not leave this
       // older row holding a grant that birth will reject as source-run-stale.
-      const refund = await refundForLostRun(tx, { taskId: run.taskId, run, reason: "lease-loss" });
+      const recoveryOwned = run.taskId ? await tx.mergeRecoveryAttempt.count({ where: {
+        regressionTaskId: run.taskId,
+        status: "REPAIRING",
+        recoveryRunId: run.id,
+      } }) > 0 : false;
+      // Recovery owns both the allowance and the successor. Leave its refund
+      // undecided until that worker has checked Hold and the shared recovery
+      // budget; ordinary Runs keep the immediate refund/reopen path below.
+      const refund = recoveryOwned ? null
+        : await refundForLostRun(tx, { taskId: run.taskId, run, reason: "lease-loss" });
       const rejectionFailureReason = completionRejection?.parsed.status === "ok"
         ? `Mechanical completion rejected with HTTP ${completionRejection.parsed.rejection.status}: ${completionRejection.parsed.rejection.responseBody}`
         : completionRejection?.parsed.status === "malformed"
@@ -293,7 +302,10 @@ export const reconcileDatabaseRuns = async (
             OR: [{ leaseExpiresAt: { lt: now } }, { leaseExpiresAt: null }],
           },
           reason: rejectionFailureReason ?? leaseLossReason,
-          ...refund.budget,
+          ...(refund?.budget ?? {
+            maxRunsPerTask: run.maxRunsPerTask,
+            budgetGrants: run.budgetGrants,
+          }),
         },
       });
       if (lost === null || "message" in lost) continue;
@@ -338,9 +350,18 @@ export const reconcileDatabaseRuns = async (
         });
         continue;
       }
+      if (recoveryOwned) {
+        await tx.taskActivity.create({ data: {
+          taskId: run.taskId,
+          actorType: "control-plane",
+          body: `Recovery-owned Run ${run.runNumber} lost; recovery worker will decide its bounded replacement`,
+          metadata: { kind: "mergeTail.recoveryPlatformLoss", reason: "lease-loss", runId: run.id },
+        } });
+        continue;
+      }
       const reopened = await reopenRefundedRun(tx, {
         taskId: run.taskId,
-        refund,
+        refund: refund!,
         // Spaced by the refunds already granted, not queued at `now`: a host
         // that keeps losing runs is given time to come back before the next
         // attempt is spent on it.
@@ -355,6 +376,18 @@ export const reconcileDatabaseRuns = async (
         });
       } else if (reopened.kind === "refused") {
         leaseOutcomes.push({ kind: "stop", taskId: run.taskId });
+      } else if (reopened.kind === "recovery-invalid") {
+        leaseOutcomes.push({ kind: "stop", taskId: run.taskId });
+        await tx.task.update({
+          where: { id: run.taskId },
+          data: { status: TaskStatus.REVIEW, failureReason: reopened.reason },
+        });
+        await tx.taskActivity.create({ data: {
+          taskId: run.taskId,
+          actorType: "control-plane",
+          body: `Run ${run.runNumber} lost; recovery-owned retry withheld: ${reopened.reason}`,
+          metadata: { kind: "mergeTail.recoveryReplacementWithheld", aggregateId: reopened.aggregateId, runId: run.id },
+        } });
       } else {
         // Budget exhausted: no retry follows, so this lost run is the chain's
         // last word and its lease has no successor to hand itself to.

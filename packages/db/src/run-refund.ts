@@ -6,6 +6,7 @@ import {
   type OpenRunIntent,
   type OpenRunRefusal,
 } from "./run-open.js";
+import { carryMergeRecoveryRun, mergeRecoveryCarryReadiness } from "./merge-tail.js";
 
 type Tx = Prisma.TransactionClient;
 
@@ -329,6 +330,7 @@ export const refundForLostRun = async (
 export type RefundedReopen =
   | { kind: "reopened"; run: Run }
   | { kind: "exhausted"; ceiling: number }
+  | { kind: "recovery-invalid"; aggregateId: string; reason: string }
   | { kind: "refused"; refusal: OpenRunRefusal };
 
 /**
@@ -358,8 +360,27 @@ export const reopenRefundedRun = async (
   if (refund.granted && refund.runNumber >= refund.budget.maxRunsPerTask) {
     return { kind: "exhausted", ceiling: refund.budget.maxRunsPerTask };
   }
+  const recovery = await mergeRecoveryCarryReadiness(tx, {
+    regressionTaskId: taskId,
+    recoveryRunId: refund.sourceRunId,
+  });
+  if (recovery.kind === "invalid") return {
+    kind: "recovery-invalid",
+    aggregateId: recovery.aggregateId,
+    reason: recovery.reason,
+  };
   const opened = await openRun(tx, taskId, refund.intent(readyAt));
-  if (opened.ok) return { kind: "reopened", run: opened.run };
+  if (opened.ok) {
+    if (recovery.kind === "ready") {
+      await carryMergeRecoveryRun(tx, {
+        regressionTaskId: taskId,
+        previousRecoveryRunId: refund.sourceRunId,
+        recoveryRunId: opened.run.id,
+        preserveClaimContext: true,
+      });
+    }
+    return { kind: "reopened", run: opened.run };
+  }
   const settlement = await settleRunBirthRefusal(tx, {
     taskId,
     refusal: opened.refusal,

@@ -270,7 +270,7 @@ export const enterRepair = async (
   const context = await requireRecoveryRepairIdentity(tx, input.aggregateId);
   const aggregate = await tx.mergeRecoveryAttempt.findUniqueOrThrow({
     where: { id: input.aggregateId },
-    select: { status: true },
+    select: { status: true, recoveryRunId: true },
   });
   const requeue = input.readinessRequeue;
   if (requeue
@@ -388,6 +388,15 @@ export const enterRepair = async (
       { taskId: context.integratorTaskId, actorType: "control-plane", body, metadata: requeueMetadata },
       { taskId: context.regressionTaskId, actorType: "control-plane", body, metadata: requeueMetadata },
     ] });
+    await writeMarker(tx, context.regressionTaskId, "baseDriftRecovery", "claim-context-consumed", {
+      actorType: "control-plane",
+      body: `Merge recovery clean context carried through readiness requeue to Run ${run.id}`,
+      metadata: {
+        claimContext: "consumed",
+        recoveryRunId: run.id,
+        previousRecoveryRunId: aggregate.recoveryRunId,
+      },
+    });
     await writeMarker(tx, context.regressionTaskId, "readiness", "requeued-regression", {
       actorType: "control-plane",
       body: `Merge readiness returned to regression: ${requeue.reason}; ${requeue.staleBaseSha} -> ${input.currentBaseSha}`,

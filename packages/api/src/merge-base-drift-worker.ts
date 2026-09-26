@@ -34,8 +34,12 @@ import {
   recordIntegratorStop,
   requireDefaultFeishuThread,
   openRun,
+  refundForLostRun,
+  reopenRefundedRun,
   carryMergeRecoveryRun,
+  mergeRecoveryCarryReadiness,
   recoveryContext,
+  transitionMergeRecovery,
   REGRESSION_VERIFICATION_OUTPUT_KINDS,
   resolveChainTarget,
   selectAuthorization,
@@ -526,7 +530,8 @@ const queueRecovery = async (
       metadata: { path: ["kind"], equals: "mergeTail.ciFailureRecovery" },
     }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], select: { metadata: true } })
     : [];
-  const attempts = expected.recoveryKind === "ci-failure" ? ciHistory.length
+  const attempts = expected.recoveryKind === "ci-failure"
+    ? await ciRecoveryAllowanceSpent(tx, expected.integratorTaskId, ciHistory)
     : await recoveryAllowanceSpent(tx, aggregate, { excludeSourceStopId: expected.stopId });
   const decision = classifyDurable({
     expected,
@@ -943,6 +948,29 @@ const addTickDelta = (result: BaseDriftRecoveryTickResult, delta: RecoveryTickDe
   result.ineligible += delta.ineligible;
 };
 
+/** CI recovery births and their external replays share one allowance. The
+ * activity is the automatic-birth authority, so extra aggregate rows created
+ * by an operator rerun do not spend the automatic budget by themselves. */
+const ciRecoveryAllowanceSpent = async (
+  tx: Prisma.TransactionClient,
+  integratorTaskId: string,
+  history?: Array<{ metadata: Prisma.JsonValue }>,
+  knownStopIds?: ReadonlySet<string>,
+): Promise<number> => {
+  const ciRows = history ?? await tx.taskActivity.findMany({ where: {
+    taskId: integratorTaskId,
+    actorType: "control-plane",
+    metadata: { path: ["kind"], equals: "mergeTail.ciFailureRecovery" },
+  }, select: { metadata: true } });
+  const ciStopIds = knownStopIds ?? new Set(ciRows.map((row) => asJsonObject(row.metadata)?.stopId)
+    .filter((value): value is string => typeof value === "string"));
+  const attempts = await tx.mergeRecoveryAttempt.findMany({ where: {
+    integratorTaskId,
+    sourceStopId: { in: [...ciStopIds] },
+  }, select: { externalReplayCount: true } });
+  return ciRows.length + attempts.reduce((total, attempt) => total + attempt.externalReplayCount, 0);
+};
+
 /** Recovery Runs and external replays spend one shared allowance across stops. */
 export const recoveryAllowanceSpent = async (
   tx: Prisma.TransactionClient,
@@ -983,13 +1011,8 @@ const recoveryRegressionAllowance = async (
       ceiling: MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
     };
   }
-  const attempts = await tx.mergeRecoveryAttempt.findMany({ where: {
-    integratorTaskId: identity.integratorTaskId,
-  }, select: { sourceStopId: true, externalReplayCount: true } });
   return {
-    spent: ciRows.length + attempts
-      .filter((attempt) => ciStopIds.has(attempt.sourceStopId))
-      .reduce((total, attempt) => total + attempt.externalReplayCount, 0),
+    spent: await ciRecoveryAllowanceSpent(tx, identity.integratorTaskId, ciRows, ciStopIds),
     ceiling: MAX_AUTOMATIC_CI_FAILURE_RECOVERIES,
   };
 };
@@ -1034,7 +1057,9 @@ export const replayFailedRecoveryRegressions = async (
       const observedRun = await db.run.findUnique({ where: { id: runId }, select: { status: true } });
       if (!observedRun || observedRun.status === "SUCCEEDED" || ACTIVE_RUN_STATUSES.includes(observedRun.status)) continue;
       result.examined += 1;
-      const outcome = await db.$transaction(async (tx): Promise<"replayed" | "blocked" | "skipped"> => {
+      let outcome: "replayed" | "blocked" | "skipped";
+      try {
+        outcome = await db.$transaction(async (tx): Promise<"replayed" | "blocked" | "skipped"> => {
       if (!await lockRecoveryChain(tx, row.integratorTaskId)) return "skipped";
       const latest = await tx.mergeRecoveryAttempt.findFirst({
         where: { regressionTaskId: row.regressionTaskId },
@@ -1055,7 +1080,7 @@ export const replayFailedRecoveryRegressions = async (
           where: { id: runId },
           select: {
             id: true, taskId: true, status: true, runNumber: true, retryAt: true,
-            maxRunsPerTask: true, budgetGrants: true, failureReason: true,
+            maxRunsPerTask: true, budgetGrants: true, leaseLossRefunds: true, failureReason: true,
           },
         }),
         tx.run.findFirst({
@@ -1067,7 +1092,23 @@ export const replayFailedRecoveryRegressions = async (
       if (!failedRun || failedRun.taskId !== latest.regressionTaskId
         || failedRun.status === "SUCCEEDED" || ACTIVE_RUN_STATUSES.includes(failedRun.status)) return "skipped";
       const recovery = recoveryContext(latest);
-      if (!recovery) throw new Error(`Merge recovery ${latest.id} has incomplete context for failed Regression Run ${runId}`);
+      if (!recovery) {
+        const reason = `Merge recovery ${latest.id} has incomplete context for failed Regression Run ${runId}`;
+        await transitionMergeRecovery(tx, latest.id, MergeRecoveryStatus.BLOCKED_DOWNSTREAM, {
+          failureReason: reason,
+          endedAt: now,
+        });
+        for (const taskId of [latest.regressionTaskId, latest.readinessTaskId, latest.integratorTaskId]) {
+          if (taskId) await tx.task.update({ where: { id: taskId }, data: {
+            status: TaskStatus.REVIEW,
+            failureReason: reason,
+          } });
+        }
+        await openRecoveryQuestion(tx, latest.integratorTaskId, latest.sourceStopId, {
+          revalidations: latest.revalidations, ceiling: false, reason,
+        });
+        return "blocked";
+      }
       if (newestRun?.id !== failedRun.id) {
         const reason = `Recovery Regression binding is stale: newer unbound Run ${newestRun?.id ?? "unknown"} exists after failed Run ${failedRun.id}`;
         await blockDownstream(tx, { recovery, phase: "regression", reason, at: now });
@@ -1088,55 +1129,102 @@ export const replayFailedRecoveryRegressions = async (
         },
         select: { id: true },
       });
+      const platformLossReason = failedRun.status === "LOST" ? "lease-loss"
+        : failedRun.status === "CANCELLED"
+          && failedRun.failureReason === "Claim invalidated before start because late salvage changed its clone base"
+          ? "claim-invalidated"
+          : null;
       const allowance = await recoveryRegressionAllowance(tx, latest);
-      if (externalRefund && allowance.spent < allowance.ceiling) {
-        const attempt = await attemptRunBirth(tx, (client) => openRun(client, latest.regressionTaskId!, {
-          kind: "retry-after-completion",
-          sourceRunId: failedRun.id,
-          sourceMaxRunsPerTask: failedRun.maxRunsPerTask,
-          sourceBudgetGrants: failedRun.budgetGrants,
-          budgetGrant: 0,
-          readyAt: failedRun.retryAt ?? now,
-        }));
-        if (attempt.outcome === "already-queued") return "skipped";
-        if (attempt.outcome === "opened") {
+      if ((externalRefund || platformLossReason) && allowance.spent < allowance.ceiling) {
+        const carry = await mergeRecoveryCarryReadiness(tx, {
+          regressionTaskId: latest.regressionTaskId,
+          recoveryRunId: failedRun.id,
+        });
+        if (carry.kind !== "ready") {
+          const reason = carry.kind === "invalid" ? carry.reason
+            : `Merge recovery ${latest.id} lost ownership of failed Regression Run ${failedRun.id}`;
+          await blockDownstream(tx, { recovery, phase: "regression", reason, at: now });
+          await openRecoveryQuestion(tx, latest.integratorTaskId, latest.sourceStopId, {
+            revalidations: latest.revalidations, ceiling: false, reason,
+          });
+          return "blocked";
+        }
+        let replayRun: { id: string; runNumber: number };
+        if (platformLossReason) {
+          const refund = await refundForLostRun(tx, {
+            taskId: latest.regressionTaskId,
+            run: failedRun,
+            reason: platformLossReason,
+          });
+          const reopened = await reopenRefundedRun(tx, {
+            taskId: latest.regressionTaskId,
+            refund,
+            readyAt: failedRun.retryAt ?? now,
+            now,
+            activityPrefix: `Recovery Regression Run ${failedRun.runNumber} platform-loss replacement refused`,
+          });
+          if (reopened.kind !== "reopened") {
+            const reason = reopened.kind === "exhausted"
+              ? `Recovery Regression platform-loss refund exhausted at Run ceiling ${reopened.ceiling}`
+              : reopened.kind === "recovery-invalid" ? reopened.reason
+                : `Recovery Regression platform-loss replacement refused: ${reopened.refusal.message}`;
+            await blockDownstream(tx, { recovery, phase: "regression", reason, at: now });
+            await openRecoveryQuestion(tx, latest.integratorTaskId, latest.sourceStopId, {
+              revalidations: latest.revalidations, ceiling: false, reason,
+            });
+            return "blocked";
+          }
+          replayRun = reopened.run;
+        } else {
+          const attempt = await attemptRunBirth(tx, (client) => openRun(client, latest.regressionTaskId!, {
+            kind: "retry-after-completion",
+            sourceRunId: failedRun.id,
+            sourceMaxRunsPerTask: failedRun.maxRunsPerTask,
+            sourceBudgetGrants: failedRun.budgetGrants,
+            budgetGrant: 0,
+            readyAt: failedRun.retryAt ?? now,
+          }));
+          if (attempt.outcome === "already-queued") return "skipped";
+          if (attempt.outcome === "refused") {
+            const reason = `Recovery Regression replay refused: ${attempt.refusal.message}`;
+            await blockDownstream(tx, { recovery, phase: "regression", reason, at: now });
+            await openRecoveryQuestion(tx, latest.integratorTaskId, latest.sourceStopId, {
+              revalidations: latest.revalidations, ceiling: false, reason,
+            });
+            return "blocked";
+          }
+          replayRun = attempt.run;
           await carryMergeRecoveryRun(tx, {
             regressionTaskId: latest.regressionTaskId,
             previousRecoveryRunId: failedRun.id,
-            recoveryRunId: attempt.run.id,
+            recoveryRunId: replayRun.id,
             preserveClaimContext: true,
           });
-          await tx.mergeRecoveryAttempt.update({
-            where: { id: latest.id },
-            data: { externalReplayCount: { increment: 1 } },
-          });
-          await tx.task.update({
-            where: { id: latest.regressionTaskId },
-            data: { status: TaskStatus.TODO, failureReason: null },
-          });
-          await tx.taskActivity.create({ data: {
-            taskId: latest.regressionTaskId,
-            actorType: "control-plane",
-            body: `Recovery Regression Run ${failedRun.runNumber} failed externally; Run ${attempt.run.runNumber} queued with recovery context`,
-            metadata: {
-              kind: "mergeTail.recoveryRegressionReplay",
-              aggregateId: latest.id,
-              failedRunId: failedRun.id,
-              recoveryRunId: attempt.run.id,
-              ordinal: allowance.spent + 1,
-              remaining: allowance.ceiling - allowance.spent - 1,
-            },
-          } });
-          return "replayed";
         }
-        const reason = `Recovery Regression replay refused: ${attempt.refusal.message}`;
-        await blockDownstream(tx, { recovery, phase: "regression", reason, at: now });
-        await openRecoveryQuestion(tx, latest.integratorTaskId, latest.sourceStopId, {
-          revalidations: latest.revalidations, ceiling: false, reason,
+        await tx.mergeRecoveryAttempt.update({
+          where: { id: latest.id },
+          data: { externalReplayCount: { increment: 1 } },
         });
-        return "blocked";
+        await tx.task.update({
+          where: { id: latest.regressionTaskId },
+          data: { status: TaskStatus.TODO, failureReason: null },
+        });
+        await tx.taskActivity.create({ data: {
+          taskId: latest.regressionTaskId,
+          actorType: "control-plane",
+          body: `Recovery Regression Run ${failedRun.runNumber} failed externally; Run ${replayRun.runNumber} queued with recovery context`,
+          metadata: {
+            kind: "mergeTail.recoveryRegressionReplay",
+            aggregateId: latest.id,
+            failedRunId: failedRun.id,
+            recoveryRunId: replayRun.id,
+            ordinal: allowance.spent + 1,
+            remaining: allowance.ceiling - allowance.spent - 1,
+          },
+        } });
+        return "replayed";
       }
-      const reason = externalRefund
+      const reason = externalRefund || platformLossReason
         ? `Automatic recovery allowance exhausted after ${String(allowance.spent)} recoveries and external replays`
         : `Recovery Regression Run ${failedRun.runNumber} failed without an external failure classification: ${failedRun.failureReason ?? "execution failed"}`;
       await blockDownstream(tx, { recovery, phase: "regression", reason, at: now });
@@ -1144,7 +1232,11 @@ export const replayFailedRecoveryRegressions = async (
         revalidations: latest.revalidations, ceiling: false, reason,
       });
       return "blocked";
-      });
+        });
+      } catch (error: unknown) {
+        console.error(`Recovery Regression replay failed for aggregate ${row.id}: ${error instanceof Error ? error.message : String(error)}`);
+        continue;
+      }
       if (outcome === "replayed") result.replayed += 1;
       if (outcome === "blocked") result.blocked += 1;
     }

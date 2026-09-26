@@ -41,7 +41,7 @@ export const MARKER_STATES = {
     "authorization-replay-refused", "authorization-replayed", "authorization-withheld",
     "class-revalidated", "classification-retry", "exhausted", "external-failure-pending",
     "ineligible", "legacy-refusal-retired", "legacy-validation-reopened", "question-opened",
-    "queued", "reopened-head-adoption", "tail-stopped", "transport-ceiling",
+    "claim-context-consumed", "queued", "reopened-head-adoption", "tail-stopped", "transport-ceiling",
     "validation-budget", "waiting-ceiling",
   ],
   executorOffline: ["requeued-executor-offline"],

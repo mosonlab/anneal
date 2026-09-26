@@ -255,10 +255,72 @@ export async function transitionMergeRecovery(
   });
 }
 
+type RecoveryCarryHandoff =
+  | { kind: "queued"; metadata: Record<string, unknown> }
+  | { kind: "consumed" }
+  | { kind: "invalid"; reason: string };
+
+const recoveryCarryHandoff = async (
+  tx: Prisma.TransactionClient,
+  input: { regressionTaskId: string; recoveryRunId: string; aggregateId: string },
+): Promise<RecoveryCarryHandoff> => {
+  const marker = asJsonObject((await tx.taskActivity.findFirst({
+    where: {
+      taskId: input.regressionTaskId,
+      actorType: "control-plane",
+      AND: [
+        { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery } },
+        { metadata: { path: ["recoveryRunId"], equals: input.recoveryRunId } },
+      ],
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { metadata: true },
+  }))?.metadata);
+  if (marker?.state === "queued" && Object.hasOwn(marker, "priorOutput")) {
+    return { kind: "queued", metadata: marker };
+  }
+  if (marker?.state === "claim-context-consumed" && marker.claimContext === "consumed") {
+    return { kind: "consumed" };
+  }
+  return {
+    kind: "invalid",
+    reason: `Merge recovery ${input.aggregateId} has no queued or consumed claim context for Run ${input.recoveryRunId}`,
+  };
+};
+
+export type MergeRecoveryCarryReadiness =
+  | { kind: "unbound" }
+  | { kind: "ready"; claimContext: "queued" | "consumed" }
+  | { kind: "invalid"; aggregateId: string; reason: string };
+
+/** Qualifies a platform replacement before it is born. A matching REPAIRING
+ * aggregate owns the successor; its marker says whether the successor must
+ * retain unconsumed claim context or continue after repair with clean context. */
+export const mergeRecoveryCarryReadiness = async (
+  tx: Prisma.TransactionClient,
+  input: { regressionTaskId: string; recoveryRunId: string },
+): Promise<MergeRecoveryCarryReadiness> => {
+  const aggregate = await tx.mergeRecoveryAttempt.findFirst({
+    where: { regressionTaskId: input.regressionTaskId },
+    orderBy: [{ attempt: "desc" }, { id: "desc" }],
+  });
+  if (!aggregate || aggregate.status !== MergeRecoveryStatus.REPAIRING
+    || aggregate.recoveryRunId !== input.recoveryRunId) return { kind: "unbound" };
+  const handoff = await recoveryCarryHandoff(tx, {
+    regressionTaskId: input.regressionTaskId,
+    recoveryRunId: input.recoveryRunId,
+    aggregateId: aggregate.id,
+  });
+  return handoff.kind === "invalid"
+    ? { kind: "invalid", aggregateId: aggregate.id, reason: handoff.reason }
+    : { kind: "ready", claimContext: handoff.kind };
+};
+
 /** Carries an expected in-progress recovery onto a successor Regression Run.
  * A replay of the failed Run explicitly preserves its unconsumed claim
- * context; a Run born after genuine repair completion does not reintroduce
- * CI findings that the repair just consumed. */
+ * context. A Run born after genuine repair completion records that the claim
+ * context was consumed, so later platform replacements stay recovery-bound
+ * without reintroducing old CI findings. */
 export const carryMergeRecoveryRun = async (
   tx: Prisma.TransactionClient,
   input: {
@@ -282,23 +344,13 @@ export const carryMergeRecoveryRun = async (
     throw new Error(`Merge recovery ${aggregate.id} is not bound to repaired Run ${input.previousRecoveryRunId}`);
   }
   const handoff = input.preserveClaimContext
-    ? asJsonObject((await tx.taskActivity.findFirst({
-        where: {
-          taskId: input.regressionTaskId,
-          actorType: "control-plane",
-          AND: [
-            { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.baseDriftRecovery } },
-            { metadata: { path: ["state"], equals: "queued" } },
-            { metadata: { path: ["recoveryRunId"], equals: input.previousRecoveryRunId } },
-          ],
-        },
-        orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-        select: { metadata: true },
-      }))?.metadata)
-    : null;
-  if (input.preserveClaimContext && (!handoff || !Object.hasOwn(handoff, "priorOutput"))) {
-    throw new Error(`Merge recovery ${aggregate.id} has no queued context for Run ${input.previousRecoveryRunId}`);
-  }
+    ? await recoveryCarryHandoff(tx, {
+        regressionTaskId: input.regressionTaskId,
+        recoveryRunId: input.previousRecoveryRunId,
+        aggregateId: aggregate.id,
+      })
+    : { kind: "consumed" as const };
+  if (handoff.kind === "invalid") throw new Error(handoff.reason);
   const transitioned = await transitionMergeRecovery(
     tx,
     aggregate.id,
@@ -313,16 +365,30 @@ export const carryMergeRecoveryRun = async (
   if (!transitioned) {
     throw new Error(`Merge recovery ${aggregate.id} changed while carrying its repaired Regression Run`);
   }
-  if (handoff) {
+  if (handoff.kind === "queued") {
     await tx.taskActivity.create({ data: {
       taskId: input.regressionTaskId,
       actorType: "control-plane",
       body: `Merge recovery context carried from Run ${input.previousRecoveryRunId} to Run ${input.recoveryRunId}`,
       metadata: {
-        ...handoff,
+        ...handoff.metadata,
         schemaVersion: MERGE_TAIL_SCHEMA_VERSION,
         state: "queued",
         kind: MERGE_TAIL_KIND.baseDriftRecovery,
+        recoveryRunId: input.recoveryRunId,
+        previousRecoveryRunId: input.previousRecoveryRunId,
+      } as Prisma.InputJsonObject,
+    } });
+  } else {
+    await tx.taskActivity.create({ data: {
+      taskId: input.regressionTaskId,
+      actorType: "control-plane",
+      body: `Merge recovery clean context carried from Run ${input.previousRecoveryRunId} to Run ${input.recoveryRunId}`,
+      metadata: {
+        schemaVersion: MERGE_TAIL_SCHEMA_VERSION,
+        state: "claim-context-consumed",
+        kind: MERGE_TAIL_KIND.baseDriftRecovery,
+        claimContext: "consumed",
         recoveryRunId: input.recoveryRunId,
         previousRecoveryRunId: input.previousRecoveryRunId,
       } as Prisma.InputJsonObject,
@@ -783,6 +849,7 @@ const DEFENSE_EXACT = new Set([
   "packages/db/src/merge-tail.ts",
   "packages/db/src/merge-tail-markers.ts",
   "packages/db/src/readiness-requeue.ts",
+  "packages/db/src/run-refund.ts",
   "packages/db/src/canonical-output-schema.ts",
   "packages/db/src/template-sources.ts",
   "packages/db/src/staffing-profile-canonical.ts",

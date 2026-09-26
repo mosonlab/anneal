@@ -11,6 +11,7 @@ import {
   defenseTriggers,
   isMergeReadinessStep,
   mergeRecoveryPhase,
+  mergeRecoveryCarryReadiness,
   mergeRecoveryTransitionAllowed,
   RECOVERY_TRANSITIONS,
   parseResolverResult,
@@ -106,6 +107,59 @@ test("a repaired Regression Run is carried onto the active recovery aggregate", 
   assert.deepEqual(activities[0]?.data.metadata.ciFailures, [
     { name: "typecheck", conclusion: "FAILURE", log: "TS2322" },
   ]);
+});
+
+test("a repaired Regression carry records consumed claim context and propagates it cleanly", async () => {
+  const activities: Array<Record<string, any>> = [];
+  let sourceRunId = "regression-run-1";
+  const aggregate = {
+    id: "recovery-clean",
+    status: MergeRecoveryStatus.REPAIRING,
+    get recoveryRunId() { return sourceRunId; },
+  };
+  const tx = {
+    taskActivity: {
+      findFirst: async () => ({ metadata: {
+        schemaVersion: 1,
+        kind: "mergeTail.baseDriftRecovery",
+        state: "claim-context-consumed",
+        claimContext: "consumed",
+        recoveryRunId: sourceRunId,
+      } }),
+      create: async (args: Record<string, any>) => { activities.push(args); },
+    },
+    mergeRecoveryAttempt: {
+      findFirst: async () => aggregate,
+      findUnique: async () => aggregate,
+      updateMany: async (args: Record<string, any>) => {
+        sourceRunId = args.data.recoveryRunId;
+        return { count: 1 };
+      },
+      findUniqueOrThrow: async () => aggregate,
+    },
+  } as unknown as Prisma.TransactionClient;
+
+  await carryMergeRecoveryRun(tx, {
+    regressionTaskId: "regression-1",
+    recoveryRunId: "regression-run-2",
+    previousRecoveryRunId: "regression-run-1",
+  });
+  assert.equal(activities[0]?.data.metadata.state, "claim-context-consumed");
+  assert.equal(activities[0]?.data.metadata.claimContext, "consumed");
+  assert.equal(activities[0]?.data.metadata.ciFailures, undefined);
+
+  assert.deepEqual(await mergeRecoveryCarryReadiness(tx, {
+    regressionTaskId: "regression-1",
+    recoveryRunId: "regression-run-2",
+  }), { kind: "ready", claimContext: "consumed" });
+  await carryMergeRecoveryRun(tx, {
+    regressionTaskId: "regression-1",
+    recoveryRunId: "regression-run-3",
+    previousRecoveryRunId: "regression-run-2",
+    preserveClaimContext: true,
+  });
+  assert.equal(activities[1]?.data.metadata.state, "claim-context-consumed");
+  assert.equal(activities[1]?.data.metadata.ciFailures, undefined);
 });
 
 test("a repaired Regression Run cannot retarget an unrelated recovery", async () => {

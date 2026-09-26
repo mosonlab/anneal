@@ -494,7 +494,12 @@ export const repairReplacementAfterSalvage = async (
     // reached, so recording a grant here that nothing may use would leave the
     // operator's own retry holding an attempt this transaction just refused.
     // Bind the grant to the same latest Run that openRun will check below.
-    const refund = await refundForLostRun(tx, {
+    const recoveryOwned = await tx.mergeRecoveryAttempt.count({ where: {
+      regressionTaskId: run.taskId,
+      status: "REPAIRING",
+      recoveryRunId: replacement.id,
+    } }) > 0;
+    const refund = recoveryOwned ? null : await refundForLostRun(tx, {
       taskId: run.taskId, run: replacement, reason: "claim-invalidated",
     });
     const revoked = await tx.run.updateMany({
@@ -507,7 +512,10 @@ export const repairReplacementAfterSalvage = async (
         failureClass: FailureClass.CANCELLED_OR_TIMED_OUT,
         failureReason: "Claim invalidated before start because late salvage changed its clone base",
         retryable: true,
-        ...refund.budget,
+        ...(refund?.budget ?? {
+          maxRunsPerTask: replacement.maxRunsPerTask,
+          budgetGrants: replacement.budgetGrants,
+        }),
       },
     });
     if (revoked.count !== 1) return "already-started";
@@ -519,11 +527,20 @@ export const repairReplacementAfterSalvage = async (
         failureReason: "Claim invalidated before start because late salvage changed its clone base",
       },
     });
+    if (recoveryOwned) {
+      await tx.taskActivity.create({ data: {
+        taskId: run.taskId,
+        actorType: "control-plane",
+        body: `Recovery-owned Run ${replacement.runNumber} claim invalidated; recovery worker will decide its bounded replacement`,
+        metadata: { kind: "mergeTail.recoveryPlatformLoss", reason: "claim-invalidated", runId: replacement.id },
+      } });
+      return "repaired";
+    }
     // Named rather than `enqueue`: this replacement exists because the platform
     // invalidated a claim, so it is one of the refunds the bound counts.
     const reopened = await reopenRefundedRun(tx, {
       taskId: run.taskId,
-      refund,
+      refund: refund!,
       readyAt: revokedAt,
       now: revokedAt,
       activityPrefix: "Late-salvage replacement was revoked and not requeued",

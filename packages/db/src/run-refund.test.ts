@@ -243,8 +243,11 @@ test("reopenRefundedRun refuses a birth for a Run already at the ceiling its ref
       throw attempted;
     },
   };
+  const ordinaryTx = {
+    mergeRecoveryAttempt: { findFirst: async () => null },
+  } as never;
   await assert.rejects(
-    reopenRefundedRun({} as never, {
+    reopenRefundedRun(ordinaryTx, {
       taskId: "task-1", refund: refused, readyAt: now, now, activityPrefix: "lost",
     }),
     (error: unknown) => error === attempted,
