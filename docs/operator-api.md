@@ -2721,11 +2721,18 @@ spending that ceiling or opening
 a card. A non-external failure, an exhausted allowance, or a refused Run birth
 parks the tail in `BLOCKED_DOWNSTREAM` and opens an answerable stop card in the
 default thread. The worker also reconciles historical `REPAIRING` rows whose
-bound Regression Run is terminal and has no active successor.
+bound Regression Run is terminal and has no active successor. A legacy row is
+left untouched when its integrator is no longer `REVIEW`, any Chain task is
+archived, or the durable integrator output records `merged`; the first such
+skip writes one `mergeTail.recoveryRegressionReplaySkipped` activity naming
+the aggregate, bound Run, and reason, while later ticks reuse that audit.
 
 A durable Regression verdict still wins: `review-fail` and `refresh-conflict`
 follow their existing stop and repair paths instead of this execution-failure
-replay. Run birth, recovery rebinding, allowance charging, and operator actions
+replay. Completion owns that durable decision and writes the `repairAttempt`
+marker in the same transaction; the replay worker skips that marker rather
+than applying a broader second verdict interpretation. Run birth, recovery
+rebinding, allowance charging, and operator actions
 are serialized under the Chain mutex, so concurrent automatic and human
 attempts have one winner. Exact-head validation, gate attestation, approval,
 Lease ownership, and Hold semantics are otherwise unchanged.

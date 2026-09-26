@@ -532,6 +532,7 @@ const failQueuedRecoveryRun = async (
   taskId: string,
   external: boolean,
   providerError = "HTTP 401",
+  persistedVerdict?: { body: string; headSha: string },
 ) => {
   const task = await db.task.findUniqueOrThrow({ where: { id: taskId } });
   const run = await db.run.findFirstOrThrow({
@@ -552,6 +553,24 @@ const failQueuedRecoveryRun = async (
     executionStatus: "RUNNING",
   } });
   await db.task.update({ where: { id: taskId }, data: { status: TaskStatus.DOING } });
+  if (persistedVerdict) {
+    await db.taskStepOutput.upsert({
+      where: { taskId },
+      create: {
+        taskId,
+        runId: run.id,
+        kind: "regression-verification",
+        body: persistedVerdict.body,
+        commitSha: persistedVerdict.headSha,
+      },
+      update: {
+        runId: run.id,
+        kind: "regression-verification",
+        body: persistedVerdict.body,
+        commitSha: persistedVerdict.headSha,
+      },
+    });
+  }
   const prior = process.env.RUNNER_TOKEN;
   process.env.RUNNER_TOKEN = "recovery-failure-runner-token";
   try {
@@ -571,6 +590,7 @@ const failQueuedRecoveryRun = async (
           : { case: "terminal-protocol-failure", reason: "Regression protocol failed deterministically" },
         cleanupStatus: "SUCCEEDED",
         pushStatus: "NOT_REQUESTED",
+        ...(persistedVerdict ? { headSha: persistedVerdict.headSha } : {}),
       }),
     });
     assert.equal(response.status, 200, await response.text());
@@ -1068,7 +1088,17 @@ test("settled or archived legacy recovery rows never birth a new Regression Run"
     }
 
     assert.deepEqual(await replayFailedRecoveryRegressions(db), { examined: 1, replayed: 0, blocked: 0 });
+    assert.deepEqual(await replayFailedRecoveryRegressions(db), { examined: 1, replayed: 0, blocked: 0 });
     assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 0);
+    const skips = await db.taskActivity.findMany({ where: {
+      taskId: seeded.gateTask.id,
+      metadata: { path: ["kind"], equals: "mergeTail.recoveryRegressionReplaySkipped" },
+    } });
+    assert.equal(skips.length, 1, `${state} emits one durable skip audit across repeated ticks`);
+    assert.equal((skips[0]!.metadata as Record<string, unknown>).aggregateId,
+      (await db.mergeRecoveryAttempt.findFirstOrThrow({ where: {
+        integratorTaskId: seeded.integratorTask!.id,
+      } })).id);
     await resetTestDb(db);
   }
 });
@@ -1990,56 +2020,34 @@ test("an active detached repair owns its failed recovery Run over external repla
   assert.equal(body.code, "merge_recovery_repair_owned");
 });
 
-test("a durable negative recovery verdict is never replaced by external replay", async () => {
-  const seeded = await seedStopped("canonical-direct", "negative-verdict-owns-recovery-replay");
+test("a gate-fail followed by provider failure is handed from completion to recovery replay", async () => {
+  const seeded = await seedStopped("canonical-direct", "gate-fail-provider-recovery-replay");
   assert.equal((await baseDriftRecoveryTick(db, reader(snapshot(BASE_2)))).recovered, 1);
   const aggregate = await db.mergeRecoveryAttempt.findFirstOrThrow({ where: {
     integratorTaskId: seeded.integratorTask!.id,
   } });
-  const recoveryRun = await db.run.findUniqueOrThrow({ where: { id: aggregate.recoveryRunId! } });
-  await db.run.update({ where: { id: recoveryRun.id }, data: {
-    status: "FAILED",
+  const failed = await failQueuedRecoveryRun(seeded.gateTask.id, true, "HTTP 401", {
     headSha: HEAD,
-    failureClass: "TRANSIENT_PROVIDER",
-    failureReason: "provider failed after persisting the negative verdict",
-  } });
-  await db.taskStepOutput.upsert({
-    where: { taskId: seeded.gateTask.id },
-    create: {
-      taskId: seeded.gateTask.id,
-      runId: recoveryRun.id,
-      kind: "regression-verification",
-      body: JSON.stringify({
-        schemaVersion: 1,
-        outcome: "review-fail",
-        headSha: HEAD,
-        baseHeadSha: BASE_2,
-        summary: "durable defect",
-      }),
-      commitSha: HEAD,
-    },
-    update: {
-      runId: recoveryRun.id,
-      kind: "regression-verification",
-      body: JSON.stringify({
-        schemaVersion: 1,
-        outcome: "review-fail",
-        headSha: HEAD,
-        baseHeadSha: BASE_2,
-        summary: "durable defect",
-      }),
-      commitSha: HEAD,
-    },
+    body: JSON.stringify({
+      schemaVersion: 1,
+      outcome: "gate-fail",
+      headSha: HEAD,
+      baseHeadSha: BASE_2,
+      gateVerdict: "FAIL",
+      summary: "merge gate did not complete delivery",
+      gateFailureExcerpt: "provider authentication failed after gate output persistence",
+    }),
   });
-  await db.taskActivity.create({ data: {
+  assert.equal(failed.id, aggregate.recoveryRunId);
+  const afterCompletion = await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } });
+  assert.equal(afterCompletion.status, "REPAIRING");
+  assert.equal(await db.taskActivity.count({ where: {
     taskId: seeded.gateTask.id,
-    actorType: "control-plane",
-    body: "external failure refund granted",
-    metadata: { kind: "externalFailureRefund.granted", runId: recoveryRun.id },
-  } });
+    metadata: { path: ["kind"], equals: "mergeTail.repairAttempt" },
+  } }), 0, "completion deliberately left this non-durable gate-fail to the replay worker");
 
-  assert.deepEqual(await replayFailedRecoveryRegressions(db), { examined: 1, replayed: 0, blocked: 0 });
-  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 0);
+  assert.deepEqual(await replayFailedRecoveryRegressions(db), { examined: 1, replayed: 1, blocked: 0 });
+  assert.equal(await db.run.count({ where: { taskId: seeded.gateTask.id, status: "QUEUED" } }), 1);
 });
 
 test("a post-repair recovery Run can replay without resurrecting consumed claim context", async () => {
