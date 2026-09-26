@@ -2352,13 +2352,13 @@ not the already-qualified semantic evidence; readiness validates the live base.
 
 ### Regression verdict precedence after an external Run failure
 
-A Regression verification Run can persist its `regression-verification-v2`
-output and then fail for an external reason: for example, a task-failed Git
+A Regression verification Run can persist its `regression-verification-v2` or
+`regression-verification-v3` output and then fail for an external reason: for example, a task-failed Git
 operation during target refresh or WIP salvage, or a provider stream failure.
 Completion qualifies the persisted semantic result before deciding whether to
 retry or settle the Task as an ordinary external failure. This ordering
 preserves the result the Run already authored.
-Only persisted v2 `review-fail` and `refresh-conflict` results receive this new
+Only persisted v2/v3 `review-fail` and `refresh-conflict` results receive this
 external-failure precedence; `gate-fail` and a Run with no such output
 keep the existing external-failure path, including the legacy protocol-error
 handling.
@@ -2367,7 +2367,7 @@ The persisted result is control-plane evidence only when all of these bindings
 hold:
 
 - the `TaskStepOutput` belongs to the same Run (`runId`),
-- its body is valid `regression-verification-v2` JSON and its authored commit
+- its body is valid JSON for its pinned v2/v3 output kind and its authored commit
   is present, and
 - the verdict's `headSha`, the output's `commitSha`, and the Run's exact head
   agree.
@@ -2700,11 +2700,18 @@ completion, because the Run ended without completing its merge. See
 The same recovery ownership applies one step earlier when the Regression Run
 bound to a `REPAIRING` aggregate fails before it produces a usable verdict. An
 external failure is replayed automatically with a new exact Run binding and the
-complete recovery handoff, including its prior semantic output and bounded CI
-findings. This replay spends the applicable existing automatic recovery
+unconsumed recovery handoff, including its prior semantic output and bounded CI
+findings. After a content repair, an explicit consumed-context marker instead
+carries clean context so a replay cannot resurrect repaired CI findings. Missing
+context blocks that aggregate without blocking the rest of the worker tick.
+Lease loss and a claim invalidated by late salvage also keep the terminal Run
+owned by recovery; the worker checks Hold and allowance before refunding and
+atomically replacing it. This replay spends the applicable existing automatic recovery
 ceiling (2): a terminal-CI recovery shares its CI allowance, while base-drift
-recovery shares its allowance with integrator external replays. The ordinary
-external-failure refund ledger is unchanged. A Hold defers the decision without
+recovery shares its allowance with integrator external replays. CI births and
+external replays consume the same allowance in either order; an operator rerun
+aggregate is not an automatic birth. The independent external-failure and
+platform-loss refund ledgers are unchanged. A Hold defers the decision without
 spending that ceiling or opening
 a card. A non-external failure, an exhausted allowance, or a refused Run birth
 parks the tail in `BLOCKED_DOWNSTREAM` and opens an answerable stop card in the

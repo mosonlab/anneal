@@ -122,6 +122,19 @@ question. A durable `review-fail` or `refresh-conflict` remains authoritative
 and follows its existing stop path. The ordinary task retry route refuses a
 terminal Run still owned by active recovery, preventing an unbound successor.
 
+Lease loss and a claim invalidated by late salvage leave their terminal Run
+bound to recovery. Reconciliation does not create a replacement outside that
+owner. The recovery worker checks Hold and the shared allowance before applying
+the separate platform-loss refund and atomically creating and binding a successor.
+
+After a content repair consumes the incoming recovery findings, a durable
+`claim-context-consumed` marker distinguishes that clean context from a missing
+handoff. A later execution replay carries the clean context without reviving
+old CI findings. Missing context blocks that aggregate; one malformed record
+does not prevent other recovery records from progressing. Automatic CI births
+and their external replays count against the same allowance in either order;
+an operator rerun aggregate does not itself count as another automatic birth.
+
 The Chain mutex and existing compare-and-set transitions make an operator
 action and automatic replay single-winner operations. This amendment changes
 neither exact-head evidence nor gate attestation, Approval, Merge Lease,
