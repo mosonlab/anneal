@@ -247,7 +247,10 @@ export const applyCanonicalInstallation = async (
         // The operator's next action is to settle or archive specific tasks, so
         // the refusal names them. A bare count left them grepping the project.
         const named = blockers.map((task) => `${task.id} (${task.name})`).join(", ");
-        throw scopedError(action.projectId, `Template ${action.templateName} (${action.rowId}) still has ${blockers.length} tasks with active Runs or no chain identity: ${named}; canonical rollover requires active Runs to settle first`);
+        const nextAction = blockers.every((task) => task.chainId !== null && task.activeRunCount > 0)
+          ? "canonical rollover requires active Runs to settle first"
+          : "canonical rollover is blocked by unfinished tasks without a chain identity; operator repair is required";
+        throw scopedError(action.projectId, `Template ${action.templateName} (${action.rowId}) still has ${blockers.length} tasks with active Runs or no chain identity: ${named}; ${nextAction}`);
       }
       const row = await tx.taskTemplate.findUnique({ where: { id: action.rowId } });
       if (!row) {

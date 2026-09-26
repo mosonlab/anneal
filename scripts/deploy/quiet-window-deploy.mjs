@@ -11,9 +11,11 @@ import {
   mkdtempSync,
   readdirSync,
   readFileSync,
+  renameSync,
   realpathSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { constants as fsConstants } from "node:fs";
 import { hostname } from "node:os";
@@ -278,6 +280,161 @@ export const canonicalSyncNoticeRecord = (record, refusedLines) => ({
     : {}),
 });
 
+const CANONICAL_SYNC_RETRY_STATE_FILE = "canonical-prompt-sync-retries.json";
+const DEPLOY_COMMIT = /^[0-9a-f]{40}$/u;
+
+const canonicalSyncSummary = (stdout) => {
+  const line = stdout.trim().split(/\r?\n/u).at(-1);
+  if (!line) fail("canonical-prompt-sync-summary-unreadable", "summary-missing");
+  let summary;
+  try { summary = JSON.parse(line); } catch { fail("canonical-prompt-sync-summary-unreadable", "summary-not-json"); }
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)
+    || !summary.projects || typeof summary.projects !== "object" || Array.isArray(summary.projects)
+    || !summary.refused || typeof summary.refused !== "object" || Array.isArray(summary.refused)
+    || !summary.totals || typeof summary.totals !== "object" || Array.isArray(summary.totals)
+    || Object.values(summary.refused).some((reason) => typeof reason !== "string")) {
+    fail("canonical-prompt-sync-summary-unreadable", "summary-shape-invalid");
+  }
+  return summary;
+};
+
+/** Only rollover refusals whose blockers all have a Chain identity and an
+ * active Run are safe for an automatic retry. A chainless task still needs an
+ * operator to repair or archive it. */
+export const canonicalSyncActiveRunRefusals = (stdout) => Object.entries(canonicalSyncSummary(stdout).refused)
+  .flatMap(([projectSlug, reason]) => reason.endsWith("; canonical rollover requires active Runs to settle first")
+    ? [{ projectSlug }]
+    : []);
+
+export const canonicalSyncSyncedProjects = (stdout) => Object.keys(canonicalSyncSummary(stdout).projects);
+
+const canonicalSyncRetryEntryKey = ({ projectSlug, targetCommit }) => `${targetCommit}\n${projectSlug}`;
+
+export const createCanonicalSyncRetryStore = ({ stateDir }) => {
+  if (typeof stateDir !== "string" || stateDir === "") throw new TypeError("canonical-sync-retry-state-directory-required");
+  const path = join(stateDir, CANONICAL_SYNC_RETRY_STATE_FILE);
+  return Object.freeze({
+    read: () => {
+      let contents;
+      try {
+        contents = readFileSync(path, "utf8");
+      } catch (error) {
+        if (error?.code === "ENOENT") return [];
+        fail("canonical-sync-retry-state-unreadable", error?.code ?? error?.name ?? "read-failed");
+      }
+      let value;
+      try { value = JSON.parse(contents); } catch { fail("canonical-sync-retry-state-unreadable", "invalid-json"); }
+      if (!value || value.schemaVersion !== 1 || !Array.isArray(value.entries)) {
+        fail("canonical-sync-retry-state-unreadable", "invalid-shape");
+      }
+      const entries = [];
+      const seen = new Set();
+      for (const entry of value.entries) {
+        if (!entry || typeof entry !== "object"
+          || typeof entry.projectSlug !== "string" || entry.projectSlug === ""
+          || typeof entry.targetCommit !== "string" || !DEPLOY_COMMIT.test(entry.targetCommit)
+          || !["waiting", "recovered"].includes(entry.status)
+          || typeof entry.noticeDelivered !== "boolean"
+          || typeof entry.notificationId !== "string" || entry.notificationId === "") {
+          fail("canonical-sync-retry-state-unreadable", "invalid-entry");
+        }
+        const key = canonicalSyncRetryEntryKey(entry);
+        if (seen.has(key)) fail("canonical-sync-retry-state-unreadable", "duplicate-entry");
+        seen.add(key);
+        entries.push({ ...entry });
+      }
+      return entries;
+    },
+    write: (entries) => {
+      const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+      try {
+        if (entries.length === 0) {
+          rmSync(path, { force: true });
+          return;
+        }
+        mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+        writeFileSync(temporary, `${JSON.stringify({ schemaVersion: 1, entries })}\n`, { mode: 0o600 });
+        renameSync(temporary, path);
+      } catch (error) {
+        fail("canonical-sync-retry-state-write-failed", error?.code ?? error?.name ?? "write-failed");
+      } finally {
+        rmSync(temporary, { force: true });
+      }
+    },
+  });
+};
+
+const canonicalSyncRetryEntriesAfterSync = ({ previous, targetCommit, activeRunRefusals, syncedProjects }) => {
+  const activeBySlug = new Map(activeRunRefusals.map((refusal) => [refusal.projectSlug, refusal]));
+  const activeSlugs = new Set(activeBySlug.keys());
+  const syncedSlugs = new Set(syncedProjects);
+  const recovered = previous.filter((entry) => entry.status === "recovered"
+    && !(entry.targetCommit === targetCommit && activeSlugs.has(entry.projectSlug)));
+  for (const entry of previous) {
+    if (entry.status !== "waiting" || activeSlugs.has(entry.projectSlug) || !syncedSlugs.has(entry.projectSlug)) continue;
+    recovered.push({ ...entry, status: "recovered", noticeDelivered: false });
+  }
+  const waiting = [...activeBySlug.keys()].map((projectSlug) => {
+    const prior = previous.find((entry) => entry.status === "waiting"
+      && entry.projectSlug === projectSlug && entry.targetCommit === targetCommit);
+    return prior ?? {
+      projectSlug,
+      targetCommit,
+      status: "waiting",
+      noticeDelivered: false,
+      notificationId: randomUUID(),
+    };
+  });
+  const unique = new Map();
+  for (const entry of [...recovered, ...waiting]) unique.set(canonicalSyncRetryEntryKey(entry), entry);
+  return [...unique.values()].sort((left, right) => (
+    left.projectSlug < right.projectSlug ? -1 : left.projectSlug > right.projectSlug ? 1 : 0
+  ));
+};
+
+const deliverCanonicalSyncRetryNotices = async ({ entries, store, notifyImpl, logImpl = log }) => {
+  let pending = [...entries];
+  for (const entry of [...pending].filter(({ status, noticeDelivered }) => status === "waiting" && !noticeDelivered)) {
+    try {
+      await notifyImpl({
+        outcome: "info",
+        reason: "canonical-prompt-sync-active-runs",
+        detail: entry.projectSlug,
+        from: entry.targetCommit,
+        to: entry.targetCommit,
+        dedupeScope: `canonical-prompt-sync-active-runs:${entry.targetCommit}:${entry.notificationId}`,
+      });
+    } catch (error) {
+      const failure = failureOf(error);
+      logImpl(`STOP ${failure.reason} detail=${failure.detail}; canonical-prompt-sync-active-runs-notice-pending project=${entry.projectSlug}`);
+      continue;
+    }
+    pending = pending.map((candidate) => canonicalSyncRetryEntryKey(candidate) === canonicalSyncRetryEntryKey(entry)
+      ? { ...candidate, noticeDelivered: true }
+      : candidate);
+    store.write(pending);
+  }
+  for (const entry of [...pending].filter(({ status }) => status === "recovered")) {
+    try {
+      await notifyImpl({
+        outcome: "info",
+        reason: "canonical-prompt-sync-recovered",
+        detail: entry.projectSlug,
+        from: entry.targetCommit,
+        to: entry.targetCommit,
+        dedupeScope: `canonical-prompt-sync-recovered:${entry.targetCommit}:${entry.notificationId}`,
+      });
+    } catch (error) {
+      const failure = failureOf(error);
+      logImpl(`STOP ${failure.reason} detail=${failure.detail}; canonical-prompt-sync-recovered-notice-pending project=${entry.projectSlug}`);
+      continue;
+    }
+    pending = pending.filter((candidate) => canonicalSyncRetryEntryKey(candidate) !== canonicalSyncRetryEntryKey(entry));
+    store.write(pending);
+  }
+  return pending;
+};
+
 /** `host` sits between the reason and the free-form detail: the reason is the
  * last field a reader can bound by `;`, and a failure detail carries a whole
  * builder transcript after it. A record written before hosts were named omits
@@ -285,6 +442,10 @@ export const canonicalSyncNoticeRecord = (record, refusedLines) => ({
 export const autoDeployNoticeBody = ({ outcome, reason, detail = "", from, to, host = "" }) =>
   outcome === "info" && reason === QUIET_WINDOW_WAIT_EXCEEDED_REASON
     ? "自动部署等待超时，已开始排空派发"
+    : outcome === "info" && reason === "canonical-prompt-sync-active-runs"
+      ? `[auto-deploy] canonical prompt sync waiting for active Runs: ${detail}`
+      : outcome === "info" && reason === "canonical-prompt-sync-recovered"
+        ? `[auto-deploy] canonical prompt sync recovered: ${detail}`
     : `[auto-deploy] ${outcome}: ${from} -> ${to}; reason=${reason}`
       + `${host ? `; host=${host}` : ""}${detail ? `; detail=${detail}` : ""}`;
 
@@ -1128,6 +1289,7 @@ export const createDeployHost = ({
   createWatchdog = createBarrierWatchdog,
   pollWait = () => sleep(POLL_MS),
   notify: notifyImpl = notify,
+  canonicalSyncRetryStore = createCanonicalSyncRetryStore({ stateDir: STATE_DIR }),
   // The two statements that stop and restore platform-wide dispatch, and the
   // deadline that bounds a row this process fails to delete.
   drainWriter = dispatchDrainWriter,
@@ -1280,6 +1442,59 @@ export const createDeployHost = ({
     attempt.establish(await verifyArtifact(attempt));
     await recordDeploymentLedger(attempt, "ARTIFACT_VERIFIED");
   };
+  const runCanonicalPromptSync = async (attempt, cwd) => {
+    const result = await hostChecked("canonical-prompt-sync-refused", loadBinaries().node, [
+      "node_modules/tsx/dist/cli.mjs",
+      "packages/db/prisma/sync-canonical-prompts.ts",
+    ], {
+      cwd,
+      capture: true,
+      timeoutMs: DEPLOY_STEP_TIMEOUT_MS.canonicalPromptSync,
+      timeoutReason: "canonical-prompt-sync-timeout",
+    });
+    if (result.stdout) process.stdout.write(result.stdout);
+    canonicalSyncRefusals = canonicalSyncRefusedLines(result.stdout);
+    return result.stdout;
+  };
+  const updateCanonicalSyncRetries = async (attempt, stdout) => {
+    const entries = canonicalSyncRetryEntriesAfterSync({
+      previous: canonicalSyncRetryStore.read(),
+      targetCommit: attempt.targetCommit,
+      activeRunRefusals: canonicalSyncActiveRunRefusals(stdout),
+      syncedProjects: canonicalSyncSyncedProjects(stdout),
+    });
+    canonicalSyncRetryStore.write(entries);
+    return deliverCanonicalSyncRetryNotices({
+      entries,
+      store: canonicalSyncRetryStore,
+      notifyImpl,
+      logImpl,
+    });
+  };
+  const retryCanonicalSyncIfPending = async (attempt) => {
+    let entries = canonicalSyncRetryStore.read();
+    if (entries.some((entry) => entry.status === "waiting" && entry.targetCommit === attempt.targetCommit)) {
+      const stdout = await runCanonicalPromptSync(attempt, CURRENT_PATH);
+      entries = canonicalSyncRetryEntriesAfterSync({
+        previous: entries,
+        targetCommit: attempt.targetCommit,
+        activeRunRefusals: canonicalSyncActiveRunRefusals(stdout),
+        syncedProjects: canonicalSyncSyncedProjects(stdout),
+      });
+      canonicalSyncRetryStore.write(entries);
+    } else {
+      // A waiting record for another release cannot be retried against this
+      // deployed source. The next full sync reconciles it with the new target.
+      entries = entries.filter((entry) => entry.status === "recovered");
+      canonicalSyncRetryStore.write(entries);
+    }
+    return deliverCanonicalSyncRetryNotices({
+      entries,
+      store: canonicalSyncRetryStore,
+      notifyImpl,
+      logImpl,
+    });
+  };
   return createProductionHost({
     selfClearEscalation: async (attempt) => {
       const pending = attempt.fact("retryEscalation");
@@ -1326,6 +1541,7 @@ export const createDeployHost = ({
       if (revisions.from !== revisions.to) return;
       pruneHistory();
       log(`NOOP already-deployed revision=${revisions.from}`);
+      if (deployRole === "control-plane") await retryCanonicalSyncIfPending(attempt);
       return { skip: "already-deployed" };
     },
     startDeploymentLedger: async (attempt) => ({
@@ -1530,17 +1746,8 @@ export const createDeployHost = ({
       timeoutReason: "prisma-client-generation-timeout",
     }),
     syncCanonicalPrompts: async (attempt) => {
-      const result = await hostChecked("canonical-prompt-sync-refused", loadBinaries().node, [
-        "node_modules/tsx/dist/cli.mjs",
-        "packages/db/prisma/sync-canonical-prompts.ts",
-      ], {
-        cwd: attempt.requireFact("operationWorkspace"),
-        capture: true,
-        timeoutMs: DEPLOY_STEP_TIMEOUT_MS.canonicalPromptSync,
-        timeoutReason: "canonical-prompt-sync-timeout",
-      });
-      if (result.stdout) process.stdout.write(result.stdout);
-      canonicalSyncRefusals = canonicalSyncRefusedLines(result.stdout);
+      const stdout = await runCanonicalPromptSync(attempt, attempt.requireFact("operationWorkspace"));
+      await updateCanonicalSyncRetries(attempt, stdout);
       return undefined;
     },
     verifyRuntimePrismaClient: async (attempt) => {
