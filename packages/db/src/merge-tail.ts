@@ -278,8 +278,8 @@ export const carryMergeRecoveryRun = async (
   if (aggregate.recoveryRunId !== input.previousRecoveryRunId) {
     throw new Error(`Merge recovery ${aggregate.id} is not bound to repaired Run ${input.previousRecoveryRunId}`);
   }
-  const handoff = input.preserveClaimContext
-    ? asJsonObject((await tx.taskActivity.findFirst({
+  const handoffRow = input.preserveClaimContext
+    ? await tx.taskActivity.findFirst({
         where: {
           taskId: input.regressionTaskId,
           actorType: "control-plane",
@@ -291,9 +291,10 @@ export const carryMergeRecoveryRun = async (
         },
         orderBy: [{ createdAt: "desc" }, { id: "desc" }],
         select: { metadata: true },
-      }))?.metadata)
+      })
     : null;
-  if (input.preserveClaimContext && (!handoff || !Object.hasOwn(handoff, "priorOutput"))) {
+  const handoff = asJsonObject(handoffRow?.metadata);
+  if (handoffRow && (!handoff || !Object.hasOwn(handoff, "priorOutput"))) {
     throw new Error(`Merge recovery ${aggregate.id} has no queued context for Run ${input.previousRecoveryRunId}`);
   }
   const transitioned = await transitionMergeRecovery(

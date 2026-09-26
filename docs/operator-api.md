@@ -2940,9 +2940,14 @@ curl -X DELETE "$BASE_URL/tasks/$TASK_ID" -H "Authorization: Bearer $OPERATOR_TO
 - A terminal failed Regression Run still bound to a `REPAIRING` merge-recovery
   aggregate is owned by the recovery worker. This route returns `409 Conflict`
   with `code: "merge_recovery_retry_owned"`, the recovery and Run ids, and the
-  applicable `chain/resume`, `merge-tail/repair`, and `merge-tail/rerun` routes.
+  applicable `chain/resume` and ordinary `retry` routes.
   It does not open an unbound Run: wait for the automatic replay, resume a held
-  Chain, or use the named merge-tail route after recovery stops.
+  Chain, or, if recovery stops without a verdict, answer its stop card or make
+  an operator decision and retry the now-blocked Regression.
+- If the same Run already has a durable `repairAttempt`, the route instead
+  returns `409 Conflict` with `code: "merge_recovery_repair_owned"`. The
+  detached repair owns the verdict; wait for it to complete (or resume the
+  Chain if held). No automatic replay is promised and no ordinary retry opens.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$TASK_ID/retry" -H "Authorization: Bearer $OPERATOR_TOKEN"

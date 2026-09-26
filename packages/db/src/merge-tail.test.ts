@@ -108,6 +108,37 @@ test("a repaired Regression Run is carried onto the active recovery aggregate", 
   ]);
 });
 
+test("a repaired Regression Run without claim context still carries the recovery binding", async () => {
+  const updates: Array<Record<string, any>> = [];
+  const activities: Array<Record<string, any>> = [];
+  const aggregate = {
+    id: "recovery-without-context",
+    status: MergeRecoveryStatus.REPAIRING,
+    recoveryRunId: "regression-run-1",
+  };
+  const tx = {
+    taskActivity: {
+      findFirst: async () => null,
+      create: async (args: Record<string, any>) => { activities.push(args); },
+    },
+    mergeRecoveryAttempt: {
+      findFirst: async () => aggregate,
+      findUnique: async () => aggregate,
+      updateMany: async (args: Record<string, any>) => { updates.push(args); return { count: 1 }; },
+      findUniqueOrThrow: async () => ({ ...aggregate, recoveryRunId: "regression-run-2" }),
+    },
+  } as unknown as Prisma.TransactionClient;
+
+  await carryMergeRecoveryRun(tx, {
+    regressionTaskId: "regression-1",
+    recoveryRunId: "regression-run-2",
+    previousRecoveryRunId: "regression-run-1",
+    preserveClaimContext: true,
+  });
+  assert.equal(updates[0]?.data.recoveryRunId, "regression-run-2");
+  assert.deepEqual(activities, []);
+});
+
 test("a repaired Regression Run cannot retarget an unrelated recovery", async () => {
   let updates = 0;
   const tx = {

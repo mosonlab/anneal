@@ -44,6 +44,7 @@ const retryRequest = async (
     failureReason?: string | null;
     maxSessionsPerTask?: number;
     recovery?: { id: string; status: string; recoveryRunId: string | null } | null;
+    repairOwner?: boolean;
   } = {},
 ) => {
   let created: Record<string, unknown> | undefined;
@@ -135,6 +136,7 @@ const retryRequest = async (
       },
       agentRepoAccess: { count: async () => 1 },
       taskActivity: {
+        findFirst: async () => options.repairOwner ? { id: "repair-owner" } : null,
         findMany: async () => [],
         create: async ({ data }: { data: Record<string, unknown> }) => {
           activities.push(data);
@@ -646,16 +648,45 @@ test("operator retry refuses the failed Run owned by active merge recovery", asy
     });
     assert.equal(response.status, 409);
     assert.deepEqual(await response.json(), {
-      error: "This failed Regression Run is owned by active merge recovery; wait for automatic replay, or resume the Chain if held. After recovery stops, use the merge-tail repair or rerun route instead of ordinary retry.",
+      error: "This failed Regression Run is owned by active merge recovery; wait for automatic replay, or resume the Chain if held. If recovery stops without a verdict, answer its stop card or retry after an operator decision.",
       code: "merge_recovery_retry_owned",
       recoveryId: "recovery-1",
       recoveryRunId: "run-1",
       resumeRoute: "/tasks/task-1/chain/resume",
-      repairRoute: "/tasks/task-1/merge-tail/repair",
-      rerunRoute: "/tasks/task-1/merge-tail/rerun",
+      retryRoute: "/tasks/task-1/retry",
     });
     assert.equal(created, undefined);
     assert.deepEqual(activities, []);
+  });
+});
+
+test("operator retry names an active merge-tail repair instead of promising automatic replay", async () => {
+  await withTokens(async () => {
+    const { response, created } = await retryRequest({
+      id: "agent-2",
+      projectId: "project-1",
+      model: "gpt-6-luna",
+      runnerPreference: RunnerPreference.CODEX,
+      foundationalPrompt: "current foundation",
+      rolePrompt: "current role",
+    }, {
+      runner: null,
+      outputKind: "regression-verification-v2",
+      taskTemplate: { name: "direct-engineer-workflow" },
+    }, {
+      taskStatus: "REVIEW",
+      recovery: { id: "recovery-1", status: "REPAIRING", recoveryRunId: "run-1" },
+      repairOwner: true,
+    });
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "This Regression verdict is already owned by merge-tail repair; wait for repair completion. Ordinary retry cannot replace an active repair.",
+      code: "merge_recovery_repair_owned",
+      recoveryId: "recovery-1",
+      recoveryRunId: "run-1",
+      resumeRoute: "/tasks/task-1/chain/resume",
+    });
+    assert.equal(created, undefined);
   });
 });
 
