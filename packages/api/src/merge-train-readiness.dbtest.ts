@@ -1396,6 +1396,85 @@ test("a live base move before train enqueue keeps candidates ready for a new tra
   assert.deepEqual(releasedChainIds, [seed.candidates[0]!.chainId]);
 });
 
+test("a train formation read failure keeps every selected readiness claim stable", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(2);
+  const unavailable = readerFor(seed);
+  unavailable.readPullRequest = async () => {
+    throw new Error("GitHub transport unavailable during formation");
+  };
+
+  assert.deepEqual(
+    await readinessTick(db, unavailable, TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []),
+    { claimed: 2, authorized: 0, requeued: 0, stopped: 0 },
+  );
+  const deferred = await Promise.all(seed.candidates.map((candidate) => db.task.findUniqueOrThrow({
+    where: { id: candidate.readiness.id },
+    select: { status: true, updatedAt: true, readinessClaimToken: true, readinessClaimExpiresAt: true },
+  })));
+  for (const state of deferred) {
+    assert.equal(state.status, TaskStatus.DOING);
+    assert.notEqual(state.readinessClaimToken, null);
+  }
+
+  for (const elapsed of [2_000, 4_000]) {
+    assert.deepEqual(
+      await readinessTick(db, unavailable, new Date(TEST_NOW.getTime() + elapsed), 5,
+        releaseChainLease, runWithMergeLease, () => []),
+      { claimed: 0, authorized: 0, requeued: 0, stopped: 0 },
+    );
+    assert.deepEqual(await Promise.all(seed.candidates.map((candidate) => db.task.findUniqueOrThrow({
+      where: { id: candidate.readiness.id },
+      select: { status: true, updatedAt: true, readinessClaimToken: true, readinessClaimExpiresAt: true },
+    }))), deferred);
+  }
+});
+
+test("a deferred release keeps a semantic candidate claim stable across ticks", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(1);
+  const candidate = seed.candidates[0]!;
+  await makeSemanticCandidate(candidate);
+  await approveCandidate(seed, candidate, "semantic-deferred-release-approval");
+  await db.mergeLeaseEvent.create({ data: {
+    projectId: seed.project.id,
+    chainId: candidate.chainId,
+    state: MergeLeaseEventState.RELEASE_DEFERRED,
+    owningTaskId: candidate.regression.id,
+    deferredAt: TEST_NOW,
+    failureDetail: "Prior holder release is still unresolved",
+  } });
+  const started = new Date(TEST_NOW.getTime() + 500);
+
+  assert.deepEqual(
+    await readinessTick(db, readerFor(seed), started, 5, releaseChainLease, runWithMergeLease, () => []),
+    { claimed: 1, authorized: 0, requeued: 0, stopped: 0 },
+  );
+  const deferred = await db.task.findUniqueOrThrow({
+    where: { id: candidate.readiness.id },
+    select: { status: true, updatedAt: true, readinessClaimToken: true, readinessClaimExpiresAt: true },
+  });
+  assert.equal(deferred.status, TaskStatus.DOING);
+  assert.notEqual(deferred.readinessClaimToken, null);
+
+  for (const elapsed of [2_000, 4_000]) {
+    assert.deepEqual(
+      await readinessTick(db, readerFor(seed), new Date(started.getTime() + elapsed), 5,
+        releaseChainLease, runWithMergeLease, () => []),
+      { claimed: 0, authorized: 0, requeued: 0, stopped: 0 },
+    );
+    assert.deepEqual(await db.task.findUniqueOrThrow({
+      where: { id: candidate.readiness.id },
+      select: { status: true, updatedAt: true, readinessClaimToken: true, readinessClaimExpiresAt: true },
+    }), deferred);
+  }
+  assert.equal(await db.task.count({ where: {
+    projectId: seed.project.id,
+    chainId: null,
+    description: { contains: "merge-train.sh" },
+  } }), 0);
+});
+
 test("an active train keeps the repository busy across a later readiness tick", async () => {
   process.env.MERGE_TRAIN_WIDTH = "2";
   const seed = await seedTrainCandidates(3);
@@ -2074,6 +2153,43 @@ test("one fresh candidate remains on the existing single-candidate authorization
   assert.deepEqual(leasedTargets, [{ projectId: seed.project.id, chainId: seed.candidates[0]!.chainId }]);
   assert.deepEqual(releasedTargets, []);
   assert.deepEqual(releasedChainIds, []);
+});
+
+test("a base advance under the Lease releases the oldest candidate for formation on the next tick", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "2";
+  const seed = await seedTrainCandidates(1);
+  const candidate = seed.candidates[0]!;
+  const movedBase = "9".repeat(40);
+  const moving = readerFor(seed);
+  let reads = 0;
+  moving.readPullRequest = async (_repository, prNumber) => {
+    const current = seed.candidates.find((entry) => entry.prNumber === prNumber)!;
+    reads += 1;
+    return snapshot(current, reads < 3 ? BASE : movedBase);
+  };
+
+  assert.deepEqual(
+    await readinessTick(db, moving, TEST_NOW, 5, releaseChainLease, runWithMergeLease, () => []),
+    { claimed: 1, authorized: 0, requeued: 0, stopped: 0 },
+  );
+  assert.equal(reads, 3, "formation, pre-Lease, and held-Lease reads observe the base move");
+  const handedBack = await db.task.findUniqueOrThrow({ where: { id: candidate.readiness.id } });
+  assert.equal(handedBack.status, TaskStatus.TODO);
+  assert.equal(handedBack.readinessClaimToken, null);
+  assert.equal(handedBack.readinessClaimExpiresAt, null);
+
+  const nextTick = await readinessTick(db, readerFor(seed, { baseSha: movedBase }),
+    new Date(TEST_NOW.getTime() + 2_000), 5, releaseChainLease, runWithMergeLease, () => []);
+  assert.equal(nextTick.claimed, 1, "the next formation tick can reclaim the oldest candidate");
+  assert.equal(nextTick.authorized, 0);
+  const train = await trainTaskFor(seed);
+  const metadata = (await trainTaskMarkerFor(train.id)).metadata as Record<string, unknown>;
+  assert.deepEqual(metadata.candidates, [{
+    taskId: candidate.readiness.id,
+    chainId: candidate.chainId,
+    headSha: candidate.headSha,
+    branch: candidate.branch,
+  }]);
 });
 
 

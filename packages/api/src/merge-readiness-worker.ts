@@ -875,7 +875,38 @@ const readReadiness = async (
   }
 };
 
-const deferReadinessSettlement = (
+/** A mechanical wait keeps the fenced claim until its ordinary expiry. The
+ * stable DOING row is both the recovery anchor and the board presentation;
+ * returning it to TODO would make every poll rewrite the Task twice. */
+export const deferReadinessSettlement = (
+  regressionTaskId: string,
+): ReadinessSettlement => ({
+  kind: "defer",
+  taskId: regressionTaskId,
+  body: async (tx, claim) => {
+    const deferred = await claim.settle(tx, {
+      kind: "keep",
+      apply: async () => undefined,
+    });
+    if (!deferred.settled) {
+      return {
+        value: { applied: false },
+        leaseOutcome: deferred.ownership === "released"
+          ? { kind: "stop", taskId: regressionTaskId }
+          : { kind: "continue" },
+      };
+    }
+    return {
+      value: { applied: true },
+      leaseOutcome: { kind: "stop", taskId: regressionTaskId },
+    };
+  },
+});
+
+/** A train-enabled base move is a one-shot handoff, not a mechanical wait:
+ * release the claim so formation can reconsider this oldest candidate on the
+ * very next tick instead of allowing a younger peer to pass it. */
+const queueTrainFormationSettlement = (
   readinessTaskId: string,
   regressionTaskId: string,
   now: Date,
@@ -1120,14 +1151,18 @@ const applyReadinessDecision = async (
   trainWidth: number,
 ): Promise<ReadinessSettlementApplication> => {
   const { readiness, regression, recovery, claim } = read;
-  const selectedDecision = trainWidth > 0 && decision.kind === "requeue-regression"
-    && decision.condition === "base-advanced"
-    ? { kind: "defer" as const, reason: "Base advanced; candidate will join a merge train" }
-    : decision;
-  return dispatchReadinessDecision(selectedDecision, {
+  if (trainWidth > 0 && decision.kind === "requeue-regression"
+    && decision.condition === "base-advanced") {
+    return runner.apply(queueTrainFormationSettlement(
+      readiness.id,
+      regression.id,
+      read.input.now,
+    ), claim);
+  }
+  return dispatchReadinessDecision(decision, {
     skip: () => Promise.resolve(runner.skip(regression.id)),
     defer: () => runner.apply(
-      deferReadinessSettlement(readiness.id, regression.id, new Date()),
+      deferReadinessSettlement(regression.id),
       claim,
     ),
     stop: async (stopping) => {
