@@ -1104,6 +1104,7 @@ export const replayFailedRecoveryRegressions = async (
             regressionTaskId: latest.regressionTaskId,
             previousRecoveryRunId: failedRun.id,
             recoveryRunId: attempt.run.id,
+            preserveClaimContext: true,
           });
           await tx.mergeRecoveryAttempt.update({
             where: { id: latest.id },
