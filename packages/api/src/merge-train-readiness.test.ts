@@ -349,11 +349,12 @@ for (const staleTrailingBase of [false, true]) {
   });
 }
 
-test("a disabled train drain gives every unrelated candidate its single decision despite reader failures", async () => {
+test("a disabled train drain preserves recovery and retained single-candidate claims", async () => {
   const seen: string[] = [];
+  const settled: string[] = [];
   const now = new Date();
   const templateStep = { stepIndex: 6, outputKind: "merge-authorization", taskTemplate: { name: "direct-engineer-workflow" } };
-  const rows = ["ready-a", "ready-b"].map((id) => ({ id, repoId: "other-repo", templateStep }));
+  const rows = ["ready-a", "ready-b"].map((id) => ({ id, repoId: "other-repo", status: TaskStatus.TODO, templateStep }));
   const tx = {
     $queryRaw: async () => [{ held: true }],
     task: { findMany: async () => [], update: async () => ({}),
@@ -369,7 +370,10 @@ test("a disabled train drain gives every unrelated candidate its single decision
     $transaction: async <T>(fn: (client: Prisma.TransactionClient) => Promise<T>) => fn(tx),
     task: { ...tx.task, findUnique: async () => ({ status: TaskStatus.DOING, runs: [{ status: RunStatus.RUNNING }] }) },
     mergeLeaseEvent: { findMany: async () => [] },
-    mergeRecoveryAttempt: { findFirst: async () => null },
+    // A REPAIRING recovery is deliberately visible here: authoritative
+    // readReadiness owns its transition to AWAITING_AUTHORIZATION. Discovery
+    // must not exclude it before that read can run.
+    mergeRecoveryAttempt: { findFirst: async () => ({ id: "repairing-recovery" }) },
   } as unknown as import("@anneal/db").PrismaClient;
   const hooks = {
     candidates: async function* () { yield* rows; },
@@ -390,7 +394,10 @@ test("a disabled train drain gives every unrelated candidate its single decision
       regression: { stepOutput: { createdAt: now } },
       input: { stage: "ready", now, regression: { headSha: head, baseHeadSha: base, verification: "gate" },
         target: { resolved: true, repository: "acme/widgets", prNumber: 1 }, defaultBranch: "main" },
-      claim: { settle: async (_tx: unknown, transition: { apply: (client: Prisma.TransactionClient) => Promise<unknown> }) => transition.apply(tx) },
+      claim: { settle: async (_tx: unknown, transition: { apply: (client: Prisma.TransactionClient) => Promise<unknown> }) => {
+        settled.push(task.id);
+        return transition.apply(tx);
+      } },
     }),
     single: async (_db: unknown, read: { readiness: { id: string } }, decision: { kind: string }) => {
       assert.equal(decision.kind, "stop");
@@ -405,6 +412,7 @@ test("a disabled train drain gives every unrelated candidate its single decision
     baseSha: base, width: 1, candidates: [candidate],
   }]);
   assert.deepEqual(seen, ["ready-a", "ready-b"]);
+  assert.deepEqual(settled, [], "the single-candidate handler retains ownership of its claim");
   assert.equal(remoteReads, 2, "only each candidate's existing decision reads GitHub");
 });
 

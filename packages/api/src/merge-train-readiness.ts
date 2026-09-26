@@ -800,21 +800,31 @@ export const mergeTrainReadinessTick = async (
     });
   }
 
+  const claimed: ClaimedReadiness[] = [];
+  const handOffClaim = (read: ClaimedReadiness): void => {
+    const index = claimed.indexOf(read);
+    if (index >= 0) claimed.splice(index, 1);
+  };
   const single = async (read: ClaimedReadiness, decision: ReadinessDecision): Promise<void> => {
     if (!read.readiness.repoId) {
+      handOffClaim(read);
       await hooks.single(db, read, decision, result, release, lease, reader);
       return;
     }
     await db.$transaction(async (mutexTx) => {
       if (!await tryRepositoryMutex(mutexTx, read.readiness.repoId!)) return;
       if ((await pendingMergeTrains(db)).some((train) => train.repoId === read.readiness.repoId)) return;
+      // The legacy single-candidate handler now owns this claim. In
+      // particular, Lease contention and transport failure intentionally keep
+      // it DOING until its claim expires; the train cleanup must not turn that
+      // durable deferral back into TODO.
+      handOffClaim(read);
       await hooks.single(db, read, decision, result, release, lease, reader);
     }, { ...serializable, timeout: 300_000 });
   };
-  // Every claim this tick takes is released here, including the ones handed to
-  // `single`, whose repository-mutex and pending-train arms return without
-  // settling. A claim left behind parks its candidate for the claim lease.
-  const claimed: ClaimedReadiness[] = [];
+  // Claims that could not be handed to `single` because its repository mutex
+  // or pending-train fence refused them are released here. Train formation
+  // claims are also released unless reservation transferred their ownership.
   try {
     type DiscoveredCandidate = { candidate: ReadinessCandidate; discovery: ReadinessDiscovery };
     const groups = new Map<string, DiscoveredCandidate[]>();
@@ -824,7 +834,6 @@ export const mergeTrainReadinessTick = async (
       // REVIEW candidates must reach read(): an executor-offline ceiling
       // parked their recovery in BLOCKED_DOWNSTREAM, which read can re-arm.
       if (candidate.repoId && busyRepos.has(candidate.repoId)) continue;
-      if (candidate.status !== TaskStatus.REVIEW && await excludedRecovery(db, candidate.id)) continue;
       const discovery = await hooks.discover(db, candidate, now);
       const entry = { candidate, discovery };
       if (discovery.input.stage === "ready" && candidate.repoId && discovery.input.target.resolved
