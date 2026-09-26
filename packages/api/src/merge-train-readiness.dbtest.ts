@@ -179,6 +179,13 @@ const passBody = (headSha: string, baseHeadSha = BASE): string => JSON.stringify
   gateProof: `MERGE GATE: PASS ${headSha}`,
 });
 
+const semanticPassBody = (headSha: string, baseHeadSha = BASE): string => JSON.stringify({
+  schemaVersion: 3,
+  outcome: "semantic-pass",
+  headSha,
+  baseHeadSha,
+});
+
 const seedTrainCandidates = async (
   count: number,
   options: { evidenceBaseSha?: string } = {},
@@ -405,6 +412,44 @@ const seedTrainCandidates = async (
     candidates.push({ chainId, headSha, branch, regression, readiness, integrator, prNumber });
   }
   return { project, repo, candidates };
+};
+
+const makeSemanticCandidate = async (candidate: Candidate): Promise<void> => {
+  assert.ok(candidate.regression.templateStepId);
+  await db.$transaction(async (tx) => {
+    await tx.taskTemplateStep.update({
+      where: { id: candidate.regression.templateStepId! },
+      data: { outputKind: "regression-verification-v3" },
+    });
+    await tx.taskStepOutput.update({
+      where: { taskId: candidate.regression.id },
+      data: {
+        kind: "regression-verification-v3",
+        body: semanticPassBody(candidate.headSha),
+      },
+    });
+    await tx.mergeGateAttestation.deleteMany({ where: { chainId: candidate.chainId } });
+    await tx.task.update({ where: { id: candidate.readiness.id }, data: { approvalGate: true } });
+  });
+  assert.equal(await db.mergeGateAttestation.count({ where: { chainId: candidate.chainId } }), 0);
+};
+
+const approveCandidate = async (seed: Seed, candidate: Candidate, event: string): Promise<void> => {
+  const regressionRun = await db.run.findFirstOrThrow({ where: { taskId: candidate.regression.id } });
+  await db.session.create({ data: {
+    runId: regressionRun.id, projectId: seed.project.id,
+    agentId: regressionRun.agentId, taskId: candidate.regression.id,
+    runner: regressionRun.runner, executionStatus: "SUCCEEDED", cleanupStatus: CleanupStatus.SUCCEEDED,
+  } });
+  await db.$transaction((tx) => advanceTemplateTask(tx, candidate.regression.id, regressionRun.id, null, TEST_NOW));
+  const card = await db.inboxMessage.findFirstOrThrow({ where: { gateTaskId: candidate.readiness.id, status: "OPEN" } });
+  await evidenceTick(db, readerFor(seed), new Date(TEST_NOW.getTime() + 100));
+  await db.$transaction((tx) => applyInboxDecisionTx(tx, {
+    inboxMessageId: card.id,
+    externalEventId: event,
+    decision: "approve",
+    actorOpenId: "operator-1",
+  }, new Date(TEST_NOW.getTime() + 200)));
 };
 
 /** Build the durable half of a reservation as if the worker died before the
@@ -1028,6 +1073,77 @@ test("width zero keeps candidates on the existing single-candidate path", async 
     } });
     assert.equal((authorization.metadata as Record<string, unknown>).train, undefined);
   }
+});
+
+test("width zero sends one approved semantic candidate through a gated prefix before authorization", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "0";
+  const seed = await seedTrainCandidates(1);
+  const candidate = seed.candidates[0]!;
+  await makeSemanticCandidate(candidate);
+  await approveCandidate(seed, candidate, "semantic-width-zero-approval");
+
+  const formed = await readinessTick(
+    db, readerFor(seed), new Date(TEST_NOW.getTime() + 500), 5,
+    releaseChainLease, runWithMergeLease, () => [],
+  );
+  assert.deepEqual(formed, { claimed: 1, authorized: 0, requeued: 0, stopped: 0 });
+  const train = await trainTaskFor(seed);
+  const marker = (await trainTaskMarkerFor(train.id)).metadata as Record<string, unknown>;
+  assert.equal(marker.width, 1);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: candidate.readiness.id,
+    metadata: { path: ["kind"], equals: "mergeIntegrator.authorization" },
+  } }), 0, "semantic evidence alone cannot authorize the candidate");
+
+  await finishTrainRun(seed, await recordFor(seed, ["pass"], 1));
+  const settled = await readinessTick(
+    db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5,
+    releaseChainLease, runWithMergeLease, () => [],
+  );
+  assert.equal(settled.authorized, 1);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.readiness.id } })).status, TaskStatus.DONE);
+  const authorization = await db.taskActivity.findFirstOrThrow({ where: {
+    taskId: candidate.readiness.id,
+    metadata: { path: ["kind"], equals: "mergeIntegrator.authorization" },
+  } });
+  assert.deepEqual((authorization.metadata as Record<string, unknown>).train, {
+    publishHead: PREFIXES[0],
+    predecessorOid: BASE,
+    ref: `refs/anneal/train/${PREFIXES[0]}`,
+    position: 1,
+    trainTaskId: train.id,
+  });
+});
+
+test("a proofless semantic train prefix authorizes nothing", async () => {
+  process.env.MERGE_TRAIN_WIDTH = "0";
+  const seed = await seedTrainCandidates(1);
+  const candidate = seed.candidates[0]!;
+  await makeSemanticCandidate(candidate);
+  await approveCandidate(seed, candidate, "semantic-proofless-approval");
+  await readinessTick(
+    db, readerFor(seed), new Date(TEST_NOW.getTime() + 500), 5,
+    releaseChainLease, runWithMergeLease, () => [],
+  );
+  const proofless = JSON.parse(await recordFor(seed, ["pass"], 1)) as {
+    prefixes: Array<{ gateExcerpt: string }>;
+  };
+  proofless.prefixes[0]!.gateExcerpt = "gate completed without an exact proof line";
+  await finishTrainRun(seed, JSON.stringify(proofless));
+
+  const settled = await readinessTick(
+    db, readerFor(seed), new Date(TEST_NOW.getTime() + 1_000), 5,
+    releaseChainLease, runWithMergeLease, () => [],
+  );
+  assert.equal(settled.authorized, 0);
+  assert.equal((await db.task.findUniqueOrThrow({ where: { id: candidate.readiness.id } })).status, TaskStatus.REVIEW);
+  assert.equal(await db.taskActivity.count({ where: {
+    taskId: candidate.readiness.id,
+    metadata: { path: ["kind"], equals: "mergeIntegrator.authorization" },
+  } }), 0);
+  const train = await trainTaskFor(seed);
+  const marker = (await trainTaskMarkerFor(train.id)).metadata as Record<string, unknown>;
+  assert.match(String(marker.reason), /no gate PASS proof/u);
 });
 
 test("terminal train settlement leaves one release obligation that restart reconciliation can consume", async () => {
