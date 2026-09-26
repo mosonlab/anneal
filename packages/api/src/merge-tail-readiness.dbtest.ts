@@ -2295,10 +2295,27 @@ for (const width of [0, 2]) test(`executor return re-arms a ceiling stop with tr
     } }), 0);
     assert.equal(result.authorized, 0);
     assert.equal(result.requeued, width === 0 ? 1 : 0);
-    assert.equal((await db.task.findUniqueOrThrow({ where: { id: seeded.readiness.id } })).status, TaskStatus.TODO);
+    const deferred = await db.task.findUniqueOrThrow({
+      where: { id: seeded.readiness.id },
+      select: { status: true, updatedAt: true, readinessClaimToken: true, readinessClaimExpiresAt: true },
+    });
+    assert.equal(deferred.status, width === 0 ? TaskStatus.TODO : TaskStatus.DOING);
+    assert.equal(deferred.readinessClaimToken === null, width === 0);
     assert.equal((await db.mergeRecoveryAttempt.findUniqueOrThrow({ where: { id: aggregate.id } })).status,
       width === 0 ? MergeRecoveryStatus.REPAIRING : MergeRecoveryStatus.AWAITING_AUTHORIZATION);
     assert.equal(await db.run.count({ where: { taskId: seeded.regression.id } }), width === 0 ? 2 : 1);
+    if (width > 0) {
+      assert.deepEqual(
+        await readinessTick(db, reader([], snapshot({ baseSha: "d".repeat(40) })),
+          new Date(expired.getTime() + 3_000), 5, releaseChainLease, runWithMergeLease,
+          executorsAt(ONLINE_NOW), width),
+        { claimed: 0, authorized: 0, requeued: 0, stopped: 0 },
+      );
+      assert.deepEqual(await db.task.findUniqueOrThrow({
+        where: { id: seeded.readiness.id },
+        select: { status: true, updatedAt: true, readinessClaimToken: true, readinessClaimExpiresAt: true },
+      }), deferred, "the train wait leaves the deferred readiness row untouched");
+    }
   });
 });
 
