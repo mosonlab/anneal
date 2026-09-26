@@ -1,7 +1,7 @@
 import {
   FailureClass, isIntegratorStep, isRegressionVerificationOutputKind,
   latestMarker, mergeTrainConcluded, readMarkers, readMarkerHistory, readLatestMarker,
-  REGRESSION_VERIFICATION_OUTPUT_KIND, stepRole,
+  REGRESSION_VERIFICATION_OUTPUT_KIND, REGRESSION_VERIFICATION_V3_OUTPUT_KIND, stepRole,
   type Marker, type Prisma,
 } from "@anneal/db";
 import {
@@ -47,7 +47,8 @@ export const terminalFailureStopsLease = (
 
 const regressionFailureFacts = (input: SettlementInput) => ({
   externalRegressionFailure: input.external
-    && input.task?.templateStep?.outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND,
+    && (input.task?.templateStep?.outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND
+      || input.task?.templateStep?.outputKind === REGRESSION_VERIFICATION_V3_OUTPUT_KIND),
   retryableProtocolRegressionFailure: input.failureClass === FailureClass.PROTOCOL_ERROR
     && input.retryable && isRegressionVerificationOutputKind(input.task?.templateStep?.outputKind),
 });
@@ -60,6 +61,7 @@ const negativeRegressionFacts = (
   const durableNegativeRegressionVerdict = Boolean(!input.succeeded
     && failedRegressionVerdict?.status === "ok"
     && failedRegressionVerdict.verdict.outcome !== "pass"
+    && failedRegressionVerdict.verdict.outcome !== "semantic-pass"
     && ((retryableProtocolRegressionFailure && input.headSha === failedRegressionVerdict.headSha)
       || (externalRegressionFailure
         && (failedRegressionVerdict.verdict.outcome === "review-fail"

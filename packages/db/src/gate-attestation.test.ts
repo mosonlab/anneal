@@ -9,6 +9,7 @@ import { deriveGateAttestation, requireGateAttestation, recordGateAttestation } 
 const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
 const V2 = "regression-verification-v2";
+const V3 = "regression-verification-v3";
 const V1 = "regression-verification";
 
 const pass = (overrides: Record<string, unknown> = {}): string => JSON.stringify({
@@ -27,6 +28,20 @@ test("a passing v2 verdict attests the head the gate signed", () => {
     baseHeadSha: BASE,
     proof: `MERGE GATE: PASS ${HEAD}`,
   });
+});
+
+test("v3 attests only an actual gate PASS, never semantic-pass", () => {
+  assert.deepEqual(deriveGateAttestation(V3, pass({ schemaVersion: 3 })), {
+    headSha: HEAD,
+    baseHeadSha: BASE,
+    proof: `MERGE GATE: PASS ${HEAD}`,
+  });
+  assert.equal(deriveGateAttestation(V3, JSON.stringify({
+    schemaVersion: 3,
+    outcome: "semantic-pass",
+    headSha: HEAD,
+    baseHeadSha: BASE,
+  })), null);
 });
 
 test("a proof naming another commit attests nothing", () => {

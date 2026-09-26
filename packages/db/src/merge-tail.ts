@@ -11,10 +11,13 @@ import { stepRole } from "./step-role.js";
 export const MERGE_TAIL_SCHEMA_VERSION = 1;
 export const REGRESSION_VERIFICATION_SCHEMA_VERSION = 2;
 export const REGRESSION_VERIFICATION_OUTPUT_KIND = "regression-verification-v2";
+export const REGRESSION_VERIFICATION_V3_SCHEMA_VERSION = 3;
+export const REGRESSION_VERIFICATION_V3_OUTPUT_KIND = "regression-verification-v3";
 export const MERGE_TRAIN_SCHEMA_VERSION = 1;
 export const MERGE_TRAIN_OUTPUT_KIND = "merge-train-v1";
 export const LEGACY_REGRESSION_VERIFICATION_OUTPUT_KIND = "regression-verification";
 export const REGRESSION_VERIFICATION_OUTPUT_KINDS = [
+  REGRESSION_VERIFICATION_V3_OUTPUT_KIND,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
   LEGACY_REGRESSION_VERIFICATION_OUTPUT_KIND,
 ] as const;
@@ -341,21 +344,31 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const PASS_GATE_PROOF = /^MERGE GATE: PASS ([0-9a-f]{40})$/u;
 const FAIL_GATE_PROOF = /^MERGE GATE: FAIL \(.+\)$/u;
 
-type RegressionVerdictSchemaVersion = typeof MERGE_TAIL_SCHEMA_VERSION | typeof REGRESSION_VERIFICATION_SCHEMA_VERSION;
+type RegressionVerdictSchemaVersion =
+  | typeof MERGE_TAIL_SCHEMA_VERSION
+  | typeof REGRESSION_VERIFICATION_SCHEMA_VERSION
+  | typeof REGRESSION_VERIFICATION_V3_SCHEMA_VERSION;
 
 type ReusedSemanticVerdict = { semanticVerdict?: "reused"; semanticSourceRunId?: string };
 
 export type RegressionVerdict =
   | { schemaVersion: typeof MERGE_TAIL_SCHEMA_VERSION; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS" }
-  | ({ schemaVersion: typeof REGRESSION_VERIFICATION_SCHEMA_VERSION; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS"; gateProof: string } & ReusedSemanticVerdict)
+  | ({ schemaVersion: typeof REGRESSION_VERIFICATION_SCHEMA_VERSION | typeof REGRESSION_VERIFICATION_V3_SCHEMA_VERSION; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS"; gateProof: string } & ReusedSemanticVerdict)
+  | ({ schemaVersion: typeof REGRESSION_VERIFICATION_V3_SCHEMA_VERSION; outcome: "semantic-pass"; headSha: string; baseHeadSha: string } & ReusedSemanticVerdict)
   | { schemaVersion: RegressionVerdictSchemaVersion; outcome: "review-fail"; headSha: string; baseHeadSha: string; summary: string }
   | { schemaVersion: typeof MERGE_TAIL_SCHEMA_VERSION; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; summary: string; gateFailureExcerpt?: string }
-  | ({ schemaVersion: typeof REGRESSION_VERIFICATION_SCHEMA_VERSION; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; gateProof: string; summary: string; gateFailureExcerpt?: string } & ReusedSemanticVerdict)
+  | ({ schemaVersion: typeof REGRESSION_VERIFICATION_SCHEMA_VERSION | typeof REGRESSION_VERIFICATION_V3_SCHEMA_VERSION; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; gateProof: string; summary: string; gateFailureExcerpt?: string } & ReusedSemanticVerdict)
   | { schemaVersion: RegressionVerdictSchemaVersion; outcome: "refresh-conflict"; headSha: string; baseHeadSha: string; summary: string };
+
+export type PassingRegressionVerdict = Extract<RegressionVerdict, { outcome: "pass" | "semantic-pass" }>;
+
+export const isPassingRegressionVerdict = (
+  verdict: RegressionVerdict,
+): verdict is PassingRegressionVerdict => verdict.outcome === "pass" || verdict.outcome === "semantic-pass";
 
 export type RegressionRepairHandoff = {
   schemaVersion: 1;
-  trigger: { kind: "regression-verdict"; verdict: Exclude<RegressionVerdict, { outcome: "pass" }> };
+  trigger: { kind: "regression-verdict"; verdict: Exclude<RegressionVerdict, { outcome: "pass" | "semantic-pass" }> };
   repair: {
     kind: "review-fix" | "gate-fix" | "refresh-conflict";
     taskId: string;
@@ -392,6 +405,8 @@ export const parseRegressionVerdict = (
   const value = parsed as Record<string, unknown>;
   const expectedSchemaVersion = outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND
     ? REGRESSION_VERIFICATION_SCHEMA_VERSION
+    : outputKind === REGRESSION_VERIFICATION_V3_OUTPUT_KIND
+      ? REGRESSION_VERIFICATION_V3_SCHEMA_VERSION
     : outputKind === LEGACY_REGRESSION_VERIFICATION_OUTPUT_KIND
       ? MERGE_TAIL_SCHEMA_VERSION
       : null;
@@ -399,21 +414,33 @@ export const parseRegressionVerdict = (
     return { status: "invalid", reason: `regression ${outputKind} requires schemaVersion ${String(expectedSchemaVersion)}` };
   }
   if (value.schemaVersion !== MERGE_TAIL_SCHEMA_VERSION
-    && value.schemaVersion !== REGRESSION_VERIFICATION_SCHEMA_VERSION) {
+    && value.schemaVersion !== REGRESSION_VERIFICATION_SCHEMA_VERSION
+    && value.schemaVersion !== REGRESSION_VERIFICATION_V3_SCHEMA_VERSION) {
     return { status: "invalid", reason: "unsupported regression schemaVersion" };
   }
   if (typeof value.headSha !== "string" || !SHA.test(value.headSha)) return { status: "invalid", reason: "invalid regression headSha" };
   if (typeof value.baseHeadSha !== "string" || !SHA.test(value.baseHeadSha)) return { status: "invalid", reason: "invalid regression baseHeadSha" };
   if (Object.hasOwn(value, "semanticVerdict") || Object.hasOwn(value, "semanticSourceRunId")) {
-    if (value.schemaVersion !== REGRESSION_VERIFICATION_SCHEMA_VERSION
-      || (value.outcome !== "pass" && value.outcome !== "gate-fail")
+    if ((value.schemaVersion !== REGRESSION_VERIFICATION_SCHEMA_VERSION
+        && value.schemaVersion !== REGRESSION_VERIFICATION_V3_SCHEMA_VERSION)
+      || (value.outcome !== "pass" && value.outcome !== "semantic-pass" && value.outcome !== "gate-fail")
       || value.semanticVerdict !== "reused"
       || typeof value.semanticSourceRunId !== "string" || value.semanticSourceRunId.trim().length === 0) {
       return { status: "invalid", reason: "invalid regression reused semantic verdict provenance" };
     }
   }
+  if (value.outcome === "semantic-pass") {
+    if (value.schemaVersion !== REGRESSION_VERIFICATION_V3_SCHEMA_VERSION) {
+      return { status: "invalid", reason: "semantic-pass requires regression schemaVersion 3" };
+    }
+    if (Object.hasOwn(value, "gateVerdict") || Object.hasOwn(value, "gateProof")) {
+      return { status: "invalid", reason: "semantic-pass must not carry merge gate evidence" };
+    }
+    return { status: "ok", verdict: value as RegressionVerdict };
+  }
   if (value.outcome === "pass" && value.gateVerdict === "PASS") {
-    if (value.schemaVersion === REGRESSION_VERIFICATION_SCHEMA_VERSION) {
+    if (value.schemaVersion === REGRESSION_VERIFICATION_SCHEMA_VERSION
+      || value.schemaVersion === REGRESSION_VERIFICATION_V3_SCHEMA_VERSION) {
       const proof = typeof value.gateProof === "string" ? PASS_GATE_PROOF.exec(value.gateProof) : null;
       if (!proof) return { status: "invalid", reason: "invalid regression gateProof for PASS" };
       if (proof[1] !== value.headSha) {
@@ -429,7 +456,8 @@ export const parseRegressionVerdict = (
     if (Object.hasOwn(value, "gateFailureExcerpt") && typeof value.gateFailureExcerpt !== "string") {
       return { status: "invalid", reason: "invalid regression gateFailureExcerpt" };
     }
-    if (value.schemaVersion === REGRESSION_VERIFICATION_SCHEMA_VERSION
+    if ((value.schemaVersion === REGRESSION_VERIFICATION_SCHEMA_VERSION
+        || value.schemaVersion === REGRESSION_VERIFICATION_V3_SCHEMA_VERSION)
       && (typeof value.gateProof !== "string" || !FAIL_GATE_PROOF.test(value.gateProof))) {
       return { status: "invalid", reason: "invalid regression gateProof for FAIL" };
     }

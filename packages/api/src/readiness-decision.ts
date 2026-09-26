@@ -18,6 +18,7 @@ type ReadinessContext = {
 type RegressionPass = {
   headSha: string;
   baseHeadSha: string;
+  verification: "gate" | "semantic";
 };
 
 export const READINESS_READ_BUDGET_MS = 20_000;

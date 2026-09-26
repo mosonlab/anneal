@@ -55,7 +55,7 @@ const context = {
 const ready = (): Extract<ReadinessInput, { stage: "ready" }> => ({
   ...context,
   stage: "ready",
-  regression: { headSha: HEAD, baseHeadSha: BASE },
+  regression: { headSha: HEAD, baseHeadSha: BASE, verification: "gate" },
   target: { resolved: true, repository: "mosonlab/agentos", prNumber: 42 },
   defaultBranch: "main",
 });

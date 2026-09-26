@@ -1,5 +1,6 @@
 import {
   MergeRecoveryStatus,
+  REGRESSION_VERIFICATION_OUTPUT_KINDS,
   recoveryContext,
   transitionMergeRecovery,
   type Prisma,
@@ -368,7 +369,7 @@ export const noticeMergeTrainAbort = async (
       where: {
         projectId: readiness.projectId,
         chainId: readiness.chainId,
-        templateStep: { outputKind: { in: ["regression-verification-v2", "regression-verification"] } },
+        templateStep: { outputKind: { in: [...REGRESSION_VERIFICATION_OUTPUT_KINDS] } },
       },
       select: { id: true, assigneeAgentId: true },
       orderBy: [{ chainIndex: "asc" }, { id: "asc" }],

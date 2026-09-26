@@ -43,6 +43,7 @@ import {
   stopStateFor,
   refundDecision,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
+  REGRESSION_VERIFICATION_V3_OUTPUT_KIND,
   type RunOutcome,
   runOutcomeVerdict,
   RunStatus,
@@ -209,7 +210,8 @@ export const completionOutputFailurePolicy = ({
   externalFailure: boolean;
   cappedExternalFailure: boolean;
 } => {
-  const targetFetchFailed = outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND
+  const targetFetchFailed = (outputKind === REGRESSION_VERIFICATION_OUTPUT_KIND
+      || outputKind === REGRESSION_VERIFICATION_V3_OUTPUT_KIND)
     && outcome.case === "required-output-unsatisfied"
     && outcome.reason.includes(TARGET_FETCH_BLOCK_REASON);
   return {

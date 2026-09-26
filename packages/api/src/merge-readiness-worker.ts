@@ -17,7 +17,6 @@ import {
   activateRecoveryIntegratorSuccessor,
   authorizationMetadata,
   isGatedMergeReadinessTask,
-  isMergeReadinessStep,
   latestRecordedStop,
   mergeExecutorRunnerIds,
   executorOfflineDetail,
@@ -222,7 +221,7 @@ export const reopenRecoveryHeadAdoptionFailures = async (
         || run?.taskId !== candidate.regressionTaskId
         || run.status !== RunStatus.SUCCEEDED
         || verdict.status !== "ok"
-        || verdict.verdict.outcome !== "pass"
+        || (verdict.verdict.outcome !== "pass" && verdict.verdict.outcome !== "semantic-pass")
         || output?.runId !== run.id
         || output?.commitSha !== verdict.verdict.headSha
         || run.headSha !== verdict.verdict.headSha
@@ -691,7 +690,8 @@ const discoverReadiness = async (
       return { input: { ...context, stage: "missing-regression-evidence" }, evidenceCreatedAt: null };
     }
     const verdict = parseRegressionVerdict(regression.stepOutput.body, regression.stepOutput.kind);
-    if (verdict.status !== "ok" || verdict.verdict.outcome !== "pass"
+    if (verdict.status !== "ok"
+      || (verdict.verdict.outcome !== "pass" && verdict.verdict.outcome !== "semantic-pass")
       || regression.stepOutput.commitSha !== verdict.verdict.headSha) {
       return { input: { ...context, stage: "invalid-regression-evidence" }, evidenceCreatedAt: null };
     }
@@ -703,6 +703,7 @@ const discoverReadiness = async (
         regression: {
           headSha: verdict.verdict.headSha,
           baseHeadSha: verdict.verdict.baseHeadSha,
+          verification: verdict.verdict.outcome === "semantic-pass" ? "semantic" : "gate",
         },
         target,
         defaultBranch: readiness.repo?.defaultBranch ?? "main",
@@ -844,7 +845,8 @@ const readReadiness = async (
       return claimedRead({ ...context, stage: "missing-regression-evidence" });
     }
     const verdict = parseRegressionVerdict(regression.stepOutput.body, regression.stepOutput.kind);
-    if (verdict.status !== "ok" || verdict.verdict.outcome !== "pass"
+    if (verdict.status !== "ok"
+      || (verdict.verdict.outcome !== "pass" && verdict.verdict.outcome !== "semantic-pass")
       || regression.stepOutput.commitSha !== verdict.verdict.headSha) {
       return claimedRead({ ...context, stage: "invalid-regression-evidence" });
     }
@@ -855,6 +857,7 @@ const readReadiness = async (
       regression: {
         headSha: verdict.verdict.headSha,
         baseHeadSha: verdict.verdict.baseHeadSha,
+        verification: verdict.verdict.outcome === "semantic-pass" ? "semantic" : "gate",
       },
       target,
       defaultBranch: readiness.repo?.defaultBranch ?? "main",
@@ -920,6 +923,11 @@ const heldLeaseOutcome = (ownership: ReadinessLeaseOwnership, taskId: string): H
   ? { kind: "stop", taskId }
   : { kind: "continue" };
 
+export const semanticAuthorizationRequiresTrain = (
+  input: ReadinessInput,
+  train?: TrainAuthorization,
+): boolean => input.stage === "ready" && input.regression.verification === "semantic" && !train;
+
 const authorizeReadinessSettlement = (
   read: ClaimedReadiness,
   decision: Extract<ReadinessDecision, { kind: "authorize" }>,
@@ -930,6 +938,9 @@ const authorizeReadinessSettlement = (
     taskId: regression.id,
     at: read.input.now,
     apply: async (tx) => {
+      if (semanticAuthorizationRequiresTrain(read.input, train)) {
+        throw new Error(`Semantic Regression evidence for ${readiness.id} requires a gated merge-train prefix`);
+      }
       const currentReadiness = await tx.task.findUniqueOrThrow({
         where: { id: readiness.id },
         select: {
@@ -1389,8 +1400,7 @@ export const readinessTick = async (
   width: number = mergeTrainWidth(),
 ): Promise<ReadinessTickResult> => {
   const pendingTrains = width === 0 ? await pendingMergeTrains(db) : undefined;
-  if (width > 0 || pendingTrains?.length) {
-    return mergeTrainReadinessTick(db, reader, now, { width, limit }, releaseChainLease, runWithMergeLease, {
+  return mergeTrainReadinessTick(db, reader, now, { width, limit }, releaseChainLease, runWithMergeLease, {
       candidates: readinessCandidates,
       discover: discoverReadiness,
       read: (database, task, at) => readReadiness(database, task, at, daemons),
@@ -1401,6 +1411,7 @@ export const readinessTick = async (
         : requeueRegressionSettlement({ readinessTaskId: read.readiness.id, regressionTaskId: read.regression.id,
           ...decision, recovery: read.recovery, now: read.input.now }),
       executor: {
+        enabled: () => mergeExecutorRunnerIds().length > 0,
         blocking: () => executorsBlockingAuthorization(daemons),
         closeEpisode: (tx, read) => closeExecutorOfflineEpisodeTx(tx, read.readiness.id, read.claim, "executor observed online under the train Lease"),
         settleOffline: async (tx, read, executorRunnerIds) => {
@@ -1412,21 +1423,7 @@ export const readinessTick = async (
       },
       single: (database, read, decision, result, release, lease, pullRequests) =>
         runReadinessDecisionSafely(database, read, decision, result, release, lease, pullRequests, daemons, width),
-    }, pendingTrains);
-  }
-  const result: ReadinessTickResult = { claimed: 0, authorized: 0, requeued: 0, stopped: 0 };
-  const pageSize = Math.max(limit * 20, 100);
-  for await (const readiness of readinessCandidates(db, pageSize)) {
-    if (result.claimed >= limit) break;
-    if (!isMergeReadinessStep(readiness.templateStep)) continue;
-
-    const read = await readReadiness(db, readiness, now, daemons);
-    if (!read.claimed) continue;
-    const decision = await evaluateReadiness(reader, read.input);
-    result.claimed += 1;
-    await runReadinessDecisionSafely(db, read, decision, result, releaseChainLease, runWithMergeLease, reader, daemons, width);
-  }
-  return result;
+  }, pendingTrains);
 };
 
 export const startReadinessWorker = (

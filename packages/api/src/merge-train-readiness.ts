@@ -2,6 +2,7 @@ import {
   ACTIVE_RUN_STATUSES,
   MERGE_TAIL_KIND,
   MERGE_TRAIN_OUTPUT_KIND,
+  REGRESSION_VERIFICATION_OUTPUT_KINDS,
   MergeRecoveryStatus,
   MergeLeaseEventState,
   MergeGateAuthorizationError,
@@ -18,6 +19,7 @@ import {
   requireMergeGateAuthorization,
   writeMarker,
   type PrismaClient,
+  type MergeTrainWidth,
   type TrainAuthorization,
   type MergeTrainRecord,
   parseMergeTrainMarker,
@@ -28,7 +30,11 @@ import type { WithMergeLease, ReleaseMergeLease, HeldLeaseOutcome } from "./merg
 import type { MergeLeaseHolder } from "../../../scripts/merge-lease-adapter.mjs";
 import type { ReadinessSettlement } from "./readiness-settlement.js";
 import type { ClaimedReadiness, ReadinessCandidate, ReadinessDiscovery, ReadinessRead, ReadinessTickResult } from "./merge-readiness-worker.js";
-import { reserveMergeTrainTask, enqueueMergeTrainTask, mergeTrainTaskDescription } from "./merge-train-task.js";
+import {
+  reserveMergeTrainTask,
+  enqueueMergeTrainTask,
+  mergeTrainTaskDescription,
+} from "./merge-train-task.js";
 import { stopMergeTail } from "./merge-tail-actions.js";
 import { noticeMergeTrainAbort, settleMergeTrainFailure } from "./merge-train-repair.js";
 import { observeEpisode } from "./merge-tail-episode.js";
@@ -89,8 +95,19 @@ export const trainRecordBindingFailure = (
 };
 
 type ReadyRead = ClaimedReadiness & { input: Extract<ClaimedReadiness["input"], { stage: "ready" }> };
+
+/** Width zero disables batching, but it cannot erase an already-durable v3
+ * semantic obligation. That candidate still needs one exact-prefix full gate. */
+export const trainWidthForRegressionEvidence = (
+  configuredWidth: number,
+  verification: "gate" | "semantic",
+): 0 | MergeTrainWidth => configuredWidth > 0
+  ? configuredWidth as MergeTrainWidth
+  : verification === "semantic" ? 1 : 0;
+
 type TrainHooks = {
   executor: {
+    enabled(): boolean;
     blocking(): string[];
     settleOffline(tx: Prisma.TransactionClient, read: ClaimedReadiness, executorRunnerIds: string[]): Promise<"ready" | "stopped">;
     closeEpisode(tx: Prisma.TransactionClient, read: ClaimedReadiness): Promise<void>;
@@ -220,7 +237,8 @@ const evidenceStillMatches = async (tx: Prisma.TransactionClient, read: ReadyRea
   const regression = await tx.task.findUnique({ where: { id: read.regression.id }, include: { stepOutput: true } });
   const output = regression?.stepOutput;
   const verdict = parseRegressionVerdict(output?.body ?? "", output?.kind ?? "");
-  return regression?.status === TaskStatus.DONE && verdict.status === "ok" && verdict.verdict.outcome === "pass"
+  return regression?.status === TaskStatus.DONE && verdict.status === "ok"
+    && (verdict.verdict.outcome === "pass" || verdict.verdict.outcome === "semantic-pass")
     && verdict.verdict.headSha === read.input.regression.headSha && output?.commitSha === verdict.verdict.headSha
     && output.id === read.regression.stepOutput?.id && output.updatedAt.getTime() === read.regression.stepOutput.updatedAt.getTime()
     && !await excludedRecovery(tx, read.readiness.id);
@@ -321,7 +339,7 @@ const abortTrain = async (
       const regression = await tx.task.findFirstOrThrow({ where: {
         projectId: readiness.projectId,
         chainId: readiness.chainId,
-        templateStep: { outputKind: { in: ["regression-verification-v2", "regression-verification"] } },
+        templateStep: { outputKind: { in: [...REGRESSION_VERIFICATION_OUTPUT_KINDS] } },
       }, select: { id: true, status: true, archivedAt: true }, orderBy: [{ chainIndex: "asc" }, { id: "asc" }] });
       const readinessIsLive = readiness.archivedAt === null
         && (readiness.status === TaskStatus.TODO || readiness.status === TaskStatus.DOING);
@@ -750,6 +768,7 @@ export const mergeTrainReadinessTick = async (
   existingPending?: PendingTrain[],
 ): Promise<ReadinessTickResult> => {
   const { width, limit } = budget;
+  const formationWidth: MergeTrainWidth = width > 0 ? width as MergeTrainWidth : 1;
   const result: ReadinessTickResult = { claimed: 0, authorized: 0, requeued: 0, stopped: 0 };
   const pending = existingPending ?? await pendingMergeTrains(db);
   const unresolvedLeases = await db.mergeLeaseEvent.findMany({
@@ -797,162 +816,152 @@ export const mergeTrainReadinessTick = async (
   // settling. A claim left behind parks its candidate for the claim lease.
   const claimed: ClaimedReadiness[] = [];
   try {
-    if (width > 0) {
-      type DiscoveredCandidate = { candidate: ReadinessCandidate; discovery: ReadinessDiscovery };
-      const groups = new Map<string, DiscoveredCandidate[]>();
-      const fallback: DiscoveredCandidate[] = [];
-      for await (const candidate of hooks.candidates(db, Math.max(limit * 20, 100))) {
-        if (!isMergeReadinessStep(candidate.templateStep)) continue;
-        // REVIEW candidates must reach read(): an executor-offline ceiling
-        // parked their recovery in BLOCKED_DOWNSTREAM, which read can re-arm.
-        if (candidate.repoId && busyRepos.has(candidate.repoId)) continue;
-        if (candidate.status !== TaskStatus.REVIEW && await excludedRecovery(db, candidate.id)) continue;
-        const discovery = await hooks.discover(db, candidate, now);
-        const entry = { candidate, discovery };
-        if (discovery.input.stage === "ready" && candidate.repoId && discovery.input.target.resolved) {
-          const group = groups.get(candidate.repoId) ?? [];
-          group.push(entry);
-          groups.set(candidate.repoId, group);
-        } else {
-          fallback.push(entry);
-        }
-      }
-
-      // Discovery is deliberately unbounded by the mutation budget. The
-      // generator still pages, but every ready PASS is present before any
-      // repository chooses its FIFO prefix.
-      const orderedGroups = [...groups.entries()].map(([repoId, group]) => {
-        group.sort((left, right) => left.discovery.evidenceCreatedAt!.getTime() - right.discovery.evidenceCreatedAt!.getTime()
-          || left.candidate.id.localeCompare(right.candidate.id));
-        return { repoId, group };
-      }).sort((left, right) => left.group[0]!.discovery.evidenceCreatedAt!.getTime()
-        - right.group[0]!.discovery.evidenceCreatedAt!.getTime() || left.repoId.localeCompare(right.repoId));
-      const claimedCandidate = async (candidate: ReadinessCandidate): Promise<ClaimedReadiness | null> => {
-        if (result.claimed >= limit) return null;
-        const read = await hooks.read(db, candidate, now);
-        if (!read.claimed) return null;
-        result.claimed += 1;
-        claimed.push(read);
-        return read;
-      };
-
-      for (const { repoId, group } of orderedGroups) {
-        if (result.claimed >= limit) break;
-        const selectedEntries = group.slice(0, Math.min(width, limit - result.claimed));
-        const selected: ReadyRead[] = [];
-        for (const entry of selectedEntries) {
-          const read = await claimedCandidate(entry.candidate);
-          if (!read) continue;
-          if (read.input.stage !== "ready" || !read.readiness.repoId || !read.input.target.resolved) {
-            await single(read, await evaluateReadiness(reader, read.input));
-            continue;
-          }
-          selected.push(read as ReadyRead);
-        }
-        if (selected.length === 0) continue;
-
-        const first = selected[0]!;
-        let baseSha: string;
-        try { baseSha = await liveBase(reader, first); }
-        catch (error: unknown) {
-          await db.$transaction((tx) => first.claim.settle(tx, { kind: "keep", apply: async (client) => client.taskActivity.create({ data: {
-            taskId: first.readiness.id, actorType: "control-plane",
-            body: `Merge train formation deferred: ${error instanceof Error ? error.message : String(error)}`,
-          } }) }), serializable);
-          continue;
-        }
-        if (unresolvedLeaseRepos.has(repoId)) {
-          for (const read of selected) await single(read, await evaluateReadiness(reader, read.input));
-          continue;
-        }
-        // Formation depends on all eligible peers, before width and claim
-        // budget bound membership. Even a width-one prefix is still a train.
-        if (group.length === 1 && first.input.regression.baseHeadSha === baseSha) {
-          await single(first, await evaluateReadiness(reader, first.input));
-          continue;
-        }
-        const candidates = selected.map((read) => ({ taskId: read.readiness.id, chainId: read.readiness.chainId!,
-          headSha: read.input.regression.headSha, branch: read.regression.runs[0]?.branch ?? "" }));
-        if (candidates.some((candidate) => !candidate.chainId || !candidate.branch)) {
-          for (const read of selected) await single(read, {
-            kind: "stop", condition: "merge-train-branch-unavailable", evidence: "Merge train candidate chain branch is unavailable",
-          });
-          continue;
-        }
-        let claimsHeld = true;
-        for (const read of selected) if (!await read.claim.renew()) claimsHeld = false;
-        if (!claimsHeld) continue;
-        const target = { projectId: first.readiness.projectId, chainId: candidates[0]!.chainId };
-        let reservation: PendingTrain | null = null;
-        try {
-          reservation = await db.$transaction(async (tx) => {
-            if (!await tryRepositoryMutex(tx, repoId)) return null;
-            await lockCandidates(tx, candidates);
-            await tx.$queryRaw`SELECT "id" FROM "Repo" WHERE "id" = ${repoId} FOR UPDATE`;
-            if ((await pendingMergeTrains(tx)).some((train) => train.repoId === repoId)) return null;
-            const unresolved = await tx.mergeLeaseEvent.findFirst({ where: {
-              state: MergeLeaseEventState.RELEASE_DEFERRED,
-              owningTask: { repoId },
-            }, select: { id: true } });
-            if (unresolved) return null;
-            for (const read of selected) {
-              if (!await evidenceStillMatches(tx, read)) throw new Error(`Merge train candidate ${read.readiness.id} changed before reservation`);
-              const held = await read.claim.settle(tx, { kind: "keep", apply: async () => true });
-              if (!held.settled) throw new Error(`Merge train candidate ${read.readiness.id} claim lost before reservation`);
-            }
-            const task = await reserveMergeTrainTask(tx, {
-              regressionTaskId: first.regression.id, baseSha, width, candidates, now,
-            });
-            for (const read of selected) {
-              const transitioned = await read.claim.settle(tx, { kind: "finish", at: now, apply: async (client) => {
-                await client.task.update({ where: { id: read.readiness.id }, data: { status: TaskStatus.TODO, failureReason: null } });
-                return { value: undefined, ownership: "released" };
-              } });
-              if (!transitioned.settled) throw new Error(`Merge train candidate ${read.readiness.id} claim lost at reservation`);
-            }
-            return { taskId: task.taskId, state: "acquiring" as const, regressionTaskId: first.regression.id,
-              projectId: first.readiness.projectId, repoId, baseSha, width, candidates };
-          }, serializable);
-        } catch (error: unknown) {
-          const reason = `Merge train reservation failed: ${error instanceof Error ? error.message : String(error)}`;
-          for (const read of selected) await single(read, {
-            kind: "stop", condition: "merge-train-reservation-failed", evidence: reason,
-          });
-        }
-        if (reservation) {
-          const train = reservation;
-          await withTrainLease(db, lease, target, train, now, async () => {
-            const outcome = await enqueueReservedTrain(db, reader, train, now, hooks);
-            return { value: outcome, leaseOutcome: outcome === "waiting" ? { kind: "continue" } : { kind: "stop", taskId: first.regression.id } };
-          });
-        }
-      }
-
-      // Non-ready candidates still receive the existing single-candidate
-      // handling, but only after ready evidence has had the opportunity to form
-      // its FIFO train. This keeps the claim budget from hiding a later peer.
-      for (const { candidate } of fallback) {
-        if (result.claimed >= limit) break;
-        const read = await claimedCandidate(candidate);
-        if (!read) continue;
-        await single(read, await evaluateReadiness(reader, read.input));
-      }
-      return result;
-    }
+    type DiscoveredCandidate = { candidate: ReadinessCandidate; discovery: ReadinessDiscovery };
+    const groups = new Map<string, DiscoveredCandidate[]>();
+    const fallback: DiscoveredCandidate[] = [];
     for await (const candidate of hooks.candidates(db, Math.max(limit * 20, 100))) {
-      // The caller's claim budget bounds this loop exactly as it bounds the
-      // single-candidate tick; a formed train is bounded by `width` instead.
-      if (result.claimed >= limit) break;
       if (!isMergeReadinessStep(candidate.templateStep)) continue;
+      // REVIEW candidates must reach read(): an executor-offline ceiling
+      // parked their recovery in BLOCKED_DOWNSTREAM, which read can re-arm.
       if (candidate.repoId && busyRepos.has(candidate.repoId)) continue;
-      // Keep the same re-arm path while draining trains after width is disabled.
       if (candidate.status !== TaskStatus.REVIEW && await excludedRecovery(db, candidate.id)) continue;
+      const discovery = await hooks.discover(db, candidate, now);
+      const entry = { candidate, discovery };
+      if (discovery.input.stage === "ready" && candidate.repoId && discovery.input.target.resolved
+        && trainWidthForRegressionEvidence(width, discovery.input.regression.verification) > 0) {
+        const group = groups.get(candidate.repoId) ?? [];
+        group.push(entry);
+        groups.set(candidate.repoId, group);
+      } else {
+        fallback.push(entry);
+      }
+    }
+
+    // Discovery is deliberately unbounded by the mutation budget. The
+    // generator still pages, but every ready PASS is present before any
+    // repository chooses its FIFO prefix.
+    const orderedGroups = [...groups.entries()].map(([repoId, group]) => {
+      group.sort((left, right) => left.discovery.evidenceCreatedAt!.getTime() - right.discovery.evidenceCreatedAt!.getTime()
+        || left.candidate.id.localeCompare(right.candidate.id));
+      return { repoId, group };
+    }).sort((left, right) => left.group[0]!.discovery.evidenceCreatedAt!.getTime()
+      - right.group[0]!.discovery.evidenceCreatedAt!.getTime() || left.repoId.localeCompare(right.repoId));
+    const claimedCandidate = async (candidate: ReadinessCandidate): Promise<ClaimedReadiness | null> => {
+      if (result.claimed >= limit) return null;
       const read = await hooks.read(db, candidate, now);
-      if (!read.claimed) continue;
+      if (!read.claimed) return null;
       result.claimed += 1;
       claimed.push(read);
+      return read;
+    };
+
+    for (const { repoId, group } of orderedGroups) {
+      if (result.claimed >= limit) break;
+      const selectedEntries = group.slice(0, Math.min(formationWidth, limit - result.claimed));
+      const selected: ReadyRead[] = [];
+      for (const entry of selectedEntries) {
+        const read = await claimedCandidate(entry.candidate);
+        if (!read) continue;
+        if (read.input.stage !== "ready" || !read.readiness.repoId || !read.input.target.resolved) {
+          await single(read, await evaluateReadiness(reader, read.input));
+          continue;
+        }
+        selected.push(read as ReadyRead);
+      }
+      if (selected.length === 0) continue;
+
+      const first = selected[0]!;
+      let baseSha: string;
+      try { baseSha = await liveBase(reader, first); }
+      catch (error: unknown) {
+        await db.$transaction((tx) => first.claim.settle(tx, { kind: "keep", apply: async (client) => client.taskActivity.create({ data: {
+          taskId: first.readiness.id, actorType: "control-plane",
+          body: `Merge train formation deferred: ${error instanceof Error ? error.message : String(error)}`,
+        } }) }), serializable);
+        continue;
+      }
+      if (unresolvedLeaseRepos.has(repoId)) {
+        for (const read of selected) {
+          if (read.input.regression.verification === "semantic") await releaseClaim(db, read);
+          else await single(read, await evaluateReadiness(reader, read.input));
+        }
+        continue;
+      }
+      // Formation depends on all eligible peers, before width and claim
+      // budget bound membership. Even a width-one prefix is still a train.
+      if (group.length === 1 && first.input.regression.verification === "gate"
+        && first.input.regression.baseHeadSha === baseSha) {
+        await single(first, await evaluateReadiness(reader, first.input));
+        continue;
+      }
+      const candidates = selected.map((read) => ({ taskId: read.readiness.id, chainId: read.readiness.chainId!,
+        headSha: read.input.regression.headSha, branch: read.regression.runs[0]?.branch ?? "" }));
+      if (candidates.some((candidate) => !candidate.chainId || !candidate.branch)) {
+        for (const read of selected) await single(read, {
+          kind: "stop", condition: "merge-train-branch-unavailable", evidence: "Merge train candidate chain branch is unavailable",
+        });
+        continue;
+      }
+      let claimsHeld = true;
+      for (const read of selected) if (!await read.claim.renew()) claimsHeld = false;
+      if (!claimsHeld) continue;
+      const target = { projectId: first.readiness.projectId, chainId: candidates[0]!.chainId };
+      let reservation: PendingTrain | null = null;
+      try {
+        reservation = await db.$transaction(async (tx) => {
+          if (!await tryRepositoryMutex(tx, repoId)) return null;
+          await lockCandidates(tx, candidates);
+          await tx.$queryRaw`SELECT "id" FROM "Repo" WHERE "id" = ${repoId} FOR UPDATE`;
+          if ((await pendingMergeTrains(tx)).some((train) => train.repoId === repoId)) return null;
+          const unresolved = await tx.mergeLeaseEvent.findFirst({ where: {
+            state: MergeLeaseEventState.RELEASE_DEFERRED,
+            owningTask: { repoId },
+          }, select: { id: true } });
+          if (unresolved) return null;
+          for (const read of selected) {
+            if (!await evidenceStillMatches(tx, read)) throw new Error(`Merge train candidate ${read.readiness.id} changed before reservation`);
+            const held = await read.claim.settle(tx, { kind: "keep", apply: async () => true });
+            if (!held.settled) throw new Error(`Merge train candidate ${read.readiness.id} claim lost before reservation`);
+          }
+          const task = await reserveMergeTrainTask(tx, {
+            regressionTaskId: first.regression.id, baseSha, width: formationWidth, candidates, now,
+          });
+          for (const read of selected) {
+            const transitioned = await read.claim.settle(tx, { kind: "finish", at: now, apply: async (client) => {
+              await client.task.update({ where: { id: read.readiness.id }, data: { status: TaskStatus.TODO, failureReason: null } });
+              return { value: undefined, ownership: "released" };
+            } });
+            if (!transitioned.settled) throw new Error(`Merge train candidate ${read.readiness.id} claim lost at reservation`);
+          }
+          return { taskId: task.taskId, state: "acquiring" as const, regressionTaskId: first.regression.id,
+            projectId: first.readiness.projectId, repoId, baseSha, width: formationWidth, candidates };
+        }, serializable);
+      } catch (error: unknown) {
+        const reason = `Merge train reservation failed: ${error instanceof Error ? error.message : String(error)}`;
+        for (const read of selected) await single(read, {
+          kind: "stop", condition: "merge-train-reservation-failed", evidence: reason,
+        });
+      }
+      if (reservation) {
+        const train = reservation;
+        await withTrainLease(db, lease, target, train, now, async () => {
+          const outcome = await enqueueReservedTrain(db, reader, train, now, hooks);
+          return { value: outcome, leaseOutcome: outcome === "waiting" ? { kind: "continue" } : { kind: "stop", taskId: first.regression.id } };
+        });
+      }
+    }
+
+    // Non-ready candidates still receive the existing single-candidate
+    // handling, but only after ready evidence has had the opportunity to form
+    // its FIFO train. This keeps the claim budget from hiding a later peer.
+    for (const { candidate, discovery } of fallback) {
+      if (result.claimed >= limit) break;
+      if (discovery.input.stage === "regression-pending" && !hooks.executor.enabled()) continue;
+      const read = await claimedCandidate(candidate);
+      if (!read) continue;
       await single(read, await evaluateReadiness(reader, read.input));
     }
+    return result;
   } finally {
     for (const read of claimed) await releaseClaim(db, read);
   }

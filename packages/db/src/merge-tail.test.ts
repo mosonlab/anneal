@@ -185,6 +185,62 @@ test("the narrowed Regression contract requires v2 while legacy output remains r
   assert.equal(parseRegressionVerdict(v2, "regression-verification").status, "invalid");
 });
 
+test("Regression v3 separates semantic PASS from gate proof and v2 rejects that shape", () => {
+  const semanticPass = {
+    schemaVersion: 3,
+    outcome: "semantic-pass",
+    headSha: A,
+    baseHeadSha: B,
+  };
+  assert.deepEqual(
+    parseRegressionVerdict(JSON.stringify(semanticPass), "regression-verification-v3"),
+    { status: "ok", verdict: semanticPass },
+  );
+  assert.equal(
+    parseRegressionVerdict(JSON.stringify(semanticPass), "regression-verification-v2").status,
+    "invalid",
+  );
+  for (const extra of [
+    { gateVerdict: "PASS" },
+    { gateProof: `MERGE GATE: PASS ${A}` },
+    { semanticVerdict: "reused" },
+    { semanticSourceRunId: "prior-run" },
+  ]) {
+    assert.equal(
+      parseRegressionVerdict(JSON.stringify({ ...semanticPass, ...extra }), "regression-verification-v3").status,
+      "invalid",
+      JSON.stringify(extra),
+    );
+  }
+  assert.equal(parseRegressionVerdict(JSON.stringify({
+    ...semanticPass,
+    semanticVerdict: "reused",
+    semanticSourceRunId: "prior-run",
+  }), "regression-verification-v3").status, "ok");
+});
+
+test("Regression v3 retains explicit gate and failure outcomes", () => {
+  const verdicts = [
+    {
+      schemaVersion: 3, outcome: "pass", headSha: A, baseHeadSha: B,
+      gateVerdict: "PASS", gateProof: `MERGE GATE: PASS ${A}`,
+    },
+    { schemaVersion: 3, outcome: "review-fail", headSha: A, baseHeadSha: B, summary: "defect" },
+    {
+      schemaVersion: 3, outcome: "gate-fail", headSha: A, baseHeadSha: B,
+      gateVerdict: "FAIL", gateProof: "MERGE GATE: FAIL (tests)", summary: "tests",
+    },
+    { schemaVersion: 3, outcome: "refresh-conflict", headSha: A, baseHeadSha: B, summary: "conflict" },
+  ];
+  for (const verdict of verdicts) {
+    assert.equal(
+      parseRegressionVerdict(JSON.stringify(verdict), "regression-verification-v3").status,
+      "ok",
+      verdict.outcome,
+    );
+  }
+});
+
 test("Regression v2 gate failures carry the complete Merge gate verdict", () => {
   const verdict = {
     schemaVersion: 2,

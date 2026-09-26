@@ -822,6 +822,25 @@ test("a passing repaired recovery Regression returns to authorization", async ()
   assert.deepEqual(observed.notices, []);
 });
 
+test("a semantic PASS advances repaired recovery without opening a repair", async () => {
+  const observed = recoveredRegressionTx();
+
+  const result = await handleRegressionCompletion(observed.tx, {
+    ...recoveredRegressionInput,
+    qualifiedVerdict: {
+      schemaVersion: 3,
+      outcome: "semantic-pass",
+      headSha: "e".repeat(40),
+      baseHeadSha: "f".repeat(40),
+    },
+  });
+
+  assert.equal(result, "advance");
+  assert.equal(observed.recoveryUpdates[0]?.data.status, MergeRecoveryStatus.AWAITING_AUTHORIZATION);
+  assert.equal(observed.activities[0]?.metadata.outcome, "semantic-pass");
+  assert.deepEqual(observed.notices, []);
+});
+
 test("a second FAIL after repaired recovery parks downstream again", async () => {
   const observed = recoveredRegressionTx();
 

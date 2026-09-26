@@ -7,10 +7,12 @@ import {
   APPROVAL_GATE_NOTE_METADATA_FIELD,
   canonicalReviewArtifactSchema as reviewArtifact,
   isRegressionVerificationOutputKind,
+  parseRegressionVerdict,
   Prisma,
   recordGateAttestation,
   REGRESSION_VERIFICATION_OUTPUT_KIND,
   REGRESSION_VERIFICATION_SCHEMA_VERSION,
+  REGRESSION_VERIFICATION_V3_OUTPUT_KIND,
   RunStatus,
   runOwnedHead,
   stepRole,
@@ -20,10 +22,11 @@ import {
   type CanonicalReviewArtifact,
   type TaskStepOutput,
 } from "@anneal/db";
-import type { ClaimPreviousRunHandoff } from "@anneal/db/claim-contract";
+import type { ClaimPreviousRunHandoff, RegressionRecoveryContext } from "@anneal/db/claim-contract";
 
 import { applyRevalidationRoute } from "./revalidation-routing.js";
 import { isRevalidationStep } from "./revalidation.js";
+import { regressionRecoveryContextForClaim } from "./regression-recovery-context.js";
 
 import { chainStepPresence, type ChainStepPresenceIndex } from "./chain-step-omission.js";
 import {
@@ -36,7 +39,7 @@ import {
 type DbTx = Prisma.TransactionClient;
 
 /** The Full Assurance and Direct Regression node's deliverable. */
-export const REGRESSION_VERIFICATION_KIND = REGRESSION_VERIFICATION_OUTPUT_KIND;
+export const REGRESSION_VERIFICATION_KIND = REGRESSION_VERIFICATION_V3_OUTPUT_KIND;
 
 export const BLIND_REVIEW_PHASE = {
   independent: "independent-findings",
@@ -362,6 +365,12 @@ export const canonicalBodyRefusal = (
       : Number(canonicalOutputGeneration(step).slice(1));
     return `${kind} task output body violates schemaVersion ${String(schemaVersion)} at ${first?.location ?? "body"}: ${first?.message ?? "invalid value"}${additional}`;
   }
+  if (isRegressionVerificationOutputKind(kind)) {
+    const verdict = parseRegressionVerdict(body, kind);
+    if (verdict.status === "invalid") {
+      return `${kind} task output body violates its Regression contract: ${verdict.reason}`;
+    }
+  }
   const bodyHead = (parsed.data as { headSha: string }).headSha;
   if (bodyHead !== authoredHead) {
     return `${kind} task output body headSha ${bodyHead} does not match authored commit ${authoredHead ?? "none"}`;
@@ -407,6 +416,29 @@ export const canonicalOutputRefusal = (
   if (bodyRefusal) return bodyRefusal;
   if (isLegacyCombinedBlindReviewStep(step) && metadataPhase(output.metadata) !== BLIND_REVIEW_PHASE.closed) {
     return `blind review output is not in required ${BLIND_REVIEW_PHASE.closed} phase`;
+  }
+  return null;
+};
+
+export const regressionSemanticReuseRefusal = (
+  body: string,
+  recovery: RegressionRecoveryContext | null,
+): string | null => {
+  const parsed = parseRegressionVerdict(body, REGRESSION_VERIFICATION_V3_OUTPUT_KIND);
+  if (parsed.status !== "ok" || parsed.verdict.outcome !== "semantic-pass"
+    || parsed.verdict.semanticVerdict !== "reused") return null;
+  const prior = recovery?.priorOutput;
+  if (!prior || prior.runId !== parsed.verdict.semanticSourceRunId) {
+    return "reused semantic-pass is not bound to this Run's trusted recovery snapshot";
+  }
+  const priorVerdict = parseRegressionVerdict(prior.body, prior.kind);
+  if (priorVerdict.status !== "ok"
+    || (priorVerdict.verdict.outcome !== "pass"
+      && priorVerdict.verdict.outcome !== "semantic-pass"
+      && priorVerdict.verdict.outcome !== "gate-fail")
+    || prior.commitSha !== priorVerdict.verdict.headSha
+    || priorVerdict.verdict.headSha !== recovery.authorizedHeadSha) {
+    return "reused semantic-pass does not match the trusted prior semantic result and authorized head";
   }
   return null;
 };
@@ -486,6 +518,18 @@ export const persistSessionTaskOutput = async (
   if (step && isCanonicalAgentStep(step)) {
     const bodyRefusal = canonicalBodyRefusal(step, input.body, input.commitSha, phase);
     if (bodyRefusal) return { ok: false, reason: bodyRefusal };
+  }
+  if (step?.outputKind === REGRESSION_VERIFICATION_V3_OUTPUT_KIND) {
+    const parsed = parseRegressionVerdict(input.body, step.outputKind);
+    if (parsed.status === "ok" && parsed.verdict.outcome === "semantic-pass"
+      && parsed.verdict.semanticVerdict === "reused") {
+      const recovery = await regressionRecoveryContextForClaim(tx, {
+        taskId: task.id,
+        runId: input.fence.runId,
+      });
+      const refusal = regressionSemanticReuseRefusal(input.body, recovery);
+      if (refusal) return { ok: false, reason: refusal };
+    }
   }
   if (step && isCanonicalFixStep(step)) {
     const refusal = await fixedImplementationPersistenceRefusal(tx, { ...task, templateStep: step }, input.body);

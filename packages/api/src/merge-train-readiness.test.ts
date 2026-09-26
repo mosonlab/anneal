@@ -9,7 +9,12 @@ import {
 } from "@anneal/db";
 import type { PullRequestReader } from "./github-read.js";
 import type { WithMergeLease } from "./merge-lease.js";
-import { mergeTrainReadinessTick, pendingMergeTrains, trainRecordBindingFailure } from "./merge-train-readiness.js";
+import {
+  mergeTrainReadinessTick,
+  pendingMergeTrains,
+  trainRecordBindingFailure,
+  trainWidthForRegressionEvidence,
+} from "./merge-train-readiness.js";
 
 const base = "a".repeat(40);
 const head = "b".repeat(40);
@@ -22,6 +27,13 @@ const record: MergeTrainRecord = {
     ref: `refs/anneal/train/${oid}`, verdict: "pass", gateExcerpt: `MERGE GATE: PASS ${oid}` }],
   blocked: [], skipped: [],
 };
+
+test("width zero still schedules one full-gate prefix for semantic evidence", () => {
+  assert.equal(trainWidthForRegressionEvidence(0, "semantic"), 1);
+  assert.equal(trainWidthForRegressionEvidence(0, "gate"), 0);
+  assert.equal(trainWidthForRegressionEvidence(3, "semantic"), 3);
+  assert.equal(trainWidthForRegressionEvidence(3, "gate"), 3);
+});
 
 test("train qualification binds the complete ordered candidate list and live base", () => {
   assert.equal(trainRecordBindingFailure(record, { baseSha: base, width: 2, candidates: [candidate] }, base), null);
@@ -237,7 +249,7 @@ for (const staleTrailingBase of [false, true]) {
         readiness: { id: readiness.id, chainId: readiness.chainId, projectId, repoId },
         now,
         stage: "ready" as const,
-        regression: { headSha: candidate.headSha, baseHeadSha: base },
+        regression: { headSha: candidate.headSha, baseHeadSha: base, verification: "gate" },
         target: { resolved: true as const, repository: "acme/widgets", prNumber: candidates.indexOf(candidate) + 1 },
         defaultBranch: "main",
       },
@@ -361,11 +373,22 @@ test("a disabled train drain gives every unrelated candidate its single decision
   } as unknown as import("@anneal/db").PrismaClient;
   const hooks = {
     candidates: async function* () { yield* rows; },
+    discover: async (_db: unknown, task: { id: string }) => ({
+      input: {
+        stage: "ready" as const,
+        now,
+        readiness: { id: task.id, chainId: "chain", projectId: "project", repoId: "other-repo" },
+        regression: { headSha: head, baseHeadSha: base, verification: "gate" as const },
+        target: { resolved: true as const, repository: "acme/widgets", prNumber: 1 },
+        defaultBranch: "main",
+      },
+      evidenceCreatedAt: now,
+    }),
     read: async (_db: unknown, task: { id: string }) => ({
       claimed: true,
       readiness: { id: task.id, repoId: "other-repo" },
       regression: { stepOutput: { createdAt: now } },
-      input: { stage: "ready", now, regression: { headSha: head, baseHeadSha: base },
+      input: { stage: "ready", now, regression: { headSha: head, baseHeadSha: base, verification: "gate" },
         target: { resolved: true, repository: "acme/widgets", prNumber: 1 }, defaultBranch: "main" },
       claim: { settle: async (_tx: unknown, transition: { apply: (client: Prisma.TransactionClient) => Promise<unknown> }) => transition.apply(tx) },
     }),

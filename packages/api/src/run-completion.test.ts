@@ -147,17 +147,19 @@ test("a configured non-committing Step keeps its ordinary completion semantics",
   assert.equal(completionEvidenceRefusal(run, true, baseSha, null), null);
 });
 
-test("a Regression target-fetch block keeps its git diagnostic and is externally refundable", () => {
-  const policy = completionOutputFailurePolicy({
-    outputKind: "regression-verification-v2",
-    outcome: {
-      case: "required-output-unsatisfied",
-      reason: "A step finished without a handoff [target-fetch-failed]: fatal: could not read Username for 'https://github.com'",
-    },
+for (const outputKind of ["regression-verification-v2", "regression-verification-v3"]) {
+  test(`${outputKind} target-fetch block keeps its git diagnostic and is externally refundable`, () => {
+    const policy = completionOutputFailurePolicy({
+      outputKind,
+      outcome: {
+        case: "required-output-unsatisfied",
+        reason: "A step finished without a handoff [target-fetch-failed]: fatal: could not read Username for 'https://github.com'",
+      },
+    });
+    assert.equal(policy.externalFailure, true);
+    assert.equal(policy.cappedExternalFailure, true);
   });
-  assert.equal(policy.externalFailure, true);
-  assert.equal(policy.cappedExternalFailure, true);
-});
+}
 
 test("a legacy Regression target-fetch text remains non-external", () => {
   const policy = completionOutputFailurePolicy({

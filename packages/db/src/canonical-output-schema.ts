@@ -1,7 +1,10 @@
 import { z } from "zod";
 
 import { canonicalTemplateIdentity, LEGACY_TEMPLATE_GENERATIONS } from "./canonical-template-transition.js";
-import { REGRESSION_VERIFICATION_SCHEMA_VERSION } from "./merge-tail.js";
+import {
+  REGRESSION_VERIFICATION_SCHEMA_VERSION,
+  REGRESSION_VERIFICATION_V3_SCHEMA_VERSION,
+} from "./merge-tail.js";
 import { stepGeneration, stepRole, type StepRole, type TemplateStepLike } from "./step-role.js";
 
 const commitSha = z.string().regex(/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u);
@@ -187,6 +190,63 @@ export const canonicalOutputSchemas: Readonly<Partial<Record<StepRole, SchemaByG
           code: "custom",
           path: ["gateProof"],
           message: "gate proof oid must match headSha",
+        });
+      }
+    }),
+    v3: z.discriminatedUnion("outcome", [
+      canonicalEnvelope.extend({
+        schemaVersion: z.literal(REGRESSION_VERIFICATION_V3_SCHEMA_VERSION),
+        outcome: z.literal("semantic-pass"),
+        baseHeadSha: commitSha,
+        semanticVerdict: z.literal("reused").optional(),
+        semanticSourceRunId: nonEmptyString.optional(),
+      }),
+      canonicalEnvelope.extend({
+        schemaVersion: z.literal(REGRESSION_VERIFICATION_V3_SCHEMA_VERSION),
+        outcome: z.literal("pass"),
+        baseHeadSha: commitSha,
+        gateVerdict: z.literal("PASS"),
+        gateProof: passGateProof,
+        semanticVerdict: z.literal("reused").optional(),
+        semanticSourceRunId: nonEmptyString.optional(),
+      }),
+      canonicalEnvelope.extend({
+        schemaVersion: z.literal(REGRESSION_VERIFICATION_V3_SCHEMA_VERSION),
+        outcome: z.literal("review-fail"),
+        baseHeadSha: commitSha,
+        summary: nonEmptyString,
+      }),
+      canonicalEnvelope.extend({
+        schemaVersion: z.literal(REGRESSION_VERIFICATION_V3_SCHEMA_VERSION),
+        outcome: z.literal("gate-fail"),
+        baseHeadSha: commitSha,
+        gateVerdict: z.literal("FAIL"),
+        gateProof: failGateProof,
+        summary: nonEmptyString,
+        gateFailureExcerpt: z.string().optional(),
+        semanticVerdict: z.literal("reused").optional(),
+        semanticSourceRunId: nonEmptyString.optional(),
+      }),
+      canonicalEnvelope.extend({
+        schemaVersion: z.literal(REGRESSION_VERIFICATION_V3_SCHEMA_VERSION),
+        outcome: z.literal("refresh-conflict"),
+        baseHeadSha: commitSha,
+        summary: nonEmptyString,
+      }),
+    ]).superRefine((verdict, context) => {
+      if (verdict.outcome === "pass" && verdict.gateProof !== `MERGE GATE: PASS ${verdict.headSha}`) {
+        context.addIssue({
+          code: "custom",
+          path: ["gateProof"],
+          message: "gate proof oid must match headSha",
+        });
+      }
+      if ((verdict.outcome === "semantic-pass" || verdict.outcome === "pass" || verdict.outcome === "gate-fail")
+        && ((verdict.semanticVerdict === "reused") !== (typeof verdict.semanticSourceRunId === "string"))) {
+        context.addIssue({
+          code: "custom",
+          path: ["semanticSourceRunId"],
+          message: "reused semantic verdict and source Run id must be present together",
         });
       }
     }),

@@ -155,3 +155,17 @@ test("protocol failure cannot use a negative verdict for an unreported head", ()
   assert.equal(actual.durableNegativeRegressionVerdict, false);
   assert.equal(actual.completionHeadSha, null);
 });
+
+test("semantic PASS is never treated as a durable negative verdict", () => {
+  const actual = deriveMergeTailFacts({
+    ...base(), succeeded: false, external: true,
+    task: { ...base().task!, templateStep: {
+      stepIndex: 8, taskTemplate: { name: "direct-engineer-workflow" }, outputKind: "regression-verification-v3",
+    } },
+    failedRegressionVerdict: { status: "ok", headSha, verdict: {
+      schemaVersion: 3, outcome: "semantic-pass", headSha, baseHeadSha: "b".repeat(40),
+    } },
+  });
+  assert.equal(actual.durableNegativeRegressionVerdict, false);
+  assert.equal(actual.completionHeadSha, base().headSha);
+});

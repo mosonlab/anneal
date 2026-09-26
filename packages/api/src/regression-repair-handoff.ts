@@ -1,5 +1,6 @@
 import {
   FailureClass,
+  isPassingRegressionVerdict,
   isRegressionVerificationOutputKind,
   type Marker,
   markerFromMetadata,
@@ -64,7 +65,7 @@ export const regressionRepairHandoffForClaim = async (
   });
 
   // A PASS opens no repair task, so a fresh Session has nothing to inherit.
-  if (parsed.verdict.outcome === "pass") return { status: "none" };
+  if (isPassingRegressionVerdict(parsed.verdict)) return { status: "none" };
 
   const repairKind: RegressionRepairKind = parsed.verdict.outcome === "review-fail"
     ? "review-fix"

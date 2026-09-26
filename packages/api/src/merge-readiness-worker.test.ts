@@ -8,6 +8,7 @@ import {
   executorsBlockingAuthorization,
   READINESS_CLAIM_LEASE_MS,
   READINESS_READ_BUDGET_MS,
+  semanticAuthorizationRequiresTrain,
   startReadinessWorker,
 } from "./merge-readiness-worker.js";
 import { waitUntil } from "./worker-tick-wait.js";
@@ -72,6 +73,26 @@ test("the renewed readiness claim covers both the read budget and a lease acquir
   assert.equal(READINESS_READ_BUDGET_MS, 20_000);
   assert.equal(READINESS_CLAIM_LEASE_MS, 60_000);
   assert.ok(READINESS_READ_BUDGET_MS + 30_000 < READINESS_CLAIM_LEASE_MS);
+});
+
+test("semantic evidence cannot take the single-candidate authorization path", () => {
+  const input = {
+    stage: "ready" as const,
+    now: new Date(),
+    readiness: { id: "readiness", chainId: "chain", projectId: "project", repoId: "repo" },
+    regression: { headSha: "a".repeat(40), baseHeadSha: "b".repeat(40), verification: "semantic" as const },
+    target: { resolved: true as const, repository: "acme/widgets", prNumber: 1 },
+    defaultBranch: "main",
+  };
+  assert.equal(semanticAuthorizationRequiresTrain(input), true);
+  assert.equal(semanticAuthorizationRequiresTrain(input, {
+    trainTaskId: "train", position: 1, predecessorOid: "b".repeat(40),
+    publishHead: "c".repeat(40), ref: "refs/anneal/train/candidate",
+  }), false);
+  assert.equal(semanticAuthorizationRequiresTrain({
+    ...input,
+    regression: { ...input.regression, verification: "gate" },
+  }), false);
 });
 
 test("the readiness worker never overlaps ticks in one process", async () => {
@@ -318,6 +339,8 @@ for (const allowlist of ["", "merge-executor-1"]) {
         findFirst: async () => { regressionReads++; return { id: "regression", status: TaskStatus.TODO }; },
       },
       taskActivity: { findFirst: async () => { markerReads++; return null; } },
+      mergeLeaseEvent: { findMany: async () => [] },
+      mergeRecoveryAttempt: { findFirst: async () => null },
       $transaction: async () => { throw new Error("a skipped tick must not claim"); },
     } as unknown as PrismaClient;
     try {
@@ -326,7 +349,7 @@ for (const allowlist of ["", "merge-executor-1"]) {
         async () => { throw new Error("no lease to acquire"); },
         () => [{ runnerId: "merge-executor-1", online: true }] as import("./runners.js").DaemonSnapshot[], 0);
       assert.equal(result.claimed, 0);
-      assert.equal(regressionReads, 1);
+      assert.equal(regressionReads, allowlist ? 2 : 1);
       assert.equal(markerReads, allowlist ? 1 : 0);
     } finally {
       if (previous === undefined) delete process.env.MERGE_EXECUTOR_RUNNER_IDS;

@@ -261,6 +261,7 @@ export const reconcileDatabaseRuns = async (
         : null;
       const durableNegativeRegressionVerdict = durableRegressionVerdict?.status === "ok"
         && durableRegressionVerdict.verdict.outcome !== "pass"
+        && durableRegressionVerdict.verdict.outcome !== "semantic-pass"
         ? durableRegressionVerdict.verdict
         : null;
       // Losing a lease is an external failure: it buys an attempt, never spends one.

@@ -6,6 +6,7 @@ import {
   DIRECT_TEMPLATE_NAME,
   enqueueTaskRun,
   INTEGRATOR_TEMPLATE_NAME,
+  REGRESSION_VERIFICATION_V3_OUTPUT_KIND,
   RepoPermission,
   RunStatus,
   TaskStatus,
@@ -312,7 +313,7 @@ const createParallelReviewHarness = ({
       implementationTaskId: taskFor("implementation").id,
       solTaskId: taskFor("review-findings").id,
       fixTaskId: taskFor("fixed-implementation").id,
-      regressionTaskId: taskFor("regression-verification-v2").id,
+      regressionTaskId: taskFor(REGRESSION_VERIFICATION_V3_OUTPUT_KIND).id,
       readinessTaskId: taskFor("merge-authorization").id,
       mergeTaskId: taskFor("merge-result").id,
     };

@@ -46,6 +46,7 @@ const HEAD = "a".repeat(40);
 const BASE = "b".repeat(40);
 const PROOF = `MERGE GATE: PASS ${HEAD}`;
 const V2 = "regression-verification-v2";
+const V3 = "regression-verification-v3";
 
 const OTHER_BASE = "e".repeat(40);
 
@@ -163,6 +164,55 @@ test("a human cannot authorize a merge at a head no gate signed", async () => {
   );
   assert.equal((await authorizations(chain.gateTask.id)).length, 0, "no authorization was written");
 });
+
+test("a human may approve a trusted v3 semantic candidate while prefix gate proof remains separate", async () => {
+  const chain = await seedIntegratorChain(db, { label: "semantic-candidate-approval" });
+  const regression = await addRegressionStep(chain, V3);
+  const run = await liveRun(chain, regression.task.id);
+  const persisted = await db.$transaction((tx) => persistSessionTaskOutput(tx, {
+    task: { id: regression.task.id },
+    fence: { runId: run.id, fencingToken: "token-1", at: new Date() },
+    kind: V3,
+    body: JSON.stringify({
+      schemaVersion: 3,
+      outcome: "semantic-pass",
+      headSha: HEAD,
+      baseHeadSha: BASE,
+    }),
+    commitSha: HEAD,
+  }));
+  assert.ok("ok" in persisted && persisted.ok);
+  await db.run.update({ where: { id: run.id }, data: { status: RunStatus.SUCCEEDED, headSha: HEAD } });
+  assert.equal(await db.mergeGateAttestation.count({ where: { chainId: chain.chainId } }), 0);
+
+  const card = await filledCard(chain);
+  await approve(card.id, "evt-semantic-candidate");
+  assert.equal((await authorizations(chain.gateTask.id)).length, 1);
+});
+
+for (const [label, candidateHead, candidateBase] of [
+  ["head", "c".repeat(40), BASE],
+  ["base", HEAD, OTHER_BASE],
+] as const) {
+  test(`v3 semantic approval fails closed when candidate ${label} changed`, async () => {
+    const chain = await seedIntegratorChain(db, { label: `semantic-candidate-stale-${label}` });
+    const regression = await addRegressionStep(chain, V3);
+    const run = await liveRun(chain, regression.task.id);
+    const persisted = await db.$transaction((tx) => persistSessionTaskOutput(tx, {
+      task: { id: regression.task.id },
+      fence: { runId: run.id, fencingToken: "token-1", at: new Date() },
+      kind: V3,
+      body: JSON.stringify({ schemaVersion: 3, outcome: "semantic-pass", headSha: candidateHead, baseHeadSha: candidateBase }),
+      commitSha: candidateHead,
+    }));
+    assert.ok("ok" in persisted && persisted.ok);
+    await db.run.update({ where: { id: run.id }, data: { status: RunStatus.SUCCEEDED, headSha: candidateHead } });
+
+    const card = await filledCard(chain);
+    await assert.rejects(() => approve(card.id, `evt-semantic-stale-${label}`), /semantic PASS evidence does not bind/u);
+    assert.equal((await authorizations(chain.gateTask.id)).length, 0);
+  });
+}
 
 test("an attestation for another commit does not authorize this head", async () => {
   const chain = await seedIntegratorChain(db, { label: "attest-other" });

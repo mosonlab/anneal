@@ -1,6 +1,6 @@
 import { Prisma, type PrismaClient, TaskStatus } from "@prisma/client";
 
-import { requireGateAttestation } from "./gate-attestation.js";
+import { requireGateAttestation, requireSemanticPassEvidence } from "./gate-attestation.js";
 import {
   MERGE_INTEGRATOR_KIND,
   MERGE_INTEGRATOR_SCHEMA_VERSION,
@@ -159,14 +159,21 @@ export const produceMergeAuthorization = async (
     headSha: payload.headSha,
   });
   if (!attested.satisfied) {
-    throw new MergeEvidenceError(`${attested.reason}; approval refused`);
+    const semantic = await requireSemanticPassEvidence(tx, {
+      chainId: gateTask.chainId,
+      headSha: payload.headSha,
+      baseHeadSha: payload.baseSha,
+    });
+    if (!semantic.satisfied) {
+      throw new MergeEvidenceError(`${attested.reason}; ${semantic.reason}; approval refused`);
+    }
   }
   // The gate signs a head *against a base*: the same tree merged onto a base
   // that has moved is a different merge, and the row records which base was
   // verified. `satisfied` alone would let an authorization inherit a signature
   // taken against another base, which is the one thing the mechanical channel
   // never does.
-  if (attested.attestation && attested.attestation.baseHeadSha !== payload.baseSha) {
+  if (attested.satisfied && attested.attestation && attested.attestation.baseHeadSha !== payload.baseSha) {
     throw new MergeEvidenceError(
       `${GATE_ATTESTATION_BASE_MISMATCH}: the gate signed ${payload.headSha} onto base `
       + `${attested.attestation.baseHeadSha}, but this authorization names base ${payload.baseSha}; approval refused`,

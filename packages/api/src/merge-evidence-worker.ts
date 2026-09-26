@@ -597,7 +597,8 @@ const regressionBaseShaFor = async (
   });
   if (!output || output.runId !== request.sourceRunId) return null;
   const parsed = parseRegressionVerdict(output.body, output.kind);
-  return parsed.status === "ok" && parsed.verdict.outcome === "pass"
+  return parsed.status === "ok"
+    && (parsed.verdict.outcome === "pass" || parsed.verdict.outcome === "semantic-pass")
     ? parsed.verdict.baseHeadSha
     : null;
 };

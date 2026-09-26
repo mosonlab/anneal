@@ -14,6 +14,7 @@ import {
   requiredOutputKind,
   salvageResumeEvidence,
   previousRunHandoffForClaim,
+  regressionSemanticReuseRefusal,
 } from "./canonical-task-output.js";
 
 const step = (template: string, stepIndex: number, outputKind: string) => ({
@@ -223,6 +224,93 @@ test("Regression v2 is canonical while the rolled v1 contract remains readable",
   assert.equal(isCanonicalAgentStep(legacy), true);
   assert.equal(requiredOutputKind(legacy), "regression-verification");
   assert.equal(canonicalOutputRefusal(legacy, output("regression-verification", 1), "run-1", headSha), null);
+});
+
+test("Regression v3 canonical output accepts semantic PASS without gate evidence", () => {
+  const headSha = "a".repeat(40);
+  const baseHeadSha = "b".repeat(40);
+  const current = step("direct-engineer-workflow", 5, "regression-verification-v3");
+  const semantic = (overrides: Record<string, unknown> = {}) => ({
+    runId: "run-1",
+    kind: "regression-verification-v3",
+    body: JSON.stringify({
+      schemaVersion: 3,
+      outcome: "semantic-pass",
+      headSha,
+      baseHeadSha,
+      ...overrides,
+    }),
+    commitSha: headSha,
+    metadata: null,
+  });
+  assert.equal(requiredOutputKind(current), "regression-verification-v3");
+  assert.equal(canonicalOutputRefusal(current, semantic(), "run-1", headSha), null);
+  assert.match(
+    canonicalOutputRefusal(current, semantic({ semanticVerdict: "reused" }), "run-1", headSha) ?? "",
+    /source Run id must be present together/u,
+  );
+  assert.match(
+    canonicalOutputRefusal(current, semantic({ semanticSourceRunId: "source-run" }), "run-1", headSha) ?? "",
+    /source Run id must be present together/u,
+  );
+  assert.match(
+    canonicalOutputRefusal(current, semantic({ gateProof: `MERGE GATE: PASS ${headSha}` }), "run-1", headSha) ?? "",
+    /semantic-pass must not carry merge gate evidence/u,
+  );
+});
+
+test("Regression v3 semantic reuse requires the trusted recovery snapshot", () => {
+  const sourceHead = "a".repeat(40);
+  const recoveredHead = "c".repeat(40);
+  const baseHead = "b".repeat(40);
+  const sourceRunId = "source-run";
+  const body = JSON.stringify({
+    schemaVersion: 3,
+    outcome: "semantic-pass",
+    headSha: recoveredHead,
+    baseHeadSha: baseHead,
+    semanticVerdict: "reused",
+    semanticSourceRunId: sourceRunId,
+  });
+  assert.match(regressionSemanticReuseRefusal(body, null) ?? "", /trusted recovery snapshot/u);
+  const recovery = {
+    state: "queued" as const,
+    currentBaseSha: baseHead,
+    authorizedHeadSha: sourceHead,
+    recoveryRunId: "recovery-run",
+    priorOutput: {
+      runId: sourceRunId,
+      kind: "regression-verification-v3",
+      body: JSON.stringify({
+        schemaVersion: 3,
+        outcome: "semantic-pass",
+        headSha: sourceHead,
+        baseHeadSha: "d".repeat(40),
+      }),
+      commitSha: sourceHead,
+    },
+  };
+  assert.equal(regressionSemanticReuseRefusal(body, recovery), null);
+  assert.equal(regressionSemanticReuseRefusal(JSON.stringify({
+    ...(JSON.parse(body) as Record<string, unknown>),
+    baseHeadSha: "e".repeat(40),
+  }), recovery), null);
+  assert.equal(regressionSemanticReuseRefusal(body, {
+    ...recovery,
+    priorOutput: {
+      ...recovery.priorOutput,
+      kind: "regression-verification-v2",
+      body: JSON.stringify({
+        schemaVersion: 2,
+        outcome: "gate-fail",
+        headSha: sourceHead,
+        baseHeadSha: "d".repeat(40),
+        gateVerdict: "FAIL",
+        gateProof: "MERGE GATE: FAIL (unit tests)",
+        summary: "semantic review passed; mechanical gate failed",
+      }),
+    },
+  }), null);
 });
 
 test("the canonical graphs carry blind findings and no adjudication node", () => {

@@ -1279,7 +1279,7 @@ export const handleRegressionCompletion = async (
     body: `Regression ${verdict.outcome} recorded for chain head ${verdict.headSha} against target ${verdict.baseHeadSha}`,
     metadata: { ...verdict },
   });
-  if (verdict.outcome === "pass") {
+  if (verdict.outcome === "pass" || verdict.outcome === "semantic-pass") {
     if (ciContext?.ciFailures?.length) return stop("CI failure recovery reported PASS without routing the blocking checks to repair");
     await recordVerdict();
     if (recovery) {

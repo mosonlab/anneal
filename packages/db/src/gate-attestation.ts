@@ -19,10 +19,11 @@
  * with the frozen v1 Regression protocol receive the compatibility exemption.
  */
 
-import type { Prisma } from "@prisma/client";
+import { TaskStatus, type Prisma } from "@prisma/client";
 
 import {
   REGRESSION_VERIFICATION_OUTPUT_KIND,
+  REGRESSION_VERIFICATION_V3_OUTPUT_KIND,
   parseRegressionVerdict,
 } from "./merge-tail.js";
 import { stepGeneration, stepRole } from "./step-role.js";
@@ -37,15 +38,15 @@ export type GateAttestation = {
 
 /**
  * The attestation an output carries, or null when it carries none. Only a v2
- * Regression verification that passed the gate attests: a review failure, a
- * gate failure and a refresh conflict all describe a head the gate did *not*
- * sign off.
+ * or v3 Regression verification that actually passed the gate attests. A v3
+ * semantic pass deliberately carries no gate authority.
  */
 export const deriveGateAttestation = (
   kind: string,
   body: string | null | undefined,
 ): GateAttestation | null => {
-  if (kind !== REGRESSION_VERIFICATION_OUTPUT_KIND) return null;
+  if (kind !== REGRESSION_VERIFICATION_OUTPUT_KIND
+    && kind !== REGRESSION_VERIFICATION_V3_OUTPUT_KIND) return null;
   const parsed = parseRegressionVerdict(body, kind);
   if (parsed.status !== "ok") return null;
   const verdict = parsed.verdict;
@@ -54,6 +55,89 @@ export const deriveGateAttestation = (
     headSha: verdict.headSha,
     baseHeadSha: verdict.baseHeadSha,
     proof: verdict.gateProof,
+  };
+};
+
+export type SemanticPassEvidence = {
+  taskId: string;
+  runId: string;
+  headSha: string;
+  baseHeadSha: string;
+  semanticSourceRunId: string;
+};
+
+export type SemanticPassEvidenceRequirement =
+  | { satisfied: true; evidence: SemanticPassEvidence }
+  | { satisfied: false; reason: string };
+
+/**
+ * Require trusted v3 candidate evidence for an operator Approval gate. This is
+ * intentionally separate from gate attestation: the approval binds the
+ * candidate's semantic evidence, while merge-train settlement independently
+ * requires a full-gate proof for the actual publish prefix.
+ */
+export const requireSemanticPassEvidence = async (
+  tx: Tx,
+  input: { chainId: string | null; headSha: string; baseHeadSha: string },
+): Promise<SemanticPassEvidenceRequirement> => {
+  if (!input.chainId) {
+    return { satisfied: false, reason: "semantic candidate approval requires a chain" };
+  }
+  const task = await tx.task.findFirst({
+    where: {
+      chainId: input.chainId,
+      status: TaskStatus.DONE,
+      templateStep: { outputKind: REGRESSION_VERIFICATION_V3_OUTPUT_KIND },
+    },
+    select: {
+      id: true,
+      stepOutput: {
+        select: {
+          kind: true,
+          body: true,
+          commitSha: true,
+          runId: true,
+          run: { select: { id: true, taskId: true, headSha: true } },
+        },
+      },
+    },
+  });
+  const output = task?.stepOutput;
+  const parsed = parseRegressionVerdict(output?.body, output?.kind);
+  if (!task || !output || parsed.status !== "ok" || parsed.verdict.outcome !== "semantic-pass") {
+    return { satisfied: false, reason: `no trusted semantic PASS evidence for head ${input.headSha}` };
+  }
+  const verdict = parsed.verdict;
+  if (verdict.headSha !== input.headSha || verdict.baseHeadSha !== input.baseHeadSha
+    || output.commitSha !== verdict.headSha || !output.runId
+    || output.run?.id !== output.runId || output.run.taskId !== task.id
+    || output.run.headSha !== verdict.headSha) {
+    return {
+      satisfied: false,
+      reason: `semantic PASS evidence does not bind its source Run, head ${input.headSha}, and base ${input.baseHeadSha}`,
+    };
+  }
+  const semanticSourceRunId = verdict.semanticVerdict === "reused"
+    ? verdict.semanticSourceRunId!
+    : output.runId;
+  if (verdict.semanticVerdict === "reused") {
+    const source = await tx.run.findUnique({
+      where: { id: semanticSourceRunId },
+      select: { taskId: true },
+    });
+    if (source?.taskId !== task.id) {
+      return { satisfied: false, reason: `semantic PASS source Run ${semanticSourceRunId} is not trusted` };
+    }
+  }
+  return {
+    satisfied: true,
+    evidence: {
+      taskId: task.id,
+      runId: output.runId,
+      headSha: verdict.headSha,
+      baseHeadSha: verdict.baseHeadSha,
+      semanticSourceRunId,
+    },
   };
 };
 
