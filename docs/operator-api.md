@@ -2686,6 +2686,27 @@ In both cases the merge Lease handed to that Run is released by this same
 completion, because the Run ended without completing its merge. See
 [Merge lease](#merge-lease).
 
+The same recovery ownership applies one step earlier when the Regression Run
+bound to a `REPAIRING` aggregate fails before it produces a usable verdict. An
+external failure is replayed automatically with a new exact Run binding and the
+complete recovery handoff, including its prior semantic output and bounded CI
+findings. This replay spends the applicable existing automatic recovery
+ceiling (2): a terminal-CI recovery shares its CI allowance, while base-drift
+recovery shares its allowance with integrator external replays. The ordinary
+external-failure refund ledger is unchanged. A Hold defers the decision without
+spending that ceiling or opening
+a card. A non-external failure, an exhausted allowance, or a refused Run birth
+parks the tail in `BLOCKED_DOWNSTREAM` and opens an answerable stop card in the
+default thread. The worker also reconciles historical `REPAIRING` rows whose
+bound Regression Run is terminal and has no active successor.
+
+A durable Regression verdict still wins: `review-fail` and `refresh-conflict`
+follow their existing stop and repair paths instead of this execution-failure
+replay. Run birth, recovery rebinding, allowance charging, and operator actions
+are serialized under the Chain mutex, so concurrent automatic and human
+attempts have one winner. Exact-head validation, gate attestation, approval,
+Lease ownership, and Hold semantics are otherwise unchanged.
+
 #### Re-entering after a base-drift recovery FAIL
 
 If a semantic (`review-fail`) or merge-gate (`gate-fail`) regression FAIL
@@ -2916,6 +2937,12 @@ curl -X DELETE "$BASE_URL/tasks/$TASK_ID" -H "Authorization: Bearer $OPERATOR_TO
 ### POST `/tasks/:taskId/retry`
 
 - Required path parameter: `taskId`.
+- A terminal failed Regression Run still bound to a `REPAIRING` merge-recovery
+  aggregate is owned by the recovery worker. This route returns `409 Conflict`
+  with `code: "merge_recovery_retry_owned"`, the recovery and Run ids, and the
+  applicable `chain/resume`, `merge-tail/repair`, and `merge-tail/rerun` routes.
+  It does not open an unbound Run: wait for the automatic replay, resume a held
+  Chain, or use the named merge-tail route after recovery stops.
 
 ```sh
 curl -X POST "$BASE_URL/tasks/$TASK_ID/retry" -H "Authorization: Bearer $OPERATOR_TOKEN"

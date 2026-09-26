@@ -17,6 +17,7 @@ import {
   lockChainRows,
   lockChainStructure,
   mergeRecoveryPhase,
+  MergeRecoveryStatus,
   observedChainPullRequests,
   openRun,
   Prisma,
@@ -25,6 +26,7 @@ import {
   resumeChain,
   runOwnsMergeOutcome,
   runSessionUsageCost,
+  RunStatus,
   ScheduleKind,
   stopStateFor,
   sumUsageCosts,
@@ -603,6 +605,35 @@ export const registerTasksRoutes = (app: RouteApp, deps: RouteDeps): void => {
       const admission = await readStepAdmission(tx, taskId, { locked: true });
       if (!admission.task) return admission.refusal;
       const task = admission.task;
+      const [latestRecovery, latestRun] = await Promise.all([
+        tx.mergeRecoveryAttempt.findFirst({
+          where: { regressionTaskId: taskId },
+          orderBy: [{ attempt: "desc" }, { id: "desc" }],
+          select: { id: true, status: true, recoveryRunId: true },
+        }),
+        tx.run.findFirst({
+          where: { taskId },
+          orderBy: { runNumber: "desc" },
+          select: { id: true, status: true },
+        }),
+      ]);
+      if (latestRecovery?.status === MergeRecoveryStatus.REPAIRING
+        && latestRecovery.recoveryRunId === latestRun?.id
+        && ([RunStatus.FAILED, RunStatus.TIMED_OUT, RunStatus.CANCELLED, RunStatus.LOST] as RunStatus[])
+          .includes(latestRun.status)) {
+        return refusal(
+          "conflict",
+          "This failed Regression Run is owned by active merge recovery; wait for automatic replay, or resume the Chain if held. After recovery stops, use the merge-tail repair or rerun route instead of ordinary retry.",
+          {
+            code: "merge_recovery_retry_owned",
+            recoveryId: latestRecovery.id,
+            recoveryRunId: latestRun.id,
+            resumeRoute: `/tasks/${taskId}/chain/resume`,
+            repairRoute: `/tasks/${taskId}/merge-tail/repair`,
+            rerunRoute: `/tasks/${taskId}/merge-tail/rerun`,
+          },
+        );
+      }
       // Retry has its own terminal-state rules and intentionally ignores the
       // Start-only refusal ladder. A Chain hold is the one admission control
       // refusal it must consume before opening a fresh Run.
