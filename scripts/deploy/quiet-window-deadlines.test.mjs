@@ -419,26 +419,31 @@ test("watchdog expiry during active migration retains the barrier", async () => 
     run: async ({ barrier }) => {
       const controller = new AbortController();
       const failure = new DeployFailure(BARRIER_TIMEOUT_REASON, "fixture-watchdog");
-      const watchdog = await createBarrierWatchdog({
-        timeoutMs: 500,
-        escalationPath,
-        escalationRecord: { outcome: "failure", reason: failure.reason, detail: failure.detail, ...revisions },
-        onTimeout: () => controller.abort(),
+      // Spawn the migration and install its abort listener before starting the
+      // watchdog. On a loaded worker the watchdog can expire before its ready
+      // handshake completes; that must still interrupt an active command.
+      const command = hangingCommand({
+        // This ceiling contains the watchdog deadline plus worker cleanup.
+        timeoutMs: 60_000,
+        signal: controller.signal,
+        abortFailure: () => failure,
+        onTermination: () => barrier.retainUntilEscalationCleared(),
       });
+      // Observe rejection immediately, including while the watchdog starts.
+      const commandSettled = command.catch(() => undefined);
+      let watchdog;
       try {
-        return await hangingCommand({
-          // The watchdog above is what this case proves, at 500ms. This outer
-          // ceiling only catches a watchdog that never fires, so it has to
-          // strictly contain the watchdog plus its cleanup on a loaded worker
-          // (CONTRIBUTING.md, "Test timing on the gate worker") — otherwise the
-          // parent reports a timeout the watchdog was about to resolve.
-          timeoutMs: 60_000,
-          signal: controller.signal,
-          abortFailure: () => failure,
-          onTermination: () => barrier.retainUntilEscalationCleared(),
+        watchdog = await createBarrierWatchdog({
+          timeoutMs: 500,
+          escalationPath,
+          escalationRecord: { outcome: "failure", reason: failure.reason, detail: failure.detail, ...revisions },
+          onTimeout: () => controller.abort(),
         });
+        return await command;
       } finally {
-        await watchdog.release();
+        controller.abort();
+        await commandSettled;
+        await watchdog?.release();
       }
     },
   });
