@@ -12,6 +12,7 @@ import {
   MAX_BASE_DRIFT_VALIDATION_ATTEMPTS,
   MAX_AUTOMATIC_BASE_DRIFT_RECOVERIES,
   MAX_AUTOMATIC_CI_FAILURE_RECOVERIES,
+  MERGE_TAIL_KIND,
   MERGE_RECOVERY_CLASS_REFUSAL_CODE,
   MERGE_RECOVERY_RETRY_CLASS_ENUM,
   MergeRecoveryStatus,
@@ -66,7 +67,7 @@ import {
   type RetryBudgetPolicy,
   type RetryClass,
 } from "./base-drift-recovery-decision.js";
-import { stopMergeTail } from "./merge-tail-actions.js";
+import { regressionVerdictForRun, stopMergeTail } from "./merge-tail-actions.js";
 import { classifyHeadCheckFailures, type FailedHeadCheck } from "./ci-failure-recovery.js";
 import {
   ensureRecoveryValidation,
@@ -526,7 +527,16 @@ const queueRecovery = async (
       metadata: { path: ["kind"], equals: "mergeTail.ciFailureRecovery" },
     }, orderBy: [{ createdAt: "desc" }, { id: "desc" }], select: { metadata: true } })
     : [];
-  const attempts = expected.recoveryKind === "ci-failure" ? ciHistory.length
+  const ciStopIds = new Set(ciHistory.map((row) => asJsonObject(row.metadata)?.stopId)
+    .filter((value): value is string => typeof value === "string"));
+  const ciExternalReplays = expected.recoveryKind === "ci-failure" && ciStopIds.size > 0
+    ? await tx.mergeRecoveryAttempt.findMany({ where: {
+        integratorTaskId: expected.integratorTaskId,
+        sourceStopId: { in: [...ciStopIds] },
+      }, select: { externalReplayCount: true } })
+    : [];
+  const attempts = expected.recoveryKind === "ci-failure"
+    ? ciHistory.length + ciExternalReplays.reduce((total, row) => total + row.externalReplayCount, 0)
     : await recoveryAllowanceSpent(tx, aggregate, { excludeSourceStopId: expected.stopId });
   const decision = classifyDurable({
     expected,
@@ -1034,7 +1044,9 @@ export const replayFailedRecoveryRegressions = async (
       const observedRun = await db.run.findUnique({ where: { id: runId }, select: { status: true } });
       if (!observedRun || observedRun.status === "SUCCEEDED" || ACTIVE_RUN_STATUSES.includes(observedRun.status)) continue;
       result.examined += 1;
-      const outcome = await db.$transaction(async (tx): Promise<"replayed" | "blocked" | "skipped"> => {
+      let outcome: "replayed" | "blocked" | "skipped";
+      try {
+        outcome = await db.$transaction(async (tx): Promise<"replayed" | "blocked" | "skipped"> => {
       if (!await lockRecoveryChain(tx, row.integratorTaskId)) return "skipped";
       const latest = await tx.mergeRecoveryAttempt.findFirst({
         where: { regressionTaskId: row.regressionTaskId },
@@ -1044,18 +1056,25 @@ export const replayFailedRecoveryRegressions = async (
         || latest.recoveryRunId !== runId || !latest.regressionTaskId) return "skipped";
       const integrator = await tx.task.findUnique({
         where: { id: latest.integratorTaskId },
-        select: { projectId: true, chainId: true },
+        select: { projectId: true, chainId: true, status: true, archivedAt: true },
       });
       if (!integrator?.chainId) return "skipped";
       const chain = { projectId: integrator.projectId, chainId: integrator.chainId };
+      if (integrator.status !== TaskStatus.REVIEW || integrator.archivedAt
+        || await tx.task.count({ where: { ...chain, archivedAt: { not: null } } })) return "skipped";
+      const integratorOutput = await tx.taskStepOutput.findUnique({
+        where: { taskId: latest.integratorTaskId },
+        select: { kind: true, body: true },
+      });
+      if (integratorOutput && parseMergeResult(integratorOutput).outcome === "merged") return "skipped";
       if (await tx.chainControl.count({ where: { ...chain, state: "HELD" } })) return "skipped";
       if (await tx.run.count({ where: { task: chain, status: { in: ACTIVE_RUN_STATUSES } } })) return "skipped";
-      const [failedRun, newestRun] = await Promise.all([
+      const [failedRun, newestRun, regressionTask, repairOwner] = await Promise.all([
         tx.run.findUnique({
           where: { id: runId },
           select: {
             id: true, taskId: true, status: true, runNumber: true, retryAt: true,
-            maxRunsPerTask: true, budgetGrants: true, failureReason: true,
+            maxRunsPerTask: true, budgetGrants: true, failureReason: true, headSha: true,
           },
         }),
         tx.run.findFirst({
@@ -1063,9 +1082,38 @@ export const replayFailedRecoveryRegressions = async (
           orderBy: { runNumber: "desc" },
           select: { id: true },
         }),
+        tx.task.findUnique({
+          where: { id: latest.regressionTaskId },
+          select: {
+            id: true,
+            templateStep: { select: {
+              stepIndex: true,
+              outputKind: true,
+              taskTemplate: { select: { name: true } },
+            } },
+          },
+        }),
+        tx.taskActivity.findFirst({ where: {
+          taskId: latest.regressionTaskId,
+          actorType: "control-plane",
+          AND: [
+            { metadata: { path: ["kind"], equals: MERGE_TAIL_KIND.repairAttempt } },
+            { metadata: { path: ["sourceRunId"], equals: runId } },
+          ],
+        }, select: { id: true } }),
       ]);
       if (!failedRun || failedRun.taskId !== latest.regressionTaskId
         || failedRun.status === "SUCCEEDED" || ACTIVE_RUN_STATUSES.includes(failedRun.status)) return "skipped";
+      if (repairOwner) return "skipped";
+      if (regressionTask) {
+        const qualified = await regressionVerdictForRun(tx, {
+          task: regressionTask,
+          runId: failedRun.id,
+          runHeadSha: failedRun.headSha,
+          allowPersistedHeadWhenUnreported: true,
+        });
+        if (qualified.status === "ok" && qualified.verdict.outcome !== "pass") return "skipped";
+      }
       const recovery = recoveryContext(latest);
       if (!recovery) throw new Error(`Merge recovery ${latest.id} has incomplete context for failed Regression Run ${runId}`);
       if (newestRun?.id !== failedRun.id) {
@@ -1117,7 +1165,7 @@ export const replayFailedRecoveryRegressions = async (
           await tx.taskActivity.create({ data: {
             taskId: latest.regressionTaskId,
             actorType: "control-plane",
-            body: `Recovery Regression Run ${failedRun.runNumber} failed externally; Run ${attempt.run.runNumber} queued with recovery context`,
+            body: `Recovery Regression Run ${failedRun.runNumber} failed externally; Run ${attempt.run.runNumber} queued under recovery ownership`,
             metadata: {
               kind: "mergeTail.recoveryRegressionReplay",
               aggregateId: latest.id,
@@ -1144,7 +1192,27 @@ export const replayFailedRecoveryRegressions = async (
         revalidations: latest.revalidations, ceiling: false, reason,
       });
       return "blocked";
-      });
+        });
+      } catch (error: unknown) {
+        const reason = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+        try {
+          await db.taskActivity.create({ data: {
+            taskId: row.regressionTaskId!,
+            actorType: "control-plane",
+            body: `Recovery Regression replay skipped after an isolated row failure: ${reason}`,
+            metadata: {
+              kind: "mergeTail.recoveryRegressionReplayError",
+              aggregateId: row.id,
+              recoveryRunId: runId,
+              reason,
+            },
+          } });
+        } catch {
+          // The row failure and its audit failure are isolated from the rest of
+          // the tick. A later tick can retry after the underlying state heals.
+        }
+        continue;
+      }
       if (outcome === "replayed") result.replayed += 1;
       if (outcome === "blocked") result.blocked += 1;
     }
