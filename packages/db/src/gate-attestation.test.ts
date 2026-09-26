@@ -30,12 +30,8 @@ test("a passing v2 verdict attests the head the gate signed", () => {
   });
 });
 
-test("v3 attests only an actual gate PASS, never semantic-pass", () => {
-  assert.deepEqual(deriveGateAttestation(V3, pass({ schemaVersion: 3 })), {
-    headSha: HEAD,
-    baseHeadSha: BASE,
-    proof: `MERGE GATE: PASS ${HEAD}`,
-  });
+test("v3 cannot grant gate authority even with a legacy proof payload", () => {
+  assert.equal(deriveGateAttestation(V3, pass({ schemaVersion: 3 })), null);
   assert.equal(deriveGateAttestation(V3, JSON.stringify({
     schemaVersion: 3,
     outcome: "semantic-pass",

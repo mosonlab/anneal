@@ -38,15 +38,14 @@ export type GateAttestation = {
 
 /**
  * The attestation an output carries, or null when it carries none. Only a v2
- * or v3 Regression verification that actually passed the gate attests. A v3
- * semantic pass deliberately carries no gate authority.
+ * Regression verification that actually passed the gate attests. The v3
+ * semantic contract carries no gate authority.
  */
 export const deriveGateAttestation = (
   kind: string,
   body: string | null | undefined,
 ): GateAttestation | null => {
-  if (kind !== REGRESSION_VERIFICATION_OUTPUT_KIND
-    && kind !== REGRESSION_VERIFICATION_V3_OUTPUT_KIND) return null;
+  if (kind !== REGRESSION_VERIFICATION_OUTPUT_KIND) return null;
   const parsed = parseRegressionVerdict(body, kind);
   if (parsed.status !== "ok") return null;
   const verdict = parsed.verdict;

@@ -363,6 +363,28 @@ test("the canonical Regression v2 schema preserves an optional gate failure exce
   assert.equal(schema.safeParse({ ...verdict, gateFailureExcerpt: 42 }).success, false);
 });
 
+test("the canonical Regression v3 schema cannot supply merge gate authority", () => {
+  const schema = canonicalOutputSchemas.regression?.v3;
+  assert.ok(schema);
+  const verdict = {
+    schemaVersion: 3,
+    outcome: "semantic-pass",
+    headSha: "a".repeat(40),
+    baseHeadSha: "b".repeat(40),
+  };
+  assert.equal(schema.safeParse(verdict).success, true);
+  for (const extra of [
+    { gateVerdict: "PASS" },
+    { gateProof: `MERGE GATE: PASS ${verdict.headSha}` },
+    { outcome: "pass", gateVerdict: "PASS", gateProof: `MERGE GATE: PASS ${verdict.headSha}` },
+    { outcome: "gate-fail", gateVerdict: "FAIL", gateProof: "MERGE GATE: FAIL (tests)", summary: "failed" },
+    { semanticVerdict: "reused" },
+    { semanticSourceRunId: "prior-run" },
+  ]) {
+    assert.equal(schema.safeParse({ ...verdict, ...extra }).success, false, JSON.stringify(extra));
+  }
+});
+
 test("the revalidation v2 schema requires an explained tier route", () => {
   const schema = canonicalOutputSchemas.revalidation?.v2;
   assert.ok(schema);

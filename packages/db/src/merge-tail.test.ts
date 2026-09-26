@@ -219,7 +219,7 @@ test("Regression v3 separates semantic PASS from gate proof and v2 rejects that 
   }), "regression-verification-v3").status, "ok");
 });
 
-test("Regression v3 retains explicit gate and failure outcomes", () => {
+test("Regression v3 accepts semantic failures and refuses legacy gate outcomes", () => {
   const verdicts = [
     {
       schemaVersion: 3, outcome: "pass", headSha: A, baseHeadSha: B,
@@ -235,7 +235,7 @@ test("Regression v3 retains explicit gate and failure outcomes", () => {
   for (const verdict of verdicts) {
     assert.equal(
       parseRegressionVerdict(JSON.stringify(verdict), "regression-verification-v3").status,
-      "ok",
+      verdict.outcome === "pass" || verdict.outcome === "gate-fail" ? "invalid" : "ok",
       verdict.outcome,
     );
   }

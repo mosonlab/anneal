@@ -40,6 +40,11 @@ queue, database table, or parallel authorization mechanism. It preserves R4 in
 `docs/out-of-scope/merge-gate.md`: integration coverage is not reduced to an
 impact guess. A width-three train still gates three prefixes, not one batch.
 
+The v3 contract rejects legacy `pass` and `gate-fail` outputs; those remain
+valid only for older Regression protocols. Re-authorization through a confirmation
+card still requires a gate attestation and cannot turn semantic evidence into
+single-candidate publication authority.
+
 ## Recovery and repair
 
 | Trigger | Semantic work | Integration work |

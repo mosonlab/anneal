@@ -200,15 +200,8 @@ export const canonicalOutputSchemas: Readonly<Partial<Record<StepRole, SchemaByG
         baseHeadSha: commitSha,
         semanticVerdict: z.literal("reused").optional(),
         semanticSourceRunId: nonEmptyString.optional(),
-      }),
-      canonicalEnvelope.extend({
-        schemaVersion: z.literal(REGRESSION_VERIFICATION_V3_SCHEMA_VERSION),
-        outcome: z.literal("pass"),
-        baseHeadSha: commitSha,
-        gateVerdict: z.literal("PASS"),
-        gateProof: passGateProof,
-        semanticVerdict: z.literal("reused").optional(),
-        semanticSourceRunId: nonEmptyString.optional(),
+        gateVerdict: z.never().optional(),
+        gateProof: z.never().optional(),
       }),
       canonicalEnvelope.extend({
         schemaVersion: z.literal(REGRESSION_VERIFICATION_V3_SCHEMA_VERSION),
@@ -218,30 +211,12 @@ export const canonicalOutputSchemas: Readonly<Partial<Record<StepRole, SchemaByG
       }),
       canonicalEnvelope.extend({
         schemaVersion: z.literal(REGRESSION_VERIFICATION_V3_SCHEMA_VERSION),
-        outcome: z.literal("gate-fail"),
-        baseHeadSha: commitSha,
-        gateVerdict: z.literal("FAIL"),
-        gateProof: failGateProof,
-        summary: nonEmptyString,
-        gateFailureExcerpt: z.string().optional(),
-        semanticVerdict: z.literal("reused").optional(),
-        semanticSourceRunId: nonEmptyString.optional(),
-      }),
-      canonicalEnvelope.extend({
-        schemaVersion: z.literal(REGRESSION_VERIFICATION_V3_SCHEMA_VERSION),
         outcome: z.literal("refresh-conflict"),
         baseHeadSha: commitSha,
         summary: nonEmptyString,
       }),
     ]).superRefine((verdict, context) => {
-      if (verdict.outcome === "pass" && verdict.gateProof !== `MERGE GATE: PASS ${verdict.headSha}`) {
-        context.addIssue({
-          code: "custom",
-          path: ["gateProof"],
-          message: "gate proof oid must match headSha",
-        });
-      }
-      if ((verdict.outcome === "semantic-pass" || verdict.outcome === "pass" || verdict.outcome === "gate-fail")
+      if (verdict.outcome === "semantic-pass"
         && ((verdict.semanticVerdict === "reused") !== (typeof verdict.semanticSourceRunId === "string"))) {
         context.addIssue({
           code: "custom",

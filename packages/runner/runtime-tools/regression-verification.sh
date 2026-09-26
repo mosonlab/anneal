@@ -259,7 +259,7 @@ process.stdin.on("end", () => {
   // PASS. A semantic review-fail or refresh-conflict is never reusable, even
   // when its head happens to match the recovery authorization.
   const semanticOnly = prior.kind === "regression-verification-v3" && verdict.outcome === "semantic-pass";
-  if (!semanticOnly && verdict.outcome !== "pass" && verdict.outcome !== "gate-fail") return;
+  if (!semanticOnly && (prior.kind !== "regression-verification-v2" || (verdict.outcome !== "pass" && verdict.outcome !== "gate-fail"))) return;
   if (semanticOnly && (Object.hasOwn(verdict, "gateVerdict") || Object.hasOwn(verdict, "gateProof"))) return;
   if (typeof verdict.headSha !== "string" || !SHA.test(verdict.headSha)) return;
   if (typeof verdict.baseHeadSha !== "string" || !SHA.test(verdict.baseHeadSha)) return;

@@ -1080,6 +1080,26 @@ test("model-free reuse carries provenance into a v3 current-Run handoff", () => 
   }
 });
 
+test("model-free reuse refuses legacy gate outcomes under the v3 kind", () => {
+  for (const outcome of ["pass", "gate-fail"]) {
+    const seeded = fixture();
+    seeded.env.AGENTOS_REGRESSION_OUTPUT_KIND = "regression-verification-v3";
+    const context = JSON.parse(recoveryContext(seeded));
+    context.priorOutput.kind = "regression-verification-v3";
+    context.priorOutput.body = JSON.stringify({
+      schemaVersion: 3, outcome, headSha: seeded.branchSha, baseHeadSha: seeded.baseSha,
+      gateVerdict: outcome === "pass" ? "PASS" : "FAIL",
+      gateProof: outcome === "pass" ? `MERGE GATE: PASS ${seeded.branchSha}` : "MERGE GATE: FAIL (tests)",
+      summary: "tests",
+    });
+    seeded.env.AGENTOS_REGRESSION_RECOVERY_CONTEXT = JSON.stringify(context);
+    const result = run(seeded, "verify-reused");
+    assert.notEqual(result.status, 0);
+    assert.equal(existsSync(seeded.output), false);
+    assert.equal(readFileSync(seeded.fetchLog, "utf8"), "");
+  }
+});
+
 test("model-free reuse refuses missing authority and new CI findings before refresh", () => {
   for (const blocked of ["missing", "ci", "head"]) {
     const seeded = fixture();

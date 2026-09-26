@@ -353,11 +353,11 @@ type ReusedSemanticVerdict = { semanticVerdict?: "reused"; semanticSourceRunId?:
 
 export type RegressionVerdict =
   | { schemaVersion: typeof MERGE_TAIL_SCHEMA_VERSION; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS" }
-  | ({ schemaVersion: typeof REGRESSION_VERIFICATION_SCHEMA_VERSION | typeof REGRESSION_VERIFICATION_V3_SCHEMA_VERSION; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS"; gateProof: string } & ReusedSemanticVerdict)
+  | ({ schemaVersion: typeof REGRESSION_VERIFICATION_SCHEMA_VERSION; outcome: "pass"; headSha: string; baseHeadSha: string; gateVerdict: "PASS"; gateProof: string } & ReusedSemanticVerdict)
   | ({ schemaVersion: typeof REGRESSION_VERIFICATION_V3_SCHEMA_VERSION; outcome: "semantic-pass"; headSha: string; baseHeadSha: string } & ReusedSemanticVerdict)
   | { schemaVersion: RegressionVerdictSchemaVersion; outcome: "review-fail"; headSha: string; baseHeadSha: string; summary: string }
   | { schemaVersion: typeof MERGE_TAIL_SCHEMA_VERSION; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; summary: string; gateFailureExcerpt?: string }
-  | ({ schemaVersion: typeof REGRESSION_VERIFICATION_SCHEMA_VERSION | typeof REGRESSION_VERIFICATION_V3_SCHEMA_VERSION; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; gateProof: string; summary: string; gateFailureExcerpt?: string } & ReusedSemanticVerdict)
+  | ({ schemaVersion: typeof REGRESSION_VERIFICATION_SCHEMA_VERSION; outcome: "gate-fail"; headSha: string; baseHeadSha: string; gateVerdict: "FAIL"; gateProof: string; summary: string; gateFailureExcerpt?: string } & ReusedSemanticVerdict)
   | { schemaVersion: RegressionVerdictSchemaVersion; outcome: "refresh-conflict"; headSha: string; baseHeadSha: string; summary: string };
 
 export type PassingRegressionVerdict = Extract<RegressionVerdict, { outcome: "pass" | "semantic-pass" }>;
@@ -438,9 +438,12 @@ export const parseRegressionVerdict = (
     }
     return { status: "ok", verdict: value as RegressionVerdict };
   }
+  if (value.schemaVersion === REGRESSION_VERIFICATION_V3_SCHEMA_VERSION
+    && (value.outcome === "pass" || value.outcome === "gate-fail")) {
+    return { status: "invalid", reason: "Regression v3 carries semantic evidence only" };
+  }
   if (value.outcome === "pass" && value.gateVerdict === "PASS") {
-    if (value.schemaVersion === REGRESSION_VERIFICATION_SCHEMA_VERSION
-      || value.schemaVersion === REGRESSION_VERIFICATION_V3_SCHEMA_VERSION) {
+    if (value.schemaVersion === REGRESSION_VERIFICATION_SCHEMA_VERSION) {
       const proof = typeof value.gateProof === "string" ? PASS_GATE_PROOF.exec(value.gateProof) : null;
       if (!proof) return { status: "invalid", reason: "invalid regression gateProof for PASS" };
       if (proof[1] !== value.headSha) {
@@ -456,8 +459,7 @@ export const parseRegressionVerdict = (
     if (Object.hasOwn(value, "gateFailureExcerpt") && typeof value.gateFailureExcerpt !== "string") {
       return { status: "invalid", reason: "invalid regression gateFailureExcerpt" };
     }
-    if ((value.schemaVersion === REGRESSION_VERIFICATION_SCHEMA_VERSION
-        || value.schemaVersion === REGRESSION_VERIFICATION_V3_SCHEMA_VERSION)
+    if (value.schemaVersion === REGRESSION_VERIFICATION_SCHEMA_VERSION
       && (typeof value.gateProof !== "string" || !FAIL_GATE_PROOF.test(value.gateProof))) {
       return { status: "invalid", reason: "invalid regression gateProof for FAIL" };
     }
